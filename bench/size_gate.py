@@ -25,6 +25,11 @@ MIN_PAIRS = 200
 ABSOLUTE_TARGET_MS = 10.0
 SIZE_KEYS = ("front", "collector", "combined")
 PENDING = "not set"
+# Cases the gate records without judging (--record-only): the command time
+# fixtures (M6 C4b-3). A base that reads no command response makes their ratio
+# the whole added cost, and their worst increment is bounded by +0.5 ms (U-23).
+RECORD_ONLY = ("record only: a base without command values makes the ratio the whole added cost; "
+               "the worst increment is bounded by +0.5 ms (U-23), not by this ratio")
 
 
 class GateResult(TypedDict, total=False):
@@ -134,6 +139,11 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
     return result
 
 
+def recorded(result: GateResult) -> GateResult:
+    """`result` kept for the record: its own status moves to `observed_status`."""
+    return {**result, "status": "RECORDED", "observed_status": result["status"], "record_only": RECORD_ONLY}
+
+
 def aggregate(results: list[GateResult]) -> str:
     statuses = {r["status"] for r in results}
     return "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses or not statuses else "PASS"
@@ -149,14 +159,17 @@ def main(argv=None):
     p.add_argument("--cap-bytes", type=int, help="cap on stripped front + collector bytes (U3: 6000000)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--enforce", action="store_true", help="exit 1 on FAIL; BLOCKED and PASS exit 0")
+    p.add_argument("--record-only", default="", help="comma-separated cases recorded but not judged")
     args = p.parse_args(argv)
     if (args.ratio_p50 is None) != (args.ratio_p95 is None):
         p.error("--ratio-p50 and --ratio-p95 go together")
     threshold = None if args.ratio_p50 is None else (args.ratio_p50, args.ratio_p95)
     measurement = json.loads(args.measurement.read_text())
+    record_only = {c for c in args.record_only.split(",") if c}
     time_results = {case: relative_gate(row, "prompt_ns", threshold) for case, row in measurement.get("cases", {}).items()}
-    if not time_results:
-        time_results = {"-": _blocked("prompt_ns", "measurement has no cases: " + str(measurement.get("reason", "")))}
+    time_results = {case: recorded(r) if case in record_only else r for case, r in time_results.items()}
+    if not any(r["status"] != "RECORDED" for r in time_results.values()):
+        time_results["-"] = _blocked("prompt_ns", "measurement has no judged cases: " + str(measurement.get("reason", "")))
     sizes = [json.loads(f.read_text()).get("stripped_bytes") for f in (args.base_preparation, args.candidate_preparation)]
     size = size_gate(sizes[0], sizes[1], args.cap_bytes)
     verdict = aggregate([*time_results.values(), size])
@@ -164,9 +177,9 @@ def main(argv=None):
               "threshold": None if threshold is None else {k: t if math.isfinite(t) else str(t) for k, t in zip(("p50", "p95"), threshold)},
               "cap_bytes": args.cap_bytes, "time": time_results, "size": size}
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    reasons = sorted({r["reason"] for r in (*time_results.values(), size) if r.get("reason")})
+    reasons = sorted({r["reason"] for r in (*time_results.values(), size) if r.get("reason") and r["status"] != "RECORDED"})
     print(json.dumps({"status": verdict, "enforced": args.enforce, "blocked_by": reasons,
-                      "time": {c: {k: r.get(k) for k in ("status", "ratio_p50", "ratio_p95", "reason")} for c, r in time_results.items()},
+                      "time": {c: {k: r.get(k) for k in ("status", "observed_status", "ratio_p50", "ratio_p95", "reason")} for c, r in time_results.items()},
                       "size": {k: size.get(k) for k in ("status", "over", "reason")}}, indent=2))
     # BLOCKED (no usable evidence) is reported in the report and summary but does not fail the run.
     return 1 if args.enforce and verdict == "FAIL" else 0

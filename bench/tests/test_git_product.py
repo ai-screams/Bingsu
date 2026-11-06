@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -417,3 +418,147 @@ def test_prepared_directory_differs_for_identical_binaries_from_different_source
     base, candidate = git.prepared_directory(front, tmp_path / "base"), git.prepared_directory(front, tmp_path / "candidate")
     assert base != candidate and base.parent == candidate.parent
     assert git.prepared_directory(front, tmp_path / "base") == base
+
+
+# 명령 시간 칸은 helper fixture 없이 제품 프롬프트만 재고, 프롬프트 시간과 그린 단위 수를 요약한다. 이것을
+# 실패시키는 것: 명령 칸을 git fixture로 보내는 것(admission_gc_ns가 없어 BLOCKED), 명령 칸을 허용 목록에서 빼는 것.
+def test_command_cases_time_the_prompt_alone(pair, monkeypatch):
+    monkeypatch.setattr(git, "observe", lambda *args: pytest.fail("a command case ran the git fixture"))
+    monkeypatch.setattr(git, "observe_command",
+                        lambda *args: {"status": "OBSERVED", "prompt_ns": 100, "units": 32, "drawn": 32})
+    value = git.measure_pair("base", "candidate", 200, cases=list(git.COMMAND_CASES))
+    assert value["status"] == "OBSERVED" and set(value["cases"]) == set(git.COMMAND_CASES)
+    for case in value["cases"].values():
+        for row in case["variants"].values():
+            assert row["observed"] == 200 and row["metrics"]["prompt_ns"]["p50"] == 100
+            assert row["units"] == [32] and row["drawn"] == [32]
+
+
+# 칸의 입력: env64k는 64 KiB frame 안에서 가득 차고, env64k-commands는 같은 환경에 단위마다 다른 이름을 허용하는
+# 32단위를 두며, max·redraw는 32단위가 각자 4,096바이트 이하의 UTF-8 한 줄을 그린다(4 KB 상한, 단위 상한 32).
+# 값마다 고유한 표식 uNN-로 시작하고, env64k는 dir·git을 그리지 않는다. 이것을 실패시키는 것: frame 상한을 넘는 환경
+# (프롬프트가 frame을 쓰지 않음), env64k가 기본 레이아웃을 써 회차마다 수집기를 띄우는 것,
+# 값이 4 KB를 넘거나 글자 중간에서 잘리는 것, 단위 수가 32가 아닌 것, env_allow가 겹치거나 환경에 없는 이름인 것,
+# 표식이 겹치는 것(한 단위만 그려도 모두 그린 것으로 셈).
+def test_command_case_inputs_fill_their_caps(tmp_path):
+    config, env, values = git.command_setup("prompt-env64k", tmp_path / "e")
+    entries = sum(len(k) + 1 + len(v) + 1 for k, v in {**env, "PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}.items())
+    assert values == {} and 60_000 <= entries <= 65_536 - 16
+    # Its layout draws `char` alone: the built-in one draws dir and git, and a
+    # collector started behind every timed prompt kept the CI blocks from
+    # being admitted (the reference after each block ran over the cap).
+    assert config.endswith("[layout.line1]\nleft = ['char']\n")
+    for case, units in (("prompt-commands-max", 32), ("prompt-commands-redraw", 32),
+                        ("prompt-env64k-commands", 32), ("prompt-commands-hit", 3)):
+        config, env, values = git.command_setup(case, tmp_path / case)
+        assert config.count("kind = 'command'") == config.count("cache = '3600s'") == len(values) == units
+        assert len({v[:4] for v in values.values()}) == units
+        assert all(v.startswith(f"u{i:02}-".encode()) for i, v in enumerate(values.values()))
+        if units == 32 and case != "prompt-env64k-commands":
+            for i, value in enumerate(values.values()):
+                assert (tmp_path / case / f"value{i:02}.txt").read_bytes() == value
+                assert 4_090 <= len(value) <= 4_096 and b"\n" not in value
+                value.decode()
+    config, env, values = git.command_setup("prompt-env64k-commands", tmp_path / "ec")
+    assert env == git.command_setup("prompt-env64k", tmp_path / "e2")[1]
+    allowed = re.findall(r'env_allow = \["(\w+)"\]', config)
+    assert len(allowed) == len(set(allowed)) == 32 and set(allowed) <= set(env)
+
+
+def command_response(units):
+    """BNGCMD01 bytes with these (id, status, value) entries; the fields the
+    harness skips are zero."""
+    out = bytearray(64 + 32 + 16 + 16 + 4 + 1 + 16 + 8)
+    for path in (b"/c", b"/s", b"/w"):
+        out += len(path).to_bytes(4, "little") + path
+    out.append(len(units))
+    for name, status, value in units:
+        out += len(name).to_bytes(2, "little") + name.encode() + bytes(1 + 32 * 3 + 16)
+        out.append(status)
+        out += len(value).to_bytes(4, "little") + value + len(value).to_bytes(4, "little") + value
+    return bytes(out)
+
+
+# command_context의 계약: 셸 hook처럼 --session을 넘기고, 32단위 칸은 2,400칸 폭으로 그리며, 응답이 모든 단위의
+# 성공 값을 담을 때까지 데우고, redraw 칸만 --redraw를 붙인다. 데운 프롬프트가 일부만 그리면 거부한다. 이것을
+# 실패시키는 것: --session·폭·--redraw를 빼는 것, 데우기가 항목 수만 보거나 상태를 보지 않는 것(실패 항목·다른 값을
+# 완료로 셈), 일부만 그린 프롬프트를 받는 것.
+@pytest.mark.parametrize("case", ["prompt-commands-hit", "prompt-commands-max", "prompt-commands-redraw",
+                                  "prompt-env64k-commands"])
+def test_command_context_waits_for_every_value_and_shapes_the_prompt(monkeypatch, tmp_path, case):
+    monkeypatch.setattr(git.time, "sleep", lambda _: None)
+    base = ["bingsu", "prompt", "--width", "80", "--pwd", "/w"]
+    monkeypatch.setattr(git.M3B, "prompt_context", lambda *a, **k: (list(base), {"E": "1"}))
+    _, _, values = git.command_setup(case, tmp_path / "probe")
+    names = list(values)
+    store = tmp_path / "ctx" / "rt" / "store"
+    # Rounds: one failure, a wrong value for each, every value but not Ok,
+    # then every value; the record draws them.
+    rounds = [[(names[0], 1, b"")], [(n, 0, b"x") for n in names], [(n, 1, values[n]) for n in names],
+              [(n, 0, values[n]) for n in names]]
+    calls = []
+    def run(command, env):
+        calls.append(list(command))
+        if rounds:
+            store.mkdir(parents=True, exist_ok=True)
+            (store / "command").write_bytes(command_response(rounds.pop(0)))
+        stdout = b"".join(v[:4] for v in values.values()) if not rounds else b""
+        return SimpleNamespace(returncode=0, stderr=b"", stdout=stdout)
+    monkeypatch.setattr(git.M3B, "run", run)
+    monkeypatch.setattr(git.M3B, "normal_record", lambda r: True)
+    command, env, got, drawn = git.command_context("bingsu", tmp_path / "ctx", case)
+    assert len(calls) == 5 and drawn == len(values) and got == values
+    assert command[command.index("--session") + 1] == git.SESSION
+    assert command[command.index("--width") + 1] == ("2400" if len(values) == 32 else "80")
+    assert ("--redraw" in command) == (case == "prompt-commands-redraw")
+    assert all("--redraw" not in c for c in calls[:4])
+    # A warm prompt that draws part of the units is refused.
+    partial = values[names[0]][:4]
+    monkeypatch.setattr(git.M3B, "run", lambda command, env: (
+        (store / "command").write_bytes(command_response([(n, 0, values[n]) for n in names])),
+        SimpleNamespace(returncode=0, stderr=b"", stdout=partial))[1])
+    with pytest.raises(ValueError, match="draws 1 of"):
+        git.command_context("bingsu", tmp_path / "ctx", case)
+
+
+# 측정 표본은 데운 프롬프트와 같은 수의 단위를 그려야 한다. 이것을 실패시키는 것: 그린 단위 수 비교를 지우는 것.
+def test_a_sample_that_draws_other_units_is_not_a_sample(monkeypatch, tmp_path):
+    values = {"custom/k00": b"u00-a", "custom/k01": b"u01-b"}
+    contexts = {str(tmp_path): (["bingsu"], {}, values, 2)}
+    monkeypatch.setattr(git.M3B, "normal_record", lambda r: True)
+    for stdout, status in ((b"u00-a u01-b", "OBSERVED"), (b"u00-a", "BLOCKED")):
+        monkeypatch.setattr(git.M3B, "run", lambda command, env, out=stdout: SimpleNamespace(stdout=out))
+        sample = git.observe_command("bingsu", contexts, tmp_path, "prompt-commands-hit")
+        assert sample["status"] == status, sample
+
+
+# 응답 없는 max 칸: max와 같은 설정·폭이고 helper도 똑같이 띄우되 --session을 넘기지 않아 단위가 돌지 않는다. 데운
+# 프롬프트와 표본 모두 0개를 그리고, 측정 중 응답이 생기면 그 표본은 빠진다. 이것을 실패시키는 것: 이 칸에 --session을
+# 넘기는 것(단위가 돌아 응답이 생김), 폭 2400을 빼는 것, 응답이 있거나 무언가 그린 데운 프롬프트를 받는 것, 측정 중
+# 생긴 응답을 보지 않는 것.
+def test_the_empty_max_case_stays_without_a_response(monkeypatch, tmp_path):
+    base = ["bingsu", "prompt", "--width", "80", "--pwd", "/w"]
+    monkeypatch.setattr(git.M3B, "prompt_context", lambda *a, **k: (list(base), {"E": "1"}))
+    monkeypatch.setattr(git.M3B, "normal_record", lambda r: True)
+    _, _, values = git.command_setup("prompt-commands-max-empty", tmp_path / "probe")
+    assert len(values) == 32
+    blank = SimpleNamespace(returncode=0, stderr=b"", stdout=b"B1 nothing")
+    monkeypatch.setattr(git.M3B, "run", lambda command, env: blank)
+    directory = tmp_path / "ctx"
+    command, env, got, drawn = git.command_context("bingsu", directory, "prompt-commands-max-empty")
+    assert drawn == 0 and "--session" not in command and "--redraw" not in command
+    assert command[command.index("--width") + 1] == "2400"
+    contexts = {str(directory): (command, env, got, drawn)}
+    assert git.observe_command("bingsu", contexts, directory, "prompt-commands-max-empty")["status"] == "OBSERVED"
+    store = directory / "rt" / "store"
+    store.mkdir(parents=True)
+    (store / "command").write_bytes(b"x")
+    sample = git.observe_command("bingsu", contexts, directory, "prompt-commands-max-empty")
+    assert sample["status"] == "BLOCKED" and "published" in sample["reason"]
+    with pytest.raises(ValueError, match="response exists"):
+        git.command_context("bingsu", directory, "prompt-commands-max-empty")
+    (store / "command").unlink()
+    drawing = SimpleNamespace(returncode=0, stderr=b"", stdout=values["custom/k00"][:4])
+    monkeypatch.setattr(git.M3B, "run", lambda command, env: drawing)
+    with pytest.raises(ValueError, match="draws 1 units"):
+        git.command_context("bingsu", directory, "prompt-commands-max-empty")

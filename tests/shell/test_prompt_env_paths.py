@@ -1824,7 +1824,11 @@ class HelperStageFixture:
                             "cgroup_parent": session_cgroup_parent(
                                 self.script, Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"),
                             "path_names": path_names(COMMAND_PATH), "target_names": path_names("/usr/bin"),
-                            "target_links": target_links("/usr/bin/true") if stage == "command_miss" else 0}
+                            "target_links": target_links("/usr/bin/true") if stage == "command_miss" else 0,
+                            # The repository scan walks the shell's folder by its names
+                            # (U-24): a canonical folder, so no link is followed.
+                            "shell_names": path_names(self.pwd)}
+            assert os.path.realpath(self.pwd) == str(self.pwd), ("a canonical shell folder", self.pwd)
         if stage == "publish":
             self.put("edited")
         elif stage == "failure-last-good":

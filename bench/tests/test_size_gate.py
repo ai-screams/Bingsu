@@ -307,6 +307,43 @@ def test_cli_summary_names_why_nothing_was_measured(tmp_path, capsys):
     assert any("stale prepared fixture" in r for r in out["blocked_by"])
 
 
+# 기록 전용 칸은 판정에 들지 않는다: 그 칸의 FAIL은 RECORDED로 남고(본래 판정은 observed_status), 다른 칸의 판정이
+# 결과가 된다. 기록 전용 칸뿐이면 판정할 칸이 없어 BLOCKED다. 이것을 실패시키는 것: --record-only를 무시하는 것
+# (그 칸의 FAIL이 결과가 됨), 기록 전용 칸만으로 PASS를 내는 것.
+def test_record_only_cases_are_kept_but_not_judged(tmp_path):
+    sizes = tmp_path / "s.json"
+    sizes.write_text(json.dumps({"stripped_bytes": {"front": 10, "collector": 20, "combined": 30}}))
+    common = ["--base-preparation", str(sizes), "--candidate-preparation", str(sizes), "--out", str(tmp_path / "v.json"),
+              "--ratio-p50", "1.03", "--ratio-p95", "1.10", "--cap-bytes", "30", "--enforce",
+              "--record-only", "prompt-commands-max"]
+    meas = tmp_path / "m.json"
+    meas.write_text(json.dumps({"cases": {"no-git": paired((8e6, 9e6), (8e6, 9e6)),
+                                          "prompt-commands-max": paired((8e6, 9e6), (80e6, 90e6))}}))
+    assert gate.main(["--measurement", str(meas), *common]) == 0
+    report = json.loads((tmp_path / "v.json").read_text())
+    assert report["status"] == "PASS"
+    row = report["time"]["prompt-commands-max"]
+    assert row["status"] == "RECORDED" and row["observed_status"] == "FAIL" and "U-23" in row["record_only"]
+    assert gate.main(["--measurement", str(meas), *common[:-2]]) == 1
+    meas.write_text(json.dumps({"cases": {"prompt-commands-max": paired((8e6, 9e6), (8e6, 9e6))}}))
+    assert gate.main(["--measurement", str(meas), *common]) == 0
+    assert json.loads((tmp_path / "v.json").read_text())["status"] == "BLOCKED"
+
+
+# 이것을 실패시키는 것: 기록 전용 칸을 CI 판정 단계에 넘기지 않는 것(측정 칸이 FAIL로 판정됨), 측정 칸에서 빼는 것,
+# 판정하는 기존 칸(no-git, git-clean, git-dirty)을 빼거나 기록 전용으로 돌리는 것.
+def test_ci_records_the_command_time_cases_only():
+    job = job_text()
+    cases = re.search(r"GATE_CASES: (\S+)", job).group(1).split(",")
+    record = re.search(r"GATE_RECORD_ONLY: (\S+)", job).group(1).split(",")
+    commands = ["prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
+                "prompt-commands-max-empty", "prompt-commands-redraw"]
+    judged = ["no-git", "git-clean", "git-dirty"]
+    assert record == commands and cases == judged + commands
+    assert [c for c in cases if c not in record] == judged
+    assert '--record-only "$GATE_RECORD_ONLY"' in job
+
+
 # 이것을 실패시키는 것: --enforce에서 PASS/BLOCKED 구분 없이 0 아닌 코드로 끝내기, 빈 증거를 PASS로 치기.
 def test_enforced_pass_and_empty_evidence(tmp_path, capsys):
     sizes = tmp_path / "s.json"

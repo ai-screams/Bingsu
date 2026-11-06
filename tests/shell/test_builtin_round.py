@@ -201,6 +201,34 @@ def test_builtin_probe_never_runs_from_the_repository(tmp_path, _native_boot_req
     assert b"18.20.4" in command_response(session)
 
 
+# 수집이 안쪽 저장소의 뿌리를 알려도, 그 위의 바깥 저장소 bin에 있는 node는 실행하지 않는다. 내장 언어도 설정 단위와
+# 같은 저장소 목록(수집 뿌리와 셸 폴더 위의 `.git` 조상)을 쓰기 때문이다(U-24). 수집이 없는 회차는 언어를 그리면
+# 생기지 않고(test_language_only_layout_is_collected), 뿌리를 확정하지 못한 회차는 정하지 않는다
+# (test_unsettled_repository_decides_no_language). 이것을 실패시키는 것: 명령 회차의 저장소 목록에서 조상 검사를
+# 빼는 것(수집 뿌리만 남아 바깥 저장소의 node가 실행됨).
+def test_builtin_probe_skips_an_outer_repository_bin(tmp_path, _native_boot_required):
+    session = BuiltinSession(tmp_path)
+    session.env["HOME"] = str(session.base)
+    session.level = "info"
+    outer = session.base / "outer"
+    inner = outer / "inner"
+    (inner / "sub").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    subprocess.run(["git", "init", "-q", str(inner)], check=True)
+    session.pwd = inner / "sub"
+    above = install(outer / "bin", "node")
+    outside = install(session.base / "tools", "node")
+    session.env["PATH"] = f"{above.parent}:{outside.parent}:{session.env['PATH']}"
+    session.put("[layout.line1]\nleft=['git', 'node']\n[layout.line2]\nleft=['char']\n")
+    ready(session)
+    for f in (above, outside):
+        Path(f"{f}.runs").unlink(missing_ok=True)
+    published_rounds(session)
+    assert counted(above) == 0, "a node in an outer repository's bin ran"
+    assert counted(outside) >= 1
+    assert b"18.20.4" in command_response(session)
+
+
 # 레이아웃에 언어 segment만 있어도(worker mask 0) 수집이 일어나 버전을 발행한다(D3a 리뷰 M2). 이것을 실패시키는 것:
 # 언어 회차에 폴더 사실을 묻지 않는 것(답이 있어도 저장소 경계가 없어 정하지 않음).
 def test_language_only_layout_is_collected(tmp_path, _native_boot_required):

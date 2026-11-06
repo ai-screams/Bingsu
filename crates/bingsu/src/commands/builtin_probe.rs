@@ -182,7 +182,8 @@ pub(crate) struct Context<'a> {
     pub vars: Option<&'a Environ<'a>>,
     /// The sanitized `PATH` folders.
     pub folders: &'a [PathBuf],
-    pub repo: Option<Id>,
+    /// Every repository the shell is in (`command_grant::search`).
+    pub repo: &'a [Id],
     /// The shell's folder as the shell gave it; made canonical only for
     /// rustup's directory overrides, and only then (D3a security review
     /// S-M3).
@@ -561,11 +562,11 @@ mod tests {
         let vars = Environ::parse(&body);
         let mut groups = SystemGroups::new(&sys::passwd_entry(sys::current_uid()).unwrap().name);
         let me = sys::current_uid();
-        let folders = exec_path::sanitize(vars.get(b"PATH").unwrap(), None, me, &mut groups);
+        let folders = exec_path::sanitize(vars.get(b"PATH").unwrap(), &[], me, &mut groups);
         let c = Context {
             vars: Some(&vars),
             folders: &folders,
-            repo: None,
+            repo: &[],
             cwd: s.0.as_os_str().as_bytes(),
             me,
             xcode_link: &s.0.join("xcode_select_link"),
@@ -769,7 +770,7 @@ mod tests {
         let c = Context {
             vars: None,
             folders: &folders,
-            repo: None,
+            repo: &[],
             cwd: b"/",
             me,
             xcode_link: Path::new(XCODE_SELECT_LINK),
