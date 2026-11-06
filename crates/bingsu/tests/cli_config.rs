@@ -691,7 +691,8 @@ fn explain_shows_limits_cwd_shell_and_the_sanitized_lookup() {
             "[segment.\"custom/a\"]\nkind = \"command\"\ncommand = [\"tool\"]\ntimeout = \"2s\"\ncache = \"30s\"\n\
              [segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n\
              [segment.\"custom/env\"]\nkind = \"command\"\ncommand = [\"{}\"]\n\
-             [layout.line1]\nleft = [\"dir\", \"custom/a\", \"custom/sh\", \"custom/env\"]\n",
+             [segment.\"custom/gone\"]\nkind = \"command\"\ncommand = [\"bingsu-no-such-tool\"]\n\
+             [layout.line1]\nleft = [\"dir\", \"custom/a\", \"custom/sh\", \"custom/env\", \"custom/gone\"]\n",
             env.display()
         ),
     );
@@ -737,6 +738,10 @@ fn explain_shows_limits_cwd_shell_and_the_sanitized_lookup() {
     );
     assert!(
         stdout.contains("custom/env  command, will not run:"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("custom/gone  command, will not run: not found on the sanitized PATH"),
         "{stdout}"
     );
 }
