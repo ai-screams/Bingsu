@@ -228,13 +228,112 @@ pub fn repo_id(root: Option<&Path>) -> Result<Option<rule::Id>, Miss> {
     Ok(Some((m.dev(), m.ino())))
 }
 
+/// The folders that hold a `.git` entry (a folder, a worktree's `.git`
+/// file, or anything else by that name), by identity: every one counts as a
+/// repository root for `sanitize` and `lookup`, nested ones included
+/// (U-24). Two sets of folders are checked:
+/// - each prefix of `cwd` as the shell gave it (`/home/u/repo` for
+///   `/home/u/repo/docs`), so a shell in a repository's link to a folder
+///   elsewhere is still in that repository;
+/// - "/" and every folder above the real folder `cwd` reaches, so an alias
+///   into a repository is in it too.
+///
+/// The walk goes from "/" one name at a time on held descriptors; a link's
+/// text is walked in its place and `..` steps back to the folder before, as
+/// the kernel resolves them. It walks to the end whatever the depth (the
+/// shell's folder is already bounded by the envelope's length cap). A name
+/// that cannot be opened as a folder or too many links is `Refused`, never
+/// "no repository". A `.git` that cannot be checked counts as present. Each
+/// folder is checked once: a canonical `cwd` costs one `.git` check for "/"
+/// and one per name.
+pub fn repo_ancestors(cwd: &Path) -> Result<Vec<rule::Id>, Miss> {
+    /// A name to walk, or the end of one of `cwd`'s own names.
+    enum Step {
+        Name(OsString),
+        Prefix,
+    }
+    // Only a `.git` known to be absent leaves a folder out: one that cannot
+    // be checked counts as there, so the rule fails closed.
+    let holds_git = |folder: &File| {
+        !matches!(sys::at_stamp(folder.as_fd(), OsStr::new(".git")),
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT))
+    };
+    if !cwd.is_absolute() {
+        return Err(Miss::Refused);
+    }
+    let root =
+        sys::open_dir_at_search_nofollow(None, OsStr::new("/")).map_err(|_| Miss::Refused)?;
+    let facts = sys::fd_facts(root.as_fd()).map_err(|_| Miss::Refused)?;
+    let mut stack = vec![(root, (facts.dev, facts.ino))];
+    let mut todo: VecDeque<Step> = names(cwd)
+        .into_iter()
+        .flat_map(|n| [Step::Name(n), Step::Prefix])
+        .collect();
+    let mut checked: Vec<rule::Id> = Vec::new();
+    let mut out: Vec<rule::Id> = Vec::new();
+    let mut links = 0;
+    while let Some(step) = todo.pop_front() {
+        let Step::Name(name) = step else {
+            let (folder, id) = stack.last().expect("root");
+            if !checked.contains(id) {
+                checked.push(*id);
+                if holds_git(folder) {
+                    out.push(*id);
+                }
+            }
+            continue;
+        };
+        if name == "/" {
+            stack.truncate(1);
+            continue;
+        }
+        if name == ".." {
+            if stack.len() > 1 {
+                stack.pop();
+            }
+            continue;
+        }
+        let dir = stack.last().expect("root").0.as_fd();
+        let stamp = sys::at_stamp(dir, &name).map_err(|_| Miss::Refused)?;
+        if stamp.mode & 0o170_000 == 0o120_000 {
+            links += 1;
+            if links > LINKS_MAX {
+                return Err(Miss::Refused);
+            }
+            let target = sys::read_link_at(dir, &name).map_err(|_| Miss::Refused)?;
+            let mut expansion: VecDeque<Step> =
+                names(&target).into_iter().map(Step::Name).collect();
+            expansion.append(&mut todo);
+            todo = expansion;
+            continue;
+        }
+        let file = sys::open_dir_at_search_nofollow(Some(dir), &name).map_err(|_| Miss::Refused)?;
+        let facts = sys::fd_facts(file.as_fd()).map_err(|_| Miss::Refused)?;
+        stack.push((file, (facts.dev, facts.ino)));
+    }
+    for (folder, id) in &stack {
+        if !checked.contains(id) {
+            checked.push(*id);
+            if holds_git(folder) {
+                out.push(*id);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether the folder chain avoids every repository root in `repos`.
+fn outside_repos(chain: &[rule::Id], repos: &[rule::Id]) -> bool {
+    repos.iter().all(|r| rule::outside_repo(chain, Some(*r)))
+}
+
 /// The canonical folders of `path_env` that commands may search, in order,
 /// first occurrence only: absolute entries whose whole way passes the
 /// ancestor rule, that do not pass through `repo` (the repository root the
 /// shell is in, by identity) and whose name has no ':'.
 pub fn sanitize(
     path_env: &[u8],
-    repo: Option<rule::Id>,
+    repo: &[rule::Id],
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Vec<PathBuf> {
@@ -244,8 +343,7 @@ pub fn sanitize(
         let Ok((canonical, End::Folder { chain })) = walked else {
             continue;
         };
-        let keep =
-            rule::outside_repo(&chain, repo) && rule::path_safe(canonical.as_os_str().as_bytes());
+        let keep = outside_repos(&chain, repo) && rule::path_safe(canonical.as_os_str().as_bytes());
         if keep && !out.contains(&canonical) {
             out.push(canonical);
         }
@@ -270,7 +368,7 @@ pub fn path_value(folders: &[PathBuf]) -> Vec<u8> {
 pub fn lookup(
     word: &[u8],
     folders: &[PathBuf],
-    repo: Option<rule::Id>,
+    repo: &[rule::Id],
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<Found, Miss> {
@@ -282,7 +380,7 @@ pub fn lookup(
 pub fn lookup_open(
     word: &[u8],
     folders: &[PathBuf],
-    repo: Option<rule::Id>,
+    repo: &[rule::Id],
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<(Found, Checked), Miss> {
@@ -306,7 +404,7 @@ pub fn lookup_open(
 /// The canonical file must be outside `repo`, wherever the walk started.
 pub fn resolve(
     path: &Path,
-    repo: Option<rule::Id>,
+    repo: &[rule::Id],
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<Found, Miss> {
@@ -344,7 +442,7 @@ impl Checked {
 /// the same rules.
 pub fn resolve_open(
     path: &Path,
-    repo: Option<rule::Id>,
+    repo: &[rule::Id],
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<(Found, Checked), Miss> {
@@ -463,7 +561,7 @@ fn script_refusal(first: &[u8]) -> Option<ScriptRefusal> {
 pub fn explain(
     word: &[u8],
     folders: &[PathBuf],
-    repo: Option<rule::Id>,
+    repo: &[rule::Id],
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Explained {
@@ -509,7 +607,7 @@ pub fn explain(
 /// lookup does not move on.
 fn interpreter(
     line: Shebang<'_>,
-    repo: Option<rule::Id>,
+    repo: &[rule::Id],
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<Interpreter, Miss> {
@@ -546,7 +644,7 @@ fn first_bytes(checked: &Checked) -> Result<Option<Vec<u8>>, Miss> {
 /// `resolve_open` without the script step.
 fn resolve_checked(
     path: &Path,
-    repo: Option<rule::Id>,
+    repo: &[rule::Id],
     me: u32,
     groups: &mut dyn GroupOracle,
 ) -> Result<(Found, Checked), Miss> {
@@ -560,7 +658,7 @@ fn resolve_checked(
     else {
         return Err(Miss::Absent);
     };
-    if !rule::outside_repo(&chain, repo) {
+    if !outside_repos(&chain, repo) {
         return Err(Miss::Refused);
     }
     let ctime = (
@@ -783,7 +881,7 @@ pub fn resolve_for_user(path: &Path, repo: Option<rule::Id>) -> Result<Found, Mi
     let me = sys::current_uid();
     let user = sys::passwd_entry(me).ok_or(Miss::Refused)?;
     let mut groups = crate::commands::group_policy::SystemGroups::new(&user.name);
-    resolve(path, repo, me, &mut groups)
+    resolve(path, repo.as_slice(), me, &mut groups)
 }
 
 /// A test that needs a user other than root: true (skip) when running as
@@ -891,6 +989,212 @@ mod tests {
         p.as_os_str().as_bytes()
     }
 
+    fn id_of(p: &Path) -> rule::Id {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(p).unwrap();
+        (m.dev(), m.ino())
+    }
+
+    // U-24: 셸 폴더와 그 위에서 `.git`(폴더, worktree의 파일)을 가진 조상을 모두 저장소로 본다. 이것을 실패시키는
+    // 것: `.git` 부재 판정을 뒤집는 것(저장소 없는 경로가 모든 조상을 냄), 판정을 지워 아무것도 내지 않는 것, 가장
+    // 가까운 하나에서 멈추는 것(바깥 저장소가 빠짐).
+    #[test]
+    fn repo_ancestors_are_every_folder_holding_git() {
+        let t = scratch("scan");
+        let outer = t.join("outer");
+        let inner = outer.join("a/inner");
+        let cwd = inner.join("sub/deep");
+        folders(&cwd);
+        assert_eq!(repo_ancestors(&cwd), Ok(vec![]));
+        std::fs::create_dir(outer.join(".git")).unwrap();
+        std::fs::write(inner.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert_eq!(repo_ancestors(&cwd), Ok(vec![id_of(&outer), id_of(&inner)]));
+        std::fs::create_dir(cwd.join(".git")).unwrap();
+        assert_eq!(
+            repo_ancestors(&cwd),
+            Ok(vec![id_of(&outer), id_of(&inner), id_of(&cwd)])
+        );
+    }
+
+    // 별칭 경로: 링크로 들어간 셸 폴더는 실제 폴더의 조상으로 판정한다(절대·상대 링크, 링크 안의 `..`). 이것을
+    // 실패시키는 것: 링크를 따르지 않는 것(실제 폴더의 조상인 저장소가 빠짐).
+    #[test]
+    fn repo_ancestors_follow_the_real_folder_of_an_alias() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-alias");
+        let repo = t.join("repo");
+        folders(&repo.join("sub"));
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        folders(&t.join("x"));
+        symlink(repo.join("sub"), t.join("x/abs")).unwrap();
+        symlink("../repo/sub", t.join("x/rel")).unwrap();
+        for alias in ["x/abs", "x/rel"] {
+            assert_eq!(
+                repo_ancestors(&t.join(alias)),
+                Ok(vec![id_of(&repo)]),
+                "{alias}"
+            );
+        }
+    }
+
+    // `.git`이 가리키는 곳이 없는 링크나 고리 링크여도 그 이름이 있으면 저장소다: 링크를 따르지 않고 이름만 본다.
+    // 이것을 실패시키는 것: 폴더·파일일 때만 있음으로 세는 것, `.git`을 링크를 따라 확인하는 것(끊긴 링크가 없음이
+    // 됨).
+    #[test]
+    fn repo_ancestors_count_a_git_link_whatever_it_names() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-git-link");
+        let (dangling, looped) = (t.join("dangling"), t.join("looped"));
+        folders(&dangling);
+        folders(&looped);
+        symlink("nowhere", dangling.join(".git")).unwrap();
+        symlink(".git", looped.join(".git")).unwrap();
+        assert_eq!(repo_ancestors(&dangling), Ok(vec![id_of(&dangling)]));
+        assert_eq!(repo_ancestors(&looped), Ok(vec![id_of(&looped)]));
+    }
+
+    // `.git`을 확인하지 못하는 폴더(검색 권한 없는 셸 폴더)는 저장소로 센다(U-24 L3). 이것을 실패시키는 것: 확인
+    // 오류를 "없음"으로 보는 것(열린 쪽 실패).
+    #[test]
+    fn repo_ancestors_count_a_folder_they_cannot_check() {
+        let t = scratch("scan-unchecked");
+        let cwd = t.join("shut");
+        folders(&cwd);
+        assert_eq!(repo_ancestors(&cwd), Ok(vec![]));
+        if me() == 0 {
+            return; // root searches any folder: the check never fails
+        }
+        std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let got = repo_ancestors(&cwd);
+        std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Linux opens the folder path-only (O_PATH) and then fails to check
+        // inside it; macOS's O_SEARCH open already refuses the walk.
+        if cfg!(target_os = "linux") {
+            assert_eq!(got, Ok(vec![id_of(&cwd)]));
+        } else {
+            assert_eq!(got, Err(Miss::Refused));
+        }
+    }
+
+    // 셸이 준 논리 경로의 접두사도 본다(U-24 L1): 저장소 안의 `docs -> 바깥 폴더`로 들어간 셸은 그 저장소 안이다.
+    // 이것을 실패시키는 것: 논리 경로의 접두사 검사를 지우는 것(실제 폴더의 조상만 남아 저장소가 빠짐).
+    #[test]
+    fn repo_ancestors_count_the_shells_own_path() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-logical");
+        let repo = t.join("repo");
+        let elsewhere = t.join("elsewhere");
+        folders(&repo);
+        folders(&elsewhere);
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        symlink(&elsewhere, repo.join("docs")).unwrap();
+        assert_eq!(repo_ancestors(&repo.join("docs")), Ok(vec![id_of(&repo)]));
+        assert_eq!(repo_ancestors(&elsewhere), Ok(vec![]));
+    }
+
+    // 링크가 붙은 셸 경로 이름도 그 접두사다: `entry -> repo`를 지나 `repo/docs -> 바깥`으로 들어간 셸의 접두사
+    // `/t/entry`는 repo다. "/"에서의 `..`는 "/"에 머문다(`/../../t/repo/sub`). 이것을 실패시키는 것: 링크로 풀린
+    // 이름 뒤의 접두사 확인을 버리는 것(repo가 빠짐), "/"에서 `..`가 스택을 비우게 하는 것.
+    #[test]
+    fn repo_ancestors_keep_prefixes_through_links_and_stay_at_root() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-chain");
+        let repo = t.join("repo");
+        let outside = t.join("outside");
+        folders(&repo.join("sub"));
+        folders(&outside);
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        symlink(&repo, t.join("entry")).unwrap();
+        symlink(&outside, repo.join("docs")).unwrap();
+        assert_eq!(
+            repo_ancestors(&t.join("entry/docs")),
+            Ok(vec![id_of(&repo)])
+        );
+        let up = format!("/../..{}", repo.join("sub").display());
+        symlink(&up, t.join("alias")).unwrap();
+        assert_eq!(repo_ancestors(&t.join("alias")), Ok(vec![id_of(&repo)]));
+    }
+
+    // 링크 안의 `..`는 앞 폴더로 돌아간다(U-24 M1). 셸 경로에도 실제 폴더의 조상에도 없는 폴더(링크가 놓인
+    // 저장소 b)는 저장소가 아니고, `../a/../a…`로 길게 쓴 링크도 폴더를 쌓지 않는다. 이것을 실패시키는 것: `..`를
+    // 부모를 새로 여는 이름으로 걷는 것(b가 들어감), 절대 링크의 "/"에서 걸은 폴더를 버리지 않는 것.
+    #[test]
+    fn repo_ancestors_step_back_on_parent_names_in_links() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-parent");
+        let repo = t.join("repo");
+        folders(&repo.join("sub"));
+        folders(&t.join("a"));
+        folders(&t.join("b"));
+        std::fs::create_dir(t.join("b/.git")).unwrap();
+        symlink(t.join("b/l2"), t.join("a/l1")).unwrap();
+        symlink("../repo/sub", t.join("b/l2")).unwrap();
+        assert_eq!(repo_ancestors(&t.join("a/l1")), Ok(vec![]));
+        // A link's own walk before an absolute link is dropped there: c is
+        // neither on the shell's path nor above the real folder.
+        folders(&t.join("a/c"));
+        std::fs::create_dir(t.join("a/c/.git")).unwrap();
+        symlink("c/l3", t.join("a/l4")).unwrap();
+        symlink(repo.join("sub"), t.join("a/c/l3")).unwrap();
+        assert_eq!(repo_ancestors(&t.join("a/l4")), Ok(vec![]));
+        let long = "../b/".repeat(200) + "../repo/sub";
+        symlink(&long, t.join("b/long")).unwrap();
+        assert_eq!(
+            repo_ancestors(&t.join("b/long")),
+            Ok(vec![id_of(&t.join("b"))])
+        );
+    }
+
+    // 걸을 수 없는 경로와 링크 고리는 "저장소 없음"이 아니라 거부다. 깊이에는 상한이 없다(U-24 판정). 이것을
+    // 실패시키는 것: 이름 조회 실패를 건너뛰는 것, 링크 수 상한을 지우거나 옮기는 것, 깊이 상한을 두는 것(깊이 40의
+    // 셸 폴더가 거부됨), 들어갈 수 없는 폴더를 "저장소 없음"으로 보는 것.
+    #[test]
+    fn repo_ancestors_refuse_what_they_cannot_walk() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-refuse");
+        assert_eq!(repo_ancestors(&t.join("gone")), Err(Miss::Refused));
+        assert_eq!(repo_ancestors(Path::new("relative")), Err(Miss::Refused));
+        std::fs::write(t.join("file"), "").unwrap();
+        assert_eq!(repo_ancestors(&t.join("file")), Err(Miss::Refused));
+        symlink("loop", t.join("loop")).unwrap();
+        assert_eq!(repo_ancestors(&t.join("loop")), Err(Miss::Refused));
+        // A chain of LINKS_MAX links still ends on its folder; one more is refused.
+        folders(&t.join("end"));
+        let mut previous = "end".to_owned();
+        for i in 0..=LINKS_MAX {
+            symlink(&previous, t.join(format!("l{i}"))).unwrap();
+            previous = format!("l{i}");
+        }
+        assert_eq!(
+            repo_ancestors(&t.join(format!("l{}", LINKS_MAX - 1))),
+            Ok(vec![])
+        );
+        assert_eq!(
+            repo_ancestors(&t.join(format!("l{LINKS_MAX}"))),
+            Err(Miss::Refused)
+        );
+        // No depth cap: a `.git` far above a deep folder is still found.
+        let mut deep = t.join("deep");
+        folders(&deep);
+        std::fs::create_dir(deep.join(".git")).unwrap();
+        let top = id_of(&deep);
+        while deep.components().count() - 1 < 40 {
+            deep = deep.join("d");
+        }
+        folders(&deep);
+        assert_eq!(repo_ancestors(&deep), Ok(vec![top]));
+        // A folder on the way the user may not search (root searches anyway).
+        if me() != 0 {
+            folders(&t.join("locked/sub"));
+            std::fs::set_permissions(t.join("locked"), std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            let got = repo_ancestors(&t.join("locked/sub"));
+            std::fs::set_permissions(t.join("locked"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            assert_eq!(got, Err(Miss::Refused));
+        }
+    }
+
     // 이것을 실패시키는 것: sanitize에서 저장소 검사(keep_folder의 repo)를 지우는 것(저장소의 bin/env가
     // 뽑힘), 또는 entries의 상대·빈 항목 제외를 지우는 것.
     #[test]
@@ -902,14 +1206,14 @@ mod tests {
         path.extend_from_slice(b":.::bin:/usr/bin");
         let folders = sanitize(
             &path,
-            repo_id(Some(&repo)).unwrap(),
+            repo_id(Some(&repo)).unwrap().as_slice(),
             me(),
             &mut RefuseGroupWrite,
         );
         let found = lookup(
             b"env",
             &folders,
-            repo_id(Some(&repo)).unwrap(),
+            repo_id(Some(&repo)).unwrap().as_slice(),
             me(),
             &mut RefuseGroupWrite,
         )
@@ -927,8 +1231,8 @@ mod tests {
         let usr_bin = std::fs::canonicalize("/usr/bin").unwrap();
         assert_eq!(path_value(&folders), bytes(&usr_bin));
         // Positive control: outside a repository the same folder stays and wins.
-        let folders = sanitize(&path, None, me(), &mut RefuseGroupWrite);
-        let found = lookup(b"env", &folders, None, me(), &mut RefuseGroupWrite).unwrap();
+        let folders = sanitize(&path, &[], me(), &mut RefuseGroupWrite);
+        let found = lookup(b"env", &folders, &[], me(), &mut RefuseGroupWrite).unwrap();
         assert_eq!(found.executable, repo.join("bin/env"));
         std::fs::remove_dir_all(&t).unwrap();
     }
@@ -942,8 +1246,8 @@ mod tests {
         exe(&real, 0o755);
         folders(&t.join("bin"));
         symlink("../Cellar/x/1/bin/x", t.join("bin/x")).unwrap();
-        let folders = sanitize(bytes(&t.join("bin")), None, me(), &mut RefuseGroupWrite);
-        let found = lookup(b"x", &folders, None, me(), &mut RefuseGroupWrite).unwrap();
+        let folders = sanitize(bytes(&t.join("bin")), &[], me(), &mut RefuseGroupWrite);
+        let found = lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite).unwrap();
         assert_eq!(
             found,
             Found {
@@ -968,14 +1272,14 @@ mod tests {
         symlink(&real, &link).unwrap();
         // Positive control: a root-owned link resolves.
         assert_eq!(
-            resolve(&link, None, 0, &mut RefuseGroupWrite)
+            resolve(&link, &[], 0, &mut RefuseGroupWrite)
                 .unwrap()
                 .executable,
             real
         );
         std::os::unix::fs::lchown(&link, Some(12345), Some(12345)).unwrap();
         assert_eq!(
-            resolve(&link, None, 0, &mut RefuseGroupWrite),
+            resolve(&link, &[], 0, &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -988,14 +1292,14 @@ mod tests {
         let loose = t.join("loose");
         exe(&loose.join("x"), 0o755);
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(sanitize(bytes(&loose), None, me(), &mut RefuseGroupWrite).is_empty());
+        assert!(sanitize(bytes(&loose), &[], me(), &mut RefuseGroupWrite).is_empty());
         assert_eq!(
-            resolve(&loose.join("x"), None, me(), &mut RefuseGroupWrite),
+            resolve(&loose.join("x"), &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
-            sanitize(bytes(&loose), None, me(), &mut RefuseGroupWrite),
+            sanitize(bytes(&loose), &[], me(), &mut RefuseGroupWrite),
             [loose]
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -1013,21 +1317,21 @@ mod tests {
         exe(&b.join("y"), 0o755);
         let folders = [a.clone(), b.clone()];
         assert_eq!(
-            lookup(b"x", &folders, None, me(), &mut RefuseGroupWrite),
+            lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
         assert_eq!(
-            lookup(b"y", &folders, None, me(), &mut RefuseGroupWrite)
+            lookup(b"y", &folders, &[], me(), &mut RefuseGroupWrite)
                 .unwrap()
                 .executable,
             b.join("y")
         );
         assert_eq!(
-            lookup(b"z", &folders, None, me(), &mut RefuseGroupWrite),
+            lookup(b"z", &folders, &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Absent)
         );
         assert_eq!(
-            lookup(b"a/x", &folders, None, me(), &mut RefuseGroupWrite),
+            lookup(b"a/x", &folders, &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -1044,14 +1348,20 @@ mod tests {
         symlink(repo.join("bin/tool"), t.join("bin/tool")).unwrap();
         let folders = sanitize(
             bytes(&t.join("bin")),
-            repo_id(Some(&repo)).unwrap(),
+            repo_id(Some(&repo)).unwrap().as_slice(),
             me(),
             &mut RefuseGroupWrite,
         );
         assert_eq!(folders, [t.join("bin")]);
         let g = &mut RefuseGroupWrite;
         assert_eq!(
-            lookup(b"tool", &folders, repo_id(Some(&repo)).unwrap(), me(), g),
+            lookup(
+                b"tool",
+                &folders,
+                repo_id(Some(&repo)).unwrap().as_slice(),
+                me(),
+                g
+            ),
             Err(Miss::Refused)
         );
         let absolute = repo.join("bin/tool");
@@ -1059,7 +1369,7 @@ mod tests {
             lookup(
                 bytes(&absolute),
                 &[],
-                repo_id(Some(&repo)).unwrap(),
+                repo_id(Some(&repo)).unwrap().as_slice(),
                 me(),
                 g
             ),
@@ -1067,7 +1377,7 @@ mod tests {
         );
         // Positive control: outside any repository the link resolves.
         assert_eq!(
-            lookup(b"tool", &folders, None, me(), g).unwrap().executable,
+            lookup(b"tool", &folders, &[], me(), g).unwrap().executable,
             absolute
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -1089,14 +1399,14 @@ mod tests {
         }
         let g = &mut RefuseGroupWrite;
         let id = repo_id(Some(&repo)).unwrap();
-        assert!(sanitize(bytes(&alias.join("bin")), id, me(), g).is_empty());
+        assert!(sanitize(bytes(&alias.join("bin")), id.as_slice(), me(), g).is_empty());
         let absolute = alias.join("bin/tool");
         assert_eq!(
-            lookup(bytes(&absolute), &[], id, me(), g),
+            lookup(bytes(&absolute), &[], id.as_slice(), me(), g),
             Err(Miss::Refused)
         );
         assert_eq!(
-            lookup(bytes(&absolute), &[], None, me(), g)
+            lookup(bytes(&absolute), &[], &[], me(), g)
                 .unwrap()
                 .executable,
             absolute
@@ -1128,9 +1438,9 @@ mod tests {
         mount(&[OsStr::new("--bind"), repo.as_os_str(), alias.as_os_str()]);
         let g = &mut RefuseGroupWrite;
         let id = repo_id(Some(&repo)).unwrap();
-        let folders_got = sanitize(bytes(&alias.join("bin")), id, me(), g);
-        let refused = lookup(bytes(&alias.join("bin/tool")), &[], id, me(), g);
-        let outside = lookup(bytes(&alias.join("bin/tool")), &[], None, me(), g);
+        let folders_got = sanitize(bytes(&alias.join("bin")), id.as_slice(), me(), g);
+        let refused = lookup(bytes(&alias.join("bin/tool")), &[], id.as_slice(), me(), g);
+        let outside = lookup(bytes(&alias.join("bin/tool")), &[], &[], me(), g);
         let st = std::process::Command::new("umount")
             .arg(&alias)
             .status()
@@ -1161,11 +1471,11 @@ mod tests {
         exe(&t.join("a:b/x"), 0o755);
         symlink(t.join("a:b"), t.join("link")).unwrap();
         let g = &mut RefuseGroupWrite;
-        assert!(sanitize(bytes(&t.join("link")), None, me(), g).is_empty());
+        assert!(sanitize(bytes(&t.join("link")), &[], me(), g).is_empty());
         // Positive control: the same folder through a name without ':' stays.
         folders(&t.join("plain"));
         assert_eq!(
-            sanitize(bytes(&t.join("plain")), None, me(), g),
+            sanitize(bytes(&t.join("plain")), &[], me(), g),
             [t.join("plain")]
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -1179,12 +1489,12 @@ mod tests {
         let x = t.join("x");
         exe(&x, 0o755);
         let g = &mut RefuseGroupWrite;
-        assert_eq!(resolve(&x, None, me(), g).unwrap().executable, x);
+        assert_eq!(resolve(&x, &[], me(), g).unwrap().executable, x);
         for tail in ["/", "/."] {
             let mut p = x.clone().into_os_string();
             p.push(tail);
             assert_eq!(
-                lookup(p.as_bytes(), &[], None, me(), g),
+                lookup(p.as_bytes(), &[], &[], me(), g),
                 Err(Miss::Refused),
                 "{p:?}"
             );
@@ -1194,7 +1504,7 @@ mod tests {
             target.push(tail);
             symlink(&target, t.join(name)).unwrap();
             assert_eq!(
-                resolve(&t.join(name), None, me(), g),
+                resolve(&t.join(name), &[], me(), g),
                 Err(Miss::Refused),
                 "{tail}"
             );
@@ -1216,14 +1526,14 @@ mod tests {
         symlink(&with_slash, t.join("link")).unwrap();
         let g = &mut RefuseGroupWrite;
         assert_eq!(
-            sanitize(with_slash.as_bytes(), None, me(), g),
+            sanitize(with_slash.as_bytes(), &[], me(), g),
             std::slice::from_ref(&bin)
         );
         assert_eq!(
-            sanitize(bytes(&t.join("link")), None, me(), g),
+            sanitize(bytes(&t.join("link")), &[], me(), g),
             std::slice::from_ref(&bin)
         );
-        let found = resolve(&t.join("link/tool"), None, me(), g).unwrap();
+        let found = resolve(&t.join("link/tool"), &[], me(), g).unwrap();
         assert_eq!(found.executable, bin.join("tool"));
         std::fs::remove_dir_all(&t).unwrap();
     }
@@ -1240,7 +1550,7 @@ mod tests {
         let found = lookup(
             b"x",
             &[a.clone(), b.clone()],
-            None,
+            &[],
             me(),
             &mut RefuseGroupWrite,
         );
@@ -1258,7 +1568,7 @@ mod tests {
         symlink(t.join("b"), t.join("a")).unwrap();
         symlink(t.join("a"), t.join("b")).unwrap();
         assert_eq!(
-            resolve(&t.join("a/x"), None, me(), &mut RefuseGroupWrite),
+            resolve(&t.join("a/x"), &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
         std::fs::remove_dir_all(&t).unwrap();
@@ -1285,14 +1595,14 @@ mod tests {
         let g = &mut RefuseGroupWrite;
         // For root: its own file runs, the other uid's file is refused.
         assert_eq!(
-            resolve(&root_file, None, 0, g).unwrap().executable,
+            resolve(&root_file, &[], 0, g).unwrap().executable,
             root_file
         );
-        assert_eq!(resolve(&theirs, None, 0, g), Err(Miss::Refused));
+        assert_eq!(resolve(&theirs, &[], 0, g), Err(Miss::Refused));
         // For uid 12345: its own file runs; root's file, fine by owner alone, is
         // refused by the sticky folder's duty.
-        assert_eq!(resolve(&theirs, None, 12345, g).unwrap().executable, theirs);
-        assert_eq!(resolve(&root_file, None, 12345, g), Err(Miss::Refused));
+        assert_eq!(resolve(&theirs, &[], 12345, g).unwrap().executable, theirs);
+        assert_eq!(resolve(&root_file, &[], 12345, g), Err(Miss::Refused));
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -1304,10 +1614,10 @@ mod tests {
         let x = t.join("x");
         exe(&x, 0o775);
         assert_eq!(
-            resolve(&x, None, me(), &mut RefuseGroupWrite),
+            resolve(&x, &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
-        let found = resolve(&x, None, me(), &mut Clear).unwrap();
+        let found = resolve(&x, &[], me(), &mut Clear).unwrap();
         let file = File::open(&x).unwrap();
         let facts = sys::fd_facts(file.as_fd()).unwrap();
         let stamp = sys::file_stamp(&file).unwrap();
@@ -1341,12 +1651,12 @@ mod tests {
         exe(&y, 0o755);
         let g = &mut RefuseGroupWrite;
         // Positive control: without the ACL both run.
-        assert_eq!(resolve(&x, None, me(), g).unwrap().executable, x);
-        assert_eq!(resolve(&y, None, me(), g).unwrap().executable, y);
+        assert_eq!(resolve(&x, &[], me(), g).unwrap().executable, x);
+        assert_eq!(resolve(&y, &[], me(), g).unwrap().executable, y);
         add_acl("nobody allow writeextattr", &x);
         add_acl("nobody allow writeextattr", &t.join("d"));
-        assert_eq!(resolve(&x, None, me(), g), Err(Miss::Refused));
-        assert_eq!(resolve(&y, None, me(), g), Err(Miss::Refused));
+        assert_eq!(resolve(&x, &[], me(), g), Err(Miss::Refused));
+        assert_eq!(resolve(&y, &[], me(), g), Err(Miss::Refused));
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -1362,10 +1672,10 @@ mod tests {
         exe(&x, 0o755);
         std::fs::set_permissions(&top, std::fs::Permissions::from_mode(0o775)).unwrap();
         assert_eq!(
-            resolve(&x, None, me(), &mut RefuseGroupWrite),
+            resolve(&x, &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
-        assert_eq!(resolve(&x, None, me(), &mut Clear).unwrap().executable, x);
+        assert_eq!(resolve(&x, &[], me(), &mut Clear).unwrap().executable, x);
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -1395,20 +1705,14 @@ mod tests {
         let f = sys::fd_facts(file.as_fd()).unwrap();
         assert_eq!(f.ownership, Some(true), "the mount ignores ownership");
         assert_eq!(rule::candidate(&f, me(), next, g), Candidate::Run);
-        assert_eq!(resolve(&x, None, me(), g), Err(Miss::Refused));
+        assert_eq!(resolve(&x, &[], me(), g), Err(Miss::Refused));
         // A file there that would not run is skipped, not refused.
         let net = x.parent().unwrap().to_path_buf();
         let name = format!("bingsu-skip-{}", std::process::id());
         exe(&net.join(&name), 0o644);
         let local = scratch("net-skip");
         exe(&local.join(&name), 0o755);
-        let found = lookup(
-            name.as_bytes(),
-            &[net.clone(), local.clone()],
-            None,
-            me(),
-            g,
-        );
+        let found = lookup(name.as_bytes(), &[net.clone(), local.clone()], &[], me(), g);
         std::fs::remove_file(net.join(&name)).unwrap();
         assert_eq!(found.unwrap().executable, local.join(&name));
         std::fs::remove_dir_all(&local).unwrap();
@@ -1438,9 +1742,7 @@ mod tests {
     fn script_at(p: &Path, body: &[u8]) -> Checked {
         std::fs::write(p, body).unwrap();
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        resolve_open(p, None, me(), &mut RefuseGroupWrite)
-            .unwrap()
-            .1
+        resolve_open(p, &[], me(), &mut RefuseGroupWrite).unwrap().1
     }
 
     /// Runs one `#[ignore]` child test of this module in a fresh process
@@ -1589,7 +1891,7 @@ mod tests {
             let script = t.join(format!("tool-{mode:o}"));
             std::fs::write(&script, b"#!/bin/sh\necho a\n").unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
-            let copied = resolve_open(&script, None, me(), &mut Clear)
+            let copied = resolve_open(&script, &[], me(), &mut Clear)
                 .ok()
                 .and_then(|(_, checked)| copies.copy(&checked, "t").ok());
             assert_eq!(copied.is_some(), ok, "{mode:o}");
@@ -1610,7 +1912,7 @@ mod tests {
             let script = volume.mount.join("tool");
             std::fs::write(&script, b"#!/bin/sh\necho a\n").unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let (_, checked) = resolve_open(&script, None, me(), &mut Clear).unwrap();
+            let (_, checked) = resolve_open(&script, &[], me(), &mut Clear).unwrap();
             assert_eq!(
                 copies.copy(&checked, "t").is_ok(),
                 !noexec,
@@ -1781,7 +2083,7 @@ mod tests {
         let x = t.join("x");
         exe(&x, 0o111);
         assert_eq!(
-            resolve(&x, None, me(), &mut RefuseGroupWrite)
+            resolve(&x, &[], me(), &mut RefuseGroupWrite)
                 .unwrap()
                 .executable,
             x
@@ -1796,7 +2098,7 @@ mod tests {
     }
 
     fn interpreter_of(path: &Path) -> Result<Option<Interpreter>, Miss> {
-        resolve(path, None, me(), &mut RefuseGroupWrite).map(|f| f.interpreter)
+        resolve(path, &[], me(), &mut RefuseGroupWrite).map(|f| f.interpreter)
     }
 
     // 도우미가 #! 줄의 인터프리터를 같은 규칙으로 해석해 줄 원문과 정규 경로를 함께 싣는다. 이것을 실패시키는

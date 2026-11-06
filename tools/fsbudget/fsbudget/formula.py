@@ -364,6 +364,9 @@ class HelperPlan:
     # runner's /usr/bin/true can be a link to gnutrue): each is an lstat that
     # finds the link, its readlinkat and the name's lstat again.
     target_links: int = 0
+    # Names of the shell's folder below "/": the command round's repository
+    # scan walks them (U-24).
+    shell_names: int = 0
 
 
 def read_to_end_calls(n: int) -> int:
@@ -859,9 +862,14 @@ def _command_prefix(e: dict, p: HelperPlan, stage: str) -> None:
     _add(e, "fd_listing")
     _add(e, "command_spawn")
     _add(e, "dup", 3)
-    # Round::grant -> units: the shell folder's identity (statx), the PATH
-    # folder's walk, the target folder's walk and the target.
+    # Round::grant -> units: the shell folder's identity (statx), the
+    # repository scan (U-24: a no-follow walk of the shell's folder, then one
+    # lstat of `.git` in "/" and in each folder of it), the PATH folder's
+    # walk, the target folder's walk and the target.
     e["fstat"] = e.get("fstat", 0) + 1
+    _add(e, "folder_root")
+    _add(e, "folder_name", p.shell_names)
+    e["fstat"] += p.shell_names + 1
     _add(e, "folder_root", 2)
     _add(e, "folder_name", p.path_names + p.target_names)
     _add(e, "target_file")

@@ -267,8 +267,9 @@ def script(path, body):
 
 
 # J9: 같은 회차 수집이 알린 저장소 루트가 PATH 정제의 저장소다. 셸이 저장소 하위 폴더에 있어도 루트 아래
-# bin은 빠진다. 이것을 실패시키는 것: Round::grant에 수집 루트 대신 None을 넘기는 것(셸 폴더로 대체되어
-# 루트 바로 아래 bin이 남음).
+# bin은 빠진다. U-24부터는 셸 폴더 위의 `.git` 조상도 저장소라, 수집이 이 회차에 끝나지 않아도 결과가 같다.
+# 이것을 실패시키는 것: 저장소 규칙에서 수집 루트와 조상 검사를 둘 다 지우는 것(셸 폴더로 대체되어 루트 바로 아래
+# bin이 남음).
 def test_collected_repo_root_excludes_its_bin(tmp_path, _native_boot_required):
     from test_helper_lifecycle import LifetimeSession
 
@@ -297,6 +298,65 @@ def test_collected_repo_root_excludes_its_bin(tmp_path, _native_boot_required):
     session.wait_quiet()
     assert outside.exists(), ("the control unit never ran", session.log())
     assert not canary.exists(), ("a PATH folder under the collected repository root ran", session.log())
+
+
+# U-24: 수집 세그먼트를 그리지 않는 설정은 어느 회차에도 수집 루트가 없다. 그래도 셸 폴더 위에서 `.git`을 가진
+# 조상(바깥 저장소와 그 안의 저장소 모두)은 저장소라, 그 아래 PATH 폴더의 명령은 돌지 않는다. 양성 대조: 저장소
+# 밖 폴더의 같은 명령은 돈다. 이것을 실패시키는 것: 명령 회차에서 조상 검사를 지우는 것, 가장 가까운 저장소에서
+# 멈추는 것(바깥 저장소의 bin이 돈다).
+def test_repository_bins_stay_out_without_a_collection(tmp_path, _native_boot_required):
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    sub = inner / "sub"
+    sub.mkdir(parents=True, mode=0o700)
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    subprocess.run(["git", "init", "-q", str(inner)], check=True)
+    ran_outer, ran_inner, outside = tmp_path / "ran-outer", tmp_path / "ran-inner", tmp_path / "outside"
+    script(outer / "bin" / "probe-outer", f"touch '{ran_outer}'")
+    script(inner / "bin" / "probe-inner", f"touch '{ran_inner}'")
+    script(tmp_path / "other" / "bin" / "probe-out", f"touch '{outside}'")
+    session = CommandSession(tmp_path / "s")
+    session.level = "debug"
+    session.env["PATH"] = f"{outer}/bin:{inner}/bin:{tmp_path}/other/bin:" + session.env["PATH"]
+    session.put("[segment.\"custom/a\"]\nkind='command'\ncommand=['probe-outer']\n"
+                "[segment.\"custom/b\"]\nkind='command'\ncommand=['probe-inner']\n"
+                "[segment.\"custom/c\"]\nkind='command'\ncommand=['probe-out']\n"
+                "[layout.line1]\nleft=['custom/a','custom/b','custom/c','char']\n")
+    session.pwd = sub
+    ready(session)
+    for _ in range(2):
+        session.prompt()
+    session.wait_quiet()
+    assert until(lambda: outside.exists()), ("the control unit never ran", session.log())
+    assert not ran_outer.exists() and not ran_inner.exists(), ("a repository's PATH folder ran", session.log())
+
+
+# U-24 L1: 셸이 저장소 안의 링크(`docs -> 바깥 폴더`)로 들어가면 실제 폴더에는 `.git` 조상이 없지만, 셸이 준 경로의
+# 접두사인 저장소는 여전히 저장소다. 절대 경로로 PATH에 넣은 저장소 bin(direnv의 PATH_add 같은)은 돌지 않는다.
+# 이것을 실패시키는 것: 명령 회차의 조상 검사에서 셸 경로 접두사 검사를 지우는 것(실제 폴더만 보아 저장소 bin이 돈다).
+def test_a_repository_link_to_elsewhere_keeps_its_bin_out(tmp_path, _native_boot_required):
+    repo = tmp_path / "repo"
+    elsewhere = tmp_path / "elsewhere"
+    repo.mkdir(mode=0o700)
+    elsewhere.mkdir(mode=0o700)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "docs").symlink_to(elsewhere)
+    ran, outside = tmp_path / "ran", tmp_path / "outside"
+    script(repo / "bin" / "probe-cmd", f"touch '{ran}'")
+    script(tmp_path / "other" / "bin" / "probe-out", f"touch '{outside}'")
+    session = CommandSession(tmp_path / "s")
+    session.level = "debug"
+    session.env["PATH"] = f"{repo}/bin:{tmp_path}/other/bin:" + session.env["PATH"]
+    session.put("[segment.\"custom/a\"]\nkind='command'\ncommand=['probe-cmd']\n"
+                "[segment.\"custom/b\"]\nkind='command'\ncommand=['probe-out']\n"
+                "[layout.line1]\nleft=['custom/a','custom/b','char']\n")
+    session.pwd = repo / "docs"
+    ready(session)
+    for _ in range(2):
+        session.prompt()
+    session.wait_quiet()
+    assert until(lambda: outside.exists()), ("the control unit never ran", session.log())
+    assert not ran.exists(), ("the repository's bin ran through its link", session.log())
 
 
 # J9 대체: 수집 루트가 없으면 셸 폴더가 저장소를 대신한다. 이것을 실패시키는 것: units()의 repo_id를

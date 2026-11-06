@@ -558,13 +558,25 @@ fn units(
         repo_fallback: collected.is_none(),
         ..Resolved::default()
     };
-    // The repository the shell is in, by identity, for the PATH and
-    // executable rules (C2 ruling J9): the root this round's collection
-    // reported, else the shell's own folder (one statx, command rounds
-    // only). A folder that cannot be read refuses the round.
+    // The repositories the shell is in, by identity, for the PATH and
+    // executable rules: the root this round's collection reported, else the
+    // shell's own folder (C2 ruling J9), and every folder at or above the
+    // shell's that holds `.git` (U-24), so a round without a collected root
+    // still keeps a repository's folders out. Command rounds only. A folder
+    // that cannot be read refuses the round.
     let folder = plan::repo_folder(&base.cwd, collected);
-    let repo = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder))))
+    let mut repos: Vec<_> = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder))))
+        .map_err(|_| Skip::Failed)?
+        .into_iter()
+        .collect();
+    let scanned = exec_path::repo_ancestors(Path::new(OsStr::from_bytes(&base.cwd)))
         .map_err(|_| Skip::Failed)?;
+    for id in scanned {
+        if !repos.contains(&id) {
+            repos.push(id);
+        }
+    }
+    let repo = repos.as_slice();
     let vars = Environ::parse(environment);
     out.dropped = vars.dropped;
     let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
@@ -1072,7 +1084,7 @@ mod tests {
         let me = sys::current_uid();
         let mut g = groups();
         let mut scripts = Scripts::new(&root, me, "abcd".to_owned());
-        let (found, checked) = exec_path::resolve_open(&tool, None, me, &mut g).unwrap();
+        let (found, checked) = exec_path::resolve_open(&tool, &[], me, &mut g).unwrap();
         let (exe, pin) = scripts.executable(&found, &checked).unwrap();
         let exe = std::path::PathBuf::from(OsStr::from_bytes(&exe));
         assert_ne!(exe, tool);
@@ -1083,10 +1095,10 @@ mod tests {
         assert_eq!(pin, None);
         assert_eq!(std::fs::read(&exe).unwrap(), std::fs::read(&tool).unwrap());
         let (native, checked) =
-            exec_path::resolve_open(Path::new("/bin/ls"), None, me, &mut g).unwrap();
+            exec_path::resolve_open(Path::new("/bin/ls"), &[], me, &mut g).unwrap();
         let (path, _) = scripts.executable(&native, &checked).unwrap();
         assert_eq!(path, native.executable.as_os_str().as_bytes());
-        let (found2, checked2) = exec_path::resolve_open(&tool, None, me, &mut g).unwrap();
+        let (found2, checked2) = exec_path::resolve_open(&tool, &[], me, &mut g).unwrap();
         let (left_out, _) = scripts.executable(&found2, &checked2).unwrap();
         scripts.forget_last(&left_out);
         assert!(!Path::new(OsStr::from_bytes(&left_out)).exists());
@@ -1187,6 +1199,75 @@ mod tests {
         )
         .unwrap();
         assert!(!got.repo_fallback);
+    }
+
+    // U-24: 수집 루트가 없는 회차에도 셸 폴더 위의 `.git` 조상이 저장소다. 셸이 저장소 하위 폴더에 있으면 저장소
+    // 뿌리 아래 PATH 폴더의 실행 파일을 찾지 않는다. 대조: `.git`이 없으면 같은 폴더의 실행 파일을 찾는다(J9 대체는
+    // 셸 폴더만 뺀다). 셸 폴더까지 걷지 못하면 회차를 거부한다. 이것을 실패시키는 것: units()에서 찾은
+    // 조상을 저장소 목록에 넣지 않는 것. 조상 검사의 거부를 "저장소 없음"으로 바꾸는 변이는 이 칸이 잡지 못한다:
+    // 걷지 못하는 셸 폴더는 그 앞의 셸 폴더 정체 조회(repo_id)도 실패하기 때문이다(경합에서만 갈림).
+    #[test]
+    fn units_keep_a_repository_bin_out_without_a_collected_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = std::env::temp_dir().join(format!("bingsu-grant-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let repo = t.join("repo");
+        for d in [&t, &repo, &repo.join("bin"), &repo.join("sub")] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let t = std::fs::canonicalize(&t).unwrap();
+        let repo = t.join("repo");
+        let probe = repo.join("bin/probe-scan");
+        std::fs::copy(std::fs::canonicalize("/usr/bin/true").unwrap(), &probe).unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = [
+            b"PATH=".as_slice(),
+            repo.join("bin").as_os_str().as_bytes(),
+            b"\0",
+        ]
+        .concat();
+        let unit = (
+            "custom/a".to_owned(),
+            plan::Runnable {
+                policy: Policy::Argv {
+                    argv: vec![b"probe-scan".to_vec()],
+                },
+                cwd: Cwd::Neutral,
+                timeout: plan::TIMEOUT_DEFAULT,
+                env_allow: Vec::new(),
+            },
+        );
+        let run = |cwd: &Path| {
+            let mut grant = base();
+            grant.cwd = cwd.as_os_str().as_bytes().to_vec();
+            units(
+                std::slice::from_ref(&unit),
+                &[],
+                &env,
+                &grant,
+                None,
+                sys::current_uid(),
+                &mut groups(),
+                &mut Scripts::default(),
+            )
+        };
+        let sub = repo.join("sub");
+        assert_eq!(run(&sub).unwrap().unresolved, 0, "control: no repository");
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let got = run(&sub).unwrap();
+        assert!(got.repo_fallback);
+        assert_eq!(got.unresolved, 1, "the repository's bin was searched");
+        // A shell folder that cannot be walked refuses the round.
+        let locked = repo.join("locked");
+        if sys::current_uid() != 0 {
+            std::fs::create_dir_all(locked.join("in")).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let got = run(&locked.join("in"));
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(matches!(got, Err(Skip::Failed)));
+        }
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     // M4: 허가는 4 KB 파이프에서도 감독이 읽는 동안 이어 써서 끝까지 간다. 읽는 쪽이 없으면 마감에 실패한다.
