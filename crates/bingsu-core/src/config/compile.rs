@@ -1432,11 +1432,14 @@ fn exec_units(
         });
     }
     // Only units that may run count: drawn by a trusted layout at some
-    // width (a field reference such as `{custom/x.value}` draws it too) and
-    // not turned off. The same test as the prompt's display
-    // (`plan::runnable` needs no `not_run`).
-    // Fails without each: at_most_32_drawn_exec_units.
-    let drawn = out.iter().filter(|u| u.not_run.is_none()).count();
+    // width (a field reference such as `{custom/x.value}` draws it too), not
+    // turned off, and of a kind that runs. The prompt's display and the
+    // helper's round decide with the same function (`plan::runnable`).
+    // Fails without it: at_most_32_drawn_exec_units.
+    let drawn = out
+        .iter()
+        .filter(|u| crate::command::plan::runnable(u).is_some())
+        .count();
     if drawn > MAX_EXEC_UNITS {
         return Err(vec![bad(
             place_of(r, &["segment"]),
@@ -2030,6 +2033,42 @@ mod tests {
         let banded = read(&narrow, &[]);
         assert!(banded.snapshot.is_none(), "{:?}", codes_of(&banded));
         assert!(codes_of(&banded).contains(&codes::BAD_VALUE));
+        // The diagnostic names the drawn count and says "drawn".
+        let d = over
+            .diagnostics
+            .iter()
+            .find(|d| d.code == codes::BAD_VALUE)
+            .unwrap();
+        let arg = |name: &str| {
+            d.args
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.value.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(arg("found"), "33 drawn");
+        assert!(arg("expected").contains("drawn"), "{}", arg("expected"));
+        // 33 drawn, one turned off: 32 may run.
+        let off = declare(0, 33).replacen(
+            "kind = \"command\"\n",
+            "kind = \"command\"\nenabled = false\n",
+            1,
+        ) + &draw(33);
+        assert!(
+            read(&off, &[]).snapshot.is_some(),
+            "{:?}",
+            codes_of(&read(&off, &[]))
+        );
+        // Language placeholders run nothing yet: 33 drawn count none.
+        let languages = (0..33)
+            .map(|i| alloc::format!("[segment.\"custom/c{i:03}\"]\nkind = \"language\"\n"))
+            .collect::<String>()
+            + &draw(33);
+        assert!(
+            read(&languages, &[]).snapshot.is_some(),
+            "{:?}",
+            codes_of(&read(&languages, &[]))
+        );
     }
 
     #[test]
