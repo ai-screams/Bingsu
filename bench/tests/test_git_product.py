@@ -576,3 +576,31 @@ def test_shown_value_is_the_read_prefix():
     assert git.shown_value(value) == b"a" * 271
     value = b"a" * 269 + "\uAC00".encode() + b"b" * 10
     assert git.shown_value(value) == b"a" * 269 + "\uAC00".encode()
+
+
+# 텍스트 기준 칸: max와 같은 레이아웃·폭에 같은 값을 text 세그먼트 32개로 둔다. 명령 응답 없이 32개를 모두 그려야
+# 하고, 하나라도 빠지거나 응답이 생기면 칸을 받지 않는다. 이것을 실패시키는 것: text 대신 command로 두는 것, 폭
+# 2400을 빼는 것, 그린 수를 보지 않는 것, 응답 검사에서 이 칸을 빼는 것.
+def test_the_text_baseline_draws_every_segment_without_a_response(monkeypatch, tmp_path):
+    case = "prompt-text-max"
+    config, env, values = git.command_setup(case, tmp_path / "probe")
+    assert config.count("kind = 'text'") == 32 and "kind = 'command'" not in config and len(values) == 32
+    base = ["bingsu", "prompt", "--width", "80", "--pwd", "/w"]
+    monkeypatch.setattr(git.M3B, "prompt_context", lambda *a, **k: (list(base), {"E": "1"}))
+    monkeypatch.setattr(git.M3B, "normal_record", lambda r: True)
+    every = SimpleNamespace(returncode=0, stderr=b"", stdout=b"".join(v[:4] for v in values.values()))
+    monkeypatch.setattr(git.M3B, "run", lambda command, env: every)
+    directory = tmp_path / "ctx"
+    command, env, got, drawn = git.command_context("bingsu", directory, case)
+    assert drawn == 32 and command[command.index("--width") + 1] == "2400"
+    contexts = {str(directory): (command, env, got, drawn)}
+    assert git.observe_command("bingsu", contexts, directory, case)["status"] == "OBSERVED"
+    store = directory / "rt" / "store"
+    store.mkdir(parents=True)
+    (store / "command").write_bytes(b"x")
+    assert git.observe_command("bingsu", contexts, directory, case)["status"] == "BLOCKED"
+    (store / "command").unlink()
+    some = SimpleNamespace(returncode=0, stderr=b"", stdout=values["custom/k00"][:4])
+    monkeypatch.setattr(git.M3B, "run", lambda command, env: some)
+    with pytest.raises(ValueError, match="draws 1 units"):
+        git.command_context("bingsu", directory, case)

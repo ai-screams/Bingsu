@@ -48,11 +48,18 @@ CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 # - prompt-commands-max-empty-redraw: the empty max config, redrawn. Neither
 #   redraw starts a helper, so its difference from the redraw case is the
 #   prompt's own cost of drawing command values (m6-P1).
+# - prompt-text-max: the max layout and width with 32 text segments of the
+#   same values instead of commands; its difference from max is what the
+#   command feature itself adds (reading, decoding, deciding), apart from
+#   drawing 32 wide segments (U-23).
 SESSION = "0123456789abcdef0123456789abcdef"
 COMMAND_CASES = ("prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
-                 "prompt-commands-max-empty", "prompt-commands-redraw", "prompt-commands-max-empty-redraw")
+                 "prompt-commands-max-empty", "prompt-commands-redraw", "prompt-commands-max-empty-redraw",
+                 "prompt-text-max")
 EMPTY_CASES = ("prompt-commands-max-empty", "prompt-commands-max-empty-redraw")
 REDRAW_CASES = ("prompt-commands-redraw", "prompt-commands-max-empty-redraw")
+# Cases without any command response for the whole run.
+NO_RESPONSE_CASES = EMPTY_CASES + ("prompt-text-max",)
 ALL_CASES = CASES + COMMAND_CASES
 STAGES = ("A", "PathFacts", "B", "C", "D")
 
@@ -436,11 +443,15 @@ def command_setup(case, directory):
             values.append(data)
             argv.append(["/usr/bin/head", "-c", "4096", str(path)])
     lines = []
+    if case == "prompt-text-max":
+        for i, value in enumerate(values):
+            lines.append(f"[segment.\"custom/k{i:02}\"]\nkind = 'text'\ntext = {json.dumps(value.decode())}\n")
+        argv = []
     for i, words in enumerate(argv):
         quoted = ", ".join(json.dumps(w) for w in words)
         allowed = f"env_allow = [{', '.join(json.dumps(n) for n in allow[i])}]\n" if allow[i] else ""
         lines.append(f"[segment.\"custom/k{i:02}\"]\nkind = 'command'\ncommand = [{quoted}]\ncache = '3600s'\n{allowed}")
-    ids = ", ".join(f"'custom/k{i:02}'" for i in range(len(argv)))
+    ids = ", ".join(f"'custom/k{i:02}'" for i in range(len(values)))
     config = "icons = 'ascii'\n" + "".join(lines) + f"[layout.line1]\nleft = [{ids}, 'char']\n"
     return config, env, {f"custom/k{i:02}": v for i, v in enumerate(values)}
 
@@ -507,6 +518,12 @@ def command_context(binary, directory, case):
         command[command.index("--width") + 1] = "2400"
     if not values:
         return command, env, values, None
+    if case == "prompt-text-max":
+        result = M3B.run(command, env=env)
+        drawn = drawn_units(values, result.stdout)
+        if not M3B.normal_record(result) or any(directory.rglob("store/command")) or drawn != len(values):
+            raise ValueError(f"{case}: a command response exists or the prompt draws {drawn} units")
+        return command, env, values, drawn
     if empty:
         if case in REDRAW_CASES:
             command = [*command, "--redraw"]
@@ -557,7 +574,7 @@ def observe_command(binary, contexts, directory, case):
     if now != drawn:
         return {"status": "BLOCKED", "reason": f"drew {now} of {len(values)} units, the warm prompt {drawn}"}
     # The empty case stays without a response for the whole run.
-    if case in EMPTY_CASES and any(directory.rglob("store/command")):
+    if case in NO_RESPONSE_CASES and any(directory.rglob("store/command")):
         return {"status": "BLOCKED", "reason": "a command response was published"}
     return {"status": "OBSERVED", "prompt_ns": elapsed, "units": len(values), "drawn": now}
 

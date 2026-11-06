@@ -337,7 +337,8 @@ def test_ci_records_the_command_time_cases_only():
     cases = re.search(r"GATE_CASES: (\S+)", job).group(1).split(",")
     record = re.search(r"GATE_RECORD_ONLY: (\S+)", job).group(1).split(",")
     commands = ["prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
-                "prompt-commands-max-empty", "prompt-commands-redraw", "prompt-commands-max-empty-redraw"]
+                "prompt-commands-max-empty", "prompt-commands-redraw", "prompt-commands-max-empty-redraw",
+                "prompt-text-max"]
     judged = ["no-git", "git-clean", "git-dirty"]
     assert record == commands and cases == judged + commands
     assert [c for c in cases if c not in record] == judged
