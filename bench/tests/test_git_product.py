@@ -436,13 +436,18 @@ def test_command_cases_time_the_prompt_alone(pair, monkeypatch):
 
 # 칸의 입력: env64k는 64 KiB frame 안에서 가득 차고, env64k-commands는 같은 환경에 단위마다 다른 이름을 허용하는
 # 32단위를 두며, max·redraw는 32단위가 각자 4,096바이트 이하의 UTF-8 한 줄을 그린다(4 KB 상한, 단위 상한 32).
-# 값마다 고유한 표식 uNN-로 시작한다. 이것을 실패시키는 것: frame 상한을 넘는 환경(프롬프트가 frame을 쓰지 않음),
+# 값마다 고유한 표식 uNN-로 시작하고, env64k는 dir·git을 그리지 않는다. 이것을 실패시키는 것: frame 상한을 넘는 환경
+# (프롬프트가 frame을 쓰지 않음), env64k가 기본 레이아웃을 써 회차마다 수집기를 띄우는 것,
 # 값이 4 KB를 넘거나 글자 중간에서 잘리는 것, 단위 수가 32가 아닌 것, env_allow가 겹치거나 환경에 없는 이름인 것,
 # 표식이 겹치는 것(한 단위만 그려도 모두 그린 것으로 셈).
 def test_command_case_inputs_fill_their_caps(tmp_path):
     config, env, values = git.command_setup("prompt-env64k", tmp_path / "e")
     entries = sum(len(k) + 1 + len(v) + 1 for k, v in {**env, "PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}.items())
     assert values == {} and 60_000 <= entries <= 65_536 - 16
+    # Its layout draws `char` alone: the built-in one draws dir and git, and a
+    # collector started behind every timed prompt kept the CI blocks from
+    # being admitted (the reference after each block ran over the cap).
+    assert config.endswith("[layout.line1]\nleft = ['char']\n")
     for case, units in (("prompt-commands-max", 32), ("prompt-commands-redraw", 32),
                         ("prompt-env64k-commands", 32), ("prompt-commands-hit", 3)):
         config, env, values = git.command_setup(case, tmp_path / case)

@@ -394,7 +394,11 @@ def command_setup(case, directory):
     # 60 entries of 1,000 bytes: under the 64 KiB frame with PATH and LC_ALL.
     pad = {f"BINGSU_PAD_{i:02}": "x" * 986 for i in range(60)}
     if case == "prompt-env64k":
-        return "icons = 'ascii'\n", pad, {}
+        # The built-in layout draws dir and git, so every prompt would start a
+        # collector in the background; the command cases draw neither. One
+        # `char`, as they draw besides their units, keeps the helper's round
+        # the same light kind and the timing on the frame.
+        return "icons = 'ascii'\n[layout.line1]\nleft = ['char']\n", pad, {}
     allow = [[]] * 32
     env = {}
     if case == "prompt-commands-hit":
