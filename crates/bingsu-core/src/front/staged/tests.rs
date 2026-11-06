@@ -1352,6 +1352,28 @@ mod cases {
         }
     }
 
+    // 템플릿이 command를 필드로만 참조해도(`{custom/yes.value}`) 응답을 읽고 그린다. 일반 프롬프트와 redraw 모두.
+    // 이것을 실패시키는 것: 그리는 줄 검사가 세그먼트 노드만 보고 필드 노드를 놓치는 것.
+    #[test]
+    fn a_command_drawn_only_by_its_field_is_read() {
+        let s = snapshot(
+            "[segment.\"custom/yes\"]\nkind='command'\ncommand=['echo','yes']\n\
+             [style]\ntemplate='{custom/yes.value} {char}'",
+        );
+        for redraw in [false, true] {
+            let mut h = commanded("prod-cluster");
+            h.current = Some(s.encode(1, 0).unwrap());
+            h.marker = Some(marker(&s).encode().to_vec());
+            let mut a = args();
+            if redraw {
+                a.push(b"--redraw");
+            }
+            let r = h.run(&a, Mode::Dark);
+            assert!(reads_commands(&h), "redraw={redraw}");
+            assert!(record(&r).contains("prod-cluster"), "{}", record(&r));
+        }
+    }
+
     // 다른 cwd의 응답, 무효 표식, 프롬프트 중 바뀐 시계에서는 그리지 않는다. 이것을 실패시키는 것: 기대 binding의
     // cwd를 응답에서 가져오는 것, 표시 자격 대신 true를 넘기는 것, 마지막 시계가 어긋날 때 응답을 남기는 것.
     #[test]
