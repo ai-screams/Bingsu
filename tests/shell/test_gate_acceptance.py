@@ -1084,6 +1084,7 @@ LINUX_DESELECTED = (
     "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]",
     "tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c",
     "tests/shell/test_prompt_env_paths.py::test_front_never_reads_trust_metadata_section",
+    "tests/shell/test_prompt_env_paths.py::test_live_front_command_response_shapes",
     "tests/shell/test_helper_lifecycle.py::test_helper_requests_kill_after_deadline_on_normal_and_blocked_mount",
     "tests/shell/test_helper_lifecycle.py::test_one_blocked_helper_per_context_after_lock",
     "tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children",
