@@ -120,8 +120,10 @@ pub struct ExecUnit {
 /// Most user segments a config draws, text and command together (the
 /// snapshot carries each one).
 pub const MAX_CUSTOM_TEXT: usize = 256;
-/// Command and language segments one config may declare (plan U-9d: 32
-/// units, the command response's `ENTRIES_MAX`).
+/// Command and language segments one config may draw: those a trusted
+/// layout draws at some width and that may run (plan U-9d: 32 units, the
+/// command response's `ENTRIES_MAX`, which holds only units that run). A
+/// declared segment no layout draws is not counted.
 pub const MAX_EXEC_UNITS: usize = 32;
 
 /// A user `custom/…` segment a layout draws. Its segment number is
@@ -1429,13 +1431,18 @@ fn exec_units(
             not_run,
         });
     }
-    // Fails without it: at_most_32_exec_units.
-    if out.len() > MAX_EXEC_UNITS {
+    // Only units that may run count: drawn by a trusted layout at some
+    // width (a field reference such as `{custom/x.value}` draws it too) and
+    // not turned off. The same test as the prompt's display
+    // (`plan::runnable` needs no `not_run`).
+    // Fails without each: at_most_32_drawn_exec_units.
+    let drawn = out.iter().filter(|u| u.not_run.is_none()).count();
+    if drawn > MAX_EXEC_UNITS {
         return Err(vec![bad(
             place_of(r, &["segment"]),
             "segment",
-            &alloc::format!("{}", out.len()),
-            "at most 32 command and language segments",
+            &alloc::format!("{drawn} drawn"),
+            "at most 32 drawn command and language segments",
         )]);
     }
     Ok(out)
@@ -1980,28 +1987,49 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 실행 정책 필드(cwd·env_allow·timeout·cache·shell)와 키별 출처를 snapshot에서 버리는 것.
-    // 명령·언어 segment는 설정 하나에 32개까지다(계획 U-9d, 명령 응답의 항목 상한). 33개는 config check 오류다.
-    // 이것을 실패시키는 것: 개수 검사를 지우는 것, 상한을 33 이상으로 두는 것.
+    // 그리는(실행될 수 있는) 명령·언어 segment는 설정 하나에 32개까지다(계획 U-9d, 명령 응답의 항목 상한). 그리지
+    // 않는 선언은 세지 않고, 좁은 폭 구간 하나에서만 그리거나 필드 참조로만 그리는 단위도 센다. 이것을 실패시키는
+    // 것: 상한 검사를 지우는 것, 상한을 33 이상으로 두는 것, 그리지 않는 선언까지 세는 것, 좁은 폭에서만 그리는
+    // 단위를 빼는 것.
     #[test]
-    fn at_most_32_exec_units() {
-        let units = |n: usize| {
-            (0..n)
+    fn at_most_32_drawn_exec_units() {
+        let declare = |from: usize, n: usize| {
+            (from..from + n)
                 .map(|i| {
                     alloc::format!(
-                        "[segment.\"custom/c{i:02}\"]\nkind = \"command\"\ncommand = [\"true\"]\n"
+                        "[segment.\"custom/c{i:03}\"]\nkind = \"command\"\ncommand = [\"true\"]\n"
                     )
                 })
                 .collect::<String>()
         };
-        let ok = read(&units(32), &[]);
-        assert_eq!(ok.snapshot.map(|c| c.exec_units.len()), Some(32));
-        let over = read(&units(33), &[]);
+        let draw = |n: usize| {
+            let ids: Vec<String> = (0..n)
+                .map(|i| alloc::format!("\"custom/c{i:03}\""))
+                .collect();
+            alloc::format!("[layout.line1]\nleft = [{}]\n", ids.join(", "))
+        };
+        let drawn =
+            |c: &CompiledConfig| c.exec_units.iter().filter(|u| u.not_run.is_none()).count();
+        // 32 drawn beside 200 declared and not drawn: valid.
+        let ok = read(&(declare(0, 232) + &draw(32)), &[]);
+        let c = ok.snapshot.expect("32 drawn");
+        assert_eq!((c.exec_units.len(), drawn(&c)), (232, 32));
+        // 33 drawn: E203.
+        let over = read(&(declare(0, 33) + &draw(33)), &[]);
         assert!(over.snapshot.is_none());
         assert!(
             codes_of(&over).contains(&codes::BAD_VALUE),
             "{:?}",
             codes_of(&over)
         );
+        // 32 drawn on the line, the 33rd only in a narrow band's template,
+        // through a field reference: counted.
+        let narrow = declare(0, 33)
+            + &draw(32)
+            + "[layout.when.narrow.style]\ntemplate = \"{custom/c032.value}{char}\"\n";
+        let banded = read(&narrow, &[]);
+        assert!(banded.snapshot.is_none(), "{:?}", codes_of(&banded));
+        assert!(codes_of(&banded).contains(&codes::BAD_VALUE));
     }
 
     #[test]
