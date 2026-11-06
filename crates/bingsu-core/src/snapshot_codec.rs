@@ -427,6 +427,66 @@ impl Wire for Setup {
         })
     }
 }
+/// What compile gives a built-in segment no config setting touches.
+fn plain_setup() -> Setup {
+    Setup {
+        priority: 0,
+        required: false,
+        methods: Vec::new(),
+        when: When::Needed,
+    }
+}
+/// The per-built-in setup table, sparse: the count, then each entry that
+/// differs from `plain_setup` as (`field::BUILTIN` index, setup), indexes
+/// strictly ascending. The table grows with the catalog while a config
+/// changes a few entries, and the prompt decodes and checksums COMMON.
+fn put_setup(table: &[Setup], o: &mut Writer) {
+    let plain = plain_setup();
+    let changed = || table.iter().enumerate().filter(|(_, s)| **s != plain);
+    changed().count().put(o);
+    for (i, s) in changed() {
+        if o.error.is_some() {
+            break;
+        }
+        match u16::try_from(i) {
+            Ok(i) => i.put(o),
+            Err(_) => o.error = Some(Error::Limit),
+        }
+        s.put(o);
+    }
+}
+/// Always `field::BUILTIN.len()` entries; a missing index is `plain_setup`.
+fn get_setup(r: &mut Reader<'_>) -> Result<Vec<Setup>, Error> {
+    let len = crate::field::BUILTIN.len();
+    let n = usize::get(r)?;
+    // Fails without it: sparse_setup_bounds (count past the catalog).
+    if n > len {
+        return Err(Error::Limit);
+    }
+    // The dense table, as `Vec::get` charged it. Fails without it:
+    // sparse_setup_bounds (budget).
+    r.charge(
+        len.checked_mul(core::mem::size_of::<Setup>())
+            .ok_or(Error::Limit)?,
+    )?;
+    let mut table = Vec::new();
+    table.try_reserve_exact(len).map_err(|_| Error::Limit)?;
+    table.resize(len, plain_setup());
+    let mut next = 0;
+    for _ in 0..n {
+        let i = usize::from(u16::get(r)?);
+        // Ascending also refuses a repeated index. Fails without it:
+        // sparse_setup_bounds (repeated and descending indexes).
+        if i < next {
+            return Err(Error::Shape);
+        }
+        // Fails without it: sparse_setup_bounds (index past the catalog).
+        let slot = table.get_mut(i).ok_or(Error::Shape)?;
+        *slot = Setup::get(r)?;
+        next = i + 1;
+    }
+    Ok(table)
+}
 impl Wire for CustomSegment {
     fn put(&self, o: &mut Writer) {
         self.id.put(o);
@@ -951,7 +1011,7 @@ fn put_compiled(c: &CompiledConfig, o: &mut Writer) {
     c.vi.put(o);
     c.palette.put(o);
     c.light_palette.put(o);
-    c.setup.put(o);
+    put_setup(&c.setup, o);
     c.collect_mask.put(o);
     c.icons.put(o);
     c.profile.put(o);
@@ -1085,7 +1145,7 @@ fn get_common(r: &mut Reader<'_>) -> Result<Common, Error> {
         vi: Wire::get(r)?,
         palette: Wire::get(r)?,
         light_palette: Wire::get(r)?,
-        setup: Wire::get(r)?,
+        setup: get_setup(r)?,
         collect_mask: Wire::get(r)?,
         icons: Wire::get(r)?,
         profile: Wire::get(r)?,
