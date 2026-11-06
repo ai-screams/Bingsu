@@ -1144,6 +1144,40 @@ mod cases {
         }
     }
 
+    // 항목 안 Setup의 decode 오류는 그대로 전파된다. 이것을 실패시키는 것: get_setup이 Setup::get 오류를 삼키고
+    // 그 칸을 기본값으로 두는 것.
+    #[test]
+    fn sparse_setup_entry_errors_propagate() {
+        // Count 1, index 0, priority 7, required, no methods, then a bad
+        // When tag.
+        let bad: [u8; 13] = [1, 0, 0, 0, 0, 0, 7, 0, 1, 0, 0, 0, 0];
+        let mut tag = bad.to_vec();
+        tag.push(0xFF);
+        assert_eq!(read_setup(&tag), Err(Error::Tag));
+        assert_eq!(read_setup(&bad), Err(Error::Short));
+    }
+
+    // codec의 기본 Setup은 compile이 설정 없는 내장 segment에 주는 값과 같다. 다르면 sparse 표가 그 칸을 바꾼다.
+    // 이것을 실패시키는 것: plain_setup이나 compile의 기본값 중 하나만 바꾸는 것(예: When::Always).
+    #[test]
+    fn plain_setup_is_what_compile_gives_an_untouched_segment() {
+        let c = config();
+        let set: Vec<&str> = crate::default_theme::SETUP
+            .iter()
+            .map(|(id, ..)| *id)
+            .collect();
+        let untouched: Vec<usize> = crate::field::BUILTIN
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| !set.contains(&d.id) && d.id != "dir")
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!untouched.is_empty());
+        for i in untouched {
+            assert_eq!(c.setup[i], plain_setup(), "{}", crate::field::BUILTIN[i].id);
+        }
+    }
+
     // decode는 표 크기를 넘는 개수, 표 밖 index, 반복·내림차순 index를 거부하고, 마지막 index와 빈 표는 받는다.
     // 이것을 실패시키는 것: 개수 검사를 지우는 것(Short로 바뀜), index 범위 검사를 마지막 칸으로 접는 것,
     // 오름차순 검사를 지우거나 같은 index를 허용하는 것, dense 표를 decode 예산에 매기지 않는 것.
