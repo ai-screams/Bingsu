@@ -1794,8 +1794,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/prompt_spawn.rs",
-        "before": "let _ = spawn_until(exe, raw, deadline);",
-        "after": "spawn_until(exe, raw, deadline).expect(\"spawn failed\");",
+        "before": "let _ = spawn_until(exe, raw, frame.as_deref(), deadline);",
+        "after": "spawn_until(exe, raw, frame.as_deref(), deadline).expect(\"spawn failed\");",
         "count": 1
       }
     ],
@@ -3239,8 +3239,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/prompt_spawn.rs",
-        "before": "let _ = spawn_until(exe, raw, deadline);",
-        "after": "let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };\n    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim); lim.rlim_cur = 128; libc::setrlimit(libc::RLIMIT_NOFILE, &lim); }\n    let _ = spawn_until(exe, raw, deadline);"
+        "before": "let _ = spawn_until(exe, raw, frame.as_deref(), deadline);",
+        "after": "let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };\n    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim); lim.rlim_cur = 128; libc::setrlimit(libc::RLIMIT_NOFILE, &lim); }\n    let _ = spawn_until(exe, raw, frame.as_deref(), deadline);"
       }
     ]
   },

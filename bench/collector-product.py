@@ -730,12 +730,19 @@ pub(crate) fn run(base: &std::path::Path, home: &std::ffi::OsStr, xdg: &std::ffi
 # Only visibility and measurement code are added to the test reader module in
 # the generated translation unit. The shipped TCB files remain byte-identical.
 def read_measurement(source):
-    """READ_MEASUREMENT for the prompt_io of `source`: from C3 on, test builds name
-    each clock read's use (`ClockUse`); a base tip before that takes no argument."""
+    """READ_MEASUREMENT for the reader of `source`. The PR's script also
+    prepares the base tip, so each call takes the shape of that tree:
+    - prompt_io: from C3 on, test builds name each clock read's use
+      (`ClockUse`); a base tip before that takes no argument.
+    - prompt_read: from C4b on, `prepare_with_clock` also takes the
+      environment frame; this harness hands none."""
     io = (Path(source) / "crates/bingsu/src/prompt_io.rs").read_text()
     now = ("crate::prompt_io::monotonic_ns(crate::prompt_io::ClockUse::Deadline)"
            if "pub(crate) enum ClockUse" in io else "crate::prompt_io::monotonic_ns()")
-    return READ_MEASUREMENT.replace("@NOW@", now)
+    reader = (Path(source) / "crates/bingsu/src/prompt_read.rs").read_text()
+    signature = re.search(r"fn prepare_with_clock\((.*?)\)\s*->\s*Prepared\b", reader, re.S)
+    environment = ",None" if signature and "environment:" in signature.group(1) else ""
+    return READ_MEASUREMENT.replace("@NOW@", now).replace("@ENV@", environment)
 
 
 READ_MEASUREMENT = r'''
@@ -756,7 +763,7 @@ READ_MEASUREMENT = r'''
         let args=vec!["--ctx".to_owned(),"1".to_owned(),"--record".to_owned(),"B1".to_owned(),"--width".to_owned(),"80".to_owned(),"--shell".to_owned(),"bash".to_owned(),"--pwd".to_owned(),"/repo".to_owned(),format!("--runtime-root={}:{}:{}",meta.dev(),meta.ino(),root.display()),format!("--config-root={}",config.display()),format!("--state-root={}",state.display())];
         let entry=crate::commands::collector_supervisor::fixture_clock().unwrap();
         let before=@NOW@.unwrap();
-        let mut p=prepare_with_clock(&args.iter().map(|s|s.as_bytes()).collect::<Vec<_>>(),product_reader_clock,None);
+        let mut p=prepare_with_clock(&args.iter().map(|s|s.as_bytes()).collect::<Vec<_>>(),product_reader_clock,None@ENV@);
         let build=bingsu_core::collection::wire::BuildId(bingsu_core::collection::cwd_hash::sha256(&[crate::build_id().0.as_slice(),b"test-worker"].concat()));
         p.plan=p.plan.with_build_id(build).with_entry(entry).with_catalog(Catalog{segments:&crate::SEGMENTS,workers:TEST_MASK},config_value);
         let prefetched=@NOW@.unwrap();

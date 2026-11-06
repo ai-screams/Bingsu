@@ -284,10 +284,12 @@ pub fn check_adapter(source: &str, tsv: &str) -> Vec<Finding> {
 
 /// The two approved entry calls are consecutive in run_prompt's unwind guard:
 /// fixed spawn, then held-fd preparation, immediately before the filter branch.
-/// Neither function may be imported or saved as a function value; all other
-/// module path rules remain unchanged. The prepared closure owns the held fds.
-/// Its pinned reader includes three snapshot slots and two collection slots;
-/// collection preparation adds only three no-follow directories and two files.
+/// The spawn returns the environ frame it wrote and the preparation takes it
+/// (one binding, `environment`). Neither function may be imported or saved as
+/// a function value; all other module path rules remain unchanged. The
+/// prepared closure owns the held fds. Its pinned reader includes three
+/// snapshot slots and three collection slots; collection preparation adds only
+/// three no-follow directories and three files.
 fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
     let f = file.items.iter().find_map(|i| match i {
         syn::Item::Fn(f) if f.sig.ident == "run_prompt" => Some(f),
@@ -386,40 +388,36 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
         return None;
     };
     let [
-        syn::Stmt::Expr(syn::Expr::Call(bootstrap), Some(_)),
+        syn::Stmt::Local(spawned),
         syn::Stmt::Local(prepared),
         syn::Stmt::Expr(syn::Expr::If(branch), None),
     ] = block.block.stmts.as_slice()
     else {
         return None;
     };
-    let syn::Expr::Path(path) = bootstrap.func.as_ref() else {
+    // Each entry is one exact statement: the spawn hands the environ frame it
+    // encoded to the reader by this one binding, and nothing else reaches it.
+    for (stmt, pinned) in [
+        (
+            spawned,
+            "let environment = crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));",
+        ),
+        (
+            prepared,
+            "let staged = crate::prompt_read::prepare(&raw, deadline, environment);",
+        ),
+    ] {
+        let pinned: syn::Stmt = syn::parse_str(pinned).expect("pinned prefilter entry");
+        if syn::Stmt::Local(stmt.clone()) != pinned {
+            return None;
+        }
+    }
+    let syn::Expr::Call(bootstrap) = spawned.init.as_ref()?.expr.as_ref() else {
         return None;
     };
-    if joined(&path.path).join("::") != "crate::prompt_spawn::bootstrap"
-        || bootstrap.args.len() != 3
-    {
-        return None;
-    }
-    if !matches!(&prepared.pat, syn::Pat::Ident(p) if p.ident == "staged") {
-        return None;
-    }
     let syn::Expr::Call(prepare) = prepared.init.as_ref()?.expr.as_ref() else {
         return None;
     };
-    let syn::Expr::Path(path) = prepare.func.as_ref() else {
-        return None;
-    };
-    if joined(&path.path).join("::") != "crate::prompt_read::prepare"
-        || prepare.args.len() != 2
-        || !matches!(prepare.args.first()?, syn::Expr::Reference(r)
-            if r.mutability.is_none() && matches!(r.expr.as_ref(), syn::Expr::Path(p)
-                if p.qself.is_none() && p.path.is_ident("raw")))
-        || !matches!(prepare.args.last()?, syn::Expr::Path(p)
-            if p.qself.is_none() && p.path.is_ident("deadline"))
-    {
-        return None;
-    }
     let syn::Expr::Call(runs) = branch.cond.as_ref() else {
         return None;
     };

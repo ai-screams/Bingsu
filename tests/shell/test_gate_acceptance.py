@@ -199,6 +199,8 @@ M3D_SUPPLEMENTARY.update({f"GATE-FS-HELPER.1-{stage}": "M6" for stage in ("comma
 M3D_SUPPLEMENTARY["GATE-EXPLAIN.4-alias"] = "M6"
 # 이것을 실패시키는 것: Rust 프로필 환경 행이나 버전 없는 첫 줄 행을 지우고 주 행 하나로 닫는 것.
 M3D_SUPPLEMENTARY.update({"GATE-LANG-RUST.1-profile": "M6", "GATE-LANG-NODE.1-version": "M6"})
+# 이것을 실패시키는 것: 명령 응답 사본 행(응답 없음·읽지 않음·읽음)을 지우고 수집 사본 행만으로 GATE-FS-FRONT.1을 닫는 것.
+M3D_SUPPLEMENTARY.update({f"GATE-FS-FRONT.1-command_{shape}": "M6" for shape in ("no_response", "unread", "unread_narrow", "read")})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
@@ -1116,6 +1118,7 @@ LINUX_DESELECTED = (
     "tests/shell/test_prompt_env_paths.py::test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots[global-present]",
     "tests/shell/test_prompt_env_paths.py::test_live_front_attempts_match_axis_c",
     "tests/shell/test_prompt_env_paths.py::test_front_never_reads_trust_metadata_section",
+    "tests/shell/test_prompt_env_paths.py::test_live_front_command_response_shapes",
     "tests/shell/test_helper_lifecycle.py::test_helper_requests_kill_after_deadline_on_normal_and_blocked_mount",
     "tests/shell/test_helper_lifecycle.py::test_one_blocked_helper_per_context_after_lock",
     "tests/shell/test_collector_lifecycle.py::test_n_prompts_leave_zero_zombies_including_killed_children",

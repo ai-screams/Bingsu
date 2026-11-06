@@ -13,7 +13,21 @@ use alloc::string::String;
 /// and U+061C. Variation selectors (gc Mn) stay.
 pub fn is_removed(c: char) -> bool {
     let cp = c as u32;
-    cp < 0x20 || (0x7F..=0x9F).contains(&cp) || in_ranges(REMOVED_FORMAT, cp)
+    // ASCII first: of 0..0x7F only C0 goes, and no format range starts
+    // below U+00AD, so most output never reaches the range search.
+    if cp < 0x7F {
+        return cp < 0x20;
+    }
+    if cp <= 0x9F {
+        return true;
+    }
+    // U+2070..=U+FEFE lies between two format ranges (U+2066..=U+206F and
+    // U+FEFF) and holds CJK, kana and Hangul: kept without the search. The
+    // every-code-point test below fails if a table update puts a range here.
+    if (0x2070..=0xFEFE).contains(&cp) {
+        return false;
+    }
+    in_ranges(REMOVED_FORMAT, cp)
 }
 
 /// Index of the sorted, non-overlapping range in `table` that holds `cp`;
@@ -126,6 +140,18 @@ pub fn sanitize(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: 빠른 경로가 판정을 바꾸는 것(ASCII 경계 0x1F·0x20·0x7E·0x7F나 지우지 않는 구간
+    // U+2070..=U+FEFE의 양 끝을 하나 옮기거나, 0x7F 이상을 범위 검색 없이 남기는 것). 모든 code point에서
+    // 빠른 경로 이전의 식과 같아야 한다.
+    #[test]
+    fn is_removed_equals_the_plain_rule_on_every_code_point() {
+        let plain =
+            |cp: u32| cp < 0x20 || (0x7F..=0x9F).contains(&cp) || in_ranges(REMOVED_FORMAT, cp);
+        for c in (0..=0x10FFFF).filter_map(char::from_u32) {
+            assert_eq!(is_removed(c), plain(c as u32), "{:#x}", c as u32);
+        }
+    }
 
     // 이것을 실패시키는 것: C0·DEL·C1·양방향·보이지 않는 서식 문자 중 하나를 남기는 것,
     // ZWJ·variation selector를 지우는 것.

@@ -9,30 +9,47 @@ use crate::collection::{
     wire::{Binding, BuildId, STREAM_MAX},
 };
 use crate::color::palette::Mode;
-use crate::config::compile::ExecUnit;
+use crate::command::response as command;
+use crate::config::compile::{CustomKind, ExecUnit};
 use crate::envelope::{self, Envelope, EnvelopeError};
+use crate::field::BUILTIN;
 use crate::fs_trust::{self, Facts, Last, NextOwner, PinnedGroupWrite};
 use crate::layout_view::FrontConfig;
 use crate::snapshot::{self, Clock, FrontDecoder, FrontSnapshot, Marker, Refusal};
 use crate::status::Status;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
+/// The files the prompt prefetches from the collection store of its cwd: the
+/// collection responses and the command response (C4b ruling Q1: opened
+/// with the others before the filter, read only when the snapshot draws a
+/// command segment).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectionCopy {
     Current,
     Previous,
+    Command,
 }
 impl CollectionCopy {
+    pub const ALL: [Self; 3] = [Self::Current, Self::Previous, Self::Command];
     pub fn index(self) -> usize {
         match self {
             Self::Current => 0,
             Self::Previous => 1,
+            Self::Command => 2,
         }
     }
     pub fn name(self) -> &'static [u8] {
         match self {
             Self::Current => b"response",
             Self::Previous => b"previous",
+            Self::Command => b"command",
+        }
+    }
+    /// The byte range a file of this copy may have.
+    fn sizes(self) -> core::ops::RangeInclusive<u64> {
+        match self {
+            Self::Current | Self::Previous => response::HEADER as u64..=STREAM_MAX as u64,
+            Self::Command => command::HEADER as u64..=command::RESPONSE_MAX as u64,
         }
     }
 }
@@ -102,9 +119,8 @@ impl Prefetch {
         .is_ok()
             && facts.entry.mode == 0o040700
     }
-    pub fn accepts_collection(&self, facts: FdFacts) -> bool {
-        trusted_file(self.uid, facts)
-            && (response::HEADER as u64..=STREAM_MAX as u64).contains(&facts.size)
+    pub fn accepts_collection(&self, copy: CollectionCopy, facts: FdFacts) -> bool {
+        trusted_file(self.uid, facts) && copy.sizes().contains(&facts.size)
     }
     pub fn parent(&self) -> Slot {
         self.parent
@@ -274,6 +290,9 @@ pub struct ReadPlan {
     decoder: Option<FrontDecoder>,
     marker_bytes: Vec<u8>,
     read_len: usize,
+    /// The shell's environment frame, as the prompt handed it to the helper
+    /// (`command::env_frame`); `None` when it had none to hand.
+    environment: Option<Vec<u8>>,
 }
 /// Only `next` can construct a successful observation. Default is fail-closed.
 #[derive(Default)]
@@ -286,6 +305,9 @@ pub struct Observed {
     boot_changed: bool,
     collection: Option<Box<Completed>>,
     collection_binding: Option<Box<Binding>>,
+    /// The command response of this context and cwd, decoded; whether a
+    /// value shows is decided per unit in `finish` (`command::display`).
+    commands: Option<Box<command::Response>>,
 }
 
 pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
@@ -316,11 +338,19 @@ pub fn prepare(argv: &[&[u8]]) -> ReadPlan {
         decoder: None,
         marker_bytes: Vec::new(),
         read_len: 0,
+        environment: None,
     }
 }
 impl ReadPlan {
     pub fn with_entry(mut self, entry: Clock) -> Self {
         self.entry = Some(entry);
+        self
+    }
+    /// The environment frame the prompt wrote for the helper (C4b ruling Q6:
+    /// one environ pass serves both). Its checksum is checked here, once: a
+    /// frame that fails is no environment.
+    pub fn with_environment(mut self, frame: Option<Vec<u8>>) -> Self {
+        self.environment = frame.filter(|f| crate::command::env_frame::body(f).is_some());
         self
     }
     pub fn with_build_id(mut self, build_id: BuildId) -> Self {
@@ -420,6 +450,14 @@ impl ReadPlan {
             File::Collection(CollectionCopy::Current) if self.observed.collection.is_none() => {
                 self.file = File::Collection(CollectionCopy::Previous)
             }
+            // The command response is read only when the snapshot draws a
+            // command segment; otherwise its prefetched descriptor is closed
+            // unread when the executor drops it.
+            File::Marker | File::Collection(CollectionCopy::Current | CollectionCopy::Previous)
+                if self.draws_commands() =>
+            {
+                self.file = File::Collection(CollectionCopy::Command)
+            }
             File::Marker | File::Collection(_) => self.after_close = Phase::FinalClock,
         }
         self.phase = if self.live[Slot::File.index()] {
@@ -427,6 +465,19 @@ impl ReadPlan {
         } else {
             self.after_close
         };
+    }
+    /// Whether the command response is worth reading: the lines this width
+    /// selected draw a command segment, and this prompt has what a value
+    /// needs (its entry clock, build identity and environment frame).
+    fn draws_commands(&self) -> bool {
+        self.entry.is_some()
+            && self.build_id.is_some()
+            && self.environment.is_some()
+            && self
+                .observed
+                .selected
+                .as_ref()
+                .is_some_and(|s| (0..s.config.custom.len()).any(|i| drawn_command(&s.config, i)))
     }
     fn width(&self) -> u16 {
         self.parsed.as_ref().map_or(0, |e| e.width)
@@ -448,13 +499,17 @@ impl ReadPlan {
                 }
                 Err(_) => false,
             },
-            File::Collection(_) => {
-                if !(response::HEADER as u64..=STREAM_MAX as u64).contains(&f.size) {
+            File::Collection(copy) => {
+                if !copy.sizes().contains(&f.size) {
                     return false;
                 }
                 self.collection_bytes.clear();
                 self.collection_len = f.size as usize;
-                self.collection_end = response::HEADER;
+                self.collection_end = if copy == CollectionCopy::Command {
+                    command::HEADER
+                } else {
+                    response::HEADER
+                };
                 true
             }
         }
@@ -496,8 +551,19 @@ impl ReadPlan {
         if self.collection_bytes.len() != self.collection_end {
             return;
         }
-        if self.collection_end == response::HEADER {
-            if response::declared_len(&self.collection_bytes).ok() != Some(self.collection_len) {
+        let commands = self.file == File::Collection(CollectionCopy::Command);
+        let header = if commands {
+            command::HEADER
+        } else {
+            response::HEADER
+        };
+        if self.collection_end == header {
+            let declared = if commands {
+                command::declared_len(&self.collection_bytes).ok()
+            } else {
+                response::declared_len(&self.collection_bytes).ok()
+            };
+            if declared != Some(self.collection_len) {
                 self.next_file();
                 return;
             }
@@ -513,6 +579,14 @@ impl ReadPlan {
             if self.collection_bytes.len() < self.collection_end {
                 return;
             }
+        }
+        if commands {
+            self.observed.commands = match command::Response::decode_shown(&self.collection_bytes) {
+                Ok(r) => Some(Box::new(r)),
+                Err(_) => None,
+            };
+            self.next_file();
+            return;
         }
         self.observed.collection =
             Completed::decode_with_catalog(&self.collection_bytes, self.catalog.segments)
@@ -844,6 +918,75 @@ fn trust_status(refusal: Refusal) -> Status {
         }
     }
 }
+/// Whether user segment `i` is a command the selected lines draw.
+fn drawn_command(config: &FrontConfig, i: usize) -> bool {
+    config.custom[i].kind == CustomKind::Command && config.draws_segment(BUILTIN.len() + i)
+}
+
+/// The value of each user segment that is a command, in `custom` order
+/// (`None` elsewhere): `command::display` against this prompt's binding,
+/// entry clock, environment frame body and display eligibility (`eligible`: the
+/// marker verdict that also makes the snapshot's units eligible).
+fn command_values(
+    entry: Option<Clock>,
+    build_id: Option<BuildId>,
+    environment: Option<&[u8]>,
+    e: &Envelope,
+    observed: &Observed,
+    eligible: bool,
+) -> Vec<Option<String>> {
+    use crate::command::{display, plan::Environ};
+    use crate::handoff::Origin;
+    let Some(selected) = observed.selected.as_ref() else {
+        return Vec::new();
+    };
+    let custom = &selected.config.custom;
+    let mut out = vec![None; custom.len()];
+    let (Some(response), Some(entry), Some(build_id), Some(body)) =
+        (observed.commands.as_deref(), entry, build_id, environment)
+    else {
+        return out;
+    };
+    let (Some(config), Some(state), Some(cwd)) =
+        (e.config_root.clone(), e.state_root.clone(), e.pwd.clone())
+    else {
+        return out;
+    };
+    // The binding the helper publishes under (command_grant::prepare): the
+    // build, the snapshot's identity, this prompt's clock, the roots and cwd.
+    let expected = command::Binding {
+        build_id,
+        boot: selected.id.boot,
+        epoch: selected.id.epoch,
+        context: selected.id.context,
+        clock_kind: entry.kind,
+        domain: entry.domain,
+        resume: entry.resume,
+        config,
+        state,
+        cwd,
+    };
+    let vars = Environ::parse(body);
+    let Some(mut prompt) = display::Prompt::new(response, &expected, entry, &vars, eligible) else {
+        return out;
+    };
+    for (i, segment) in custom.iter().enumerate() {
+        if segment.kind != CustomKind::Command {
+            continue;
+        }
+        let Some(unit) = selected
+            .config
+            .exec_units
+            .iter()
+            .find(|u| u.id == segment.id)
+        else {
+            continue;
+        };
+        out[i] = display::value(&mut prompt, unit, Origin::Config).map(|v| v.into());
+    }
+    out
+}
+
 /// Finish never observes the OS. COLORFGBG comes only from the display envelope,
 /// separate from snapshot identity. Saved OSC 11 observation is deferred until
 /// its observation file and address are defined (N4 review ruling).
@@ -884,6 +1027,7 @@ pub fn finish_with_catalog(
         .as_deref()
         .zip(e.state_root.as_deref())
         .and_then(|(c, s)| snapshot::context_crc(c, s).ok());
+    let mut eligible = false;
     if plan.phase != Phase::Done || !observed.runtime_ok {
         observed.selected = None;
         response.status = Status::DEGRADED_RUNTIME_ROOT;
@@ -916,7 +1060,8 @@ pub fn finish_with_catalog(
                 }
             };
             response.worker_mask = catalog.worker_mask(&s.config, e.width, e.redraw);
-            if eligibility.is_ok() {
+            eligible = eligibility.is_ok();
+            if eligible {
                 response.execution.units = s
                     .config
                     .exec_units()
@@ -927,6 +1072,18 @@ pub fn finish_with_catalog(
             }
         }
     }
+    let commands = command_values(
+        plan.entry,
+        plan.build_id,
+        // A frame kept by `with_environment` has a checked body after its header.
+        plan.environment
+            .as_deref()
+            .map(|f| &f[crate::command::env_frame::HEADER..]),
+        &e,
+        &observed,
+        eligible,
+    );
+    let commands: Vec<Option<&str>> = commands.iter().map(|v| v.as_deref()).collect();
     if let Some(shell) = e.shell {
         super::render_selected_with_catalog(
             &e,
@@ -940,6 +1097,7 @@ pub fn finish_with_catalog(
                 .filter(|_| observed.selected.is_some()),
             observed.collection_binding.as_deref(),
             catalog,
+            &commands,
             &mut response.record,
         );
     } else {

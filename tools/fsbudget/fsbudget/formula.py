@@ -1147,14 +1147,20 @@ def collection_front_expected(directories: int, file_sizes: tuple[int | None, ..
     """Front increment only: O_PATH directories, immutable data and 16 KiB reads.
 
     `directories` counts successfully inspected private collection directories;
-    a failed directory open contributes one attempt and no facts. None file sizes
-    mean ENOENT slots. Body sizes name only records whose header was accepted.
-    A normal two-slot fixture has directories=3 and two file sizes; a missing
-    namespace has absent=True and no successful directory/file observations.
+    a failed directory open contributes one attempt and no facts. With all
+    three, the prefetch opens three files: the collection response, the
+    previous response and the command response (C4b ruling Q1: opened with
+    them before the filter, read only when the snapshot draws a command
+    segment). None file sizes mean ENOENT slots. Body sizes name only records
+    whose header was accepted and that were read (a command response the
+    snapshot does not draw is closed unread). A missing namespace has
+    absent=True and no successful directory/file observations.
     """
-    if not 0 <= directories <= 3 or len(file_sizes) > 2 or any(n is not None and n < 0 for n in file_sizes):
+    if not 0 <= directories <= 3 or any(n is not None and n < 0 for n in file_sizes):
         raise ValueError("invalid collection prefetch axes")
-    if directories < 3 and file_sizes or len(body_bytes) > 2 or any(not 0 <= n <= 262_144 - 64 for n in body_bytes):
+    if directories == 3 and len(file_sizes) != 3 or directories < 3 and file_sizes:
+        raise ValueError("invalid collection prefetch axes")
+    if len(body_bytes) > 3 or any(not 0 <= n <= 471_082 - 64 for n in body_bytes):
         raise ValueError("invalid collection read axes")
     if absent and (directories or file_sizes or body_bytes):
         raise ValueError("absent namespace has no facts or reads")
@@ -1185,13 +1191,13 @@ def collector_product_expected(case: str, *, body_bytes: int = 256,
     stopped = case in {"runtime-unsafe", "proc-absent", "nofile-lowered"}
     absent = case == "product-mask0"
     front = ({} if stopped else collection_front_expected(0, (), (), absent=True) if absent
-             else collection_front_expected(3, (64 + body_bytes, 64 + previous_bytes),
+             else collection_front_expected(3, (64 + body_bytes, 64 + previous_bytes, None),
                                             (body_bytes, previous_bytes)))
     publishes = case in {"fixture", "partial", "malformed-flood", "long-cwd", "legacy-gc"}
     if case == "ready-failure":
-        # Admission created all three directories before startup failed. Both
-        # file slots are still absent, so there are five opens and no reads.
-        front = collection_front_expected(3, (None, None), ())
+        # Admission created all three directories before startup failed. The
+        # three file slots are still absent, so there are six opens and no reads.
+        front = collection_front_expected(3, (None, None, None), ())
     publication = collection_expected(3, body_bytes, False, False) if publishes else {}
     # collector-effects is the expected ceiling, not evidence. Linux failure
     # traces supply measured counts; untraced cases are labelled in the ledger.
