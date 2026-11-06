@@ -67,10 +67,10 @@ pub fn sanitize_into(input: &[u8], out: &mut String) {
     }
 }
 
-/// Bytes `sanitize_into_capped` decodes at a time, so it reads at most this
-/// much past the point where it stops. Smaller windows cost more per byte on
-/// input it keeps reading (1 MiB of ESC: 256 bytes took about 17% longer
-/// than one pass, 4,096 bytes about the same).
+/// The largest number of bytes `sanitize_into_capped` decodes at a time.
+/// Smaller windows cost more per byte on input it keeps reading (1 MiB of
+/// ESC: 256 bytes took about 17% longer than one pass, 4,096 bytes about the
+/// same), so its windows start at the limit and double up to this.
 const WINDOW: usize = 4096;
 
 /// `sanitize_into` that stops reading `input` once it has appended more than
@@ -82,14 +82,19 @@ const WINDOW: usize = 4096;
 /// removed (1 MiB of ESC), or `limit` bytes of text followed by a long run
 /// of removed code points.
 pub(crate) fn sanitize_into_capped(input: &[u8], out: &mut String, limit: usize) -> Option<usize> {
-    capped_in_windows(input, out, limit, WINDOW)
+    // The first window holds about as much as the limit keeps, so text that
+    // keeps what it reads (a command's 4 KB value cut to a field) stops
+    // there instead of checking a whole 4 KiB window.
+    capped_in_windows(input, out, limit, limit.saturating_add(4).clamp(4, WINDOW))
 }
 
-/// `sanitize_into_capped` with the window as an argument (at least 4), so
-/// tests can put window edges anywhere.
-fn capped_in_windows(input: &[u8], out: &mut String, limit: usize, window: usize) -> Option<usize> {
+/// `sanitize_into_capped` with the first window as an argument (at least 4),
+/// so tests can put window edges anywhere. Each next window is twice the
+/// last, at most `WINDOW`.
+fn capped_in_windows(input: &[u8], out: &mut String, limit: usize, first: usize) -> Option<usize> {
     let start = out.len();
     let mut rest = input;
+    let mut window = first;
     while !rest.is_empty() {
         // Decoding one window at a time keeps `utf8_chunks` from checking
         // the whole input before the first chunk. The cut goes before a
@@ -105,6 +110,7 @@ fn capped_in_windows(input: &[u8], out: &mut String, limit: usize, window: usize
         }
         let (head, tail) = rest.split_at(cut);
         rest = tail;
+        window = window.saturating_mul(2).min(WINDOW);
         for chunk in head.utf8_chunks() {
             for c in chunk.valid().chars().filter(|&c| !is_removed(c)) {
                 out.push(c);
@@ -198,7 +204,8 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 상한을 넘은 뒤에도 읽기를 계속하는 것(1 MiB를 끝까지 정제하거나, 창을 키워 끝까지 UTF-8 검사), 상한을 넘기 전에 멈추는 것,
-    // 멈춘 결과가 전체 결과의 앞부분이 아닌 것, 멈췄는지를 잘못 알리는 것.
+    // 멈춘 결과가 전체 결과의 앞부분이 아닌 것, 멈췄는지를 잘못 알리는 것, 첫 창을 상한 대신 WINDOW로 잡는 것, 창을
+    // 두 배씩 키우지 않거나 WINDOW 위로 키우는 것.
     #[test]
     fn capped_sanitize_stops_past_the_limit() {
         let mut out = String::from("pre");
@@ -206,8 +213,18 @@ mod tests {
         // ASCII keeps one byte per input byte: it kept 1,041 bytes and read
         // only to the end of that window.
         assert_eq!(out.len(), 3 + 1041);
-        // A bound that does not come from WINDOW: one 4 KiB window, not 1 MiB.
-        assert_eq!(read, Some(4096));
+        // One window sized to the limit (1,040 + 4), not 4 KiB or 1 MiB.
+        assert_eq!(read, Some(1044));
+        // Windows double from there up to WINDOW: past 6,000 removed bytes
+        // and a limit of 16, the windows of 20, 40, ..., 2,560 bytes end at
+        // 5,100 and the next, of 4,096, holds the first kept bytes.
+        let mut out = String::new();
+        let input = [alloc::vec![0x1b; 6000], alloc::vec![b'a'; 100]].concat();
+        assert_eq!(sanitize_into_capped(&input, &mut out, 16), Some(6100));
+        assert_eq!(out, "a".repeat(17));
+        let mut out = String::new();
+        let input = [alloc::vec![0x1b; 20_000], alloc::vec![b'a'; 20_000]].concat();
+        assert_eq!(sanitize_into_capped(&input, &mut out, 16), Some(21_484));
         let mut out = String::new();
         let read = sanitize_into_capped(&alloc::vec![0x1b; 1 << 20], &mut out, 16);
         assert_eq!(read, None);

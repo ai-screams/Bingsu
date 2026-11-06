@@ -50,6 +50,19 @@ impl Clean {
     /// removed (1 MiB of ESC), or a short text followed by a long run of
     /// removed code points. The cut then stops at the first grapheme past a
     /// cap.
+    /// The prefix of sanitized `text` that `new` needs for `max_cells` (or
+    /// fewer) cells: `new` of it equals `new` of the whole under every width
+    /// profile. `new` cuts at `max_cells * 4` bytes at most, and its read
+    /// limit is 16 bytes past that so the grapheme crossing the cut is seen
+    /// whole; a prefix of that limit, back to a character boundary, holds it.
+    pub fn read_prefix(text: &str, max_cells: u16) -> &str {
+        let mut end = text.len().min(read_limit(max_cells));
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+
     pub fn new(raw: &[u8], max_cells: u16, p: WidthProfile) -> Self {
         // Stopping early gives the same result as sanitizing everything:
         // whether a grapheme boundary falls at byte i depends only on the
@@ -58,7 +71,7 @@ impl Clean {
         // in the prefix as in the full text, and the grapheme that crosses
         // that byte, read whole or not, ends past it and is cut. The 16 bytes
         // are a margin over the one code point the rule needs.
-        let limit = usize::from(max_cells) * 4 + 16;
+        let limit = read_limit(max_cells);
         let mut text = String::with_capacity(raw.len().min(limit + 4));
         sanitize_into_capped(raw, &mut text, limit);
         cut(&mut text, max_cells, p);
@@ -71,6 +84,11 @@ impl Clean {
     pub fn as_str(&self) -> &str {
         &self.text
     }
+}
+
+/// Bytes of kept text after which `Clean::new` stops sanitizing.
+fn read_limit(max_cells: u16) -> usize {
+    usize::from(max_cells) * 4 + 16
 }
 
 /// Cuts sanitized `text` as `Clean::new` describes, in one pass that stops at
@@ -610,7 +628,7 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 정제를 멈추는 자리가 너무 일러 앞부분만 정제한 결과가 전체를 정제하고 자른 결과와 달라지는 것
-    // (멈춘 뒤 남은 글자가 상한 근처 grapheme 경계를 바꾸는 경우).
+    // (멈춘 뒤 남은 글자가 상한 근처 grapheme 경계를 바꾸는 경우), 창 경계에서 지워지는 글자나 넓은 글자를 가르는 것.
     #[test]
     fn capped_sanitize_cuts_like_the_full_text() {
         let p2 = WidthProfile::new(2, 2).unwrap();
@@ -635,6 +653,23 @@ mod tests {
             // Regional indicators after an odd number of them: pairing looks back.
             inputs.push([&b"aaa"[..k], &"\u{1F1F0}".repeat(61).into_bytes()].concat());
         }
+        // Removed code points and wide text around the first window's edge
+        // (the limit plus 4 bytes: 276 for 64 cells): a kept grapheme or a
+        // run of removed ones may cross it, and the windows after it double.
+        for pre in (240..=300).step_by(3) {
+            for u in units {
+                inputs.push([&alloc::vec![0x1b; pre][..], &u.repeat(80)].concat());
+                inputs.push(
+                    [
+                        &"\u{AC00}".repeat(pre / 3).into_bytes(),
+                        &[0x1b; 40][..],
+                        &u.repeat(80),
+                    ]
+                    .concat(),
+                );
+                inputs.push([&b"a".repeat(pre)[..], "\u{202E}".as_bytes(), &u.repeat(80)].concat());
+            }
+        }
         for p in [WidthProfile::DEFAULT, p2] {
             for max in (0..=12u16).chain([16, 64]) {
                 for raw in &inputs {
@@ -647,6 +682,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    // m6-P1: helper가 저장하는 값 앞부분(read_prefix)을 자른 결과는 전체를 자른 결과와 같다. 64칸까지 모든 칸 수,
+    // 두 폭 설정, 상한 근처에서 넓은 글자·결합 글자·이모지 ZWJ·국기가 걸치는 자리에서. 이것을 실패시키는 것:
+    // 앞부분을 자르기 바이트 상한(64칸 × 4)에서 끊는 것(그 자리에 걸친 grapheme이 잘려 남음), 문자 경계로 물리지
+    // 않는 것.
+    #[test]
+    fn the_read_prefix_cuts_like_the_whole_text() {
+        let p2 = WidthProfile::new(2, 2).unwrap();
+        let units: [&str; 8] = [
+            "a",
+            "\u{AC00}",
+            "e\u{301}",
+            "\u{1F1F0}\u{1F1F7}",
+            "\u{1F468}\u{200D}\u{1F469}",
+            "\u{1112}\u{1161}\u{11AB}",
+            "\u{2764}\u{FE0F}",
+            "\u{1F600}",
+        ];
+        for pre in 260..=280 {
+            for u in units {
+                let full = "a".repeat(pre) + &u.repeat(40);
+                let prefix = Clean::read_prefix(&full, CUSTOM_TEXT_CELLS);
+                assert!(prefix.len() <= read_limit(CUSTOM_TEXT_CELLS));
+                for p in [WidthProfile::DEFAULT, p2] {
+                    for max in [0, 1, 2, 16, 63, 64] {
+                        assert_eq!(
+                            Clean::new(prefix.as_bytes(), max, p),
+                            Clean::new(full.as_bytes(), max, p),
+                            "{pre} {u:?} {max}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(Clean::read_prefix("short", CUSTOM_TEXT_CELLS), "short");
     }
 
     // 이것을 실패시키는 것: 선언된 칸 상한을 보지 않고 Text면 받는 것(256칸으로 자른 값이 16칸 필드에 들어감).
