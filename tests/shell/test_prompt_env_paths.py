@@ -1534,6 +1534,9 @@ TEMPLATES = {"plain": "[style]\ntemplate='BASE {char}'\n", "edited": "[style]\nt
 TEMPLATES["command_miss"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="'custom/probe', ")
 TEMPLATES["command_hit"] = COMMAND_UNIT + "cache='30s'\n" + COMMAND_SCREEN.format(shown="'custom/probe', ")
 TEMPLATES["command_not_run"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="")
+# The unit drawn only from 120 columns: the prompts here are 80 wide.
+TEMPLATES["command_wide"] = (COMMAND_UNIT + "cache='30s'\n" + COMMAND_SCREEN.format(shown="")
+                             + "[layout.when.wide]\nmin_cols=120\n[layout.when.wide.line2]\nleft=['custom/probe','char']\n")
 # 64 bands of 4 columns, the first key widest, each drawing 600 text bytes: width
 # 80 selects a variant past INDEX's chunk, with more variants after it.
 TEMPLATES["bands"] = "".join(f"[layout.when.b{i:02}]\nmin_cols={(64 - i) * 4}\nmax_cols={(64 - i) * 4 + 3}\n"
@@ -3455,9 +3458,10 @@ def test_target_links_count_same_folder_hops(tmp_path):
 # the prompt prefetches `command` with the collection responses before the
 # filter and reads it after the filter only when the snapshot draws a command
 # segment. A store without the file costs one ENOENT open; a file the snapshot
-# does not draw costs its open and facts and one unread close; a drawn one
+# does not draw costs its open and facts and one unread close, also when only
+# a wider band than this prompt's width draws it (unread_narrow); a drawn one
 # adds its header and body reads.
-COMMAND_FRONT_SHAPES = ("no_response", "unread", "read")
+COMMAND_FRONT_SHAPES = ("no_response", "unread", "unread_narrow", "read")
 
 
 def front_calls(lines, exe):
@@ -3475,21 +3479,23 @@ def front_calls(lines, exe):
 
 
 # 이것을 실패시키는 것: command 사본을 prefetch에서 빼는 것(no_response의 ENOENT 1이 없음), 그리지 않는 응답을
-# 읽는 것(unread에 read가 생김), 열어 둔 사본을 닫지 않는 것(unread의 close 1이 없음), 그리는 응답을 끝까지 읽지
-# 않는 것(read의 머리·본문 읽기 수가 식과 다름).
+# 읽는 것(unread에 read가 생김), 넓은 구간에만 있는 command를 좁은 폭에서 읽는 것(unread_narrow에 read가 생김),
+# 열어 둔 사본을 닫지 않는 것(unread의 close 1이 없음), 그리는 응답을 끝까지 읽지 않는 것(read의 머리·본문 읽기
+# 수가 식과 다름).
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 @pytest.mark.parametrize("shape", COMMAND_FRONT_SHAPES)
 def test_live_front_command_response_shapes(shape, tmp_path):
     from fsbudget.formula import collection_front_expected
     assert shutil.which("strace"), "the front gate must execute strace"
     require_release_helper(real_bin())
-    stage = {"no_response": "collect", "unread": "command_hit", "read": "command_hit"}[shape]
+    stage = {"no_response": "collect", "unread": "command_hit", "unread_narrow": "command_hit",
+             "read": "command_hit"}[shape]
     fixture = HelperStageFixture(stage)
     try:
-        if shape == "unread":
-            # The unit stays declared and its response stays; the screen no
-            # longer draws it. Publish that snapshot before the traced prompt.
-            fixture.put("command_not_run")
+        if shape in ("unread", "unread_narrow"):
+            # The unit stays declared and its response stays; the screen at
+            # this width no longer draws it. Publish that snapshot first.
+            fixture.put("command_not_run" if shape == "unread" else "command_wide")
             fixture.prompt()
             wait_helpers(fixture.base)
         trace = tmp_path / "trace.strace"
@@ -3516,7 +3522,7 @@ def test_live_front_command_response_shapes(shape, tmp_path):
         size = (fixture.response.stat().st_size if hasattr(fixture, "response") else
                 next((fixture.store / "collections-v1").glob("*/store/command")).stat().st_size)
         assert fd and closes and closes[0].index > boundary, ("one close after the filter", closes)
-        if shape == "unread":
+        if shape in ("unread", "unread_narrow"):
             assert reads == [], reads
         else:
             assert len(reads) == 1 + -(-(size - 64) // 16_384), (size, reads)

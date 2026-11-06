@@ -127,11 +127,11 @@ fn full() -> Input {
 fn draw(input: &Input) -> Vec<Field> {
     let response = Response::decode_shown(&input.bytes).unwrap();
     let vars = Environ::parse(&input.environ);
-    let mut prompt = Prompt::new(&input.binding, clock(), &vars, true);
+    let mut prompt = Prompt::new(&response, &input.binding, clock(), &vars, true).unwrap();
     input
         .units
         .iter()
-        .filter_map(|u| display::value(&response, &mut prompt, u, Origin::Config))
+        .filter_map(|u| display::value(&mut prompt, u, Origin::Config))
         .map(|v| Field::text(v.as_bytes(), CUSTOM_TEXT_CELLS, WidthProfile::DEFAULT))
         .collect()
 }

@@ -12,6 +12,7 @@ use crate::color::palette::Mode;
 use crate::command::response as command;
 use crate::config::compile::{CustomKind, ExecUnit};
 use crate::envelope::{self, Envelope, EnvelopeError};
+use crate::field::BUILTIN;
 use crate::fs_trust::{self, Facts, Last, NextOwner, PinnedGroupWrite};
 use crate::layout_view::FrontConfig;
 use crate::snapshot::{self, Clock, FrontDecoder, FrontSnapshot, Marker, Refusal};
@@ -346,9 +347,10 @@ impl ReadPlan {
         self
     }
     /// The environment frame the prompt wrote for the helper (C4b ruling Q6:
-    /// one environ pass serves both).
+    /// one environ pass serves both). Its checksum is checked here, once: a
+    /// frame that fails is no environment.
     pub fn with_environment(mut self, frame: Option<Vec<u8>>) -> Self {
-        self.environment = frame;
+        self.environment = frame.filter(|f| crate::command::env_frame::body(f).is_some());
         self
     }
     pub fn with_build_id(mut self, build_id: BuildId) -> Self {
@@ -464,23 +466,18 @@ impl ReadPlan {
             self.after_close
         };
     }
-    /// Whether the command response is worth reading: the snapshot draws a
-    /// command segment, and this prompt has what a value needs (its entry
-    /// clock, build identity and environment frame).
+    /// Whether the command response is worth reading: the lines this width
+    /// selected draw a command segment, and this prompt has what a value
+    /// needs (its entry clock, build identity and environment frame).
     fn draws_commands(&self) -> bool {
         self.entry.is_some()
             && self.build_id.is_some()
+            && self.environment.is_some()
             && self
-                .environment
-                .as_deref()
-                .and_then(|f| crate::command::env_frame::body(f))
-                .is_some()
-            && self.observed.selected.as_ref().is_some_and(|s| {
-                s.config
-                    .custom
-                    .iter()
-                    .any(|c| c.kind == CustomKind::Command)
-            })
+                .observed
+                .selected
+                .as_ref()
+                .is_some_and(|s| (0..s.config.custom.len()).any(|i| drawn_command(&s.config, i)))
     }
     fn width(&self) -> u16 {
         self.parsed.as_ref().map_or(0, |e| e.width)
@@ -921,9 +918,14 @@ fn trust_status(refusal: Refusal) -> Status {
         }
     }
 }
+/// Whether user segment `i` is a command the selected lines draw.
+fn drawn_command(config: &FrontConfig, i: usize) -> bool {
+    config.custom[i].kind == CustomKind::Command && config.draws_segment(BUILTIN.len() + i)
+}
+
 /// The value of each user segment that is a command, in `custom` order
 /// (`None` elsewhere): `command::display` against this prompt's binding,
-/// entry clock, environment frame and display eligibility (`eligible`: the
+/// entry clock, environment frame body and display eligibility (`eligible`: the
 /// marker verdict that also makes the snapshot's units eligible).
 fn command_values(
     entry: Option<Clock>,
@@ -933,19 +935,16 @@ fn command_values(
     observed: &Observed,
     eligible: bool,
 ) -> Vec<Option<String>> {
-    use crate::command::{display, env_frame, plan::Environ};
+    use crate::command::{display, plan::Environ};
     use crate::handoff::Origin;
     let Some(selected) = observed.selected.as_ref() else {
         return Vec::new();
     };
     let custom = &selected.config.custom;
     let mut out = vec![None; custom.len()];
-    let (Some(response), Some(entry), Some(build_id), Some(body)) = (
-        observed.commands.as_deref(),
-        entry,
-        build_id,
-        environment.and_then(|f| env_frame::body(f)),
-    ) else {
+    let (Some(response), Some(entry), Some(build_id), Some(body)) =
+        (observed.commands.as_deref(), entry, build_id, environment)
+    else {
         return out;
     };
     let (Some(config), Some(state), Some(cwd)) =
@@ -968,7 +967,9 @@ fn command_values(
         cwd,
     };
     let vars = Environ::parse(body);
-    let mut prompt = display::Prompt::new(&expected, entry, &vars, eligible);
+    let Some(mut prompt) = display::Prompt::new(response, &expected, entry, &vars, eligible) else {
+        return out;
+    };
     for (i, segment) in custom.iter().enumerate() {
         if segment.kind != CustomKind::Command {
             continue;
@@ -981,7 +982,7 @@ fn command_values(
         else {
             continue;
         };
-        out[i] = display::value(response, &mut prompt, unit, Origin::Config).map(|v| v.into());
+        out[i] = display::value(&mut prompt, unit, Origin::Config).map(|v| v.into());
     }
     out
 }
@@ -1074,7 +1075,10 @@ pub fn finish_with_catalog(
     let commands = command_values(
         plan.entry,
         plan.build_id,
-        plan.environment.as_deref(),
+        // A frame kept by `with_environment` has a checked body after its header.
+        plan.environment
+            .as_deref()
+            .map(|f| &f[crate::command::env_frame::HEADER..]),
         &e,
         &observed,
         eligible,

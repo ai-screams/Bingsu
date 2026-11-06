@@ -158,7 +158,7 @@ M3D_SUPPLEMENTARY.update({"GATE-CMD-GRANT.2-pipe": "M6", "GATE-CMD-SPAWN.1-not_r
 # 이것을 실패시키는 것: 명령 회차 단계 행(실행·캐시 적중·화면 밖 단위)을 지우고 기존 단계만으로 GATE-FS-HELPER.1을 닫는 것.
 M3D_SUPPLEMENTARY.update({f"GATE-FS-HELPER.1-{stage}": "M6" for stage in ("command_miss", "command_hit", "command_not_run")})
 # 이것을 실패시키는 것: 명령 응답 사본 행(응답 없음·읽지 않음·읽음)을 지우고 수집 사본 행만으로 GATE-FS-FRONT.1을 닫는 것.
-M3D_SUPPLEMENTARY.update({f"GATE-FS-FRONT.1-command_{shape}": "M6" for shape in ("no_response", "unread", "read")})
+M3D_SUPPLEMENTARY.update({f"GATE-FS-FRONT.1-command_{shape}": "M6" for shape in ("no_response", "unread", "unread_narrow", "read")})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 

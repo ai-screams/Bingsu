@@ -146,6 +146,10 @@ mod cases {
         commands: Option<Vec<u8>>,
         environment: Option<Vec<u8>>,
         entry: Option<Clock>,
+        /// The build identity comes with `entry`; these leave it out with
+        /// an entry, or hand it without one.
+        no_build_id: bool,
+        build_without_entry: bool,
     }
     impl Harness {
         fn new() -> Self {
@@ -170,6 +174,8 @@ mod cases {
                 commands: None,
                 environment: None,
                 entry: None,
+                no_build_id: false,
+                build_without_entry: false,
             }
         }
         fn bytes(&self) -> Option<&[u8]> {
@@ -296,7 +302,10 @@ mod cases {
             ]);
             let mut plan = prepare(&args).with_environment(self.environment.clone());
             if let Some(entry) = self.entry {
-                plan = plan.with_entry(entry).with_build_id(BuildId([8; 32]));
+                plan = plan.with_entry(entry);
+            }
+            if (self.entry.is_some() || self.build_without_entry) && !self.no_build_id {
+                plan = plan.with_build_id(BuildId([8; 32]));
             }
             let mut previous = None;
             for _ in 0..100_000 {
@@ -1286,6 +1295,61 @@ mod cases {
         h.marker = Some(marker(&s).encode().to_vec());
         h.run(&args(), Mode::Dark);
         assert!(!reads_commands(&h));
+    }
+
+    // 다른 조건은 모두 갖춘 채 진입 시계만, build id만 빠지거나 환경 frame의 checksum이 틀리면 응답을 읽지 않는다.
+    // 이것을 실패시키는 것: draws_commands에서 진입 시계 조건, build id 조건을 지우는 것, with_environment가 frame의
+    // checksum을 보지 않는 것.
+    #[test]
+    fn a_missing_entry_build_id_or_a_damaged_frame_alone_stops_the_read() {
+        let mut h = commanded("prod-cluster");
+        h.run(&args(), Mode::Dark);
+        assert!(reads_commands(&h));
+        let mut h = commanded("prod-cluster");
+        h.entry = None;
+        h.build_without_entry = true;
+        h.run(&args(), Mode::Dark);
+        assert!(!reads_commands(&h));
+        let mut h = commanded("prod-cluster");
+        h.no_build_id = true;
+        h.run(&args(), Mode::Dark);
+        assert!(!reads_commands(&h));
+        let mut h = commanded("prod-cluster");
+        let mut damaged = frame();
+        let last = damaged.len() - 2;
+        damaged[last] ^= 1;
+        h.environment = Some(damaged);
+        let r = h.run(&args(), Mode::Dark);
+        assert!(!reads_commands(&h));
+        assert!(!record(&r).contains("prod-cluster"));
+    }
+
+    /// `UNIT` drawn only in a band from 120 columns.
+    const WIDE: &str = "[segment.\"custom/yes\"]\nkind='command'\ncommand=['echo','yes']\n\
+        [layout.when.wide]\nmin_cols=120\n[layout.when.wide.line2]\nleft=['custom/yes','char']";
+
+    // 응답은 이 폭이 고른 줄이 command 세그먼트를 그릴 때만 읽는다. 넓은 구간에만 있는 command는 좁은 폭에서 읽지
+    // 않고, redraw에서도 그 폭의 줄을 따른다. 이것을 실패시키는 것: draws_commands가 폭과 무관한 사용자 세그먼트
+    // 목록만 보는 것(80열에서 읽음), 그 폭의 줄 검사를 지우는 것.
+    #[test]
+    fn a_command_only_in_a_wider_band_is_read_only_at_that_width() {
+        let s = snapshot(WIDE);
+        for redraw in [false, true] {
+            for (width, read) in [(b"80".as_slice(), false), (b"130".as_slice(), true)] {
+                let mut h = commanded("prod-cluster");
+                h.current = Some(s.encode(1, 0).unwrap());
+                h.marker = Some(marker(&s).encode().to_vec());
+                let mut a = args();
+                let at = a.iter().position(|w| *w == b"--width").unwrap() + 1;
+                a[at] = width;
+                if redraw {
+                    a.push(b"--redraw");
+                }
+                let r = h.run(&a, Mode::Dark);
+                assert_eq!(reads_commands(&h), read, "{width:?} redraw={redraw}");
+                assert_eq!(record(&r).contains("prod-cluster"), read, "{}", record(&r));
+            }
+        }
     }
 
     // 다른 cwd의 응답, 무효 표식, 프롬프트 중 바뀐 시계에서는 그리지 않는다. 이것을 실패시키는 것: 기대 binding의

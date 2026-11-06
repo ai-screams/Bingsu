@@ -96,8 +96,8 @@ mod cases {
     ) -> Option<String> {
         let expected = binding();
         let vars = Environ::parse(environ);
-        let mut prompt = Prompt::new(&expected, entry, &vars, eligible);
-        value(r, &mut prompt, u, origin).map(String::from)
+        let mut prompt = Prompt::new(r, &expected, entry, &vars, eligible)?;
+        value(&mut prompt, u, origin).map(String::from)
     }
 
     // 양성 대조와 표식 조건. 이것을 실패시키는 것: 설정 단위의 표시 자격 검사를 지우는 것(자격 없는 회차에도
@@ -218,10 +218,10 @@ mod cases {
         let expected = binding();
         let vars = Environ::parse(ENV);
         for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0]] {
-            let mut prompt = Prompt::new(&expected, clock(11), &vars, true);
+            let mut prompt = Prompt::new(&r, &expected, clock(11), &vars, true).unwrap();
             for i in order {
                 assert_eq!(
-                    value(&r, &mut prompt, &units[i], Origin::Config),
+                    value(&mut prompt, &units[i], Origin::Config),
                     Some("prod"),
                     "{order:?} {i}"
                 );

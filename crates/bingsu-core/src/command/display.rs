@@ -25,30 +25,36 @@ use super::{
 use crate::{config::compile::ExecUnit, handoff::Origin, snapshot::Clock};
 use alloc::vec::Vec;
 
-/// This prompt's side of the comparison.
+/// This prompt's side of the comparison, bound to the response it reads.
 pub struct Prompt<'a> {
-    /// The binding this prompt would publish under.
-    pub expected: &'a Binding,
-    /// This prompt's entry clock.
-    pub entry: Clock,
-    /// This shell's environment, as the prompt hands it to the helper.
-    pub vars: &'a Environ<'a>,
+    response: &'a Response,
+    entry: Clock,
+    vars: &'a Environ<'a>,
     /// Whether the marker makes the snapshot's config units eligible.
-    pub eligible: bool,
+    eligible: bool,
     /// The environment digest per `env_allow` list already computed: units
     /// that allow the same names share one digest of this shell.
     digests: Vec<(Vec<Vec<u8>>, [u8; 32])>,
 }
 
 impl<'a> Prompt<'a> {
-    pub fn new(expected: &'a Binding, entry: Clock, vars: &'a Environ<'a>, eligible: bool) -> Self {
-        Self {
-            expected,
+    /// `None` when `response` may not be used by this prompt at all: another
+    /// binding than `expected` (build, boot, epoch, context, roots, cwd) or
+    /// another clock than `entry`. Checked once for every unit.
+    pub fn new(
+        response: &'a Response,
+        expected: &Binding,
+        entry: Clock,
+        vars: &'a Environ<'a>,
+        eligible: bool,
+    ) -> Option<Self> {
+        response.eligible(expected, entry).then(|| Self {
+            response,
             entry,
             vars,
             eligible,
             digests: Vec::new(),
-        }
+        })
     }
 
     /// `plan::env_digest` of this shell for `env_allow`, once per list.
@@ -63,20 +69,12 @@ impl<'a> Prompt<'a> {
 }
 
 /// The value `unit` shows under `origin`, or `None`.
-pub fn value<'r>(
-    response: &'r Response,
-    prompt: &mut Prompt<'_>,
-    unit: &ExecUnit,
-    origin: Origin,
-) -> Option<&'r str> {
+pub fn value<'r>(prompt: &mut Prompt<'r>, unit: &ExecUnit, origin: Origin) -> Option<&'r str> {
     if origin == Origin::Config && !prompt.eligible {
         return None;
     }
-    if !response.eligible(prompt.expected, prompt.entry) {
-        return None;
-    }
     let runnable = plan::runnable(unit)?;
-    let entry = response.entry(origin, &unit.id)?;
+    let entry = prompt.response.entry(origin, &unit.id)?;
     let policy = policy_digest(
         &runnable.policy,
         runnable.cwd,

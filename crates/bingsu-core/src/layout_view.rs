@@ -165,6 +165,14 @@ impl FrontConfig {
     pub fn lines(&self) -> &[CompiledLine] {
         &self.lines
     }
+    /// Whether the lines of this width draw segment number `seg`.
+    pub fn draws_segment(&self, seg: usize) -> bool {
+        self.lines.iter().any(|l| {
+            l.nodes().iter().any(
+                |n| matches!(n, crate::template::compile::Node::Segment { seg: s, .. } if usize::from(*s) == seg),
+            )
+        })
+    }
     pub fn band(&self) -> Option<usize> {
         self.band
     }

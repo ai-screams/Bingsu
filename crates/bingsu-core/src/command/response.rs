@@ -191,8 +191,9 @@ impl Response {
     }
 
     /// The prompt's decode: every check of [`Response::decode`] except the
-    /// characters of `raw`, which the prompt never draws (its length and
-    /// UTF-8 still are checked). The helper reads with `decode`, so a file
+    /// characters of `raw`, which the prompt never draws (its length, UTF-8
+    /// and the empty raw line of a failure still are checked), and every
+    /// `raw` comes back empty. The helper reads with `decode`, so a file
     /// that fails it is never merged or used for the cache.
     pub fn decode_shown(bytes: &[u8]) -> Result<Self, Error> {
         Self::decode_with(bytes, Raw::Unchecked)
@@ -242,7 +243,23 @@ impl Response {
                 _ => return Err(Error::Kind),
             };
             let value = text(r.bytes()?)?;
-            let raw = text(r.bytes()?)?;
+            let raw = match raw_text {
+                Raw::Checked => text(r.bytes()?)?,
+                // The prompt never draws the raw line: it gets the same
+                // length, UTF-8 and failure checks, then is left out, so no
+                // unchecked character reaches the prompt's memory.
+                Raw::Unchecked => {
+                    let bytes = r.bytes()?;
+                    core::str::from_utf8(bytes).map_err(|_| Error::Utf8)?;
+                    if bytes.len() > VALUE_MAX {
+                        return Err(Error::Limit);
+                    }
+                    if status == Status::Failed && !bytes.is_empty() {
+                        return Err(Error::Flags);
+                    }
+                    String::new()
+                }
+            };
             entries.push(Entry {
                 origin,
                 id,
