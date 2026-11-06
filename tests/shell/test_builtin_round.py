@@ -225,6 +225,9 @@ def git_repo(base):
     return repo
 
 
+RESOLVED = b"command round: shell folder resolved for rustup"
+
+
 def unsettled(tmp_path, pwd_of, config_unit=False):
     """A round whose folder facts cannot settle the repository: the
     repository's own node is first on PATH, another node after it."""
@@ -238,15 +241,18 @@ def unsettled(tmp_path, pwd_of, config_unit=False):
     session.env["PATH"] = f"{inside.parent}:{outside.parent}:{session.env['PATH']}"
     unit = ""
     if config_unit:
-        unit = "[segment.\"custom/u\"]\nkind='command'\ncommand=['/bin/echo','u']\n"
+        canary = session.base / "unit-ran"
+        unit = f"[segment.\"custom/u\"]\nkind='command'\ncommand=['/usr/bin/touch','{canary}']\n"
     drawn = "'node', 'custom/u'" if config_unit else "'node'"
     session.put(f"{unit}[layout.line1]\nleft=[{drawn}]\n[layout.line2]\nleft=['char']\n")
     ready(session)
     for f in (inside, outside):
         Path(f"{f}.runs").unlink(missing_ok=True)
     seen = session.log().count(b"command round: PATH searched")
+    resolved = session.log().count(RESOLVED)
     rounds(session, 3)
     searched = session.log().count(b"command round: PATH searched") - seen
+    assert session.log().count(RESOLVED) == resolved, "a shell folder was resolved for no language"
     return session, inside, outside, searched
 
 
@@ -281,6 +287,7 @@ def test_unsettled_repository_decides_no_language(tmp_path, where, _native_boot_
 def test_config_units_still_search_beside_an_unsettled_language(tmp_path, _native_boot_required):
     session, inside, outside, searched = unsettled(tmp_path, alias, config_unit=True)
     assert searched >= 1, session.log()
+    assert (session.base / "unit-ran").exists(), "the config unit did not run"
     assert counted(inside) == 0 and counted(outside) == 0
 
 
@@ -297,3 +304,29 @@ def test_git_shows_beside_a_language_segment(tmp_path, _native_boot_required):
     session.put("[layout.line1]\nleft=['git', 'node']\n[layout.line2]\nleft=['char']\n")
     session.init()
     session.await_text("main", timeout=8)
+
+
+# rustup 회차만 셸 폴더를 정규화한다(rustup의 폴더 override 비교). 설치된 1.80.0은 실행 없이 보이고, 그 회차의 debug
+# 로그에 정규화 줄이 남는다. 미확정 저장소 회차에는 그 줄이 없다(위 시험). 이것을 실패시키는 것: 정규화 로그를
+# 지우는 것, rustup 회차에 셸 폴더를 정규화하지 않는 것.
+def test_rustup_round_resolves_the_shell_folder(tmp_path, _native_boot_required):
+    session = session_with(tmp_path, "rust")
+    session.level = "debug"
+    cargo = session.base / "cargo"
+    rustup = session.base / "rustup"
+    proxy = install(cargo / "bin", "rustc")
+    rustc = install(rustup / "toolchains" / "1.80.0-zz-host" / "bin", "rustc")
+    (rustup / "settings.toml").write_text('version = "12"\ndefault_host_triple = "zz-host"\n')
+    for folder in (rustup, rustup / "toolchains", rustup / "toolchains" / "1.80.0-zz-host"):
+        folder.chmod(0o755)
+    (rustup / "settings.toml").chmod(0o644)
+    (session.pwd / "rust-toolchain").write_text("1.80.0\n")
+    session.env["CARGO_HOME"] = str(cargo)
+    session.env["RUSTUP_HOME"] = str(rustup)
+    session.env["PATH"] = f"{proxy.parent}:{session.env['PATH']}"
+    ready(session)
+    seen = session.log().count(RESOLVED)
+    published_rounds(session)
+    assert b"1.80.0" in command_response(session)
+    assert session.log().count(RESOLVED) > seen, session.log()
+    assert counted(proxy) == 0 and counted(rustc) == 0

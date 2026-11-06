@@ -968,6 +968,7 @@ mod tests {
 
     /// A Command Line Tools folder of the test's own with its python3, so
     /// the stub tests hold whatever this Mac has installed.
+    #[cfg(target_os = "macos")]
     fn developer_fixture(s: &Scratch) -> PathBuf {
         let real = s.0.join("CommandLineTools/usr/bin/python3");
         file(&real, b"\x7fELF python");
