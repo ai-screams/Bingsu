@@ -1092,6 +1092,29 @@ mod tests {
         assert_eq!(repo_ancestors(&elsewhere), Ok(vec![]));
     }
 
+    // 링크가 붙은 셸 경로 이름도 그 접두사다: `entry -> repo`를 지나 `repo/docs -> 바깥`으로 들어간 셸의 접두사
+    // `/t/entry`는 repo다. "/"에서의 `..`는 "/"에 머문다(`/../../t/repo/sub`). 이것을 실패시키는 것: 링크로 풀린
+    // 이름 뒤의 접두사 확인을 버리는 것(repo가 빠짐), "/"에서 `..`가 스택을 비우게 하는 것.
+    #[test]
+    fn repo_ancestors_keep_prefixes_through_links_and_stay_at_root() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-chain");
+        let repo = t.join("repo");
+        let outside = t.join("outside");
+        folders(&repo.join("sub"));
+        folders(&outside);
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        symlink(&repo, t.join("entry")).unwrap();
+        symlink(&outside, repo.join("docs")).unwrap();
+        assert_eq!(
+            repo_ancestors(&t.join("entry/docs")),
+            Ok(vec![id_of(&repo)])
+        );
+        let up = format!("/../..{}", repo.join("sub").display());
+        symlink(&up, t.join("alias")).unwrap();
+        assert_eq!(repo_ancestors(&t.join("alias")), Ok(vec![id_of(&repo)]));
+    }
+
     // 링크 안의 `..`는 앞 폴더로 돌아간다(U-24 M1). 셸 경로에도 실제 폴더의 조상에도 없는 폴더(링크가 놓인
     // 저장소 b)는 저장소가 아니고, `../a/../a…`로 길게 쓴 링크도 폴더를 쌓지 않는다. 이것을 실패시키는 것: `..`를
     // 부모를 새로 여는 이름으로 걷는 것(b가 들어감), 절대 링크의 "/"에서 걸은 폴더를 버리지 않는 것.
