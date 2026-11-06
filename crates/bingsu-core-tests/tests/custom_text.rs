@@ -113,6 +113,44 @@ fn empty_text_draws_nothing() {
     }
 }
 
+// 값이 없는 command 세그먼트는 칸도 구분자도 남기지 않는다: text 사이에 끼워도, 앞뒤에 두어도, 그것만 있는
+// 그룹이어도 그 세그먼트를 뺀 배치와 같다. 이것을 실패시키는 것: 값이 없는 command 칸에 자리표시 글자를 그리는
+// 것, command 세그먼트를 그리는 목록에서 빼는 것(번호가 밀려 text가 엉뚱한 칸에 감). 빈 값은 빈 text처럼 이미
+// 숨으므로 None과 Some("")는 같은 결과다. command id(`custom/k`)가 text id(`custom/m`, `custom/n`)보다
+// 앞에 정렬되므로, 앞단이 command 값 자리를 비우면 안 된다: command 분기의 `values.push(None)`을 지우면
+// text 값이 한 칸씩 밀린다.
+#[test]
+fn a_command_segment_without_a_value_leaves_nothing() {
+    let decl = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\n\
+                [segment.\"custom/m\"]\nkind = \"text\"\ntext = \"A\"\n\
+                [segment.\"custom/n\"]\nkind = \"text\"\ntext = \"B\"\n";
+    for (with, without) in [
+        (
+            "['custom/m', 'custom/k', 'custom/n', 'char']",
+            "['custom/m', 'custom/n', 'char']",
+        ),
+        ("['custom/k', 'custom/m', 'char']", "['custom/m', 'char']"),
+        ("['custom/m', 'custom/k']", "['custom/m']"),
+    ] {
+        let c = fixture::compile(&format!("{decl}[layout.line2]\nleft = {with}\n"));
+        let base = fixture::compile(&format!("{decl}[layout.line2]\nleft = {without}\n"));
+        assert_eq!(c.custom.len(), base.custom.len() + 1, "{with}");
+        for sh in SHELLS {
+            assert_eq!(left(&c, sh, 80), left(&base, sh, 80), "{sh:?} {with}");
+        }
+    }
+    let tpl = |t: &str| format!("{decl}[style]\ntemplate = \"{t}\"\n");
+    let c = fixture::compile(&tpl("{custom/m}{@group}[{custom/k}]{@end} {char}"));
+    let base = fixture::compile(&tpl("{custom/m} {char}"));
+    for sh in SHELLS {
+        assert_eq!(
+            left(&c, sh, 80),
+            left(&base, sh, 80),
+            "{sh:?} template group"
+        );
+    }
+}
+
 // 이것을 실패시키는 것: custom 값이 기존 정제·이스케이프 경로를 건너뛰는 것. zsh 필드에서 `%`가
 // `%%`로, 읽은 뒤 원문 그대로여야 한다. 원시 레코드의 `%%F{red}!!`는 아래 raw 단언이 잡는다.
 #[test]
@@ -253,20 +291,50 @@ fn only_drawn_enabled_text_is_declared() {
     assert_eq!(ids, ["custom/a"]);
 }
 
-// 이것을 실패시키는 것: command·language를 text와 함께 그리기 시작하는 것(M6 뒤 단계가 열리기 전).
+// command 세그먼트는 text와 같은 번호 규칙으로 그려지는 목록에 들고 N502를 내지 않는다. env는 아직(C5) 그리지
+// 않고 N502를 낸다. 이것을 실패시키는 것: command를 그리는 종류에서 빼는 것(목록에 없음, N502), env를 그리기
+// 시작하는 것.
 #[test]
-fn command_segment_stays_hidden() {
+fn command_segment_is_drawn_env_stays_hidden() {
+    use bingsu_core::config::compile::CustomKind;
     let cfg = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\n\
                [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\n\
-               [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"char\"]\n";
+               [segment.\"custom/e\"]\nkind = \"env\"\nvar = \"E\"\n\
+               [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"char\"]\n";
     let r = fixture::report(cfg);
+    let drawn_later: Vec<_> = r
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == codes::CUSTOM_DRAWN_LATER)
+        .collect();
     let c = r.snapshot.unwrap();
-    assert_eq!(c.custom.len(), 1);
-    assert!(
-        r.diagnostics
-            .iter()
-            .any(|d| d.code == codes::CUSTOM_DRAWN_LATER)
+    let kinds: Vec<_> = c.custom.iter().map(|t| (t.id.as_str(), &t.kind)).collect();
+    assert_eq!(
+        kinds,
+        [
+            ("custom/a", &CustomKind::Text("A".into())),
+            ("custom/k", &CustomKind::Command)
+        ]
     );
+    assert_eq!(drawn_later.len(), 1, "{drawn_later:?}");
+}
+
+// 꺼진 text·command 세그먼트는 "아직 그리지 않는 종류"가 아니므로 N502를 내지 않는다. 그리지 않는 종류(env)만
+// 낸다. 이것을 실패시키는 것: N502 조건에서 그리는 종류 검사를 지우는 것(꺼진 둘에도 N502).
+#[test]
+fn a_turned_off_text_or_command_segment_is_not_drawn_later() {
+    let cfg = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\nenabled = false\n\
+               [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\nenabled = false\n\
+               [segment.\"custom/e\"]\nkind = \"env\"\nvar = \"E\"\n\
+               [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"char\"]\n";
+    let r = fixture::report(cfg);
+    let drawn_later: Vec<_> = r
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == codes::CUSTOM_DRAWN_LATER)
+        .collect();
+    assert_eq!(drawn_later.len(), 1, "{drawn_later:?}");
+    assert!(r.snapshot.unwrap().custom.is_empty());
 }
 
 fn wire(c: &CompiledConfig) -> Vec<u8> {
@@ -367,7 +435,9 @@ fn long_text_is_cut_to_the_cells_and_always_encodes() {
         let c = r
             .snapshot
             .unwrap_or_else(|| panic!("{text:.8}: {:?}", r.diagnostics));
-        let kept = &c.custom[0].text;
+        let bingsu_core::config::compile::CustomKind::Text(kept) = &c.custom[0].kind else {
+            panic!("{text:.8}: a text segment");
+        };
         let p = bingsu_core::width::WidthProfile::new(amb as u8, 2).unwrap();
         let cells = bingsu_core::width::str_width(kept, p);
         assert!(

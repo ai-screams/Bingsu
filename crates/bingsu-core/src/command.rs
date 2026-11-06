@@ -3,6 +3,7 @@
 //! deadline formulas. Types and pure decisions only; nothing here runs.
 pub mod cgroup;
 pub mod deadline;
+pub mod display;
 pub mod env_frame;
 pub mod grant;
 pub mod path;

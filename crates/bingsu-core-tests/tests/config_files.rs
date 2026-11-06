@@ -72,7 +72,7 @@ fn the_prompt_path_never_reads_config() {
             "front.rs" => text.replace("use crate::config::compile::CompiledConfig;", ""),
             "front/staged.rs" => text.replace("use crate::config::compile::ExecUnit;", ""),
             "layout_view.rs" => text.replace(
-                "use crate::config::compile::{CompiledConfig, CustomText, ExecUnit, Setup};",
+                "use crate::config::compile::{CompiledConfig, CustomKind, CustomSegment, ExecUnit, Setup};",
                 "",
             ),
             _ => text.to_owned(),

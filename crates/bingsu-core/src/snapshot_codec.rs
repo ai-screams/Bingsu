@@ -1,4 +1,4 @@
-//! BNGCFG06: bounded CompiledConfig codec with an explicit fact schema version.
+//! BNGCFG08: bounded CompiledConfig codec with an explicit fact schema version.
 //!
 //! HEAD, COMMON, INDEX (one entry per variant), the variants, the band names.
 //! The snapshot header checksum covers HEAD, COMMON and INDEX; each variant and
@@ -13,7 +13,8 @@ use crate::{
     },
     config::{
         compile::{
-            CompiledConfig, CustomText, ExecPolicy, ExecUnit, LayoutRef, NotRun, Setup, Side,
+            CompiledConfig, CustomKind, CustomSegment, ExecPolicy, ExecUnit, LayoutRef, NotRun,
+            Setup, Side,
         },
         merge::Origin,
         schema::FACT_SCHEMA_VERSION,
@@ -48,8 +49,8 @@ const MAX_ALLOC: usize = 64 * 1024 * 1024;
 pub const HEAD: usize = 20;
 /// Offset, length and CRC of one variant, then four reserved zero bytes.
 const ENTRY: usize = 16;
-const MAGIC: &[u8; 8] = b"BNGCFG06";
-const VERSION: u16 = 6;
+const MAGIC: &[u8; 8] = b"BNGCFG08";
+const VERSION: u16 = 8;
 /// CRC of one variant or of the name block.
 pub fn section_sum(section: &[u8]) -> [u8; 4] {
     crate::snapshot::crc32c(&[b"bingsu-compiled-v6\0", section])
@@ -426,15 +427,25 @@ impl Wire for Setup {
         })
     }
 }
-impl Wire for CustomText {
+impl Wire for CustomSegment {
     fn put(&self, o: &mut Writer) {
         self.id.put(o);
-        self.text.put(o);
+        match &self.kind {
+            CustomKind::Text(text) => {
+                0u8.put(o);
+                text.put(o);
+            }
+            CustomKind::Command => 1u8.put(o),
+        }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Self {
             id: Wire::get(r)?,
-            text: Wire::get(r)?,
+            kind: match u8::get(r)? {
+                0 => CustomKind::Text(Wire::get(r)?),
+                1 => CustomKind::Command,
+                _ => return Err(Error::Shape),
+            },
         })
     }
 }
@@ -1060,7 +1071,7 @@ struct Common {
     use_last_column: bool,
     duration_min_ms: u64,
     exec_units: Vec<ExecUnit>,
-    custom: Vec<CustomText>,
+    custom: Vec<CustomSegment>,
     widths: Vec<WidthRun>,
     name_count: usize,
     names_len: usize,
@@ -1349,7 +1360,7 @@ struct Parts<'c> {
     light_palette: &'c ResolvedPalette,
     collect_mask: u32,
     exec_units: &'c [ExecUnit],
-    custom: &'c [CustomText],
+    custom: &'c [CustomSegment],
     widths: &'c [WidthRun],
 }
 fn check(c: &Parts<'_>) -> Result<(), Error> {
@@ -1450,8 +1461,13 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
         || !c.custom.windows(2).all(|w| w[0].id < w[1].id)
         || c.custom.iter().any(|t| {
             parse_segment_id(&t.id).map(|id| id.namespace()) != Ok(Namespace::Custom)
-                || !t.text.chars().all(|c| !crate::sanitize::is_removed(c))
-                || t.text.len() > usize::from(crate::field::CUSTOM_TEXT_CELLS) * 4
+                || match &t.kind {
+                    CustomKind::Text(text) => {
+                        !text.chars().all(|c| !crate::sanitize::is_removed(c))
+                            || text.len() > usize::from(crate::field::CUSTOM_TEXT_CELLS) * 4
+                    }
+                    CustomKind::Command => false,
+                }
         })
     {
         return Err(Error::Shape);
