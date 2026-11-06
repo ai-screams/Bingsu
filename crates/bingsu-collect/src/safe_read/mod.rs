@@ -317,7 +317,7 @@ impl ResolverChoice {
 
 /// Folders the discovery holds above the shell's and looks through for a
 /// repository; language detection looks no further (it is the same bound).
-pub const DISCOVERY_LEVELS: usize = 32;
+pub const DISCOVERY_LEVELS: usize = bingsu_core::collection::DISCOVERY_LEVELS;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ReadCap {

@@ -415,7 +415,7 @@ fn lookups(
     if words.is_empty() {
         return Vec::new();
     }
-    let repo = None;
+    let repo: &[_] = &[];
     #[cfg(test)]
     tests::PATH_WALKS.with(|n| n.set(n.get() + 1));
     let folders = exec_path::sanitize(path.map_or(&b""[..], |p| p.as_bytes()), repo, me, groups);
