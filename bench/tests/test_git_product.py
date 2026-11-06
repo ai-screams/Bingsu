@@ -530,3 +530,35 @@ def test_a_sample_that_draws_other_units_is_not_a_sample(monkeypatch, tmp_path):
         monkeypatch.setattr(git.M3B, "run", lambda command, env, out=stdout: SimpleNamespace(stdout=out))
         sample = git.observe_command("bingsu", contexts, tmp_path, "prompt-commands-hit")
         assert sample["status"] == status, sample
+
+
+# 응답 없는 max 칸: max와 같은 설정·폭이고 helper도 똑같이 띄우되 --session을 넘기지 않아 단위가 돌지 않는다. 데운
+# 프롬프트와 표본 모두 0개를 그리고, 측정 중 응답이 생기면 그 표본은 빠진다. 이것을 실패시키는 것: 이 칸에 --session을
+# 넘기는 것(단위가 돌아 응답이 생김), 폭 2400을 빼는 것, 응답이 있거나 무언가 그린 데운 프롬프트를 받는 것, 측정 중
+# 생긴 응답을 보지 않는 것.
+def test_the_empty_max_case_stays_without_a_response(monkeypatch, tmp_path):
+    base = ["bingsu", "prompt", "--width", "80", "--pwd", "/w"]
+    monkeypatch.setattr(git.M3B, "prompt_context", lambda *a, **k: (list(base), {"E": "1"}))
+    monkeypatch.setattr(git.M3B, "normal_record", lambda r: True)
+    _, _, values = git.command_setup("prompt-commands-max-empty", tmp_path / "probe")
+    assert len(values) == 32
+    blank = SimpleNamespace(returncode=0, stderr=b"", stdout=b"B1 nothing")
+    monkeypatch.setattr(git.M3B, "run", lambda command, env: blank)
+    directory = tmp_path / "ctx"
+    command, env, got, drawn = git.command_context("bingsu", directory, "prompt-commands-max-empty")
+    assert drawn == 0 and "--session" not in command and "--redraw" not in command
+    assert command[command.index("--width") + 1] == "2400"
+    contexts = {str(directory): (command, env, got, drawn)}
+    assert git.observe_command("bingsu", contexts, directory, "prompt-commands-max-empty")["status"] == "OBSERVED"
+    store = directory / "rt" / "store"
+    store.mkdir(parents=True)
+    (store / "command").write_bytes(b"x")
+    sample = git.observe_command("bingsu", contexts, directory, "prompt-commands-max-empty")
+    assert sample["status"] == "BLOCKED" and "published" in sample["reason"]
+    with pytest.raises(ValueError, match="response exists"):
+        git.command_context("bingsu", directory, "prompt-commands-max-empty")
+    (store / "command").unlink()
+    drawing = SimpleNamespace(returncode=0, stderr=b"", stdout=values["custom/k00"][:4])
+    monkeypatch.setattr(git.M3B, "run", lambda command, env: drawing)
+    with pytest.raises(ValueError, match="draws 1 units"):
+        git.command_context("bingsu", directory, "prompt-commands-max-empty")

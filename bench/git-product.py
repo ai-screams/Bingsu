@@ -41,10 +41,13 @@ CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 #   all drawn (2,400 columns).
 # - prompt-commands-hit: three cached command segments, values of a few bytes.
 # - prompt-commands-max: 32 cached command segments, each value 4 KB of mixed text, all drawn (2,400 columns).
+# - prompt-commands-max-empty: the max config with no command response: the
+#   prompts pass no session, so no unit runs and nothing is published. Its
+#   difference from max is the cost of drawing command values (U-23).
 # - prompt-commands-redraw: the max config, redrawn (`--redraw`: no helper).
 SESSION = "0123456789abcdef0123456789abcdef"
 COMMAND_CASES = ("prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
-                 "prompt-commands-redraw")
+                 "prompt-commands-max-empty", "prompt-commands-redraw")
 ALL_CASES = CASES + COMMAND_CASES
 STAGES = ("A", "PathFacts", "B", "C", "D")
 
@@ -477,14 +480,24 @@ def command_context(binary, directory, case):
     for a base without command values; a part is refused."""
     config, extra_env, values = command_setup(case, directory)
     command, env = M3B.prompt_context(binary, directory, config_text=config, extra_env=extra_env)
-    # The shell hooks pass a session value on every prompt; command units run only with one.
-    command = [*command, "--session", SESSION]
+    # The shell hooks pass a session value on every prompt; command units run
+    # only with one. The empty case passes none: the helper still starts every
+    # prompt, but runs no unit and publishes no command response.
+    empty = case == "prompt-commands-max-empty"
+    if not empty:
+        command = [*command, "--session", SESSION]
     if len(values) == 32:
         # 32 values, separators included, fit only a wide line: at 80
         # columns the layout drops them and nothing is drawn.
         command[command.index("--width") + 1] = "2400"
     if not values:
         return command, env, values, None
+    if empty:
+        result = M3B.run(command, env=env)
+        drawn = drawn_units(values, result.stdout)
+        if not M3B.normal_record(result) or any(directory.rglob("store/command")) or drawn:
+            raise ValueError(f"{case}: a command response exists or the prompt draws {drawn} units")
+        return command, env, values, 0
     # Each prompt starts a refresh helper, which runs at most eight units a
     # round and caches the results: wait until every unit succeeded with its value.
     want = {name: (0, value) for name, value in values.items()}
@@ -526,6 +539,9 @@ def observe_command(binary, contexts, directory, case):
     now = None if drawn is None else drawn_units(values, result.stdout)
     if now != drawn:
         return {"status": "BLOCKED", "reason": f"drew {now} of {len(values)} units, the warm prompt {drawn}"}
+    # The empty case stays without a response for the whole run.
+    if case == "prompt-commands-max-empty" and any(directory.rglob("store/command")):
+        return {"status": "BLOCKED", "reason": "a command response was published"}
     return {"status": "OBSERVED", "prompt_ns": elapsed, "units": len(values), "drawn": now}
 
 
