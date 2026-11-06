@@ -11,10 +11,6 @@ pub mod response;
 pub mod selection;
 pub mod wire;
 
-/// How many folders above the shell's folder repository discovery looks at
-/// (the collector's `.git` search, and the helper's scan for command rounds).
-pub const DISCOVERY_LEVELS: usize = 32;
-
 /// Merge a previously eligible completed response. The reader must first enforce
 /// `completed_at < prompt_entry`; this boundary rechecks the exact binding and
 /// the envelope's path query. Validate the entire update set before changing any

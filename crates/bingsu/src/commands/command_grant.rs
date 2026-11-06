@@ -1203,8 +1203,9 @@ mod tests {
 
     // U-24: 수집 루트가 없는 회차에도 셸 폴더 위의 `.git` 조상이 저장소다. 셸이 저장소 하위 폴더에 있으면 저장소
     // 뿌리 아래 PATH 폴더의 실행 파일을 찾지 않는다. 대조: `.git`이 없으면 같은 폴더의 실행 파일을 찾는다(J9 대체는
-    // 셸 폴더만 뺀다). 조상을 끝까지 걷지 못하면(깊이 상한) 회차를 거부한다. 이것을 실패시키는 것: units()에서 찾은
-    // 조상을 저장소 목록에 넣지 않는 것, 조상 검사의 거부를 "저장소 없음"으로 바꾸는 것.
+    // 셸 폴더만 뺀다). 셸 폴더까지 걷지 못하면 회차를 거부한다. 이것을 실패시키는 것: units()에서 찾은
+    // 조상을 저장소 목록에 넣지 않는 것. 조상 검사의 거부를 "저장소 없음"으로 바꾸는 변이는 이 칸이 잡지 못한다:
+    // 걷지 못하는 셸 폴더는 그 앞의 셸 폴더 정체 조회(repo_id)도 실패하기 때문이다(경합에서만 갈림).
     #[test]
     fn units_keep_a_repository_bin_out_without_a_collected_root() {
         use std::os::unix::fs::PermissionsExt;
@@ -1257,12 +1258,15 @@ mod tests {
         let got = run(&sub).unwrap();
         assert!(got.repo_fallback);
         assert_eq!(got.unresolved, 1, "the repository's bin was searched");
-        let mut deep = sub.clone();
-        while deep.components().count() - 1 <= bingsu_core::collection::DISCOVERY_LEVELS {
-            deep = deep.join("d");
+        // A shell folder that cannot be walked refuses the round.
+        let locked = repo.join("locked");
+        if sys::current_uid() != 0 {
+            std::fs::create_dir_all(locked.join("in")).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let got = run(&locked.join("in"));
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(matches!(got, Err(Skip::Failed)));
         }
-        std::fs::create_dir_all(&deep).unwrap();
-        assert!(matches!(run(&deep), Err(Skip::Failed)));
         let _ = std::fs::remove_dir_all(&t);
     }
 

@@ -234,8 +234,9 @@ pub fn repo_id(root: Option<&Path>) -> Result<Option<rule::Id>, Miss> {
 /// nested ones included (U-24). The walk goes from "/" one name at a time
 /// on held descriptors; a link's text is walked in its place, as the kernel
 /// would, so the ancestors are those of the real folder whatever alias the
-/// shell's path is. A name that cannot be opened as a folder, too many links
-/// or more than `DISCOVERY_LEVELS` folders below "/" is `Refused`, never "no
+/// shell's path is. It walks to the end whatever the depth (the shell's
+/// folder is already bounded by the envelope's length cap). A name that
+/// cannot be opened as a folder or too many links is `Refused`, never "no
 /// repository". A `.git` that cannot be checked counts as present.
 pub fn repo_ancestors(cwd: &Path) -> Result<Vec<rule::Id>, Miss> {
     if !cwd.is_absolute() {
@@ -264,9 +265,6 @@ pub fn repo_ancestors(cwd: &Path) -> Result<Vec<rule::Id>, Miss> {
             expansion.append(&mut todo);
             todo = expansion;
             continue;
-        }
-        if stack.len() > bingsu_core::collection::DISCOVERY_LEVELS {
-            return Err(Miss::Refused);
         }
         // `..` opens the physical parent, as the kernel resolves it.
         let file = sys::open_dir_at_search_nofollow(Some(dir), &name).map_err(|_| Miss::Refused)?;
@@ -979,8 +977,9 @@ mod tests {
         );
     }
 
-    // 별칭 경로: 링크로 들어간 셸 폴더는 실제 폴더의 조상으로 판정한다(절대·상대 링크, 링크 안의 `..`). 이것을
-    // 실패시키는 것: 링크를 따르지 않거나 절대 링크의 "/"를 처음부터 다시 걷지 않는 것.
+    // 별칭 경로: 링크로 들어간 셸 폴더는 실제 폴더의 조상으로 판정한다(절대·상대 링크, 링크 안의 `..`). 링크가
+    // 놓인 저장소는 실제 폴더의 조상이 아니다. 이것을 실패시키는 것: 링크를 따르지 않는 것, 절대 링크의 "/"에서
+    // 걸은 폴더를 버리지 않는 것(링크가 놓인 저장소가 조상으로 남음).
     #[test]
     fn repo_ancestors_follow_the_real_folder_of_an_alias() {
         use std::os::unix::fs::symlink;
@@ -998,14 +997,20 @@ mod tests {
                 "{alias}"
             );
         }
+        // An alias inside a repository to a folder outside any: the folders
+        // the alias's own path went through are not ancestors.
+        let plain = t.join("plain");
+        folders(&plain);
+        std::fs::create_dir(t.join("x/.git")).unwrap();
+        symlink(&plain, t.join("x/out")).unwrap();
+        assert_eq!(repo_ancestors(&t.join("x/out")), Ok(vec![]));
     }
 
-    // 걸을 수 없는 경로, 링크 고리, 깊이 상한(수집기와 같은 DISCOVERY_LEVELS)은 "저장소 없음"이 아니라 거부다.
-    // 이것을 실패시키는 것: 이름 조회 실패를 건너뛰는 것, 링크 수 상한을 지우거나 옮기는 것, 깊이 상한을 지우거나
-    // 한 칸 옮기는 것, 들어갈 수 없는 폴더를 "저장소 없음"으로 보는 것.
+    // 걸을 수 없는 경로와 링크 고리는 "저장소 없음"이 아니라 거부다. 깊이에는 상한이 없다(U-24 판정). 이것을
+    // 실패시키는 것: 이름 조회 실패를 건너뛰는 것, 링크 수 상한을 지우거나 옮기는 것, 깊이 상한을 두는 것(깊이 40의
+    // 셸 폴더가 거부됨), 들어갈 수 없는 폴더를 "저장소 없음"으로 보는 것.
     #[test]
     fn repo_ancestors_refuse_what_they_cannot_walk() {
-        use bingsu_core::collection::DISCOVERY_LEVELS;
         use std::os::unix::fs::symlink;
         let t = scratch("scan-refuse");
         assert_eq!(repo_ancestors(&t.join("gone")), Err(Miss::Refused));
@@ -1029,15 +1034,16 @@ mod tests {
             repo_ancestors(&t.join(format!("l{LINKS_MAX}"))),
             Err(Miss::Refused)
         );
-        let below_root = t.components().count() - 1;
-        let mut p = t.clone();
-        for i in below_root..DISCOVERY_LEVELS {
-            p = p.join(format!("d{i}"));
+        // No depth cap: a `.git` far above a deep folder is still found.
+        let mut deep = t.join("deep");
+        folders(&deep);
+        std::fs::create_dir(deep.join(".git")).unwrap();
+        let top = id_of(&deep);
+        while deep.components().count() - 1 < 40 {
+            deep = deep.join("d");
         }
-        folders(&p.join("x"));
-        assert_eq!(p.components().count() - 1, DISCOVERY_LEVELS);
-        assert_eq!(repo_ancestors(&p), Ok(vec![]));
-        assert_eq!(repo_ancestors(&p.join("x")), Err(Miss::Refused));
+        folders(&deep);
+        assert_eq!(repo_ancestors(&deep), Ok(vec![top]));
         // A folder on the way the user may not search (root searches anyway).
         if me() != 0 {
             folders(&t.join("locked/sub"));
