@@ -36,11 +36,15 @@ CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 # response makes the ratio the whole added cost, and the worst increment is
 # bounded by +0.5 ms (U-23), not by the ratio.
 # - prompt-env64k: about 60 KiB of shell environment, so the prompt writes a near-full frame.
+# - prompt-env64k-commands: the same environment and 32 cached command segments
+#   that each allow another variable (32 environment digests, none shared),
+#   all drawn (2,400 columns).
 # - prompt-commands-hit: three cached command segments, values of a few bytes.
 # - prompt-commands-max: 32 cached command segments, each value 4 KB of mixed text, all drawn (2,400 columns).
 # - prompt-commands-redraw: the max config, redrawn (`--redraw`: no helper).
 SESSION = "0123456789abcdef0123456789abcdef"
-COMMAND_CASES = ("prompt-env64k", "prompt-commands-hit", "prompt-commands-max", "prompt-commands-redraw")
+COMMAND_CASES = ("prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
+                 "prompt-commands-redraw")
 ALL_CASES = CASES + COMMAND_CASES
 STAGES = ("A", "PathFacts", "B", "C", "D")
 
@@ -384,13 +388,23 @@ def repository(directory, name):
 def command_setup(case, directory):
     """The config, extra environment and drawn text of a command case."""
     directory.mkdir(parents=True, exist_ok=True)
+    # 60 entries of 1,000 bytes: under the 64 KiB frame with PATH and LC_ALL.
+    pad = {f"BINGSU_PAD_{i:02}": "x" * 986 for i in range(60)}
+    allow = [[]] * 32
+    env = {}
     if case == "prompt-env64k":
-        # 60 entries of 1,000 bytes: under the 64 KiB frame with PATH and LC_ALL.
-        return "icons = 'ascii'\n", {f"BINGSU_PAD_{i:02}": "x" * 986 for i in range(60)}, None
+        return "icons = 'ascii'\n", pad, None
     if case == "prompt-commands-hit":
         units = [("/bin/echo", "prod-cluster"), ("/bin/echo", "default"), ("/bin/echo", "v1.29")]
         argv = [[exe, word] for exe, word in units]
         mark = b"prod-cluster"
+    elif case == "prompt-env64k-commands":
+        # The near-full frame and 32 units that each allow another variable:
+        # 32 environment digests over it, nothing shared between units.
+        argv = [["/bin/echo", f"u{i:02}"] for i in range(32)]
+        allow = [[f"BINGSU_PAD_{i:02}"] for i in range(32)]
+        env = pad
+        mark = b"u00"
     else:
         # One line of 4,096 bytes of mixed text (ASCII, Hangul, a separator), no newline.
         text = "kube-\uD55C\uAE00-ctx/" * 400
@@ -407,9 +421,10 @@ def command_setup(case, directory):
     lines = []
     for i, words in enumerate(argv):
         quoted = ", ".join(json.dumps(w) for w in words)
-        lines.append(f"[segment.\"custom/k{i:02}\"]\nkind = 'command'\ncommand = [{quoted}]\ncache = '3600s'\n")
+        allowed = f"env_allow = [{', '.join(json.dumps(n) for n in allow[i])}]\n" if allow[i] else ""
+        lines.append(f"[segment.\"custom/k{i:02}\"]\nkind = 'command'\ncommand = [{quoted}]\ncache = '3600s'\n{allowed}")
     ids = ", ".join(f"'custom/k{i:02}'" for i in range(len(argv)))
-    return "icons = 'ascii'\n" + "".join(lines) + f"[layout.line1]\nleft = [{ids}, 'char']\n", {}, mark
+    return "icons = 'ascii'\n" + "".join(lines) + f"[layout.line1]\nleft = [{ids}, 'char']\n", env, mark
 
 
 def response_entries(directory):
@@ -433,15 +448,15 @@ def command_context(binary, directory, case):
     command, env = M3B.prompt_context(binary, directory, config_text=config, extra_env=extra_env)
     # The shell hooks pass a session value on every prompt; command units run only with one.
     command = [*command, "--session", SESSION]
-    if case in ("prompt-commands-max", "prompt-commands-redraw"):
-        # 32 values of 64 cells, separators included, fit only a wide line:
-        # at 80 columns the layout drops them and nothing is drawn.
+    units = config.count("kind = 'command'")
+    if units == 32:
+        # 32 values, separators included, fit only a wide line: at 80
+        # columns the layout drops them and nothing is drawn.
         command[command.index("--width") + 1] = "2400"
     if case == "prompt-env64k":
         return command, env, None
     # Each prompt starts a refresh helper, which runs at most eight units a
     # round and caches the results: wait until the response holds every unit.
-    units = config.count("kind = 'command'")
     for _ in range(400):
         result = M3B.run(command, env=env)
         if M3B.normal_record(result) and response_entries(directory) == units:

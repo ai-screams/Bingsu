@@ -335,7 +335,8 @@ def test_ci_records_the_command_time_cases_only():
     job = job_text()
     cases = re.search(r"GATE_CASES: (\S+)", job).group(1).split(",")
     record = re.search(r"GATE_RECORD_ONLY: (\S+)", job).group(1).split(",")
-    commands = ["prompt-env64k", "prompt-commands-hit", "prompt-commands-max", "prompt-commands-redraw"]
+    commands = ["prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
+                "prompt-commands-redraw"]
     assert record == commands and all(c in cases for c in commands)
     assert '--record-only "$GATE_RECORD_ONLY"' in job
 

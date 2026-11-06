@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -433,9 +434,10 @@ def test_command_cases_time_the_prompt_alone(pair, monkeypatch):
             assert row["draws_value"]["rate"] == 1
 
 
-# 칸의 입력: env64k는 64 KiB frame 안에서 가득 차고, max·redraw는 32단위가 각자 4,096바이트 이하의 UTF-8 한 줄을
+# 칸의 입력: env64k는 64 KiB frame 안에서 가득 차고, env64k-commands는 같은 환경에 단위마다 다른 이름을 허용하는
+# 32단위를 두며, max·redraw는 32단위가 각자 4,096바이트 이하의 UTF-8 한 줄을
 # 그린다(4 KB 상한, 단위 상한 32). 이것을 실패시키는 것: frame 상한을 넘는 환경(프롬프트가 frame을 쓰지 않음), 값이
-# 4 KB를 넘거나 글자 중간에서 잘리는 것, 단위 수가 32가 아닌 것.
+# 4 KB를 넘거나 글자 중간에서 잘리는 것, 단위 수가 32가 아닌 것, env_allow가 겹치거나 환경에 없는 이름인 것.
 def test_command_case_inputs_fill_their_caps(tmp_path):
     config, env, mark = git.command_setup("prompt-env64k", tmp_path / "e")
     entries = sum(len(k) + 1 + len(v) + 1 for k, v in {**env, "PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}.items())
@@ -446,5 +448,9 @@ def test_command_case_inputs_fill_their_caps(tmp_path):
         assert 4_090 <= len(value) <= 4_096 and b"\n" not in value
         value.decode()
         assert config.count("kind = 'command'") == 32 and config.count("cache = '3600s'") == 32
+    config, env, mark = git.command_setup("prompt-env64k-commands", tmp_path / "ec")
+    assert env == git.command_setup("prompt-env64k", tmp_path / "e2")[1]
+    allowed = re.findall(r'env_allow = \["(\w+)"\]', config)
+    assert len(allowed) == len(set(allowed)) == 32 and set(allowed) <= set(env)
     config, env, mark = git.command_setup("prompt-commands-hit", tmp_path / "h")
     assert config.count("kind = 'command'") == 3 and mark == b"prod-cluster"
