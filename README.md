@@ -140,7 +140,7 @@ the current environment and warn that these can differ from the prompt's folders
 Use `bingsu config check` to see diagnostics and folder safety details, and `bingsu config path` to see the applied
 file order. `bingsu config check --explain` adds, for each command and language segment, whether it runs and why
 not, its command, working folder, time limits and the names of the environment it gets, each with the file and line
-it came from, and the file it would run. Environment values are never shown. The file is looked up as from a folder
+it came from, and the file it would run. The values of environment entries are not printed; paths such as the file to run can still come from `HOME`, XDG or `PATH`. The file is looked up as from a folder
 outside any repository; a prompt inside a repository leaves out executables inside it. A folder whose safety cannot be confirmed can supply colors and layout only; choosing a file inside it
 with `config use` does not grant execution trust. Check the ownership, permissions and access lists named by the
 diagnostic before running init again. External text in diagnostics is sanitized for terminal display; path arguments
