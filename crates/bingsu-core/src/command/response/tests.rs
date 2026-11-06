@@ -435,4 +435,72 @@ mod cases {
         bytes[status] = 1;
         assert_eq!(Response::decode(&resealed(bytes)), Err(Error::Flags));
     }
+
+    // 앞단 decode(decode_shown)는 그리지 않는 원본 줄의 글자를 검사하지 않고 비워서 돌려주며, 값은 그대로 검사한다.
+    // helper의 decode와 encode는 원본 줄도 거부한다. 이것을 실패시키는 것: decode_shown이 원본 줄을 검사하는 것(제어
+    // 문자가 든 원본 줄 때문에 값을 잃음), 원본 줄을 그대로 돌려주는 것, decode_shown이 값 검사까지 빼는 것, decode가
+    // 원본 줄 검사를 빼는 것, 원본 줄의 UTF-8·길이·실패 항목 검사를 빼는 것.
+    #[test]
+    fn the_prompt_decode_skips_only_the_raw_line_characters() {
+        let good = Response {
+            binding: binding(),
+            entries: vec![entry("custom/a", 10, 20)],
+        }
+        .encode()
+        .unwrap();
+        // Value first, then the raw line: both are "v-custom/a".
+        let value = good.windows(2).position(|w| w == b"v-").unwrap();
+        let raw = good.windows(2).rposition(|w| w == b"v-").unwrap();
+        assert!(value < raw);
+        let mut bytes = good.clone();
+        bytes[raw] = 0x1b;
+        let bytes = resealed(bytes);
+        assert_eq!(Response::decode(&bytes), Err(Error::Utf8));
+        let shown = Response::decode_shown(&bytes).unwrap();
+        assert_eq!(shown.entries[0].value, "v-custom/a");
+        // The undrawn raw line is left out, checked or not.
+        assert_eq!(shown.entries[0].raw, "");
+        assert_eq!(Response::decode_shown(&good).unwrap().entries[0].raw, "");
+        let mut bytes = good.clone();
+        bytes[value] = 0x1b;
+        assert_eq!(Response::decode_shown(&resealed(bytes)), Err(Error::Utf8));
+        // A raw line that is not UTF-8 is refused by both.
+        let mut bytes = good;
+        bytes[raw] = 0xff;
+        let bytes = resealed(bytes);
+        assert_eq!(Response::decode_shown(&bytes), Err(Error::Utf8));
+        assert_eq!(Response::decode(&bytes), Err(Error::Utf8));
+        // A failure that keeps a raw line, and a raw line over 4 KB.
+        let mut e = entry("custom/a", 10, 20);
+        e.value.clear();
+        e.raw = "r".into();
+        let one = Response {
+            binding: binding(),
+            entries: vec![e.clone()],
+        }
+        .encode()
+        .unwrap();
+        let mut bytes = one.clone();
+        let status = bytes.len() - 4 - (4 + 1) - 1;
+        assert_eq!(bytes[status], 0);
+        bytes[status] = 1;
+        let bytes = resealed(bytes);
+        assert_eq!(Response::decode(&bytes), Err(Error::Flags));
+        assert_eq!(Response::decode_shown(&bytes), Err(Error::Flags));
+        e.raw = "r".repeat(VALUE_MAX);
+        let mut bytes = Response {
+            binding: binding(),
+            entries: vec![e],
+        }
+        .encode()
+        .unwrap();
+        let at = bytes.len() - VALUE_MAX - 4;
+        bytes[at..at + 4].copy_from_slice(&(VALUE_MAX as u32 + 1).to_le_bytes());
+        bytes.push(b'r');
+        let body = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) + 1;
+        bytes[12..16].copy_from_slice(&body.to_le_bytes());
+        let bytes = resealed(bytes);
+        assert_eq!(Response::decode(&bytes), Err(Error::Limit));
+        assert_eq!(Response::decode_shown(&bytes), Err(Error::Limit));
+    }
 }

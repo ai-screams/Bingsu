@@ -136,7 +136,7 @@ def test_product_budgets_cover_success_failure_and_gc():
     small = collector_product_expected("current", body_bytes=16384)
     big = collector_product_expected("current", body_bytes=16385)
     assert big["front-prefetch"]["read"] == small["front-prefetch"]["read"] + 1
-    assert collector_product_expected("long-cwd", cwd_bytes=65536)["front-prefetch"]["openat"] == small["front-prefetch"]["openat"] == 5
+    assert collector_product_expected("long-cwd", cwd_bytes=65536)["front-prefetch"]["openat"] == small["front-prefetch"]["openat"] == 6
     assert collector_product_expected("busy")["helper-publication"] == {}
     assert collector_product_expected("legacy-gc", gc_directories=2, gc_files=1)["helper-gc"] == {"getdents": 4, "unlinkat": 1, "fsync": 0}
 
@@ -545,15 +545,25 @@ def test_prompt_samples_require_normal_record(monkeypatch, tmp_path, record):
 # prepared: the PR's script also prepares the base tip, which may predate ClockUse.
 # 이것을 실패시키는 것: 측정 코드가 ClockUse 인자를 늘 넘기거나(옛 base 빌드가 깨짐) 늘 빼는 것
 # (C3 이후 트리의 --cfg test 빌드가 깨짐), 자리표시자를 남기는 것.
+# prompt_read도 같다: C4b부터 prepare_with_clock이 환경 frame 인자를 받는다. 이것을 실패시키는 것: 그 인자를
+# 늘 넘기거나 늘 빼는 것, 다른 함수의 environment 매개변수를 보고 정하는 것.
 @pytest.mark.parametrize("declared", [True, False])
-def test_read_measurement_matches_the_prepared_tree(tmp_path, declared):
+@pytest.mark.parametrize("environment", [True, False])
+def test_read_measurement_matches_the_prepared_tree(tmp_path, declared, environment):
     io = tmp_path / "crates/bingsu/src/prompt_io.rs"
     io.parent.mkdir(parents=True)
     io.write_text("pub(crate) enum ClockUse {\n    Entry,\n}\n" if declared else "pub(crate) fn monotonic_ns() {}\n")
+    reader = ("fn prepare_state(raw: &[&[u8]], environment: Option<Vec<u8>>) -> Prepared {}\n"
+              "fn prepare_with_clock(\n    raw: &[&[u8]],\n    clock: fn(Option<Deadline>) -> ClockPins,\n    deadline: Option<Deadline>,\n"
+              + ("    environment: Option<Vec<u8>>,\n" if environment else "") + ") -> Prepared {}\n")
+    (tmp_path / "crates/bingsu/src/prompt_read.rs").write_text(reader)
     text = product.read_measurement(tmp_path)
-    assert "@NOW@" not in text
+    assert "@NOW@" not in text and "@ENV@" not in text
+    call = re.search(r"prepare_with_clock\((.*?)\);", text).group(1)
+    assert call.endswith("product_reader_clock,None,None" if environment else "product_reader_clock,None"), call
     calls = re.findall(r"crate::prompt_io::monotonic_ns\(([^)]*)\)", text)
     assert len(calls) == 4, calls
     assert set(calls) == ({"crate::prompt_io::ClockUse::Deadline"} if declared else {""}), calls
-    # The real tree of this checkout declares it.
-    assert "ClockUse::Deadline" in product.read_measurement(SOURCE.parents[1])
+    # The real tree of this checkout declares both.
+    real = product.read_measurement(SOURCE.parents[1])
+    assert "ClockUse::Deadline" in real and "product_reader_clock,None,None)" in real

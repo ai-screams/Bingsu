@@ -790,3 +790,19 @@ def test_round_without_units_starts_no_supervisor(tmp_path, _native_boot_require
     session.wait_quiet()
     assert seen == []
     assert list(root.glob("command-*.lock")) == [] and not session.neutral().exists()
+
+
+# 앞단이 이 셸의 명령 응답 값을 그린다(C4b). 다른 KUBECONFIG 셸에는 그 값을 그리지 않는다. 이것을 실패시키는 것:
+# 앞단의 command 응답 읽기나 값 채우기를 빼는 것(값이 안 보임), 환경 요약값 비교를 빼는 것(다른 셸에도 보임).
+def test_command_value_is_drawn_for_its_own_shell(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    session.put(config(["/bin/sh", "-c", "echo shown-value"], "cache='30s'\nenv_allow=['KUBECONFIG']\n"))
+    session.env["KUBECONFIG"] = "/a"
+    session.level = "info"
+    ready(session)
+    published_rounds(session)
+    assert b"shown-value" in session.prompt()
+    session.wait_quiet(timeout=8)
+    session.env["KUBECONFIG"] = "/b"
+    assert b"shown-value" not in session.prompt()
+    session.wait_quiet(timeout=8)

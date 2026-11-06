@@ -1143,15 +1143,25 @@ fn bootstrap_is_only_a_prefilter_entry() {
     let (ok, err) = run_adapter(&source);
     assert!(ok, "{err}");
     let call = "crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));";
-    assert!(source.contains(call));
-    let after = source.replace(call, "").replace(
+    let bound = format!("let environment = {call}");
+    assert!(source.contains(&bound));
+    let after = source.replace(&bound, "let environment = None;").replace(
         "respond(staged())",
         &format!("{call}\n            respond(staged())"),
     );
     assert!(!run_adapter(&after).0);
+    // 이것을 실패시키는 것: bootstrap 문을 경로와 인자 수만 보는 검사로 되돌리는 것(다른 인자·바인딩을 받음),
+    // 바인딩 없이 식 문으로 부르는 옛 모양을 받는 것.
+    for shape in [
+        "let environment = crate::prompt_spawn::bootstrap(exe, &raw, None);",
+        "let mut environment = crate::prompt_spawn::bootstrap(exe, &raw, Some(deadline));",
+    ] {
+        let (ok, err) = run_adapter(&source.replace(&bound, shape));
+        assert!(!ok, "{shape}: {err}");
+    }
     let early = source.replace("let rec =", "enter_sandbox(); let rec =");
     assert!(!run_adapter(&early).0);
-    let other = source.replace(call, "crate::other::run(exe, &raw);");
+    let other = source.replace(call, "crate::other::run(exe, &raw, Some(deadline));");
     assert!(!run_adapter(&other).0);
     let extra = source.replace(
         "respond(staged())",
@@ -1168,7 +1178,7 @@ fn reader_is_only_a_prefilter_entry() {
     )
     .unwrap();
     assert!(run_adapter(&source).0);
-    let call = "let staged = crate::prompt_read::prepare(&raw, deadline);";
+    let call = "let staged = crate::prompt_read::prepare(&raw, deadline, environment);";
     assert!(source.contains(call));
     for bad in [
         source
@@ -1176,7 +1186,17 @@ fn reader_is_only_a_prefilter_entry() {
             .replace("respond(staged())", &format!("{call} respond(staged())")),
         source.replace(
             call,
-            &format!("{call} crate::prompt_read::prepare(&raw, deadline);"),
+            &format!("{call} crate::prompt_read::prepare(&raw, deadline, None);"),
+        ),
+        // 이것을 실패시키는 것: 세 번째 인자를 `environment` 바인딩이 아닌 값으로 받는 것(셸 환경 밖의
+        // 바이트나 다른 경로가 reader에 닿음), 옛 두 인자 모양을 받는 것.
+        source.replace(
+            call,
+            "let staged = crate::prompt_read::prepare(&raw, deadline, other);",
+        ),
+        source.replace(
+            call,
+            "let staged = crate::prompt_read::prepare(&raw, deadline);",
         ),
         source.replace(
             "respond(staged())",
@@ -1409,13 +1429,17 @@ fn prepare_arguments_are_exact() {
     .unwrap();
     assert!(run_adapter(&source).0);
     for args in [
-        "&[], deadline",
-        "&raw, deadline + 1",
-        "&raw, other",
-        "&mut raw, deadline",
-        "&raw, { deadline }",
+        "&[], deadline, environment",
+        "&raw, deadline + 1, environment",
+        "&raw, other, environment",
+        "&mut raw, deadline, environment",
+        "&raw, { deadline }, environment",
+        "&raw, deadline, { environment }",
     ] {
-        let bad = source.replace("prepare(&raw, deadline)", &format!("prepare({args})"));
+        let bad = source.replace(
+            "prepare(&raw, deadline, environment)",
+            &format!("prepare({args})"),
+        );
         let (ok, err) = run_adapter(&bad);
         assert!(!ok, "{args}: {err}");
     }

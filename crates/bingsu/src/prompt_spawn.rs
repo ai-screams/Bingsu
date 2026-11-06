@@ -11,22 +11,30 @@
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 
+/// Starts the refresh helper (unless the shell asked for a redraw) and
+/// returns the shell's environment frame: the one pass over environ serves
+/// the helper's fd 4 and the prompt's command display (C4b ruling Q6).
+/// `None` for an environment over the frame cap, as the helper sees it.
 pub fn bootstrap(
     exe: &OsStr,
     raw: &[&[u8]],
     deadline: Option<bingsu_core::front::output::Deadline>,
-) {
+) -> Option<Vec<u8>> {
+    let frame = bingsu_core::command::env_frame::encode(environ_entries());
     if bingsu_core::front::spawns_helper(raw) {
-        let _ = spawn_until(exe, raw, deadline);
+        let _ = spawn_until(exe, raw, frame.as_deref(), deadline);
     }
+    frame
 }
 #[cfg(test)]
 pub(crate) fn spawn_for_test(exe: &OsStr, raw: &[&[u8]]) -> Result<(), ()> {
-    spawn_until(exe, raw, None)
+    let frame = bingsu_core::command::env_frame::encode(environ_entries());
+    spawn_until(exe, raw, frame.as_deref(), None)
 }
 fn spawn_until(
     exe: &OsStr,
     raw: &[&[u8]],
+    frame: Option<&[u8]>,
     deadline: Option<bingsu_core::front::output::Deadline>,
 ) -> Result<(), ()> {
     crate::prompt_io::check_deadline(deadline);
@@ -110,7 +118,7 @@ fn spawn_until(
         return Err(());
         crate::prompt_io::check_deadline(deadline);
         // Made after the fd walk above, so the walk neither lists nor marks it.
-        *env_read = env_pipe(environ_entries());
+        *env_read = env_pipe(frame);
         if let Some(read) = *env_read {
             // First, so a read end at 0-2 is copied before those are replaced.
             // A read end that already is fd 4 has its close-on-exec flag
@@ -160,12 +168,12 @@ fn check(rc: i32) -> Result<(), ()> {
 
 const ENV_FD: i32 = bingsu_core::command::env_frame::FD;
 
-/// The read end of a new pipe holding the frame of `entries`, its write end
-/// already closed. `None` when no pipe could be made; the helper then starts
-/// without fd 4, which it reads as no environment.
-fn env_pipe<'a>(entries: impl IntoIterator<Item = &'a [u8]>) -> Option<i32> {
+/// The read end of a new pipe holding `frame`, its write end already
+/// closed. `None` when no pipe could be made; the helper then starts without
+/// fd 4, which it reads as no environment.
+fn env_pipe(frame: Option<&[u8]>) -> Option<i32> {
     let [read, write] = env_pipe_ends()?;
-    let _ = write_frame(write, entries);
+    let _ = write_frame(write, frame);
     // SAFETY: the write end made above, closed exactly once.
     unsafe { libc::close(write) };
     Some(read)
@@ -207,8 +215,8 @@ fn env_pipe_ends() -> Option<[i32; 2]> {
 /// write or an oversize environment (no frame, no write) leaves less than a
 /// whole frame, which the helper reads as no environment. Never retried:
 /// nobody reads the pipe until the helper runs.
-fn write_frame<'a>(write: i32, entries: impl IntoIterator<Item = &'a [u8]>) -> isize {
-    let Some(frame) = bingsu_core::command::env_frame::encode(entries) else {
+fn write_frame(write: i32, frame: Option<&[u8]>) -> isize {
+    let Some(frame) = frame else {
         return 0;
     };
     // SAFETY: initialized frame bytes, valid for frame.len() bytes.
@@ -254,7 +262,12 @@ fn environ_entries() -> impl Iterator<Item = &'static [u8]> {
 #[cfg(test)]
 mod tests {
     fn spawn(exe: &std::ffi::OsStr, raw: &[&[u8]]) -> Result<(), ()> {
-        super::spawn_until(exe, raw, None)
+        let frame = bingsu_core::command::env_frame::encode(super::environ_entries());
+        super::spawn_until(exe, raw, frame.as_deref(), None)
+    }
+    /// The frame of these entries, as `bootstrap` makes it.
+    fn frame_of(entries: &[&[u8]]) -> Option<Vec<u8>> {
+        bingsu_core::command::env_frame::encode(entries.iter().copied())
     }
     use super::*;
     use std::{
@@ -522,7 +535,7 @@ mod tests {
         let max = entry(BODY_MAX);
         let [read, write] = super::env_pipe_ends().unwrap();
         assert_eq!(
-            super::write_frame(write, [max.as_slice()]),
+            super::write_frame(write, frame_of(&[max.as_slice()]).as_deref()),
             FRAME_MAX as isize
         );
         // SAFETY: test-owned write end, closed once.
@@ -532,7 +545,7 @@ mod tests {
             Some(max.as_slice())
         );
         let over = entry(BODY_MAX + 1);
-        let read = super::env_pipe([over.as_slice()]).unwrap();
+        let read = super::env_pipe(frame_of(&[over.as_slice()]).as_deref()).unwrap();
         assert_eq!(
             read_all(read),
             b"",
@@ -565,7 +578,7 @@ mod tests {
             assert!(n > 0);
             filled += n as usize;
         }
-        let accepted = super::write_frame(write, [body.as_slice()]);
+        let accepted = super::write_frame(write, frame_of(&[body.as_slice()]).as_deref());
         assert!(
             accepted < frame.len() as isize,
             "the fixture must refuse part of the frame"

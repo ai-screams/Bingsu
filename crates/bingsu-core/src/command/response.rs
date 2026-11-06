@@ -145,7 +145,7 @@ impl Response {
 
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.binding.validate()?;
-        check_entries(&self.entries)?;
+        check_entries(&self.entries, Raw::Checked)?;
         let mut out = alloc::vec![0; HEADER];
         let b = &self.binding;
         out.extend_from_slice(&b.build_id.0);
@@ -187,6 +187,19 @@ impl Response {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        Self::decode_with(bytes, Raw::Checked)
+    }
+
+    /// The prompt's decode: every check of [`Response::decode`] except the
+    /// characters of `raw`, which the prompt never draws (its length, UTF-8
+    /// and the empty raw line of a failure still are checked), and every
+    /// `raw` comes back empty. The helper reads with `decode`, so a file
+    /// that fails it is never merged or used for the cache.
+    pub fn decode_shown(bytes: &[u8]) -> Result<Self, Error> {
+        Self::decode_with(bytes, Raw::Unchecked)
+    }
+
+    fn decode_with(bytes: &[u8], raw_text: Raw) -> Result<Self, Error> {
         let total = declared_len(bytes)?;
         if bytes.len() != total {
             return Err(if bytes.len() < total {
@@ -230,7 +243,23 @@ impl Response {
                 _ => return Err(Error::Kind),
             };
             let value = text(r.bytes()?)?;
-            let raw = text(r.bytes()?)?;
+            let raw = match raw_text {
+                Raw::Checked => text(r.bytes()?)?,
+                // The prompt never draws the raw line: it gets the same
+                // length, UTF-8 and failure checks, then is left out, so no
+                // unchecked character reaches the prompt's memory.
+                Raw::Unchecked => {
+                    let bytes = r.bytes()?;
+                    core::str::from_utf8(bytes).map_err(|_| Error::Utf8)?;
+                    if bytes.len() > VALUE_MAX {
+                        return Err(Error::Limit);
+                    }
+                    if status == Status::Failed && !bytes.is_empty() {
+                        return Err(Error::Flags);
+                    }
+                    String::new()
+                }
+            };
             entries.push(Entry {
                 origin,
                 id,
@@ -247,7 +276,7 @@ impl Response {
         if !r.0.is_empty() {
             return Err(Error::Trailing);
         }
-        check_entries(&entries)?;
+        check_entries(&entries, raw_text)?;
         Ok(Self { binding, entries })
     }
 }
@@ -274,7 +303,14 @@ pub fn declared_len(bytes: &[u8]) -> Result<usize, Error> {
     Ok(total)
 }
 
-fn check_entries(entries: &[Entry]) -> Result<(), Error> {
+/// Whether `check_entries` checks the characters of `raw`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Raw {
+    Checked,
+    Unchecked,
+}
+
+fn check_entries(entries: &[Entry], raw_text: Raw) -> Result<(), Error> {
     if entries.len() > ENTRIES_MAX {
         return Err(Error::Limit);
     }
@@ -287,12 +323,10 @@ fn check_entries(entries: &[Entry]) -> Result<(), Error> {
         {
             return Err(Error::Limit);
         }
-        // The front reads these values straight to the terminal (C4b): only
+        // The front reads values straight to the terminal (C4b): only
         // sanitized text, as `first_line` makes it. A failure has no value.
-        if [&e.value, &e.raw]
-            .iter()
-            .any(|t| !t.chars().all(|c| !crate::sanitize::is_removed(c)))
-        {
+        let clean = |t: &str| t.chars().all(|c| !crate::sanitize::is_removed(c));
+        if !clean(&e.value) || (raw_text == Raw::Checked && !clean(&e.raw)) {
             return Err(Error::Utf8);
         }
         if e.status == Status::Failed && !(e.value.is_empty() && e.raw.is_empty()) {

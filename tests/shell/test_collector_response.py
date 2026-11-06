@@ -73,7 +73,7 @@ def run_reader(trace_binary, tmp_path, mode="current", length=4, shell="bash", p
 # 이것을 실패시키는 것: 실제 발행 fixture·동일 fd·previous fallback 시험이 실행되지 않는 것.
 @pytest.mark.parametrize("name", [
     "missing_collections_stops_after_one_enoent",
-    "collection_prefetch_has_five_fixed_path_opens",
+    "collection_prefetch_has_six_fixed_path_opens",
     "prefetch_uses_only_validated_context_and_cwd_address",
     "published_fixture_previous_and_unknown_reach_render",
     "new_completion_never_blocks_the_current_prompt",
@@ -113,7 +113,8 @@ def test_collected_text_is_sanitized_for_each_shell(trace_binary, tmp_path, shel
     assert b"MARK" in screen and not canary.exists()
 
 
-# 이것을 실패시키는 것: Linux 실행을 skip하거나 부재1·정상5/facts/청크 계약을 실제 trace에서 검사하지 않는 것.
+# 이것을 실패시키는 것: Linux 실행을 skip하거나 부재1·정상6(폴더 셋, 수집 사본 둘, 명령 응답)/facts/청크 계약을 실제 trace에서
+# 검사하지 않는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux seccomp and strace runtime gate")
 @pytest.mark.parametrize("length", [1, 3841, 65536])
 @pytest.mark.parametrize("mode", ["absent", "current", "previous", "corrupt"])
@@ -134,7 +135,10 @@ def test_post_filter_has_no_new_path_or_metadata_effects(trace_binary, tmp_path,
     budget.prompt_root_io([c for c in front if c.name != budget.EXIT_EVENT],
                           boundary, trace_binary, pinned, begin.pid, cwd)
     counts = budget.assert_collection_trace(front, boundary, pinned, cwd, required=True)
-    assert counts["openat"] == (1 if mode == "absent" else 5)
+    # No collection folder: one ENOENT open. With a store: three folders, the
+    # two collection copies and the command response (C4b ruling Q1: opened
+    # with them, here absent, so its open fails ENOENT and adds nothing more).
+    assert counts["openat"] == (1 if mode == "absent" else 6)
     assert sum(c.name == "write" for c in front if c.index > boundary) == 1
     table = {r[0] for r in budget._ROWS if r[0] != "-"}
     for call in front:
