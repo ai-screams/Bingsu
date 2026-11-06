@@ -369,6 +369,21 @@ mod cases {
         )
         .unwrap();
         assert_eq!(late.attempted_at, 20);
+        // m6-P1: the value is the part the prompt reads to cut a user
+        // segment, the raw line the whole first line (4 KB here).
+        let mut long = o(Reason::Exited(0));
+        long.stdout = "kube-\u{D55C}\u{AE00}-ctx/".repeat(300).into_bytes();
+        let e = entry_for("custom/a".into(), [1; 32], [2; 32], 5, &long).unwrap();
+        assert!(e.raw.len() > 4_000);
+        assert_eq!(
+            e.value,
+            crate::field::Clean::read_prefix(&e.raw, crate::field::CUSTOM_TEXT_CELLS)
+        );
+        assert!(
+            e.value.len() <= 276 && e.value.len() >= 272,
+            "{}",
+            e.value.len()
+        );
     }
     // 앞단이 이 파일의 값을 터미널에 그대로 쓰므로(C4b) 값과 원본 줄에는 sanitize가 지우는 문자가 없어야 하고,
     // 실패 항목은 값이 비어야 한다. encode와 decode가 같은 검사를 한다. 이것을 실패시키는 것: check_entries의
