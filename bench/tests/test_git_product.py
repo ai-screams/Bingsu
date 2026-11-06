@@ -417,3 +417,34 @@ def test_prepared_directory_differs_for_identical_binaries_from_different_source
     base, candidate = git.prepared_directory(front, tmp_path / "base"), git.prepared_directory(front, tmp_path / "candidate")
     assert base != candidate and base.parent == candidate.parent
     assert git.prepared_directory(front, tmp_path / "base") == base
+
+
+# 명령 시간 칸은 helper fixture 없이 제품 프롬프트만 재고, 프롬프트 시간과 값을 그린 비율만 요약한다. 이것을
+# 실패시키는 것: 명령 칸을 git fixture로 보내는 것(admission_gc_ns가 없어 BLOCKED), 명령 칸을 허용 목록에서 빼는 것.
+def test_command_cases_time_the_prompt_alone(pair, monkeypatch):
+    monkeypatch.setattr(git, "observe", lambda *args: pytest.fail("a command case ran the git fixture"))
+    monkeypatch.setattr(git, "observe_command",
+                        lambda *args: {"status": "OBSERVED", "prompt_ns": 100, "draws_value": True})
+    value = git.measure_pair("base", "candidate", 200, cases=list(git.COMMAND_CASES))
+    assert value["status"] == "OBSERVED" and set(value["cases"]) == set(git.COMMAND_CASES)
+    for case in value["cases"].values():
+        for row in case["variants"].values():
+            assert row["observed"] == 200 and row["metrics"]["prompt_ns"]["p50"] == 100
+            assert row["draws_value"]["rate"] == 1
+
+
+# 칸의 입력: env64k는 64 KiB frame 안에서 가득 차고, max·redraw는 32단위가 각자 4,096바이트 이하의 UTF-8 한 줄을
+# 그린다(4 KB 상한, 단위 상한 32). 이것을 실패시키는 것: frame 상한을 넘는 환경(프롬프트가 frame을 쓰지 않음), 값이
+# 4 KB를 넘거나 글자 중간에서 잘리는 것, 단위 수가 32가 아닌 것.
+def test_command_case_inputs_fill_their_caps(tmp_path):
+    config, env, mark = git.command_setup("prompt-env64k", tmp_path / "e")
+    entries = sum(len(k) + 1 + len(v) + 1 for k, v in {**env, "PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}.items())
+    assert mark is None and 60_000 <= entries <= 65_536 - 16
+    for case in ("prompt-commands-max", "prompt-commands-redraw"):
+        config, env, mark = git.command_setup(case, tmp_path / case)
+        value = (tmp_path / case / "value.txt").read_bytes()
+        assert 4_090 <= len(value) <= 4_096 and b"\n" not in value
+        value.decode()
+        assert config.count("kind = 'command'") == 32 and config.count("cache = '3600s'") == 32
+    config, env, mark = git.command_setup("prompt-commands-hit", tmp_path / "h")
+    assert config.count("kind = 'command'") == 3 and mark == b"prod-cluster"

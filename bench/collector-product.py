@@ -258,9 +258,10 @@ def normal_record(result):
             and result.stdout.endswith(b"ok:none\x1e") and result.stdout.count(b"\x1f") == 13)
 
 
-def prompt_context(binary, directory):
-    """Prime the default product snapshot outside the measured interval."""
-    env = {"PATH": os.environ["PATH"], "LC_ALL": "C.UTF-8"}
+def prompt_context(binary, directory, config_text="icons = 'ascii'\n", extra_env=None):
+    """Prime the default product snapshot outside the measured interval. A
+    caller may give its own config text and more shell environment."""
+    env = {"PATH": os.environ["PATH"], "LC_ALL": "C.UTF-8", **(extra_env or {})}
     for key, name in (("XDG_CONFIG_HOME", "product-config"), ("XDG_STATE_HOME", "product-state"),
                       ("XDG_RUNTIME_DIR", "product-runtime"), ("XDG_CACHE_HOME", "product-cache")):
         path = Path(directory) / name
@@ -268,7 +269,7 @@ def prompt_context(binary, directory):
         env[key] = str(path)
     config = Path(env["XDG_CONFIG_HOME"]) / "bingsu"
     config.mkdir(mode=0o700, exist_ok=True)
-    (config / "config.toml").write_text("icons = 'ascii'\n")
+    (config / "config.toml").write_text(config_text)
     init = run([binary, "init", "bash"], env=env)
     cold_notice = (b"bingsu: reading your settings did not finish in time; the prompt starts with "
                    b"the built-in look and takes your settings when they are ready\n")

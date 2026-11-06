@@ -30,6 +30,18 @@ from typing import TypedDict
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(tempfile.gettempdir()) / "bingsu-measurements"
 CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
+# Whole-prompt time with the command environment and command values (M6 C4b-3).
+# These run only the normal product prompt, not the helper fixture. The gate
+# records them only (size_gate.py --record-only): a base that reads no command
+# response makes the ratio the whole added cost, and the worst increment is
+# bounded by +0.5 ms (U-23), not by the ratio.
+# - prompt-env64k: about 60 KiB of shell environment, so the prompt writes a near-full frame.
+# - prompt-commands-hit: three cached command segments, values of a few bytes.
+# - prompt-commands-max: 32 cached command segments, each value 4 KB of mixed text, all drawn (2,400 columns).
+# - prompt-commands-redraw: the max config, redrawn (`--redraw`: no helper).
+SESSION = "0123456789abcdef0123456789abcdef"
+COMMAND_CASES = ("prompt-env64k", "prompt-commands-hit", "prompt-commands-max", "prompt-commands-redraw")
+ALL_CASES = CASES + COMMAND_CASES
 STAGES = ("A", "PathFacts", "B", "C", "D")
 
 # commands::run names crate::relay on Linux and macOS; the relay itself is not part of this build.
@@ -369,6 +381,112 @@ def repository(directory, name):
     return path
 
 
+def command_setup(case, directory):
+    """The config, extra environment and drawn text of a command case."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if case == "prompt-env64k":
+        # 60 entries of 1,000 bytes: under the 64 KiB frame with PATH and LC_ALL.
+        return "icons = 'ascii'\n", {f"BINGSU_PAD_{i:02}": "x" * 986 for i in range(60)}, None
+    if case == "prompt-commands-hit":
+        units = [("/bin/echo", "prod-cluster"), ("/bin/echo", "default"), ("/bin/echo", "v1.29")]
+        argv = [[exe, word] for exe, word in units]
+        mark = b"prod-cluster"
+    else:
+        # One line of 4,096 bytes of mixed text (ASCII, Hangul, a separator), no newline.
+        text = "kube-\uD55C\uAE00-ctx/" * 400
+        data = text.encode()[:4096]
+        while True:
+            try:
+                data.decode()
+                break
+            except UnicodeDecodeError:
+                data = data[:-1]
+        (directory / "value.txt").write_bytes(data)
+        argv = [["/usr/bin/head", "-c", "4096", str(directory / "value.txt")] for _ in range(32)]
+        mark = b"kube-"
+    lines = []
+    for i, words in enumerate(argv):
+        quoted = ", ".join(json.dumps(w) for w in words)
+        lines.append(f"[segment.\"custom/k{i:02}\"]\nkind = 'command'\ncommand = [{quoted}]\ncache = '3600s'\n")
+    ids = ", ".join(f"'custom/k{i:02}'" for i in range(len(argv)))
+    return "icons = 'ascii'\n" + "".join(lines) + f"[layout.line1]\nleft = [{ids}, 'char']\n", {}, mark
+
+
+def response_entries(directory):
+    """How many entries the published command response under `directory`
+    holds (BNGCMD01: 64-byte head, the binding, then a one-byte count), or 0."""
+    for path in directory.rglob("store/command"):
+        data = path.read_bytes()
+        at = 64 + 32 + 16 + 16 + 4 + 1 + 16 + 8
+        for _ in range(3):
+            if len(data) < at + 4:
+                return 0
+            at += 4 + int.from_bytes(data[at:at + 4], "little")
+        return data[at] if len(data) > at else 0
+    return 0
+
+
+def command_context(binary, directory, case):
+    """A warm prompt for a command case: the product snapshot is current and,
+    for a command config, the helper has published the command response."""
+    config, extra_env, mark = command_setup(case, directory)
+    command, env = M3B.prompt_context(binary, directory, config_text=config, extra_env=extra_env)
+    # The shell hooks pass a session value on every prompt; command units run only with one.
+    command = [*command, "--session", SESSION]
+    if case in ("prompt-commands-max", "prompt-commands-redraw"):
+        # 32 values of 64 cells, separators included, fit only a wide line:
+        # at 80 columns the layout drops them and nothing is drawn.
+        command[command.index("--width") + 1] = "2400"
+    if case == "prompt-env64k":
+        return command, env, None
+    # Each prompt starts a refresh helper, which runs at most eight units a
+    # round and caches the results: wait until the response holds every unit.
+    units = config.count("kind = 'command'")
+    for _ in range(400):
+        result = M3B.run(command, env=env)
+        if M3B.normal_record(result) and response_entries(directory) == units:
+            break
+        time.sleep(0.05)
+    else:
+        raise ValueError(f"{case}: the command response never held all {units} units")
+    if case == "prompt-commands-redraw":
+        command = [*command, "--redraw"]
+    return command, env, mark
+
+
+def observe_command(binary, contexts, directory, case):
+    """One normal product prompt of a command case, timed."""
+    key = str(directory)
+    if key not in contexts:
+        try:
+            contexts[key] = command_context(binary, directory, case)
+        except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+            contexts[key] = str(error)
+    if isinstance(contexts[key], str):
+        return {"status": "BLOCKED", "reason": contexts[key]}
+    command, env, mark = contexts[key]
+    start = time.monotonic_ns()
+    try:
+        result = M3B.run(command, env=env)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        return {"status": "BLOCKED", "reason": str(error)}
+    elapsed = time.monotonic_ns() - start
+    if not M3B.normal_record(result):
+        return {"status": "BLOCKED", "reason": "normal B1 record unavailable"}
+    return {"status": "OBSERVED", "prompt_ns": elapsed, "draws_value": None if mark is None else mark in result.stdout}
+
+
+def summarize_prompt(samples, rounds):
+    """The prompt time of a command case, and how often the value was drawn."""
+    observed = [s for s in samples if s.get("status") == "OBSERVED"]
+    values = [s["prompt_ns"] for s in observed]
+    drawn = [s for s in observed if s.get("draws_value") is not None]
+    return {"attempted": len(samples), "observed": len(observed),
+            "draws_value": rate(sum(s["draws_value"] for s in drawn), len(drawn)),
+            "metrics": {"prompt_ns": {"status": "OBSERVED" if len(values) == rounds else "BLOCKED",
+                                      **(M3B.summary(values) if values else {"n": 0})}}}
+
+
 def memory_sample(pid):
     at = time.monotonic_ns()
     if platform.system() == "Linux":
@@ -641,7 +759,7 @@ def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, conditio
     if rounds < 200:
         raise ValueError("M3c requires at least 200 warm rounds")
     cases = list(CASES if cases is None else cases)
-    if not cases or len(set(cases)) != len(cases) or set(cases) - set(CASES):
+    if not cases or len(set(cases)) != len(cases) or set(cases) - set(ALL_CASES):
         raise ValueError("unknown or duplicate cases")
     binaries = {"base": str(Path(base).resolve()), "candidate": str(Path(candidate).resolve())}
     preparations = {name: prepared(binary) for name, binary in binaries.items()}
@@ -663,10 +781,16 @@ def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, conditio
         M3B.protocol.random.Random(case_seed).shuffle(cases)
         result['case_seed'], result['case_order'] = case_seed, cases
         for case in cases:
-            repo = repos[case]
-            paired = M3B.protocol.paired(binaries['base'], binaries['candidate'], rounds, condition,
-                lambda name, binary: observe(binary, preparations[name], scratch / name / case, repo),
-                required_metrics=("prompt_ns", "admission_gc_ns"))
+            if case in COMMAND_CASES:
+                contexts = {}
+                paired = M3B.protocol.paired(binaries['base'], binaries['candidate'], rounds, condition,
+                    lambda name, binary: observe_command(binary, contexts, scratch / name / case, case),
+                    required_metrics=("prompt_ns",))
+            else:
+                repo = repos[case]
+                paired = M3B.protocol.paired(binaries['base'], binaries['candidate'], rounds, condition,
+                    lambda name, binary: observe(binary, preparations[name], scratch / name / case, repo),
+                    required_metrics=("prompt_ns", "admission_gc_ns"))
             cold = paired.get('cold_first_process', {})
             samples = {n: paired['variants'][n]['samples'] for n in binaries}
             order = paired['order']
@@ -674,7 +798,7 @@ def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, conditio
                 result['status'] = 'BLOCKED'
             row = {**paired, "cold_first_process": cold, "order": order, "variants": {}}
             for name in binaries:
-                stats = summarize(samples[name], rounds)
+                stats = (summarize_prompt if case in COMMAND_CASES else summarize)(samples[name], rounds)
                 row["variants"][name] = {**paired["variants"][name], "samples": samples[name], **stats}
                 if stats["observed"] != rounds or stats["metrics"]["prompt_ns"]["n"] != rounds:
                     result["status"] = "BLOCKED"
