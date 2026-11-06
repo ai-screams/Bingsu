@@ -50,19 +50,6 @@ impl Clean {
     /// removed (1 MiB of ESC), or a short text followed by a long run of
     /// removed code points. The cut then stops at the first grapheme past a
     /// cap.
-    /// The prefix of sanitized `text` that `new` needs for `max_cells` (or
-    /// fewer) cells: `new` of it equals `new` of the whole under every width
-    /// profile. `new` cuts at `max_cells * 4` bytes at most, and its read
-    /// limit is 16 bytes past that so the grapheme crossing the cut is seen
-    /// whole; a prefix of that limit, back to a character boundary, holds it.
-    pub fn read_prefix(text: &str, max_cells: u16) -> &str {
-        let mut end = text.len().min(read_limit(max_cells));
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        &text[..end]
-    }
-
     pub fn new(raw: &[u8], max_cells: u16, p: WidthProfile) -> Self {
         // Stopping early gives the same result as sanitizing everything:
         // whether a grapheme boundary falls at byte i depends only on the
@@ -79,6 +66,19 @@ impl Clean {
             text,
             cap: max_cells,
         }
+    }
+
+    /// The prefix of sanitized `text` that `new` needs for `max_cells` (or
+    /// fewer) cells: `new` of it equals `new` of the whole under every width
+    /// profile. `new` cuts at `max_cells * 4` bytes at most, and its read
+    /// limit is 16 bytes past that so the grapheme crossing the cut is seen
+    /// whole; a prefix of that limit, back to a character boundary, holds it.
+    pub fn read_prefix(text: &str, max_cells: u16) -> &str {
+        let mut end = text.len().min(read_limit(max_cells));
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
     }
 
     pub fn as_str(&self) -> &str {
@@ -343,6 +343,9 @@ pub const BUILTIN: &[SegmentDecl] = &[
 ];
 
 /// Cells a user text segment may show (`value`, cut with an ellipsis).
+/// The helper also cuts each published command value to what this many
+/// cells need (`command::response`); giving command segments more cells
+/// means raising that cap too.
 pub const CUSTOM_TEXT_CELLS: u16 = 64;
 
 /// The declaration every user `kind = "text"` segment shares. Its segment
