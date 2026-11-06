@@ -1037,6 +1037,22 @@ mod tests {
         }
     }
 
+    // `.git`이 가리키는 곳이 없는 링크나 고리 링크여도 그 이름이 있으면 저장소다: 링크를 따르지 않고 이름만 본다.
+    // 이것을 실패시키는 것: 폴더·파일일 때만 있음으로 세는 것, `.git`을 링크를 따라 확인하는 것(끊긴 링크가 없음이
+    // 됨).
+    #[test]
+    fn repo_ancestors_count_a_git_link_whatever_it_names() {
+        use std::os::unix::fs::symlink;
+        let t = scratch("scan-git-link");
+        let (dangling, looped) = (t.join("dangling"), t.join("looped"));
+        folders(&dangling);
+        folders(&looped);
+        symlink("nowhere", dangling.join(".git")).unwrap();
+        symlink(".git", looped.join(".git")).unwrap();
+        assert_eq!(repo_ancestors(&dangling), Ok(vec![id_of(&dangling)]));
+        assert_eq!(repo_ancestors(&looped), Ok(vec![id_of(&looped)]));
+    }
+
     // `.git`을 확인하지 못하는 폴더(검색 권한 없는 셸 폴더)는 저장소로 센다(U-24 L3). 이것을 실패시키는 것: 확인
     // 오류를 "없음"으로 보는 것(열린 쪽 실패).
     #[test]
