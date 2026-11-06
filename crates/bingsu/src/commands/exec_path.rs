@@ -366,6 +366,142 @@ pub fn resolve_open(
     ))
 }
 
+/// Why a script found on the way does not run, for `config check`'s W411
+/// (D3a/E2 ruling Q2: one code, the reason as its argument). The decision
+/// is `rule::head`'s and `interpreter`'s; this only names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptRefusal {
+    /// `#!/usr/bin/env`, or an interpreter that is `/usr/bin/env` under
+    /// another name (merged-/usr `/bin/env`).
+    Env,
+    /// The interpreter is not an absolute path.
+    Relative,
+    /// No line end within `SHEBANG_MAX` bytes.
+    LongLine,
+    /// A NUL in the line.
+    Nul,
+}
+
+impl ScriptRefusal {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Env => {
+                "it starts with `#!/usr/bin/env`, which would take the interpreter from PATH"
+            }
+            Self::Relative => "its interpreter is not an absolute path",
+            Self::LongLine => "its first line is longer than 256 bytes",
+            Self::Nul => "its first line holds a NUL byte",
+        }
+    }
+}
+
+/// What `config check --explain` shows for a unit's first word: the file
+/// that would run (or why none would), found by the executor's own lookup
+/// and checks, without running anything.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Explained {
+    Runs(Found),
+    /// Nothing of that name on the way.
+    Absent,
+    /// A file was found and refused; `Some` when its first line says why.
+    Refused {
+        file: Option<PathBuf>,
+        script: Option<ScriptRefusal>,
+    },
+}
+
+/// The reason `rule::head` refused `first` (it returned `Head::Refused`):
+/// checked in its own order, so each refused head gets exactly one reason.
+fn head_refusal(first: &[u8]) -> ScriptRefusal {
+    let rest = first.strip_prefix(b"#!").unwrap_or(first);
+    let Some(end) = rest.iter().position(|&b| b == b'\n') else {
+        if first.len() >= SHEBANG_MAX {
+            return ScriptRefusal::LongLine;
+        }
+        return refusal_of_line(rest);
+    };
+    refusal_of_line(&rest[..end])
+}
+
+fn refusal_of_line(line: &[u8]) -> ScriptRefusal {
+    if line.contains(&0) {
+        return ScriptRefusal::Nul;
+    }
+    let word = line
+        .iter()
+        .position(|b| *b != b' ' && *b != b'\t')
+        .map_or(&line[line.len()..], |i| &line[i..]);
+    // Fails without it: explain_names_why_a_script_is_refused (relative).
+    if word.first() != Some(&b'/') {
+        return ScriptRefusal::Relative;
+    }
+    ScriptRefusal::Env
+}
+
+/// Why a refused file's first line refused it, if it did: a head
+/// `rule::head` refuses, or an interpreter that is `/usr/bin/env` under
+/// another name.
+fn script_refusal(first: &[u8]) -> Option<ScriptRefusal> {
+    match rule::head(first) {
+        Head::Native => None,
+        // Fails without it: explain_names_why_a_script_is_refused (the
+        // reason of each refused head).
+        Head::Refused => Some(head_refusal(first)),
+        Head::Script(line) => {
+            let word = Path::new(OsStr::from_bytes(line.interpreter));
+            // Fails without it: test_env_shebang_warned (`/bin/env` on
+            // merged /usr).
+            let env = std::fs::canonicalize(word)
+                .is_ok_and(|p| p.as_os_str().as_bytes() == b"/usr/bin/env");
+            env.then_some(ScriptRefusal::Env)
+        }
+    }
+}
+
+/// `lookup_open` for `config check --explain` and W411: the same search
+/// and checks, reporting why a found file is refused.
+pub fn explain(
+    word: &[u8],
+    folders: &[PathBuf],
+    repo: Option<rule::Id>,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Explained {
+    let candidates: Vec<PathBuf> = match rule::name(word) {
+        Name::Refused => {
+            return Explained::Refused {
+                file: None,
+                script: None,
+            };
+        }
+        Name::Absolute(p) => vec![PathBuf::from(OsStr::from_bytes(p))],
+        Name::Search(n) => folders
+            .iter()
+            .map(|f| f.join(OsStr::from_bytes(n)))
+            .collect(),
+    };
+    for path in candidates {
+        // The decision is the executor's own (`resolve_open`); a refused
+        // file is read again only to name why.
+        match resolve_open(&path, repo, me, groups) {
+            Err(Miss::Absent) => continue,
+            Ok((found, _)) => return Explained::Runs(found),
+            Err(Miss::Refused) => {
+                let checked = resolve_checked(&path, repo, me, groups).ok();
+                let script = checked
+                    .as_ref()
+                    .and_then(|(_, c)| first_bytes(c).ok().flatten())
+                    .and_then(|first| script_refusal(&first));
+                return Explained::Refused {
+                    file: Some(checked.map_or(path, |(found, _)| found.executable)),
+                    script,
+                };
+            }
+        }
+    }
+    Explained::Absent
+}
+
 /// A script's interpreter (spec section 4 script row): an absolute path
 /// resolved by the same rules, a native executable (no nested `#!`, read
 /// from its checked descriptor), and not `/usr/bin/env` under another name

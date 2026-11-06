@@ -128,6 +128,13 @@ M6_GATES = {
         "At most one command supervisor per shell session at once, and a stopped supervisor keeps the session lock",
         "A round whose every unit hits the cache starts no supervisor and runs nothing",
     ),
+    # M6 E2: `config check --explain` and W411 on the executor's own rule.
+    "GATE-EXPLAIN": (
+        "No environment value appears in the explanation, only names and their origins",
+        "Each key shows the file and line it came from",
+        "A unit that does not run shows why, with the diagnostic code",
+        "W411 warns about exactly the first lines the executor refuses, with the reason",
+    ),
 }
 GATE_IDS = M3D_GATE_IDS + tuple(M4_GATES) + tuple(M6_GATES)
 
@@ -157,6 +164,8 @@ M3D_SUPPLEMENTARY.update({"GATE-CMD-GRANT.2-pipe": "M6", "GATE-CMD-SPAWN.1-not_r
                           "GATE-CMD-SPAWN.2-lock": "M6"})
 # 이것을 실패시키는 것: 명령 회차 단계 행(실행·캐시 적중·화면 밖 단위)을 지우고 기존 단계만으로 GATE-FS-HELPER.1을 닫는 것.
 M3D_SUPPLEMENTARY.update({f"GATE-FS-HELPER.1-{stage}": "M6" for stage in ("command_miss", "command_hit", "command_not_run")})
+# 이것을 실패시키는 것: merged-/usr `/bin/env` 별칭 행을 지우고 CLI 주 행 하나로 W411을 닫는 것.
+M3D_SUPPLEMENTARY["GATE-EXPLAIN.4-alias"] = "M6"
 # 이것을 실패시키는 것: 명령 응답 사본 행(응답 없음·읽지 않음·읽음)을 지우고 수집 사본 행만으로 GATE-FS-FRONT.1을 닫는 것.
 M3D_SUPPLEMENTARY.update({f"GATE-FS-FRONT.1-command_{shape}": "M6" for shape in ("no_response", "unread", "unread_narrow", "read")})
 # Stages an active row may name: the milestone whose work added the test.
@@ -290,8 +299,8 @@ def test_gate_rows_exist_and_run_in_ci():
 
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
-    # 14 M3d, 5 M4 and the 2 M6 C2 gates.
-    assert len(GATE_IDS) == 21
+    # 14 M3d, 5 M4, the 2 M6 C2 gates and the E2 explain gate.
+    assert len(GATE_IDS) == 22
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     assert_clauses_accounted(table)
