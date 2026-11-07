@@ -67,12 +67,19 @@ pub enum Name<'a> {
     Search(&'a [u8]),
     /// An absolute path: resolved as given.
     Absolute(&'a [u8]),
-    /// Empty, ".", "..", or a relative path with a '/' (it would name a file
-    /// relative to the working folder).
+    /// Empty, ".", "..", a relative path with a '/' (it would name a file
+    /// relative to the working folder), or a word with ASCII whitespace: a
+    /// value such as `deno --version` reads as a command line, and running a
+    /// file of that exact name would not be what it says.
     Refused,
 }
 
 pub fn name(word: &[u8]) -> Name<'_> {
+    // Fails without it: names, and
+    // test_user_language_interpreter_is_looked_up_as_a_command[space].
+    if word.iter().any(|b| b.is_ascii_whitespace()) {
+        return Name::Refused;
+    }
     match word {
         [b'/', ..] => Name::Absolute(word),
         [] | b"." | b".." => Name::Refused,
@@ -325,13 +332,23 @@ mod tests {
         assert_eq!(sanitized([]), b"");
     }
 
-    // 이것을 실패시키는 것: name에서 '/'가 든 상대 경로 거부를 지우는 것, 또는 "."·".."·빈 이름
-    // 거부를 지우는 것.
+    // 이것을 실패시키는 것: name에서 '/'가 든 상대 경로 거부를 지우는 것, "."·".."·빈 이름 거부를 지우는 것,
+    // 공백 거부를 지우는 것(이름에서든 절대 경로에서든), 공백만 보고 탭·줄바꿈을 놓치는 것.
     #[test]
     fn names() {
         assert_eq!(name(b"kubectl"), Name::Search(b"kubectl"));
         assert_eq!(name(b"/usr/bin/go"), Name::Absolute(b"/usr/bin/go"));
-        for w in [&b""[..], b".", b"..", b"./x", b"bin/x"] {
+        for w in [
+            &b""[..],
+            b".",
+            b"..",
+            b"./x",
+            b"bin/x",
+            b"deno --version",
+            b"/opt/my tools/deno",
+            b"de\tno",
+            b"deno\n",
+        ] {
             assert_eq!(name(w), Name::Refused, "{w:?}");
         }
     }

@@ -493,19 +493,27 @@ def test_user_language_runs_nothing_where_its_files_are_not(tmp_path, _native_bo
 
 
 # GATE-LANG-USER.3: interpreter의 조회는 command의 첫 단어와 같다. 상대 경로(`./deno`)는 셸 폴더에 실행 파일이 있어도
-# 실행하지 않고, 공백이 든 값은 나누지 않아 그 이름 전체를 찾는다(없으므로 실행 안 함). 이름만 쓴 `deno`는 PATH에서
-# 찾아 실행한다(양성 대조). 찾지 못한 결과는 10초 실패 항목이라 그 안의 회차는 다시 찾지 않는다. 이것을 실패시키는
-# 것: 상대 경로를 이름으로 바꿔 PATH에서 찾는 것, interpreter를 공백으로 나눠 인자로 만드는 것, 찾지 못한 항목을
-# 감지 파일 없는 요약값으로 쓰는 것(적중하지 않아 회차마다 다시 찾음).
-@pytest.mark.parametrize("interpreter, runs_it", [("./deno", False), ("deno --version", False), ("deno", True)],
-                         ids=["relative", "space", "name"])
+# 실행하지 않는다. 공백이 든 값은 이름이든 절대 경로든 거부한다. 그 이름 그대로의 실행 파일(`deno --version`, `my
+# tools/deno`)이 실제로 있어도 실행하지 않는다(음성 대조). 이름만 쓴 `deno`는 PATH에서 찾아 실행한다(양성 대조). 찾지
+# 못한 결과는 10초 실패 항목이라 그 안의 회차는 다시 찾지 않는다. 이것을 실패시키는 것: 상대 경로를 이름으로 바꿔
+# PATH에서 찾는 것, 이름의 공백 거부를 지우는 것(그 이름의 파일이 실행됨), interpreter를 공백으로 나눠 인자로 만드는
+# 것, 찾지 못한 항목을 감지 파일 없는 요약값으로 쓰는 것(적중하지 않아 회차마다 다시 찾음).
+@pytest.mark.parametrize("interpreter, runs_it", [("./deno", False), ("deno --version", False),
+                                                  ("{base}/my tools/deno", False), ("deno", True)],
+                         ids=["relative", "space", "absolute-space", "name"])
 def test_user_language_interpreter_is_looked_up_as_a_command(tmp_path, interpreter, runs_it,
                                                                _native_boot_required):
     session = session_with(tmp_path)
     found, counter = deno(session)
     deno(session, session.pwd)
+    deno(session, session.base / "my tools")
+    # The exact name a whitespace value would look up, as an executable.
+    spaced = found.parent / "deno --version"
+    spaced.write_text(found.read_text())
+    spaced.chmod(0o755)
     session.env["PATH"] = f"{found.parent}:{session.env['PATH']}"
     (session.pwd / "deno.json").write_text("{}\n")
+    interpreter = interpreter.format(base=session.base)
     session.put(user_language(interpreter))
     ready(session)
     published_rounds(session)
