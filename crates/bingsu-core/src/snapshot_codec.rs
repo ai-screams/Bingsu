@@ -1598,6 +1598,14 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
         {
             return Err(Error::Shape);
         }
+        // The compiler writes 1 to 16 detect files. Without any, a language
+        // entry's digest would be the grant's alone (`plan::entry_digest`),
+        // the one a command with the same id and argv has, so its value
+        // could stand for the language's.
+        if matches!(&u.policy, ExecPolicy::Language { detect_files, .. } if detect_files.is_empty())
+        {
+            return Err(Error::Shape);
+        }
         for (_, o) in &u.origins {
             valid_origin(o)?;
         }
