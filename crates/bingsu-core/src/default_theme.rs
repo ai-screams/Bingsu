@@ -13,7 +13,7 @@ use crate::layout::{SegmentSetup, When};
 use crate::render::Theme;
 use crate::shorten::Method;
 use crate::style::{LineLayout, StyleError, StyleOptions, generate, preset};
-use crate::template::compile::{CompileError, CompiledLine, compile};
+use crate::template::compile::{CompileError, CompiledLine, compile_builtin};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -98,7 +98,7 @@ fn lines(preset_name: &str, l: &[LineLayout<'_>]) -> Result<Vec<CompiledLine>, D
 }
 
 fn compile_all(src: &str) -> Result<Vec<CompiledLine>, DefaultThemeError> {
-    match compile(src, BUILTIN) {
+    match compile_builtin(src, &[]) {
         Ok(lines) => Ok(lines),
         Err(error) => Err(DefaultThemeError::Compile(error)),
     }
