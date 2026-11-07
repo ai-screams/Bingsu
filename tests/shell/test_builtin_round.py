@@ -430,11 +430,14 @@ def deno(session, folder=None):
     return path, counter
 
 
-def user_language(interpreter):
+UNRESOLVED = b"command round: a unit's executable was not found or failed the checks"
+
+
+def user_language(interpreter, extra=""):
     """A user language segment and a layout that draws nothing else that
     collects: no dir, no git, no builtin language."""
     return ("[segment.\"custom/deno\"]\nkind='language'\ndetect_files=['deno.json']\n"
-            f"interpreter='{interpreter}'\nversion=['--version']\n"
+            f"interpreter='{interpreter}'\nversion=['--version']\n{extra}"
             "[layout.line1]\nleft=['custom/deno']\n[layout.line2]\nleft=['char']\n")
 
 
@@ -491,8 +494,9 @@ def test_user_language_runs_nothing_where_its_files_are_not(tmp_path, _native_bo
 
 # GATE-LANG-USER.3: interpreter의 조회는 command의 첫 단어와 같다. 상대 경로(`./deno`)는 셸 폴더에 실행 파일이 있어도
 # 실행하지 않고, 공백이 든 값은 나누지 않아 그 이름 전체를 찾는다(없으므로 실행 안 함). 이름만 쓴 `deno`는 PATH에서
-# 찾아 실행한다(양성 대조). 이것을 실패시키는 것: 상대 경로를 이름으로 바꿔 PATH에서 찾는 것, interpreter를 공백으로
-# 나눠 인자로 만드는 것.
+# 찾아 실행한다(양성 대조). 찾지 못한 결과는 10초 실패 항목이라 그 안의 회차는 다시 찾지 않는다. 이것을 실패시키는
+# 것: 상대 경로를 이름으로 바꿔 PATH에서 찾는 것, interpreter를 공백으로 나눠 인자로 만드는 것, 찾지 못한 항목을
+# 감지 파일 없는 요약값으로 쓰는 것(적중하지 않아 회차마다 다시 찾음).
 @pytest.mark.parametrize("interpreter, runs_it", [("./deno", False), ("deno --version", False), ("deno", True)],
                          ids=["relative", "space", "name"])
 def test_user_language_interpreter_is_looked_up_as_a_command(tmp_path, interpreter, runs_it,
@@ -507,4 +511,29 @@ def test_user_language_interpreter_is_looked_up_as_a_command(tmp_path, interpret
     published_rounds(session)
     assert (runs(counter) >= 1) == runs_it, (interpreter, runs(counter))
     assert (b"1.46.3" in session.prompt()) == runs_it
+    session.wait_quiet(timeout=8)
+    if not runs_it:
+        # The failed lookup is a failure entry the next rounds hit for 10 s:
+        # they look nothing up again.
+        seen = session.log().count(UNRESOLVED)
+        assert seen >= 1, session.log()
+        rounds(session, 2)
+        assert session.log().count(UNRESOLVED) == seen, "a failed lookup was tried again inside 10 s"
+
+
+# GATE-LANG-USER.1-cache: cache를 둔 language는 그 기간 안의 회차에 다시 실행하지 않는다. 응답 항목은 감지 파일까지
+# 묶은 요약값을 쓰므로, helper의 적중 판정도 같은 요약값이어야 맞는다. 이것을 실패시키는 것: 적중 판정에 감지 파일을
+# 뺀 요약값을 쓰는 것(회차마다 다시 실행).
+def test_user_language_cache_hit_runs_nothing(tmp_path, _native_boot_required):
+    session = session_with(tmp_path)
+    interpreter, counter = deno(session)
+    (session.pwd / "deno.json").write_text("{}\n")
+    session.put(user_language(interpreter, "cache='30s'\n"))
+    ready(session)
+    published_rounds(session)
+    before = runs(counter)
+    assert before >= 1
+    rounds(session, 3)
+    assert runs(counter) == before, "a language inside its cache time ran again"
+    assert b"1.46.3" in session.prompt()
     session.wait_quiet(timeout=8)
