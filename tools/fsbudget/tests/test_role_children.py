@@ -129,3 +129,29 @@ def test_timing_evidence_starts_at_validated_exec():
 def test_unexpected_successful_exec_in_any_product_role(pid, name, args):
     with pytest.raises(ValueError, match='exec transition'):
         role_children(sample(f'{pid} {name}({args}) = 0'))
+
+
+def dedicated(front_args, helper='/bin/bingsu'):
+    return parse(f'''10 execve("/bin/bingsu-prompt", ["/bin/bingsu-prompt", "prompt"{front_args}], []) = 0
+11 execve("{helper}", ["{helper}", "__refresh-v1"], []) = 0
+10 vfork() = 11
+''')
+
+
+# 이것을 실패시키는 것: helper를 front 실행 파일과만 비교하는 것, 값 자리의 helper 글을 플래그로 읽는 것,
+# 중복 helper 단어를 받는 것.
+@pytest.mark.parametrize('front_args,helper,ok', [
+    (', "--helper-exe=/bin/bingsu"', '/bin/bingsu', True),
+    (', "--helper-exe=/bin/bingsu"', '/elsewhere/bingsu', False),
+    (', "--host", "--helper-exe=/evil"', '/evil', False),
+    (', "--helper-exe=/bin/bingsu", "--helper-exe=/bin/bingsu"', '/bin/bingsu', False),
+    (', "--helper-exe=bingsu"', 'bingsu', False),
+    ('', '/bin/bingsu', False),
+])
+def test_dedicated_front_helper_is_the_hook_word(front_args, helper, ok):
+    trace = dedicated(front_args, helper)
+    if ok:
+        assert role_children(trace) == {'front': 1, 'helper': 0, 'collector': 0, 'command': 0}
+    else:
+        with pytest.raises(ValueError):
+            role_children(trace)

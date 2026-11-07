@@ -113,7 +113,7 @@ fn exit(code: i32) -> ! {
 fn run_prompt(
     deadline: Option<front::output::Deadline>,
     args: &[OsString],
-    exe: &OsString,
+    exe: Option<&OsString>,
     enter_sandbox: impl FnOnce() -> front::Sandbox,
     respond: impl FnOnce(Vec<u8>) -> Vec<u8>,
     refused: impl FnOnce(&[&[u8]]) -> Vec<u8>,
@@ -151,13 +151,37 @@ pub fn dispatch(enter_sandbox: fn() -> front::Sandbox) -> NonPromptArgs {
         run_prompt(
             deadline,
             &args[1..],
-            &argv0,
+            Some(&argv0),
             enter_sandbox,
             |record| record,
             front::without_sandbox,
         )
     }
     NonPromptArgs { argv0, args }
+}
+
+/// The whole of `bingsu-prompt`: `prompt` as `dispatch` runs it, except that
+/// only the hook's `--helper-exe=` word names a helper (`front::helper_exe`
+/// with no fallback: this binary's argv0 is not one). Any other command
+/// exits 2.
+#[allow(
+    dead_code,
+    reason = "the bingsu binary compiles this file too and never calls it"
+)]
+pub fn dedicated(enter_sandbox: fn() -> front::Sandbox) -> ! {
+    let deadline = crate::prompt_io::entry_deadline();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.first().map(|a| a.as_bytes()) == Some(b"prompt".as_slice()) {
+        run_prompt(
+            deadline,
+            &args[1..],
+            None,
+            enter_sandbox,
+            |record| record,
+            front::without_sandbox,
+        )
+    }
+    exit(2)
 }
 
 #[cfg(test)]
@@ -197,7 +221,7 @@ mod tests {
         run_prompt(
             crate::prompt_io::entry_deadline(),
             &args(),
-            &OsString::new(),
+            Some(&OsString::new()),
             crate::sandbox::enter,
             panic_record,
             front::without_sandbox,
@@ -210,7 +234,7 @@ mod tests {
         run_prompt(
             crate::prompt_io::entry_deadline(),
             &args(),
-            &OsString::new(),
+            Some(&OsString::new()),
             || panic!("in the filter"),
             |record| record,
             front::without_sandbox,
@@ -223,7 +247,7 @@ mod tests {
         run_prompt(
             crate::prompt_io::entry_deadline(),
             &args(),
-            &OsString::new(),
+            Some(&OsString::new()),
             || front::Sandbox::Blocked,
             panic_record,
             front::without_sandbox,
@@ -236,7 +260,7 @@ mod tests {
         run_prompt(
             crate::prompt_io::entry_deadline(),
             &args(),
-            &OsString::new(),
+            Some(&OsString::new()),
             || front::Sandbox::Blocked,
             |record| record,
             panics,
@@ -249,7 +273,7 @@ mod tests {
         run_prompt(
             crate::prompt_io::entry_deadline(),
             &args(),
-            &OsString::new(),
+            Some(&OsString::new()),
             || front::Sandbox::Absent,
             |_| b"<rendered>".to_vec(),
             panics,
@@ -278,7 +302,7 @@ mod tests {
         run_prompt(
             crate::prompt_io::entry_deadline(),
             &helper_args(std::path::Path::new("/h")),
-            &OsString::from("/missing-bingsu"),
+            Some(&OsString::from("/missing-bingsu")),
             || front::Sandbox::Absent,
             |_| b"<rendered>".to_vec(),
             panics,
@@ -292,7 +316,7 @@ mod tests {
         run_prompt(
             crate::prompt_io::entry_deadline(),
             &helper_args(&base),
-            &exe.into_os_string(),
+            Some(&exe.into_os_string()),
             || {
                 // SAFETY: initialized writable storage for a read-only query.
                 let mut action: libc::sigaction = unsafe { std::mem::zeroed() };

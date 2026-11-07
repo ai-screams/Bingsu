@@ -22,3 +22,12 @@
 | `k83/shadow2.rs` | K83 | A second `raw` binding replaces the collected arguments with an empty slice. | Reject, even with updated TCB hash pins. |
 | `k83/shadow_dl.rs` | K83 | A second `deadline` binding shadows the validated deadline. | Reject, even with updated TCB hash pins. |
 | `k83/init.rs` | K83 | The sole `raw` initializer discards the incoming arguments. | Reject, even with updated TCB hash pins. |
+| `prompt-main/commands.rs` | Prompt binary shape | A further `#[path]` module compiles the CLI's commands into the prompt binary. | Reject, even with updated TCB hash pins. |
+| `prompt-main/retarget.rs` | Prompt binary shape | A shared module's `#[path]` names another file of the CLI. | Reject, even with updated TCB hash pins. |
+| `prompt-main/no_sandbox.rs` | Prompt binary shape | Linux gets the empty sandbox instead of the seccomp filter. | Reject, even with updated TCB hash pins. |
+| `prompt-main/allocator.rs` | Prompt binary shape | A global allocator runs code the prompt files never name. | Reject, even with updated TCB hash pins. |
+| `prompt-main/constructor.rs` | Prompt binary shape | The role marker is placed in the constructor table. | Reject, even with updated TCB hash pins. |
+| `prompt-main/cli_entry.rs` | Prompt binary shape | `main` calls the CLI entry, which falls back to argv0 as the helper. | Reject, even with updated TCB hash pins. |
+| `prompt-main/windows_runs.rs` | Prompt binary shape | The binary without prompt files exits 0 instead of 2. | Reject, even with updated TCB hash pins. |
+| `prompt-main/inner_attr.rs` | Prompt binary shape | An inner attribute lets the forbidden calls through. | Reject, even with updated TCB hash pins. |
+| `prompt-main/trailing.rs` | Prompt binary shape | An exported function after the last pinned item replaces a C symbol. | Reject, even with updated TCB hash pins. |

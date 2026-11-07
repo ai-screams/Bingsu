@@ -1170,6 +1170,38 @@ fn bootstrap_is_only_a_prefilter_entry() {
     assert!(!run_adapter(&extra).0);
 }
 
+// 이것을 실패시키는 것: entry_deadline을 dedicated의 첫 문 밖에서도 받는 것, 그 문의 모양을 보지 않는 것.
+#[test]
+fn dedicated_entry_takes_time_only_as_its_first_statement() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/bingsu/src/prompt.rs"),
+    )
+    .unwrap();
+    let (ok, err) = run_adapter(&source);
+    assert!(ok, "{err}");
+    let first = "    let deadline = crate::prompt_io::entry_deadline();\n    let args: Vec<OsString> = std::env::args_os().skip(1).collect();";
+    assert_eq!(source.matches(first).count(), 1);
+    for bad in [
+        source.replace(
+            first,
+            "    let args: Vec<OsString> = std::env::args_os().skip(1).collect();\n    let deadline = crate::prompt_io::entry_deadline();",
+        ),
+        source.replace(
+            first,
+            "    let deadline = crate::prompt_io::entry_deadline();\n    let _ = crate::prompt_io::entry_deadline();\n    let args: Vec<OsString> = std::env::args_os().skip(1).collect();",
+        ),
+        source.replace(
+            first,
+            "    let mut deadline = crate::prompt_io::entry_deadline();\n    let args: Vec<OsString> = std::env::args_os().skip(1).collect();",
+        ),
+        source.replace("pub fn dedicated(", "pub fn other_entry("),
+    ] {
+        assert_ne!(bad, source);
+        let (ok, err) = run_adapter(&bad);
+        assert!(!ok, "{err}");
+    }
+}
+
 // 이것을 실패시키는 것: reader 호출을 필터 뒤·다른 함수·추가 모듈 호출로 확대하는 것.
 #[test]
 fn reader_is_only_a_prefilter_entry() {

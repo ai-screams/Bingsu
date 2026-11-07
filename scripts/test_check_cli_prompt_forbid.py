@@ -19,6 +19,36 @@ import check_cli_prompt_forbid as gate
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+class PromptPackage(unittest.TestCase):
+    """Rule 6 on a copy of crates/bingsu-prompt, one change per case."""
+
+    def copy(self, temp):
+        import shutil
+        package = pathlib.Path(temp) / "bingsu-prompt"
+        shutil.copytree(ROOT / "crates/bingsu-prompt", package, symlinks=True)
+        return package
+
+    # 이것을 실패시키는 것: 패키지 파일·manifest 규칙 하나를 빼는 것.
+    def test_each_change_is_refused(self):
+        self.assertEqual(gate.prompt_package_rules(), [])
+        manifest = (ROOT / "crates/bingsu-prompt/Cargo.toml").read_text()
+        cases = {
+            "extra source": lambda p: (p / "src/other.rs").write_text("pub fn f() {}\n"),
+            "nested source": lambda p: ((p / "src/bin").mkdir(), (p / "src/bin/x.rs").write_text("fn main() {}\n")),
+            "symlink": lambda p: (p / "link").symlink_to(ROOT / "crates/bingsu/src/main.rs"),
+            "dependency": lambda p: (p / "Cargo.toml").write_text(manifest + 'regex = "1"\n'),
+            "test build": lambda p: (p / "Cargo.toml").write_text(manifest.replace("test = false", "test = true")),
+            "build script": lambda p: (p / "Cargo.toml").write_text(manifest.replace('rust-version = "1.88"', 'rust-version = "1.88"\nbuild = "build.rs"')),
+            "features": lambda p: (p / "Cargo.toml").write_text(manifest + "\n[features]\nx = []\n"),
+        }
+        for name, change in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as temp:
+                package = self.copy(temp)
+                self.assertEqual(gate.prompt_package_rules(package), [])
+                change(package)
+                self.assertNotEqual(gate.prompt_package_rules(package), [], name)
+
+
 class ProductFixtureIsolation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

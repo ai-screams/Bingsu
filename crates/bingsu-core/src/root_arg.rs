@@ -1,6 +1,9 @@
 //! Grammar of the root arguments init pins into the hook (spec section 4
 //! "runtime root" 3 and 7). Walking and checking the path is M3a.
 
+/// `--helper-exe=<path>`: the refresh helper the prompt starts
+/// (`front::helper_exe`).
+pub const HELPER_EXE_PREFIX: &[u8] = b"--helper-exe=";
 pub const RUNTIME_ROOT_PREFIX: &[u8] = b"--runtime-root=";
 pub const CONFIG_ROOT_PREFIX: &[u8] = b"--config-root=";
 pub const CONFIG_ROOT_WRITTEN_PREFIX: &[u8] = b"--config-root-written=";

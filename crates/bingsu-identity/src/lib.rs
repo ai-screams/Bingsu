@@ -7,6 +7,7 @@ include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
 pub const ROLE_MARKER: [u8; 16] = *b"BNGROLE-ID02\0\0\0\0";
 pub const COLLECTOR_ROLE: u8 = 1;
 pub const BINGSU_ROLE: u8 = 2;
+pub const PROMPT_ROLE: u8 = 3;
 
 /// Only each binary's entry embeds its own role, bound to this build identity.
 pub const fn role_tag(role: u8) -> [u8; 49] {

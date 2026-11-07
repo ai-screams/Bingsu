@@ -224,9 +224,6 @@ pub(crate) fn record_version(args: &[&[u8]]) -> Result<RecordVersion, EnvelopeEr
     }
 }
 
-/// The one-word field naming the refresh helper (`front::helper_exe`).
-pub(crate) const HELPER_EXE_PREFIX: &[u8] = b"--helper-exe=";
-
 fn root_slot<'e, 'a>(
     e: &'e mut Envelope,
     a: &'a [u8],
@@ -243,7 +240,7 @@ fn root_slot<'e, 'a>(
     if let Some(v) = a.strip_prefix(b"--collector-exe=") {
         return Some((&mut e.collector_exe, v));
     }
-    if let Some(v) = a.strip_prefix(HELPER_EXE_PREFIX) {
+    if let Some(v) = a.strip_prefix(crate::root_arg::HELPER_EXE_PREFIX) {
         return Some((&mut e.helper_exe, v));
     }
     if let Some(v) = a.strip_prefix(HOME_PREFIX) {
