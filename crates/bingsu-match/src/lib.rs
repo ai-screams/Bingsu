@@ -1,0 +1,121 @@
+//! A command segment's `match` (spec section 3, U-9c): a regular expression
+//! the refresh helper applies to the sanitized first line of a command's
+//! output before it publishes the value. One check (`Matcher::new`, also used
+//! by config check and when a snapshot is made) and one apply
+//! (`Matcher::value`). The prompt never runs a pattern: it only compares the
+//! pattern digest in the command response with its snapshot's.
+#![forbid(unsafe_code)]
+
+/// Bytes the compiled program of one pattern may take. Without the perf
+/// engines the search is a Pike VM whose time grows with this size: at
+/// 256 KiB the slowest accepted pattern measured took about 1.8 ms on a
+/// 4 KB line (`[\s\S]{500}`), so 32 units stay well inside the helper's
+/// 500 ms work budget; at 1 MiB one pattern took 18 ms. Version and path
+/// patterns (`([^/]+)$`, `(?P<value>[0-9]+\.[0-9]+\.[0-9]+)`, `\w{10}`)
+/// fit with room to spare.
+pub const SIZE_LIMIT: usize = 256 * 1024;
+// No `dfa_size_limit`: the lazy DFA is a perf engine this build leaves out
+// (C4c ruling Q6), so its cap would change nothing and no test could tell.
+
+/// A checked pattern.
+#[derive(Clone, Debug)]
+pub struct Matcher {
+    regex: regex::Regex,
+    /// Which part of a match is the value (decided once from the pattern).
+    group: Group,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Group {
+    /// The pattern names a group `value`.
+    Named,
+    /// No `value` group; the first capture group.
+    First,
+    /// No capture group; the whole match.
+    Whole,
+}
+
+/// Why a pattern does not compile: its syntax, or a size past the limits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Error(pub String);
+
+impl Matcher {
+    /// Compiles `pattern` under `SIZE_LIMIT`.
+    pub fn new(pattern: &str) -> Result<Self, Error> {
+        let regex = regex::RegexBuilder::new(pattern)
+            .size_limit(SIZE_LIMIT)
+            .build()
+            .map_err(|e| Error(e.to_string()))?;
+        let group = if regex.capture_names().any(|n| n == Some("value")) {
+            Group::Named
+        } else if regex.captures_len() > 1 {
+            Group::First
+        } else {
+            Group::Whole
+        };
+        Ok(Self { regex, group })
+    }
+
+    /// The value `line` shows: the group `value` when the pattern names one,
+    /// else the first capture group, else the whole match. Empty when the
+    /// pattern does not match or that part is empty or did not take part.
+    pub fn value<'a>(&self, line: &'a str) -> &'a str {
+        let Some(c) = self.regex.captures(line) else {
+            return "";
+        };
+        let part = match self.group {
+            Group::Named => c.name("value"),
+            Group::First => c.get(1),
+            Group::Whole => c.get(0),
+        };
+        part.map_or("", |m| m.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value(pattern: &str, line: &str) -> String {
+        Matcher::new(pattern).unwrap().value(line).into()
+    }
+
+    // 값 규칙(스펙 908행): 이름 붙은 그룹 `value` → 첫 캡처 그룹 → 맞은 전체. 맞지 않거나 그 부분이 비거나 참여하지
+    // 않으면 빈 값(숨김). 이것을 실패시키는 것: 그룹 순서를 바꾸는 것(`(?P<value>b)(a)`가 a를 냄), 이름 그룹이
+    // 있는데 첫 그룹을 쓰는 것, 캡처가 없는데 첫 그룹을 찾는 것(빈 값), 맞지 않을 때 원문을 내는 것.
+    #[test]
+    fn named_group_then_first_capture_then_whole() {
+        assert_eq!(value(r"(a)(?P<value>b)", "ab"), "b");
+        assert_eq!(value(r"(?P<value>b)(a)", "ba"), "b");
+        assert_eq!(
+            value(r"go version go([^ ]+)", "go version go1.23.1 darwin"),
+            "1.23.1"
+        );
+        assert_eq!(value(r"[0-9]+\.[0-9]+", "Python 3.12"), "3.12");
+        assert_eq!(value(r"([^/]+)$", "a/b/kube-ctx"), "kube-ctx");
+        assert_eq!(value(r"x([0-9]+)", "no digits"), "");
+        assert_eq!(value(r"(?P<value>[0-9]*)x", "x"), "");
+        assert_eq!(value(r"(?P<value>q)?x", "x"), "");
+        assert_eq!(value(r"(?P<value>\w+)", "caf\u{e9}!"), "caf\u{e9}");
+    }
+
+    // 크기 상한: 버전·경로 패턴과 `\w{10}`은 받고, 큰 반복(`\w{50}`, `[\s\S]{1000}`, 중첩 반복)은 문법 대신 상한으로
+    // 거부한다. 이것을 실패시키는 것: size_limit 지정을 빼는 것(기본 10 MiB가 큰 패턴을 받음), 상한을 1 MiB 이상으로
+    // 올리는 것(`\w{50}`을 받음), 64 KiB 아래로 내리는 것(`\w{10}`을 거부).
+    #[test]
+    fn the_size_limit_takes_version_patterns_and_refuses_large_programs() {
+        for ok in [
+            r"([^/]+)$",
+            r"(?P<value>[0-9]+\.[0-9]+\.[0-9]+)",
+            r"\w{10}",
+            r"(a|b)*a(a|b){20}",
+        ] {
+            assert!(Matcher::new(ok).is_ok(), "{ok}");
+        }
+        for big in [r"\w{50}", r"[\s\S]{1000}", r"((a{1000}){1000}){1000}"] {
+            let e = Matcher::new(big).unwrap_err();
+            assert!(e.0.contains("size limit"), "{big}: {}", e.0);
+        }
+        assert!(Matcher::new("(unclosed").is_err());
+    }
+}
