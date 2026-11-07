@@ -363,6 +363,24 @@ impl Languages {
         self.found.iter().find(|(a, _)| a == id).map(|(_, f)| *f)
     }
 
+    /// Answers and a root as a collection would give them (tests).
+    #[cfg(test)]
+    pub(crate) fn of(
+        answers: Vec<(Vec<u8>, bingsu_core::collection::language::Version)>,
+        root: Root,
+    ) -> Self {
+        Self {
+            answers,
+            found: Vec::new(),
+            root,
+        }
+    }
+
+    /// What the folder facts say of the repository.
+    pub(crate) fn root(&self) -> Root {
+        self.root
+    }
+
     /// The answer for language `id`, if the collection gave one.
     pub(crate) fn get(&self, id: &[u8]) -> Option<&bingsu_core::collection::language::Version> {
         self.answers.iter().find(|(a, _)| a == id).map(|(_, v)| v)
@@ -700,10 +718,10 @@ struct Resolved {
 /// entry under the ancestor and group rules is the round's largest cost
 /// (about 30 ms on macOS with a long `PATH`, D3a measurement), so it runs
 /// once.
-struct Search {
+pub(crate) struct Search {
     /// Every repository the shell is in, by identity (`search`).
-    repo: Vec<bingsu_core::command::path::Id>,
-    folders: Vec<std::path::PathBuf>,
+    pub(crate) repo: Vec<bingsu_core::command::path::Id>,
+    pub(crate) folders: Vec<std::path::PathBuf>,
     /// No collected repository root: the shell's folder stood for it.
     fallback: bool,
 }
@@ -715,7 +733,7 @@ struct Search {
 /// still keeps a repository's folders out. The config units and the builtin
 /// languages share this one list and its one walk. A folder that cannot be
 /// read refuses the round, both its units and its languages.
-fn search(
+pub(crate) fn search(
     environment: &[u8],
     cwd: &[u8],
     collected: Option<u16>,

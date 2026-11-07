@@ -133,6 +133,30 @@ fn check_and_path_write_nothing() {
     }
 }
 
+// config check --explain is a read too, with or without a builtin language drawn: on a fresh machine
+// it makes no runtime, state or cache folder, and with everything in place it changes nothing.
+// 이것을 실패시키는 것: 내장 언어 절이 뿌리를 찾으며 런타임 폴더를 만들거나 권한을 바꾸는 것(roots::resolve),
+// 그리는 언어가 없는데도 뿌리를 찾는 것.
+#[test]
+fn explain_writes_nothing() {
+    const NODE: &str = "[layout.line2]\nleft=['node','char']\n";
+    for (tag, toml) in [("plain", VALID), ("node", NODE)] {
+        let e = Env::new("cli_config", &format!("explain-ro-{tag}"));
+        e.put_config("config.toml", toml);
+        let before = e.tree();
+        let o = e.run(&["config", "check", "--explain"]);
+        assert_eq!(o.status.code(), Some(0), "{tag}: {}", text(&o.stderr));
+        assert_eq!(e.tree(), before, "{tag} on a fresh machine");
+        let chosen = e.put("other/work.toml", toml);
+        let o = e.run(&["config", "use", chosen.to_str().unwrap()]);
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+        let before = e.tree();
+        let o = e.run(&["config", "check", "--explain"]);
+        assert_eq!(o.status.code(), Some(0), "{tag}: {}", text(&o.stderr));
+        assert_eq!(e.tree(), before, "{tag} with everything in place");
+    }
+}
+
 // check prints the files in apply order, the diagnostics, the width table and a verdict; a valid
 // settings folder exits 0, an error exits 1 and names the code.
 // 이것을 실패시키는 것: 오류가 있는데 종료 코드 0, 진단·폭 표를 출력에서 빼는 것, 적용 순서를 바꾸는 것.

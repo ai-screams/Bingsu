@@ -141,7 +141,11 @@ Use `bingsu config check` to see diagnostics and folder safety details, and `bin
 file order. `bingsu config check --explain` adds, for each command and language segment, whether it runs and why
 not, its command, working folder, time limits and the names of the environment it gets, each with the file and line
 it came from, and the file it would run. The values of environment entries are not printed; paths such as the file to run can still come from `HOME`, XDG or `PATH`. The file is looked up as from a folder
-outside any repository; a prompt inside a repository leaves out executables inside it. A folder whose safety cannot be confirmed can supply colors and layout only; choosing a file inside it
+outside any repository; a prompt inside a repository leaves out executables inside it. For each builtin language segment
+(`node`, `python`, `rust`, `go`) the layout draws, it also says what a prompt in the current folder would do now: show a
+version without running anything, run a probe (which file, with which arguments), or hide it and why. It decides with the
+folder facts the last prompt collected for this folder, says how old they are, and runs nothing; with no such facts it
+says so. Here executables are looked up as a prompt in this folder does, inside the repository rules. A folder whose safety cannot be confirmed can supply colors and layout only; choosing a file inside it
 with `config use` does not grant execution trust. Check the ownership, permissions and access lists named by the
 diagnostic before running init again. External text in diagnostics is sanitized for terminal display; path arguments
 in the hooks retain their original bytes. Displayed paths with removed control characters are not exact copies of the names.
@@ -156,7 +160,9 @@ in the hooks retain their original bytes. Displayed paths with removed control c
 - Local config value edits preserve bytes outside the changed value, including comments, order and other quotes.
   The changed value uses the caller's TOML spelling, including its quotes.
 - `config check` and `config path` have no command deadline and can wait on a stalled mount; `config check` also
-  opens the executables a command segment would run, which can wait the same way. Commands that change
+  opens the executables a command segment would run, which can wait the same way. `config check --explain` also
+  reads the saved folder facts, looks for repositories above the current folder and opens the `PATH` folders a
+  builtin language would be looked up in, each of which can wait the same way. Commands that change
   settings have a three-second limit. The prompt's 50 ms and refresh work's 500 ms budgets are unchanged.
 - A deadline cannot interrupt kernel I/O in uninterruptible sleep, including hard NFS or some FUSE operations.
   macOS timer coalescing can delay alarm delivery by several milliseconds. On Linux, a blocked write during suspend
