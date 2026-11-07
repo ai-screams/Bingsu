@@ -478,7 +478,7 @@ impl<'l, 'i> Lay<'l, 'i> {
         let cat = inp.catalog;
         let char_seg = cat.iter().position(|d| d.id == "char");
         let mut slots: Vec<Slot> = Vec::with_capacity(cat.len());
-        for (i, d) in cat.iter().enumerate() {
+        for i in 0..cat.len() {
             slots.push(Slot {
                 present: matches!(inp.values.get(i), Some(Some(_))),
                 hidden: [false; 2],
@@ -487,7 +487,11 @@ impl<'l, 'i> Lay<'l, 'i> {
                 base: Base::Glyph(""),
                 short: None,
                 m: TextM::default(),
-                role: role_tok(d.role),
+                // Set below for a segment the line draws as text, the only
+                // one `push_segment` reads it for: a token lookup per catalog
+                // segment the line does not draw is a cost each prompt pays
+                // for nothing.
+                role: None,
                 entry: [None; 2],
             });
         }
@@ -535,6 +539,8 @@ impl<'l, 'i> Lay<'l, 'i> {
                 continue;
             }
             let decl = &cat[s];
+            // Fails without it: role_block_text_is_picked_per_block.
+            slot.role = role_tok(decl.role);
             if Some(s) == char_seg {
                 let failed = bool_field(decl, v, "failed");
                 let name = if bool_field(decl, v, "vicmd") {
@@ -2750,7 +2756,9 @@ pub(crate) mod tests {
     }
 
     // 이것을 실패시키는 것: 역할이 있는 블록 글자를 `block.text` 하나로 그리는 것(해석기가 블록마다 고른
-    // 글자색 `OnBlock`을 쓰지 않음, 2026-10-13).
+    // 글자색 `OnBlock`을 쓰지 않음, 2026-10-13). 줄이 그리는 segment의 role token은 Lay::new가 글자를 재는
+    // 반복에서만 정한다(그리지 않는 내장 segment마다 조회하지 않음). 이것을 실패시키는 것: 그 대입 삭제
+    // (`slot.role = role_tok(decl.role)`, role이 None으로 남아 기본색이 됨).
     #[test]
     fn role_block_text_is_picked_per_block() {
         let f = fixture(&["Works"], "main");
