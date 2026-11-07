@@ -650,6 +650,39 @@ pub(crate) mod tests {
         assert_eq!(r.snapshot.unwrap().custom.len(), 1);
     }
 
+    // C4c: `match`는 실행 키다. 안전 검사에 실패한 파일이 쓴 `match`는 그 단위를 끄고(UnsafeFile, W405), 모양 전용
+    // 파일의 `match`는 버려진다(W401). 같은 `match`를 신뢰 파일이 쓰면 단위가 돌고 패턴을 싣는다. 이것을 실패시키는
+    // 것: `match`를 실행 키 목록에서 빼는 것(남이 쓸 수 있는 파일이 출력 해석을 바꿈).
+    #[test]
+    fn match_from_an_untrusted_file_turns_the_unit_off() {
+        let root = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\n[layout.line2]\nleft = ['custom/k', 'char']\n";
+        let pattern = "[segment.\"custom/k\"]\nmatch = \"(x)\"\n";
+        let unit = |name: &str| {
+            let r = report(
+                vec![builtin(), opened("root", root, 1), opened(name, pattern, 2)],
+                &mut files(&[]),
+                [0, 3, 0],
+                Mode::Dark,
+            );
+            let codes = codes_of(&r);
+            let u = r.snapshot.unwrap().exec_units.remove(0);
+            (u.not_run, u.pattern, codes)
+        };
+        let (not_run, _, codes) = unit("unsafe-match");
+        assert_eq!(
+            not_run,
+            Some(NotRun::UnsafeFile {
+                key: "match".into()
+            })
+        );
+        assert!(codes.contains(&codes::NOT_RUN_UNSAFE_FILE));
+        let (not_run, pattern, codes) = unit("shape-match");
+        assert_eq!((not_run, pattern), (None, None));
+        assert!(codes.contains(&codes::EXEC_KEY_IGNORED));
+        let (not_run, pattern, _) = unit("root2");
+        assert_eq!((not_run, pattern.as_deref()), (None, Some("(x)")));
+    }
+
     // 이것을 실패시키는 것: 검사·컴파일 진단이 승리한 값의 원본·범위·extends 경로를 잃는 것.
     #[test]
     fn diagnostics_keep_winning_key_origins_and_chains() {

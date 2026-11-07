@@ -74,7 +74,14 @@ impl Matcher {
     /// else the first capture group, else the whole match. Empty when the
     /// pattern does not match or that part is empty or did not take part.
     pub fn value<'a>(&self, line: &'a str) -> &'a str {
-        let Some(c) = self.regex.captures(line) else {
+        // Capture slots cost time and memory per state; a line the pattern
+        // does not match pays only for the plain search, and a match is
+        // re-run with captures from where it starts, the haystack whole so
+        // `^`, `$` and `\b` see the same text.
+        let Some(m) = self.regex.find(line) else {
+            return "";
+        };
+        let Some(c) = self.regex.captures_at(line, m.start()) else {
             return "";
         };
         let part = match self.group {
