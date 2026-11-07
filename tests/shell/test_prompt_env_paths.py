@@ -1232,7 +1232,7 @@ def allowlist_capture(base, case):
     return SimpleNamespace(
         lines=trace.read_text(errors="replace").splitlines(), trace=trace,
         # execve names the pinned path (the symlink); its target never shows.
-        exe=str(inst.exe), collector_exe=collector_exe, global_inputs=global_inputs,
+        exe=str(inst.front()), helper_exe=str(inst.exe), collector_exe=collector_exe, global_inputs=global_inputs,
         global_present=global_present, collectors=int(case != "no-collection"),
         pinned=[os.path.realpath(trusted[k] + sub) for k, sub in
                 (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
@@ -1251,7 +1251,7 @@ def judge_allowlist(cap, shape=None):
     evidence; front-alarm the front's filter and record, the exact collector
     count and both coverage checks. Every path, call and audit rule stays."""
     assert_prompt_trace_budget(cap.lines, cap.exe, cap.pinned, global_inputs=cap.global_inputs,
-                               collector_exe=cap.collector_exe,
+                               collector_exe=cap.collector_exe, helper_exe=cap.helper_exe,
                                collectors=None if shape == "front-alarm" else cap.collectors,
                                repository_roots=cap.roots,
                                repository_evidence=() if shape else cap.evidence,
@@ -1770,7 +1770,7 @@ class HelperStageFixture:
     the stage formula does not include, so the fixture refuses one.
     """
 
-    def __init__(self, stage, *, template=None, config="plain"):
+    def __init__(self, stage, *, template=None, config="plain", entry="cli"):
         import tempfile
         root = real_bin().parent.parent
         self.base = Path(tempfile.mkdtemp(prefix="helper-stage-", dir=root)).resolve()
@@ -1788,7 +1788,10 @@ class HelperStageFixture:
         self.put("collect" if stage == "collect" else stage if command else config, template=template)
         if command:
             self.env["PATH"] = COMMAND_PATH
-        self.script = self.inst.init("bash", self.env)
+        # The helper-stage formulas count the `bingsu prompt` front; the helper
+        # is the same process under either entry. child_capture traces the
+        # `bingsu-prompt` front ("dedicated").
+        self.script = self.inst.init("bash", self.env, entry=entry)
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
         self.pwd = self.base
@@ -2605,7 +2608,7 @@ def child_capture(tmp_path):
         # Reuse A2's real hook, advancing session sequence and untraced warm-up.
         # A cold admission under strace may defer before it can spawn a worker.
         fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
-                                     template=template)
+                                     template=template, entry="dedicated")
         try:
             return capture_prompt(fixture, base, invalid, timestamps, redraw)
         finally:
@@ -2660,6 +2663,8 @@ def child_capture(tmp_path):
         trace = parse_trace(strip_trace_times(text) if timestamps else text)
         # 이것을 실패시키는 것: assert not trace.errors, (trace.errors, evidence) 조건을 제거하거나 반전하는 변이.
         assert not trace.errors, (trace.errors, evidence)
+        # The entry the hook ran, for the helper rule of the role attribution.
+        trace.entry = "dedicated" if fixture.inst.dedicated else "cli"
         return trace, fixture.store, result.stdout
     return capture
 
@@ -2668,7 +2673,7 @@ def child_capture(tmp_path):
 def test_live_child_count_is_bounded_per_role(child_capture):
     from fsbudget.attribute import role_children
     trace, _, _ = child_capture()
-    children = role_children(trace)
+    children = role_children(trace, entry_of(trace))
     # 이것을 실패시키는 것: assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children 조건을 제거하거나 반전하는 변이.
     assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children
 
@@ -2685,12 +2690,12 @@ def test_redraw_spawns_no_process_and_reads_no_config_source(child_capture, tmp_
         return [c for c in trace if c.name not in {"execve", "execveat"} and root in named(c)]
 
     trace, _, record = child_capture(name="prompt")
-    assert role_children(trace)["front"] == 1
+    assert role_children(trace, entry_of(trace))["front"] == 1
     # 양성 대조: 같은 검사가 일반 프롬프트 도우미의 설정 원본 읽기를 본다.
     assert config_calls("prompt", trace)
     trace, _, record = child_capture(name="redraw", redraw=True)
     assert record.startswith(b"B1\x1f") and record.endswith(b"\x1e")
-    assert role_children(trace) == {"front": 0, "helper": 0, "collector": 0, "command": 0}
+    assert role_children(trace, entry_of(trace)) == {"front": 0, "helper": 0, "collector": 0, "command": 0}
     assert len({c.pid for c in trace}) == 1, "a redraw is one process"
     assert not config_calls("redraw", trace)
     # 이것을 실패시키는 것: 도우미를 띄우지 않는 redraw에서도 환경 파이프를 만드는 것.
@@ -2764,8 +2769,8 @@ def test_redraw_renders_new_width_from_same_values(tmp_path):
 def test_live_no_worker_segment_spawns_zero_collectors(child_capture):
     from fsbudget.attribute import role_children
     trace, _, _ = child_capture("{char}")
-    # 이것을 실패시키는 것: assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0} 조건을 제거하거나 반전하는 변이.
-    assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0}
+    # 이것을 실패시키는 것: assert role_children(trace, entry_of(trace)) == {"front": 1, "helper": 0, "collector": 0, "command": 0} 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace, entry_of(trace)) == {"front": 1, "helper": 0, "collector": 0, "command": 0}
 
 
 # Under strace the front can pass its 50 ms deadline and exit 0 without a
@@ -2892,7 +2897,7 @@ def judge_marker_attempt(cap, shape=None, trace_judge=judge_marker_trace):
     deadline cannot stop its spawn)."""
     from fsbudget.attribute import role_children
     trace_judge(cap, shape)
-    children = role_children(cap.trace)
+    children = role_children(cap.trace, entry_of(cap.trace))
     # 이것을 실패시키는 것: 마감 시도에서 역할 상한(helper 둘, collector·명령 자식)을 넘기는 것.
     assert children["front"] <= 1 and children["helper"] <= 1, children
     assert children["collector"] == children["command"] == 0, children
@@ -2934,23 +2939,30 @@ def test_live_collector_count_ignores_marker_validity(child_capture, tmp_path):
 def test_live_collector_spawns_after_helper_header_and_marker_reads(child_capture):
     from fsbudget.attribute import first_index, role_children
     trace, store, _ = child_capture()
-    # 이것을 실패시키는 것: assert role_children(trace)["helper"] == 1 조건을 제거하거나 반전하는 변이.
-    assert role_children(trace)["helper"] == 1
+    # 이것을 실패시키는 것: assert role_children(trace, entry_of(trace))["helper"] == 1 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace, entry_of(trace))["helper"] == 1
     assert_child_timing(trace, store)
+
+
+def entry_of(trace):
+    """The prompt entry a trace ran ("cli" or "dedicated"), which the capture
+    records on it from the program the hook called; stored traces of the CLI
+    entry carry none."""
+    return getattr(trace, "entry", "cli")
 
 
 def assert_child_timing(trace, store):
     from fsbudget.attribute import first_index
-    helper_exec = first_index(trace, "helper", lambda c: c.name == "execve" and c.ret == "0")
+    helper_exec = first_index(trace, "helper", lambda c: c.name == "execve" and c.ret == "0", entry_of(trace))
     main = trace[helper_exec].pid
     spawn = first_index(trace, "helper", lambda c: c.pid == main and c.name in SPAWNS
-                        and "CLONE_THREAD" not in c.args and re.fullmatch(r"[1-9][0-9]*", c.ret))
+                        and "CLONE_THREAD" not in c.args and re.fullmatch(r"[1-9][0-9]*", c.ret), entry_of(trace))
     # The helper verifies its freshly staged marker by same-fd readback before
     # admission. This is distinct from the front reading the published marker.
     for name, size in (("snapshot", 192), (".marker.stage", 208)):
         read = first_index(trace, "helper", lambda c: c.pid == main and c.name == "read"
                            and args_of(c)[0].endswith("<" + str(store / name) + ">")
-                           and c.ret.isdigit() and int(c.ret) >= size)
+                           and c.ret.isdigit() and int(c.ret) >= size, entry_of(trace))
         # 이것을 실패시키는 것: 머리·표식 읽기를 collector 생성 뒤로 옮기는 것.
         assert read < spawn, (name, read, spawn)
 
@@ -2992,7 +3004,7 @@ def test_stored_child_timing_control():
     passing = parse_trace((fixtures / 'b1-child-timing-passing.strace').read_text())
     moved = parse_trace((fixtures / 'b1-child-timing-before-reads.strace').read_text())
     expected = {"front": 1, "helper": 1, "collector": 0, "command": 0}
-    assert role_children(passing) == role_children(moved) == expected
+    assert role_children(passing, entry_of(passing)) == role_children(moved, entry_of(moved)) == expected
     assert_child_timing(passing, Path('/store'))
     with pytest.raises(AssertionError, match='snapshot'):
         assert_child_timing(moved, Path('/store'))

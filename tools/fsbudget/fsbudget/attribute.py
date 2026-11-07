@@ -1276,10 +1276,13 @@ def _value_flags():
     return frozenset(re.findall(r'b"(--[a-z-]+)"', body))
 
 
-def _helper_exe(argv, exe):
+def _helper_exe(argv, exe, entry):
     """The helper the front may start: the one `--helper-exe=` word of its
-    argv in flag position (front::helper_exe), else the front itself (the
-    `bingsu prompt` entry). Two such words or a relative one: none."""
+    argv in flag position (front::helper_exe), else the front itself for the
+    `bingsu prompt` entry ("cli") and none for `bingsu-prompt` ("dedicated").
+    The caller says which entry it ran; the file name does not, and any
+    other value is treated as "dedicated". Two such words or a relative one:
+    none."""
     flags = _value_flags()
     named, i = [], 2
     while i < len(argv):
@@ -1289,10 +1292,13 @@ def _helper_exe(argv, exe):
     # 이것을 실패시키는 것: 중복·상대 경로 helper 단어를 받는 것.
     if len(named) > 1 or (named and not named[0].startswith("/")):
         return None
-    return named[0] if named else exe
+    if named:
+        return named[0]
+    # 이것을 실패시키는 것: bingsu-prompt가 helper 단어 없이 자기 자신을 helper로 띄우는 것을 받는 것.
+    return exe if entry == "cli" else None
 
 
-def _product_roles(trace):
+def _product_roles(trace, entry):
     """Resolve task lifetimes using creation edges and fixed product argv.
 
     A vfork exec can be recorded before the parent's spawn return. Resolve
@@ -1318,7 +1324,7 @@ def _product_roles(trace):
     if initial is None:
         raise ValueError("missing successful root exec")
     exe = ast.literal_eval(split_args(initial.args)[0])
-    helper = _helper_exe(ast.literal_eval(split_args(initial.args)[1]), exe)
+    helper = _helper_exe(ast.literal_eval(split_args(initial.args)[1]), exe, entry)
     parents, spawns = {}, []
     for c in trace:
         # 이것을 실패시키는 것: if c.name in SPAWN and re.fullmatch(r"[1-9][0-9]*", c.ret) 조건을 제거하거나 반전하는 변이.
@@ -1378,9 +1384,10 @@ def _product_roles(trace):
     return keys, roles, spawns, starts
 
 
-def role_children(trace):
-    """Successful process creations per parent role; threads are separate."""
-    keys, roles, spawns, _ = _product_roles(trace)
+def role_children(trace, entry):
+    """Successful process creations per parent role; threads are separate.
+    `entry`: "cli" for a traced `bingsu prompt`, "dedicated" for `bingsu-prompt`."""
+    keys, roles, spawns, _ = _product_roles(trace, entry)
     counts = dict.fromkeys(("front", "helper", "collector", "command"), 0)
     for call, child in spawns:
         # 이것을 실패시키는 것: watchdog 스레드의 exec로 collector 프로세스 생성을 숨기는 변이.
@@ -1398,13 +1405,13 @@ def role_children(trace):
     return counts
 
 
-def first_index(trace, role, predicate):
+def first_index(trace, role, predicate, entry):
     """First matching completed call in a role, failing closed if missing.
 
     Calls before the validated product exec cannot supply timing evidence.
     Timing comparisons use calls in the helper's own main TID; its reads
     cannot execute during its pending process creation syscall.
     """
-    keys, roles, _, starts = _product_roles(trace)
+    keys, roles, _, starts = _product_roles(trace, entry)
     return next(c.index for c in trace if roles[keys[c.index]] == role
                 and c.index >= starts[keys[c.index]] and predicate(c))

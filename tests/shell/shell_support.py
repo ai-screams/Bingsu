@@ -77,7 +77,10 @@ class Install:
         os.symlink(real_prompt(), self.prompt)
         self.dedicated = None
 
-    def init(self, shell, env):
+    def init(self, shell, env, entry=None):
+        """`entry="cli"` makes the hook call `bingsu prompt` (the fallback
+        entry, its `--helper-exe=` word unchanged) where init chose
+        `bingsu-prompt`; a test whose trace formulas count the CLI front uses it."""
         r = subprocess.run([str(self.exe), "init", shell], env=env, capture_output=True)
         # A warning here (an executable another user can change, a root that
         # could not be pinned) means the test runs in an arrangement it was
@@ -87,7 +90,12 @@ class Install:
         # 이것을 실패시키는 것: 다른 경고를 이 예외에 넣는 것(그 줄만 지운 뒤 비어 있어야 한다).
         rest = r.stderr.replace(COLD_INIT_NOTICE, b"")
         assert r.returncode == 0 and rest == b"", r.stderr
-        return self.route_prompt(r.stdout)
+        script = self.route_prompt(r.stdout)
+        if entry == "cli" and self.dedicated:
+            assert script.count(os.fsencode(self.prompt)) == 1, script
+            script = script.replace(os.fsencode(self.prompt), os.fsencode(self.exe))
+            self.dedicated = False
+        return script
 
     def route_prompt(self, script: bytes) -> bytes:
         """Point the hook's prompt call at this folder's `bingsu-prompt` link.
