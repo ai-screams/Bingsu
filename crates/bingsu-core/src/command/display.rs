@@ -23,7 +23,12 @@
 //! folder. Its policy digest is not checked here: it binds facts only the
 //! helper sees (the executable's identity, the toolchain, the selection
 //! file), and the response is the helper's own file under the runtime root.
-//! The value must also be a version name (`collection::language::version_ok`).
+//! The value must also be a version name (`collection::language::version_ok`),
+//! and this shell's environment must have been read whole: a frame with an
+//! entry left out (malformed, or a name given twice) shows no builtin value,
+//! as the helper decides none from it (`builtin_probe::whole`). Otherwise a
+//! shell whose only difference is a variable given twice would digest like
+//! one without it.
 //!
 //! The value is sanitized text (`response` refuses anything else); the
 //! renderer cuts it to the segment's cells.
@@ -103,7 +108,9 @@ pub fn value<'r>(prompt: &mut Prompt<'r>, unit: &ExecUnit, origin: Origin) -> Op
 /// The version `language` shows, or `None`.
 pub fn builtin_value<'r>(prompt: &Prompt<'r>, language: &Language) -> Option<&'r str> {
     let entry = prompt.response.entry(Origin::Builtin, language.id)?;
-    (entry.status == Status::Ok
+    let whole = prompt.vars.dropped.malformed + prompt.vars.dropped.duplicate == 0;
+    (whole
+        && entry.status == Status::Ok
         && entry.pattern == [0; 32]
         && entry.completed_at < prompt.entry.now
         && entry.environment == language.env_digest(prompt.vars)

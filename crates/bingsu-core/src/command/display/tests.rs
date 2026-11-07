@@ -7,7 +7,7 @@ mod cases {
         config::compile::{ExecPolicy, NotRun},
         snapshot,
     };
-    use alloc::{string::String, vec, vec::Vec};
+    use alloc::{format, string::String, vec, vec::Vec};
 
     const ENV: &[u8] = b"PATH=/usr/bin\0KUBECONFIG=/a\0LC_TIME=C\0";
 
@@ -355,5 +355,88 @@ mod cases {
         let mut e = python_entry(PY_ENV);
         e.origin = Origin::Config;
         assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+    }
+
+    // 환경을 온전히 읽지 못한 셸(같은 이름이 두 번, 잘못된 항목)은 내장 값을 그리지 않는다. helper도 그런 frame에서는
+    // 정하지 않는다. 같은 이름 두 번은 둘 다 버려져 그 변수가 없는 셸과 요약값이 같아지기 때문이다. 이것을 실패시키는
+    // 것: builtin_value에서 버린 항목 검사를 지우는 것(셸 B가 셸 A의 3.12.1을 그림), 중복이나 잘못된 항목 한쪽만 세는 것.
+    #[test]
+    fn a_shell_not_read_whole_shows_no_builtin_version() {
+        let a = b"PATH=/usr/bin\0HOME=/home/u\0";
+        let r = response(python_entry(a));
+        assert_eq!(version(&r, a, 11, true).as_deref(), Some("3.12.1"));
+        let twice = b"PATH=/usr/bin\0HOME=/home/u\0PYENV_VERSION=3.11.9\0PYENV_VERSION=3.10.14\0";
+        assert_eq!(version(&r, twice, 11, true), None);
+        let malformed = b"PATH=/usr/bin\0HOME=/home/u\0NOEQUALS\0";
+        assert_eq!(version(&r, malformed, 11, true), None);
+    }
+
+    // 언어마다 값을 묶는 셸 변수를 공유 표와 따로 이 시험에 적는다. 각 변수가 없을 때 정한 값은, 그 변수를 빈 값으로
+    // 두거나 넣은 셸에서 숨고, 값이 있을 때 정한 값은 다른 값을 넣은 셸에서 숨는다. 이것을 실패시키는 것: 공유 표에서
+    // 변수 하나를 지우는 것(예: PYENV_DIR), 해석기 없는 관리자 변수 하나를 지우는 것.
+    #[test]
+    fn each_language_is_bound_by_its_own_variables() {
+        const UNSUPPORTED: [&str; 8] = [
+            "ASDF_DATA_DIR",
+            "ASDF_DIR",
+            "MISE_DATA_DIR",
+            "MISE_SHIMS_DIR",
+            "XDG_DATA_HOME",
+            "VOLTA_HOME",
+            "NODENV_ROOT",
+            "GOENV_ROOT",
+        ];
+        let own: [(&str, &[&str]); 4] = [
+            ("node", &[]),
+            (
+                "python",
+                &[
+                    "PYENV_ROOT",
+                    "PYENV_VERSION",
+                    "PYENV_DIR",
+                    "PYENV_HOOK_PATH",
+                    "DEVELOPER_DIR",
+                ],
+            ),
+            ("rust", &["RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN"]),
+            ("go", &[]),
+        ];
+        let base = "PATH=/usr/bin\0HOME=/home/u\0";
+        for (id, names) in own {
+            let language = crate::command::builtin::language(id.as_bytes()).unwrap();
+            let decided = |environ: &str| Entry {
+                origin: Origin::Builtin,
+                id: id.into(),
+                policy: [4; 32],
+                environment: language.env_digest(&Environ::parse(environ.as_bytes())),
+                pattern: [0; 32],
+                attempted_at: 5,
+                completed_at: 10,
+                status: Status::Ok,
+                value: "1.2.3".into(),
+                raw: String::new(),
+            };
+            let shows = |r: &Response, environ: &str| {
+                let expected = binding();
+                let vars = Environ::parse(environ.as_bytes());
+                let prompt = Prompt::new(r, &expected, clock(11), &vars, true).unwrap();
+                builtin_value(&prompt, language).is_some()
+            };
+            for name in names.iter().chain(UNSUPPORTED.iter()) {
+                let without = response(decided(base));
+                assert!(shows(&without, base), "{id} {name}");
+                for value in ["", "/x"] {
+                    let set = format!("{base}{name}={value}\0");
+                    assert!(!shows(&without, &set), "{id} {name}={value:?}");
+                }
+                let with = format!("{base}{name}=/x\0");
+                let decided_with = response(decided(&with));
+                assert!(shows(&decided_with, &with), "{id} {name}");
+                assert!(
+                    !shows(&decided_with, &format!("{base}{name}=/y\0")),
+                    "{id} {name}"
+                );
+            }
+        }
     }
 }
