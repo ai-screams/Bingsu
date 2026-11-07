@@ -12,9 +12,10 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 </div>
 
 > [!WARNING]
-> **bingsu is in early development (M3a, M3b, M3c, M3d and M4 done, M6 next; bash and fish integration (M5) comes after M7).** `bingsu prompt` draws the built-in default prompt
-> in bash, zsh and fish, or your own look from a TOML config file, with git status collected in the background. There is
-> no release yet, and command segments are checked but not run yet. Published performance numbers do not exist yet.
+> **bingsu is in early development (M3a, M3b, M3c, M3d and M4 done, M6 in progress; bash and fish integration (M5) comes after M7).** `bingsu prompt` draws the built-in default prompt
+> in bash, zsh and fish, or your own look from a TOML config file, with git status collected in the background. Your
+> own text, command and environment variable segments are drawn; commands run in the background, on Linux and macOS.
+> There is no release yet. Published performance numbers do not exist yet.
 > This README describes what is being built. The feature list below describes the plan; the Status table records what works today.
 
 ## What is bingsu?
@@ -88,7 +89,8 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Performance and process gates (M3d) | Done for Linux: CI runs gates for filesystem call budgets per role, child process count, inherited descriptors, helper lifetime, zombies, snapshot read bytes, trust revocation, execution approval deadlines, the marker update rule and instruction counts, and fails when one breaks. Not complete: memory certification, macOS latency, cold-cache runs and a network home directory were not certified. No published numbers yet |
 | Performance measurement (M1 Part B) | Measurement tools in place; no published numbers yet |
 | zsh integration (M4) | Done for zsh 5.8 and 5.9: shell notices, exit status and duration, a transient line for past prompts, vi mode prompt switching, redraw when the terminal width changes, and runs next to a pinned oh-my-zsh. Not complete: the shell time gate runs on Linux only, records its verdict without failing the job, and some runs can end BLOCKED; the redraw time has no recorded value on Linux or macOS. bash and fish already handle the exit status and duration; they get the notices, transient line, vi mode switch and width redraw in M5, which comes after M7 |
-| User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width |
+| User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width; your text, command and environment variable segments, and node, python, rust and go versions where a layout draws them |
+| User commands and segments (M6) | In progress: text, command and `env` segments are drawn, commands run in the background with a cleaned environment, time limits, caching and `match` (Linux and macOS), and the built-in language segments show versions. User-defined language segments are checked but their version command does not run yet. See [docs/config.md](docs/config.md) |
 | Theme selection and customization | Partly: style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
@@ -153,8 +155,8 @@ in the hooks retain their original bytes. Displayed paths with removed control c
 ## Current limits
 
 - The default prompt remains two lines at narrow widths, including in fish; segments move or disappear as width permits.
-- A user-defined language segment (`kind = "language"`) takes `detect_files` (1 to 16 file names), `interpreter`
-  and `version`; `config check` checks them and `--explain` shows them, but the version command does not run yet.
+- User segments (text, command, `env`, language) have their own limits, such as values showing one prompt late and
+  the environment size; [docs/config.md](docs/config.md) lists them.
 - If a shape-only source fails checking or compilation during config inspection, it and its descendants are dropped
   and the already loaded data is merged, checked and compiled again; the remaining files are not read again.
 - Local config value edits preserve bytes outside the changed value, including comments, order and other quotes.
