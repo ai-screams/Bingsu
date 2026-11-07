@@ -13,7 +13,7 @@ import tempfile
 
 import pytest
 
-from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env, real_bin, real_collector
+from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env, real_bin, real_collector, real_prompt
 from shell_support import plain_script
 
 # The golden runner's reader rendering (T-A7 below compares against it).
@@ -32,7 +32,7 @@ HOOK_WORDS = (
     b"--ctx", b"--record", b"--width", b"--shell", b"--pwd", b"--colorterm", b"--colorfgbg",
     b"--log-level=", b"--host", b"--venv", b"--ssh=", b"--session", b"--seq",
     b"--runtime-root=", b"--runtime-groups=", b"--config-root=",
-    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=", b"--git-global-home=", b"--git-global-xdg=", b"--collector-exe=",
+    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=", b"--git-global-home=", b"--git-global-xdg=", b"--collector-exe=", b"--helper-exe=",
 )
 
 
@@ -96,6 +96,9 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         collector = inst.dir / "bingsu-collect"
         shutil.copyfile(real_collector(), collector)
         collector.chmod(0o700)
+        inst.prompt.unlink()
+        shutil.copyfile(real_prompt(), inst.prompt)
+        inst.prompt.chmod(0o700)
         env = trusted_env(base, tag=case)
         env["HOME"] = str(base / ("home " + case))
         pathlib.Path(env["HOME"]).mkdir(parents=True)
@@ -121,6 +124,9 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
             words[word] = value
         assert set(words) == set(HOOK_WORDS), (shell, argv)
         assert words[b"--collector-exe="] == os.fsencode(collector.resolve()), (shell, argv)
+        # The prompt ran through the verified sibling and names the pinned bingsu as its helper.
+        assert inst.dedicated, (shell, script)
+        assert words[b"--helper-exe="] == os.fsencode(inst.exe), (shell, argv)
         assert words[b"--ctx"] == b"1", (shell, argv)
         assert words[b"--record"] == b"B1", (shell, argv)
         assert words[b"--width"] == b"80", (shell, argv)

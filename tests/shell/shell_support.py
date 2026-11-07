@@ -93,18 +93,24 @@ class Install:
         """Point the hook's prompt call at this folder's `bingsu-prompt` link.
         init picks the sibling of the resolved `bingsu`; a folder whose
         `bingsu` is a copy without a sibling keeps the `bingsu prompt` call."""
+        # Only the prompt call names bingsu-prompt (the folders of these tests do not).
+        self.dedicated = b"bingsu-prompt" in script
         sibling = os.fsencode(pathlib.Path(os.path.realpath(self.exe)).with_name("bingsu-prompt"))
-        # The sibling's path is written once, as the program of the prompt call.
-        self.dedicated = script.count(sibling) == 1
-        if not self.dedicated:
-            assert sibling not in script, script
+        if not self.dedicated or os.fsencode(self.prompt) == sibling:
             return script
+        # A plain path is written once, as the program of the prompt call.
+        assert script.count(sibling) == 1, script
         return script.replace(sibling, os.fsencode(self.prompt))
+
+    def front(self):
+        """The program the hook of the last init() runs for the prompt."""
+        assert self.dedicated is not None, "init() first"
+        return self.prompt if self.dedicated else self.exe
 
     def use_fake(self, record: bytes, script=FAKE):
         (self.dir / "record.bin").write_bytes(record)
         for link in (self.exe, self.prompt):
-            if link.is_symlink():
+            if link.is_symlink() or link.exists():
                 link.unlink()
                 os.symlink(script, link)
 

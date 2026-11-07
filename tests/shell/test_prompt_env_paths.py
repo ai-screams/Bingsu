@@ -1739,18 +1739,20 @@ def test_pinned_prompt_argv_from_real_init(tmp_path):
     env["XDG_CONFIG_HOME"] += " ' quoted\nconfig"
     script = inst.init("bash", env)
     (tmp_path / "init.bash").write_bytes(script)
-    argv = pinned_prompt_argv(script, inst.exe, tmp_path, 7, env, tmp_path)
-    assert argv[:8] == [str(inst.exe), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
+    argv = pinned_prompt_argv(script, inst.front(), tmp_path, 7, env, tmp_path)
+    assert inst.dedicated
+    assert argv[:8] == [str(inst.prompt), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
     assert argv[argv.index("--pwd") + 1] == str(tmp_path)
     assert argv[argv.index("--seq") + 1] == "8"
     assert re.fullmatch(r"[0-9a-f]{32}", argv[argv.index("--session") + 1])
     for flag, word in pinned_roots(env).items():
         assert [os.fsencode(a) for a in argv if os.fsencode(a).startswith(flag)] == [word]
     assert "--collector-exe=" + init_collector_exe(script) in argv
+    assert "--helper-exe=" + str(inst.exe) in argv
     # Extra flag-bearing lines (such as init's exported command roots) cannot
     # select a different invocation or make extraction ambiguous.
     extra = b"\n# --runtime-root=decoy --config-root=decoy\n"
-    assert pinned_prompt_argv(script + extra * 3, inst.exe, tmp_path, 7, env, tmp_path) == argv
+    assert pinned_prompt_argv(script + extra * 3, inst.front(), tmp_path, 7, env, tmp_path) == argv
     # Compare every word with the same hook calling the existing fake binary.
     inst.use_fake(minimal_record())
     path = tmp_path / "actual-prompt.bash"
@@ -2632,7 +2634,7 @@ def child_capture(tmp_path):
         # Expand A2's exact hook without tracing bash or running a prompt.
         # A2 increments fixture.seq before setting the hook's pre-call counter;
         # use that same next counter so capture cannot replay the last warm-up.
-        argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
+        argv = pinned_prompt_argv(fixture.script, fixture.inst.front(), fixture.pwd,
                                   fixture.seq + 1, fixture.env, base)
         assert "--collector-exe=" + fixture.collector in argv, argv
         if redraw:
@@ -2640,7 +2642,7 @@ def child_capture(tmp_path):
         # What a full trace judgment needs after the fixture is gone.
         env, repo = fixture.env, os.path.realpath(fixture.pwd)
         (base / "context.json").write_text(json.dumps({
-            "exe": str(fixture.inst.exe), "collector_exe": fixture.collector,
+            "exe": str(fixture.inst.front()), "helper_exe": str(fixture.inst.exe), "collector_exe": fixture.collector,
             "pinned": [os.path.realpath(env[k] + sub) for k, sub in
                        (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                         ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))],
