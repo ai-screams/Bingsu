@@ -582,6 +582,40 @@ def test_shown_value_is_the_read_prefix():
     assert git.shown_value(value) == b"a" * 269 + "\uAC00".encode()
 
 
+# env segment 칸(C5): 32개 env segment가 거의 가득 찬 frame(64 KiB 아래)의 변수를 2,400칸 폭에 그린다. 세션을
+# 넘기지 않고 응답도 없다. 데운 프롬프트는 32개를 모두 그리거나(이 빌드) 하나도 그리지 않아야(env를 그리지 않는
+# base) 하고, 일부만 그리거나 응답이 생기면 받지 않는다. 이것을 실패시키는 것: 폭 2400을 빼는 것, 세션을 넘기는 것,
+# 그린 수 검사를 지우는 것, 응답 검사에서 이 칸을 빼는 것, 변수를 frame 상한 밖으로 키우는 것.
+def test_the_env_segment_case_draws_all_or_none(monkeypatch, tmp_path):
+    case = "prompt-env-segments"
+    config, env, values = git.command_setup(case, tmp_path / "probe")
+    assert config.count("kind = 'env'") == 32 and "kind = 'command'" not in config and len(values) == 32
+    frame = sum(len(k) + len(v.encode()) + 2 for k, v in env.items())
+    assert 55 * 1024 < frame < 63 * 1024, frame
+    assert all(env[f"BINGSU_PAD_{i:02}"].encode() == values[f"custom/e{i:02}"] for i in range(32))
+    assert len({v[:4] for v in values.values()}) == 32
+    base = ["bingsu", "prompt", "--width", "80", "--pwd", "/w"]
+    monkeypatch.setattr(git.M3B, "prompt_context", lambda *a, **k: (list(base), {"E": "1"}))
+    monkeypatch.setattr(git.M3B, "normal_record", lambda r: True)
+    directory = tmp_path / "ctx"
+    for stdout, want in ((b"".join(v[:4] for v in values.values()), 32), (b"B1 nothing", 0)):
+        monkeypatch.setattr(git.M3B, "run", lambda command, env, out=stdout: SimpleNamespace(
+            returncode=0, stderr=b"", stdout=out))
+        command, env_, got, drawn = git.command_context("bingsu", directory, case)
+        assert drawn == want and "--session" not in command and command[command.index("--width") + 1] == "2400"
+    contexts = {str(directory): (command, env_, got, drawn)}
+    assert git.observe_command("bingsu", contexts, directory, case)["status"] == "OBSERVED"
+    store = directory / "rt" / "store"
+    store.mkdir(parents=True)
+    (store / "command").write_bytes(b"x")
+    assert git.observe_command("bingsu", contexts, directory, case)["status"] == "BLOCKED"
+    (store / "command").unlink()
+    some = SimpleNamespace(returncode=0, stderr=b"", stdout=values["custom/e00"][:4])
+    monkeypatch.setattr(git.M3B, "run", lambda command, env: some)
+    with pytest.raises(ValueError, match="draws 1 units"):
+        git.command_context("bingsu", directory, case)
+
+
 # 텍스트 기준 칸: max와 같은 레이아웃·폭에 같은 값을 text 세그먼트 32개로 둔다. 명령 응답 없이 32개를 모두 그려야
 # 하고, 하나라도 빠지거나 응답이 생기면 칸을 받지 않는다. 이것을 실패시키는 것: text 대신 command로 두는 것, 폭
 # 2400을 빼는 것, 그린 수를 보지 않는 것, 응답 검사에서 이 칸을 빼는 것.

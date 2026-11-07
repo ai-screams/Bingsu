@@ -68,6 +68,18 @@ impl Clean {
         }
     }
 
+    /// `raw` sanitized up to what `new` reads for `max_cells` (or fewer)
+    /// cells: `new` of it equals `new` of `raw` under every width profile.
+    /// Sanitizing stops at the same kept length as in `new`, so removed code
+    /// points (ESC, bidi controls) never count toward it and a long raw
+    /// value is not copied whole.
+    pub fn sanitized_prefix(raw: &[u8], max_cells: u16) -> String {
+        let limit = read_limit(max_cells);
+        let mut text = String::with_capacity(raw.len().min(limit + 4));
+        sanitize_into_capped(raw, &mut text, limit);
+        text
+    }
+
     /// The prefix of sanitized `text` that `new` needs for `max_cells` (or
     /// fewer) cells: `new` of it equals `new` of the whole under every width
     /// profile. `new` cuts at `max_cells * 4` bytes at most, and its read
@@ -708,6 +720,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    // C5: env 값처럼 정제 전 원문을 받을 때는 sanitized_prefix가 자르기에 필요한 만큼만 정제하고, 그 결과를 자른
+    // 것은 원문 전체를 자른 것과 같다. 지워지는 글자(ESC, bidi 제어)는 상한에 세지 않는다. 이것을 실패시키는 것:
+    // 원문을 바이트 상한에서 먼저 자르는 것(ESC 272개 뒤 VISIBLE, RLO 91개 뒤 dev가 사라짐), 상한을 40 B 이상 줄이는
+    // 것. 16 B 줄인 변이는 통과한다: 첫 창이 상한 + 4 B를 읽어 남기는 글이 260 B 이상이 되고, 그 길이부터는 결과가
+    // 같다(read_prefix 시험과 같은 경계).
+    #[test]
+    fn the_sanitized_prefix_cuts_like_the_raw_value() {
+        let profiles =
+            [(1, 1), (1, 2), (2, 1), (2, 2)].map(|(a, e)| WidthProfile::new(a, e).unwrap());
+        let mut inputs: Vec<Vec<u8>> = alloc::vec![
+            [b"\x1b".repeat(272), b"VISIBLE".to_vec()].concat(),
+            ["\u{202E}".repeat(91), String::from("dev")]
+                .concat()
+                .into_bytes(),
+            [b"\x1b[31m".repeat(60), "\u{AC00}".repeat(100).into_bytes()].concat(),
+            [
+                b"a\xff\xfeb".repeat(100),
+                b"\x1b".repeat(300),
+                b"tail".to_vec()
+            ]
+            .concat(),
+            [String::from("e"), "\u{301}".repeat(140)]
+                .concat()
+                .into_bytes(),
+            b"x".repeat(5000),
+        ];
+        for pre in [0usize, 250, 269, 271] {
+            inputs.push(
+                [
+                    b"a".repeat(pre),
+                    b"\x07".repeat(100),
+                    "\u{1F600}".repeat(30).into_bytes(),
+                ]
+                .concat(),
+            );
+        }
+        for raw in &inputs {
+            let prefix = Clean::sanitized_prefix(raw, CUSTOM_TEXT_CELLS);
+            assert!(prefix.len() <= read_limit(CUSTOM_TEXT_CELLS) + 4);
+            for p in profiles {
+                for max in 0..=CUSTOM_TEXT_CELLS {
+                    assert_eq!(
+                        Clean::new(prefix.as_bytes(), max, p),
+                        Clean::new(raw, max, p),
+                        "{max} {:?}",
+                        &raw[..raw.len().min(16)]
+                    );
+                }
+            }
+        }
+        let shown = |raw: &[u8]| {
+            Clean::new(
+                Clean::sanitized_prefix(raw, CUSTOM_TEXT_CELLS).as_bytes(),
+                CUSTOM_TEXT_CELLS,
+                WidthProfile::DEFAULT,
+            )
+        };
+        assert_eq!(shown(&inputs[0]).as_str(), "VISIBLE");
+        assert_eq!(shown(&inputs[1]).as_str(), "dev");
     }
 
     // m6-P1: helper가 저장하는 값 앞부분(read_prefix)을 자른 결과는 전체를 자른 결과와 같다. 0–64칸 모든 칸 수,

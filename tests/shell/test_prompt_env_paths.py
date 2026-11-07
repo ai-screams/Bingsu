@@ -1537,6 +1537,8 @@ TEMPLATES["command_not_run"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="")
 # The unit drawn only from 120 columns: the prompts here are 80 wide.
 TEMPLATES["command_wide"] = (COMMAND_UNIT + "cache='30s'\n" + COMMAND_SCREEN.format(shown="")
                              + "[layout.when.wide]\nmin_cols=120\n[layout.when.wide.line2]\nleft=['custom/probe','char']\n")
+# C5: an env segment drawn on the only line (front strace case `env-segment`).
+TEMPLATES["env_segment"] = "[segment.\"custom/aws\"]\nkind='env'\nenv='AWS_PROFILE'\n[style]\ntemplate='BASE {custom/aws} {char}'\n"
 # 64 bands of 4 columns, the first key widest, each drawing 600 text bytes: width
 # 80 selects a variant past INDEX's chunk, with more variants after it.
 TEMPLATES["bands"] = "".join(f"[layout.when.b{i:02}]\nmin_cols={(64 - i) * 4}\nmax_cols={(64 - i) * 4 + 3}\n"
@@ -2208,7 +2210,7 @@ def test_live_helper_stops_config_io_past_an_axis_cap(axis, tmp_path):
 
 # Fixture metadata, pinned independently from the product source.
 FRONT_CHUNK = 16 * 1024
-FRONT_CASES = ('normal', 'checksum-last-good', 'body-limit', 'header-only', 'selected-band')
+FRONT_CASES = ('normal', 'checksum-last-good', 'body-limit', 'header-only', 'selected-band', 'env-segment')
 
 
 # 이것을 실패시키는 것: 제품 READ_CHUNK를 바꾸고 fixture 메타데이터는 그대로 두는 것.
@@ -2222,10 +2224,10 @@ def front_attempt_plan(case, body, through_index=None):
     """`body` bytes read through the selected variant; a checksum failure stops
     the current copy at `through_index` bytes."""
     from fsbudget.formula import FrontAttempt
-    read = {'normal': body, 'selected-band': body, 'body-limit': 0, 'header-only': 0,
+    read = {'normal': body, 'selected-band': body, 'env-segment': body, 'body-limit': 0, 'header-only': 0,
             'checksum-last-good': body if through_index is None else through_index}[case]
     current = FrontAttempt('current', True, case not in ('header-only', 'body-limit'), read, read > 0)
-    one_copy = case in ('normal', 'selected-band')
+    one_copy = case in ('normal', 'selected-band', 'env-segment')
     return [current] + ([] if one_copy else [FrontAttempt('last_good', True, True, body, True)])
 
 
@@ -2483,7 +2485,8 @@ def front_capture(request, tmp_path_factory):
     fixture = None
     lock = None
     try:
-        fixture = HelperStageFixture('unchanged', config='bands' if case == 'selected-band' else 'plain')
+        config = {'selected-band': 'bands', 'env-segment': 'env_segment'}.get(case, 'plain')
+        fixture = HelperStageFixture('unchanged', config=config)
         lock = (fixture.store / 'snapshot.lock').open('rb')
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = bytearray((fixture.store / 'snapshot').read_bytes())
@@ -2513,7 +2516,19 @@ def front_capture(request, tmp_path_factory):
         attempts = front_attempt_plan(case, read, through_index)
         evidence.update(attempts=[asdict(a) for a in attempts], body=body, metadata=metadata)
         trace = artifacts / 'trace.strace'
+        if case == 'env-segment':
+            # C5: the env segment's value comes from the environment the
+            # prompt already holds, so the calls equal the normal case's.
+            fixture.env['AWS_PROFILE'] = 'dev-acct'
         result = fixture.prompt(trace)
+        if case == 'env-segment':
+            # The hook keeps the record in shell variables; the prompt's write
+            # of it is in the trace. Only that write counts: the environment
+            # frame and execve also carry the value. 이것을 실패시키는 것: env segment 값을 그리지 않는 것(호출
+            # 비교가 공허해짐).
+            records = [line for line in trace.read_text().splitlines()
+                       if re.search(r'\bwrite\(1<[^>]*>, "B1\\0?37', line)]
+            assert records and all('dev-acct' in line for line in records), records
         (artifacts / 'stdout').write_bytes(result.stdout)
         (artifacts / 'stderr').write_bytes(result.stderr)
         pinned = [os.path.realpath(Path(fixture.env[key]) / 'bingsu')

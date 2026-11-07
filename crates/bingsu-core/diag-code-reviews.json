@@ -10,5 +10,11 @@
     "after": "1151b7db18ac39c42f81595a5d224816ce79e2b2ce52c56baf29cbb0ddc6121c",
     "kind": "meaning",
     "reason": "W411 still means: the script a command segment would run is refused by its first line, so it will not run. It now reports every first line the executor refuses (the executor's own rule: `#!/usr/bin/env` or an interpreter that is /usr/bin/env under another name, a relative interpreter, a line over 256 bytes, a NUL), naming which in a new {reason} argument, where it named only the first case before; {id} and {path} keep their meaning and the fix is unchanged. Its number, status and severity stay; no code is reused or deprecated."
+  },
+  {
+    "before": "1151b7db18ac39c42f81595a5d224816ce79e2b2ce52c56baf29cbb0ddc6121c",
+    "after": "2cadb6636e9653b33434e59b2e7ad2555a0544081a040a9851e64a676bd83b48",
+    "kind": "meaning",
+    "reason": "W404 still means: a user segment that needs a trusted layout is left out because no line of a trusted layout draws it. It now also covers env segments, which show the user's environment and take the same layout verdict as command segments, so its text says the segment is not used (an env segment does not run) and its explanation names command and env segments. {id} and the fix keep their meaning. Its number, status and severity stay; no code is reused or deprecated."
   }
 ]

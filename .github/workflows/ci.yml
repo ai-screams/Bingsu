@@ -1143,11 +1143,11 @@ jobs:
       GATE_RATIO_P95: '1.10'
       GATE_SIZE_CAP_BYTES: '6000000'
       GATE_ENFORCE: 'true'
-      GATE_CASES: no-git,git-clean,git-dirty,prompt-env64k,prompt-env64k-commands,prompt-commands-hit,prompt-commands-max,prompt-commands-max-empty,prompt-commands-redraw,prompt-commands-max-empty-redraw,prompt-text-max
+      GATE_CASES: no-git,git-clean,git-dirty,prompt-env64k,prompt-env64k-commands,prompt-commands-hit,prompt-commands-max,prompt-commands-max-empty,prompt-commands-redraw,prompt-commands-max-empty-redraw,prompt-text-max,prompt-env-segments
       # M6 C4b-3: the command time fixtures are measured and recorded, not
       # judged. A base without command values makes their ratio the whole added
       # cost; the worst increment is bounded by +0.5 ms (U-23), not by the ratio.
-      GATE_RECORD_ONLY: prompt-env64k,prompt-env64k-commands,prompt-commands-hit,prompt-commands-max,prompt-commands-max-empty,prompt-commands-redraw,prompt-commands-max-empty-redraw,prompt-text-max
+      GATE_RECORD_ONLY: prompt-env64k,prompt-env64k-commands,prompt-commands-hit,prompt-commands-max,prompt-commands-max-empty,prompt-commands-redraw,prompt-commands-max-empty-redraw,prompt-text-max,prompt-env-segments
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

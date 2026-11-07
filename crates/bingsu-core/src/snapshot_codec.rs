@@ -1,4 +1,4 @@
-//! BNGCFG09: bounded CompiledConfig codec with an explicit fact schema version.
+//! BNGCFG10: bounded CompiledConfig codec with an explicit fact schema version.
 //!
 //! HEAD, COMMON, INDEX (one entry per variant), the variants, the band names.
 //! The snapshot header checksum covers HEAD, COMMON and INDEX; each variant and
@@ -49,11 +49,11 @@ const MAX_ALLOC: usize = 64 * 1024 * 1024;
 pub const HEAD: usize = 20;
 /// Offset, length and CRC of one variant, then four reserved zero bytes.
 const ENTRY: usize = 16;
-const MAGIC: &[u8; 8] = b"BNGCFG09";
-const VERSION: u16 = 9;
+const MAGIC: &[u8; 8] = b"BNGCFG10";
+const VERSION: u16 = 10;
 /// CRC of one variant or of the name block.
 pub fn section_sum(section: &[u8]) -> [u8; 4] {
-    crate::snapshot::crc32c(&[b"bingsu-compiled-v9\0", section])
+    crate::snapshot::crc32c(&[b"bingsu-compiled-v10\0", section])
 }
 struct Reader<'a> {
     rest: &'a [u8],
@@ -496,6 +496,10 @@ impl Wire for CustomSegment {
                 text.put(o);
             }
             CustomKind::Command => 1u8.put(o),
+            CustomKind::Env(name) => {
+                2u8.put(o);
+                name.put(o);
+            }
         }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
@@ -504,6 +508,7 @@ impl Wire for CustomSegment {
             kind: match u8::get(r)? {
                 0 => CustomKind::Text(Wire::get(r)?),
                 1 => CustomKind::Command,
+                2 => CustomKind::Env(Wire::get(r)?),
                 _ => return Err(Error::Shape),
             },
         })
@@ -1527,6 +1532,7 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
                             || text.len() > usize::from(crate::field::CUSTOM_TEXT_CELLS) * 4
                     }
                     CustomKind::Command => false,
+                    CustomKind::Env(name) => !crate::config::check::env_name(name),
                 }
         })
     {

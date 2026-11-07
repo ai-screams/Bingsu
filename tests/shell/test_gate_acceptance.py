@@ -206,6 +206,8 @@ M3D_SUPPLEMENTARY["GATE-EXPLAIN.4-alias"] = "M6"
 M3D_SUPPLEMENTARY.update({"GATE-LANG-RUST.1-profile": "M6", "GATE-LANG-NODE.1-version": "M6"})
 # 이것을 실패시키는 것: 명령 응답 사본 행(응답 없음·읽지 않음·읽음)을 지우고 수집 사본 행만으로 GATE-FS-FRONT.1을 닫는 것.
 M3D_SUPPLEMENTARY.update({f"GATE-FS-FRONT.1-command_{shape}": "M6" for shape in ("no_response", "unread", "unread_narrow", "read")})
+# 이것을 실패시키는 것: env segment 행을 지워 앞단이 환경 값을 그릴 때의 호출을 고정하지 않는 것(C5).
+M3D_SUPPLEMENTARY["GATE-FS-FRONT.1-env_segment"] = "M6"
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 

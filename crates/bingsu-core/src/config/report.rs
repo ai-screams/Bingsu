@@ -236,7 +236,7 @@ pub fn from_loaded(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::config::compile::{BUILTIN_TOML, NotRun};
+    use crate::config::compile::{BUILTIN_TOML, CustomKind, NotRun};
     use crate::config::source::tests::{files, opened};
     use crate::config::source::{FileKey, Opened};
     use crate::diag::DiagCode;
@@ -333,8 +333,8 @@ pub(crate) mod tests {
     // 빈 그룹을 남기는 것(그룹은 참조가 있어야 컴파일된다), 다른 참조가 있는 그룹까지 지우는 것.
     #[test]
     fn custom_ids_in_a_template_drop_only_that_reference() {
-        // `env` is drawn from C5; `text` and `command` are drawn now.
-        let decl = "[segment.\"custom/t\"]\nkind = \"env\"\nvar = \"T\"\n";
+        // `language` is not drawn yet; `text`, `command` and `env` are.
+        let decl = "[segment.\"custom/t\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n";
         let tpl = |t: &str| alloc::format!("[style]\ntemplate = \"{t}\"\n");
         let want = nodes_of(&read(&tpl("{dir} {@group}<{git}>{@end}{@nl}{char}"), &[]));
         let with = "{@group}[{custom/t}]{@end}{dir} {@group}<{git}{custom/t.x}>{@end}{@nl}{char}";
@@ -679,7 +679,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(d.via.len(), 2);
         let r = read(
-            "[segment.\"custom/t\"]\nkind='env'\nvar='T'\n[style]\ntemplate='{dir}{custom/t}'\n",
+            "[segment.\"custom/t\"]\nkind='language'\ndetect_files=['deno.json']\ninterpreter='deno'\n[style]\ntemplate='{dir}{custom/t}'\n",
             &[],
         );
         let d = r
@@ -697,6 +697,52 @@ pub(crate) mod tests {
     }
 
     // 실행 집합 = 신뢰 출처가 그린 줄의 명령 ∩ 실제로 그려지는 줄의 명령.
+    // C5: env segment는 명령과 같은 판정(layout_verdict)을 거쳐, 신뢰 레이아웃이 그릴 때만 그린다. 저장소 설정(모양
+    // 전용)의 레이아웃만 참조하면 사용자 환경 값을 끌어내지 못한다. 이것을 실패시키는 것: env에 판정을 부르지 않는
+    // 것(모양 전용 참조가 값을 그림), 판정 결과를 뒤집는 것(신뢰 참조가 안 그림), 모양 전용 파일이 꺼진 줄을 켜서
+    // 그리게 두는 것, env를 그리는 kind 목록에서 빼는 것(N502).
+    #[test]
+    fn env_segments_show_only_from_a_trusted_layout() {
+        const ENV: &str = "[segment.\"custom/e\"]\nkind = \"env\"\nenv = \"AWS_PROFILE\"\n";
+        let user = |extra: &str| alloc::format!("extends = [\"shape-t\"]\n{ENV}{extra}");
+        let custom = |r: &ConfigReport| -> Vec<CustomKind> {
+            r.snapshot
+                .as_ref()
+                .unwrap_or_else(|| panic!("{:?}", codes_of(r)))
+                .custom
+                .iter()
+                .map(|c| c.kind.clone())
+                .collect()
+        };
+        let aws = CustomKind::Env("AWS_PROFILE".into());
+        let r = read(
+            &user("[layout.line1]\nleft = [\"dir\", \"custom/e\"]\n"),
+            &[("shape-t", "")],
+        );
+        assert_eq!(custom(&r), [aws]);
+        assert!(
+            !codes_of(&r).contains(&codes::CUSTOM_DRAWN_LATER),
+            "{:?}",
+            codes_of(&r)
+        );
+        for shape in [
+            "[layout.line1]\nleft = [\"dir\", \"custom/e\"]\n",
+            "[style]\ntemplate = '{dir}{custom/e}'\n",
+        ] {
+            let r = read(&user(""), &[("shape-t", shape)]);
+            assert_eq!(custom(&r), [], "{shape}");
+            assert!(
+                codes_of(&r).contains(&codes::NOT_RUN_UNTRUSTED_LAYOUT),
+                "{shape}"
+            );
+        }
+        let r = read(
+            &user("[layout.line1]\nleft = [\"dir\", \"custom/e\"]\nenabled = false\n"),
+            &[("shape-t", "[layout.line1]\nenabled = true\n")],
+        );
+        assert_eq!(custom(&r), []);
+    }
+
     // 이것을 실패시키는 것: 모양 전용 파일이 줄을 켜거나(`enabled = true`) 명령을 더해 실행을 켜는 것,
     // 한쪽 배열을 바꿨다고 다른 쪽 신뢰 명령을 끄는 것, 숨긴 줄의 명령을 실행하는 것, 구간 줄을 빠뜨리는 것.
     #[test]

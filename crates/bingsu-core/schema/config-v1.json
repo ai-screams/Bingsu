@@ -662,6 +662,16 @@
             "x-bingsu-level": "basic",
             "x-bingsu-exec": true
           },
+          "env": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$(?![\\s\\S])",
+            "x-bingsu-type": "env-name",
+            "examples": ["AWS_PROFILE"],
+            "description": "Environment variable to show.",
+            "x-bingsu-description-ko": "보일 환경 변수.",
+            "x-bingsu-level": "advanced",
+            "x-bingsu-exec": true
+          },
           "env_allow": {
             "type": "array",
             "items": { "type": "string" },
@@ -722,14 +732,6 @@
             "x-bingsu-level": "expert",
             "x-bingsu-exec": true
           },
-          "var": {
-            "type": "string",
-            "examples": ["AWS_PROFILE"],
-            "description": "Environment variable to show.",
-            "x-bingsu-description-ko": "보일 환경 변수.",
-            "x-bingsu-level": "advanced",
-            "x-bingsu-exec": true
-          },
           "version": {
             "type": "array",
             "items": { "type": "string" },
@@ -740,7 +742,7 @@
             "x-bingsu-exec": true
           }
         },
-        "allOf": [{ "if": { "required": ["kind"], "properties": { "kind": { "const": "command" } } }, "then": { "properties": { "detect_files": false, "interpreter": false, "text": false, "var": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "text" } } }, "then": { "properties": { "cache": false, "command": false, "cwd": false, "detect_files": false, "env_allow": false, "interpreter": false, "shell": false, "timeout": false, "unsafe_shell": false, "var": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "env" } } }, "then": { "properties": { "cache": false, "command": false, "cwd": false, "detect_files": false, "env_allow": false, "interpreter": false, "shell": false, "text": false, "timeout": false, "unsafe_shell": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "language" } } }, "then": { "properties": { "command": false, "cwd": false, "env_allow": false, "shell": false, "text": false, "unsafe_shell": false, "var": false } } }],
+        "allOf": [{ "if": { "required": ["kind"], "properties": { "kind": { "const": "command" } } }, "then": { "properties": { "detect_files": false, "env": false, "interpreter": false, "text": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "text" } } }, "then": { "properties": { "cache": false, "command": false, "cwd": false, "detect_files": false, "env": false, "env_allow": false, "interpreter": false, "shell": false, "timeout": false, "unsafe_shell": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "env" } } }, "then": { "properties": { "cache": false, "command": false, "cwd": false, "detect_files": false, "env_allow": false, "interpreter": false, "shell": false, "text": false, "timeout": false, "unsafe_shell": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "language" } } }, "then": { "properties": { "command": false, "cwd": false, "env": false, "env_allow": false, "shell": false, "text": false, "unsafe_shell": false } } }],
         "additionalProperties": false,
         "description": "One segment.",
         "x-bingsu-description-ko": "세그먼트 하나.",
