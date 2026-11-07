@@ -3527,11 +3527,40 @@ def test_target_links_count_same_folder_hops(tmp_path):
 COMMAND_FRONT_SHAPES = ("no_response", "unread", "unread_narrow", "read")
 
 
+def prompt_execs(lines):
+    """The successful execs of a prompt process (argv[1] == "prompt") in a
+    strace -f text, as (path, argv0). The parser joins an exec strace split
+    into `<unfinished ...>` and `<... execve resumed>` when another process
+    printed in between, so the result does not depend on that interleaving."""
+    out = []
+    for c in parse_trace("\n".join(lines)):
+        if c.name == "execve" and c.ret == "0":
+            m = re.match(r'"([^"]+)", \["([^"]+)", "prompt"', c.args)
+            if m:
+                out.append((m[1], m[2]))
+    return out
+
+
 def assert_dedicated_front(lines, inst):
     """The traced prompt is the shipped `bingsu-prompt` front, which init chose."""
     # 이것을 실패시키는 것: front 축 gate가 fallback(`bingsu prompt`) front를 재는 것.
-    fronts = [line for line in lines if re.search(r'execve\("[^"]+", \["[^"]+", "prompt"', line) and line.rstrip().endswith("= 0")]
-    assert inst.dedicated and fronts and all(f'execve("{inst.prompt}"' in line for line in fronts), fronts
+    fronts = prompt_execs(lines)
+    assert inst.dedicated and fronts and all(path == str(inst.prompt) for path, _ in fronts), fronts
+
+
+# 이것을 실패시키는 것: 다른 프로세스의 출력에 갈라진 execve(unfinished … resumed)를 놓치는 것, 실패한 exec이나
+# prompt가 아닌 exec을 front로 세는 것.
+def test_prompt_execs_survive_a_split_exec_line():
+    split = [
+        '10 execve("/b/bingsu-prompt", ["/b/bingsu-prompt", "prompt", "--ctx", "1"], 0x1 /* 2 vars */ <unfinished ...>',
+        '11 read(3, "x", 1) = 1',
+        '10 <... execve resumed>) = 0',
+        '12 execve("/b/bingsu-prompt", ["/b/bingsu-prompt", "prompt"], 0x1) = -1 ENOENT (No such file or directory)',
+        '13 execve("/b/bingsu", ["/b/bingsu", "__refresh-v1"], 0x2 /* 0 vars */) = 0',
+    ]
+    assert prompt_execs(split) == [("/b/bingsu-prompt", "/b/bingsu-prompt")]
+    whole = ['10 execve("/b/bingsu", ["/b/bingsu", "prompt"], 0x1) = 0']
+    assert prompt_execs(whole) == [("/b/bingsu", "/b/bingsu")]
 
 
 def front_calls(lines, exe):
