@@ -2523,8 +2523,12 @@ def front_capture(request, tmp_path_factory):
         result = fixture.prompt(trace)
         if case == 'env-segment':
             # The hook keeps the record in shell variables; the prompt's write
-            # of it is in the trace. 이것을 실패시키는 것: env segment 값을 그리지 않는 것(호출 비교가 공허해짐).
-            assert 'dev-acct' in trace.read_text(), 'the record does not draw the env value'
+            # of it is in the trace. Only that write counts: the environment
+            # frame and execve also carry the value. 이것을 실패시키는 것: env segment 값을 그리지 않는 것(호출
+            # 비교가 공허해짐).
+            records = [line for line in trace.read_text().splitlines()
+                       if re.search(r'\bwrite\(1<[^>]*>, "B1\\0?37', line)]
+            assert records and all('dev-acct' in line for line in records), records
         (artifacts / 'stdout').write_bytes(result.stdout)
         (artifacts / 'stderr').write_bytes(result.stderr)
         pinned = [os.path.realpath(Path(fixture.env[key]) / 'bingsu')
