@@ -72,7 +72,11 @@ def test_zsh_hooks_exec_only_pinned_binary(tmp_path, monkeypatch):
     s.kill()
     calls = re.findall(r'exec(?:ve|veat)\((?:\S+, )?"([^"]+)"', trace.read_text(errors="replace"))
     assert calls[0] == zsh, calls
-    pinned = {str(inst.exe), str(real_bin()), str(real_collector())}
+    # The prompt program the hook runs (bingsu-prompt beside a matching build,
+    # through this install's link) and the helper it names (the pinned bingsu).
+    pinned = {str(inst.exe), str(inst.front()), str(real_bin()), str(real_collector())}
+    # 이것을 실패시키는 것: 확인한 bingsu-prompt 대신 다른 프로그램을 부르는 것(위 집합 밖), 형제를 쓰지 않는 것.
+    assert inst.dedicated and str(inst.front()) in calls[1:], calls
     assert set(calls[1:]) <= pinned, sorted(set(calls[1:]) - pinned)
     assert len(calls) >= 4, calls
 
