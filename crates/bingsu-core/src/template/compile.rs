@@ -355,12 +355,44 @@ fn index16(i: usize, sp: Span) -> Result<u16, CompileError> {
 
 /// Lookups are binary searches, so ids and field names must be strictly
 /// ascending. The catalog is outside input (M3 installs declarations).
-fn catalog_sorted(catalog: &[SegmentDecl]) -> bool {
-    catalog.windows(2).all(|w| w[0].id < w[1].id)
-        && catalog
-            .iter()
-            .all(|d| d.fields.windows(2).all(|w| w[0].name < w[1].name))
+/// A `const fn`, so the built-in catalog's order is checked once, when this
+/// crate is compiled (the assertion below).
+const fn catalog_sorted(catalog: &[SegmentDecl]) -> bool {
+    let mut i = 0;
+    while i < catalog.len() {
+        if i + 1 < catalog.len() && !str_lt(catalog[i].id, catalog[i + 1].id) {
+            return false;
+        }
+        let fields = catalog[i].fields;
+        let mut j = 0;
+        while j + 1 < fields.len() {
+            if !str_lt(fields[j].name, fields[j + 1].name) {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
 }
+
+/// `a < b` as `str` orders them (bytewise), in a `const fn`.
+const fn str_lt(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut i = 0;
+    while i < a.len() && i < b.len() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+        i += 1;
+    }
+    a.len() < b.len()
+}
+
+/// The built-in catalog is sorted; checked at build time, so
+/// `compile_builtin` does not walk it again on every template (a config or
+/// the default theme compiles several).
+const _: () = assert!(catalog_sorted(crate::field::BUILTIN));
 
 fn one_arg(args: &[String], sp: Span) -> Result<&str, CompileError> {
     match args {
@@ -532,7 +564,25 @@ pub fn compile_with(
     catalog: &[SegmentDecl],
     customs: &[&str],
 ) -> Result<Vec<CompiledLine>, CompileError> {
-    if !catalog_sorted(catalog) || !customs.windows(2).all(|w| w[0] < w[1]) {
+    if !catalog_sorted(catalog) {
+        return Err(err(CompileErrorKind::BadCatalog, Span { start: 0, end: 0 }));
+    }
+    compile_sorted(src, catalog, customs)
+}
+
+/// `compile_with` against `field::BUILTIN`, whose order the build already
+/// checked.
+pub fn compile_builtin(src: &str, customs: &[&str]) -> Result<Vec<CompiledLine>, CompileError> {
+    compile_sorted(src, crate::field::BUILTIN, customs)
+}
+
+/// `catalog` is known to be sorted.
+fn compile_sorted(
+    src: &str,
+    catalog: &[SegmentDecl],
+    customs: &[&str],
+) -> Result<Vec<CompiledLine>, CompileError> {
+    if !customs.windows(2).all(|w| w[0] < w[1]) {
         return Err(err(CompileErrorKind::BadCatalog, Span { start: 0, end: 0 }));
     }
     let tree = parse(src).map_err(|e| err(CompileErrorKind::Syntax(e.kind), e.span))?;
