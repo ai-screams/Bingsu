@@ -114,8 +114,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # Include Linux-only unit/integration test paths for both sibling crates.
-      - run: cargo clippy -j 2 -p bingsu -p bingsu-collect --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
-      - run: cargo clippy -j 2 -p bingsu -p bingsu-collect --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+      - run: cargo clippy -j 2 -p bingsu -p bingsu-prompt -p bingsu-collect --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+      - run: cargo clippy -j 2 -p bingsu -p bingsu-prompt -p bingsu-collect --all-targets --target x86_64-unknown-linux-musl -- -D warnings
 
   collector-msrv:
     name: Collector deployment MSRV (1.88)
@@ -131,7 +131,7 @@ jobs:
         with:
           toolchain: 1.88.0
       # 이것을 실패시키는 것: 제품이나 전이 의존성이 MSRV보다 새 문법/API를 쓰는 것.
-      - run: cargo build --locked -j 2 -p bingsu -p bingsu-collect
+      - run: cargo build --locked -j 2 -p bingsu -p bingsu-prompt -p bingsu-collect
 
   # Independent probe crates have their own lock/build graph. Keep their
   # native glibc+musl gates off the product job's 30-minute critical path.
@@ -430,7 +430,7 @@ jobs:
           grep -F 'test every_fuzz_target_calls_its_shared_entry ... ok' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test pattern_flags_reach_every_source_label ... ok' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test assert_live_rejects_unreserved_heap - should panic ... ok' "$RUNNER_TEMP/f2-seeds.txt"
-      - run: cargo build -j 2 --release -p bingsu -p bingsu-collect
+      - run: cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect
       # 이것을 실패시키는 것: build script·RUSTFLAGS·config가 제품 rustc에 --cfg collector_fuzz를 넘기는 것.
       - name: Product rustc never enables collector_fuzz
         shell: bash --noprofile --norc -euo pipefail {0}
@@ -671,7 +671,7 @@ jobs:
         run: |
           set -o pipefail
           triple="$(uname -m)-unknown-linux-musl"
-          cargo build -j 2 --release -p bingsu -p bingsu-collect --target "$triple"
+          cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect --target "$triple"
           # 이것을 실패시키는 것: 정적 musl ELF를 빈 동적 심벌 표만으로 통과시키는 것.
           python3 scripts/check_collector_symbols.py "target/$triple/release/bingsu-collect" --sibling "target/$triple/release/bingsu" --unstripped-dir "target/$triple/release/symbol-audit" --strip
           python3 bench/git-product.py --prepare "target/$triple/release/bingsu" --out "$RUNNER_TEMP/measurements/musl-preparation.json"
@@ -1166,8 +1166,12 @@ jobs:
           fi
           git worktree add "$RUNNER_TEMP/base" "$(git rev-parse HEAD^1)"
           mkdir -p "$RUNNER_TEMP/measurements"
-          cargo build --manifest-path "$RUNNER_TEMP/base/Cargo.toml" -j 2 --release -p bingsu -p bingsu-collect
-          cargo build -j 2 --release -p bingsu -p bingsu-collect
+          # The base builds bingsu-prompt when its tree has the package; the
+          # measurement then fails if a hook does not call the built binary.
+          base_packages=(-p bingsu -p bingsu-collect)
+          if [ -f "$RUNNER_TEMP/base/crates/bingsu-prompt/Cargo.toml" ]; then base_packages+=(-p bingsu-prompt); fi
+          cargo build --manifest-path "$RUNNER_TEMP/base/Cargo.toml" -j 2 --release "${base_packages[@]}"
+          cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect
           python3 bench/git-product.py --prepare "$RUNNER_TEMP/base/target/release/bingsu" --out "$RUNNER_TEMP/measurements/base-preparation.json"
           python3 bench/git-product.py --prepare target/release/bingsu --out "$RUNNER_TEMP/measurements/candidate-preparation.json"
       - name: Alternate 200 pairs per case in the controlled protocol

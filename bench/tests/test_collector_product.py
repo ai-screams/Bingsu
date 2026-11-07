@@ -21,14 +21,41 @@ def test_prompt_context_preserves_collector_pin(monkeypatch, tmp_path):
     calls = []
     def run(command, **kwargs):
         calls.append(command)
-        output = (b"'--runtime-root=1:2:/r' '--config-root=/c' "
-                  b"'--collector-exe=/trusted/semi;colon/bingsu-collect';\n") if command[1] == "init" else (
+        output = (b"  { _bingsu_rec=$('/trusted/bingsu' prompt --ctx 1 '--runtime-root=1:2:/r' '--config-root=/c' "
+                  b"'--collector-exe=/trusted/semi;colon/bingsu-collect' '--helper-exe=/trusted/bingsu'; printf .);\n"
+                  ) if command[1] == "init" else (
                       b"B1\x1f12\x1f> \x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1f\x1fok:none\x1e")
         return CompletedProcess(command, 0, output, b"")
     monkeypatch.setattr(product, "run", run)
+    monkeypatch.setattr(product, "dedicated_prompt", lambda binary: False)
     command, _ = product.prompt_context("/trusted/bingsu", tmp_path)
     assert "--collector-exe=/trusted/semi;colon/bingsu-collect" in command
+    assert "--helper-exe=/trusted/bingsu" in command
     assert calls[-1] == command
+
+
+# 이것을 실패시키는 것: 트리에 bingsu-prompt가 있는데 hook이 `bingsu prompt`를 불러도 그 fallback을 재는 것,
+# 트리에 없는데 다른 프로그램을 받는 것.
+def test_front_program_follows_the_tree(monkeypatch, tmp_path):
+    tree = tmp_path / "tree"
+    (tree / "crates/bingsu").mkdir(parents=True)
+    (tree / "Cargo.toml").write_text("")
+    binary = tree / "target/release/bingsu"
+    binary.parent.mkdir(parents=True)
+    dedicated = str(binary.with_name("bingsu-prompt"))
+    assert not product.dedicated_prompt(binary)
+    assert product.front_program(binary, str(binary)) == str(binary)
+    with pytest.raises(ValueError):
+        product.front_program(binary, dedicated)
+    (tree / "crates/bingsu-prompt").mkdir()
+    (tree / "crates/bingsu-prompt/Cargo.toml").write_text("")
+    assert product.dedicated_prompt(binary)
+    assert product.front_program(binary, dedicated) == dedicated
+    for wrong in (str(binary), None):
+        with pytest.raises(ValueError):
+            product.front_program(binary, wrong)
+    with pytest.raises(ValueError):
+        product.dedicated_prompt(tmp_path / "elsewhere/bingsu")
 
 
 
