@@ -237,6 +237,13 @@ fn selected_variant(c: CompiledConfig) -> (CompiledConfig, u32) {
 )]
 #[path = "../../bingsu-core/tests/collection_front.rs"]
 mod front_fixture;
+// The measured run sits behind an `#[inline(never)]` boundary: inlined into
+// the bench wrapper, Callgrind on aarch64 leaves most of it out of the count
+// (55,827 instead of 233,995 for width_change).
+#[inline(never)]
+fn front_run(fixture: &mut front_fixture::Harness) -> Vec<u8> {
+    fixture.run().record
+}
 #[library_benchmark]
 #[bench::absent(args=[0], setup=front_fixture::bench_case)]
 #[bench::current(args=[1], setup=front_fixture::bench_case)]
@@ -244,7 +251,7 @@ mod front_fixture;
 #[bench::maximum(args=[3], setup=front_fixture::bench_case)]
 #[bench::width_change(args=[4], setup=front_fixture::bench_case)]
 fn front_collection(mut fixture: front_fixture::Harness) -> (front_fixture::Harness, Vec<u8>) {
-    let record = black_box(fixture.run().record);
+    let record = black_box(front_run(&mut fixture));
     (fixture, record)
 }
 // Historical M3b policy, retained separately from the activated product catalog.
