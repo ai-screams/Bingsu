@@ -756,15 +756,15 @@ pub(crate) fn selected_request(
 mod query_tests {
     use bingsu_core::config::compile::{ExecPolicy, ExecUnit};
 
-    // 아직 실행할 수 없는 사용자 언어(D3c-1)는 수집 질의에 싣지 않는다. 표시 파일 조회가 수집 시간을 쓰지 않게
-    // 하려는 것이다. 양성 대조로, 같은 단위를 core의 질의 함수에 바로 넣으면 질의 하나가 된다. 이것을 실패시키는
-    // 것: helper의 runnable 거르기를 지우는 것.
+    // 실행할 수 없는 사용자 언어(interpreter 없음, not_run)는 수집 질의에 싣지 않는다. 표시 파일 조회가 수집 시간을
+    // 쓰지 않게 하려는 것이다. 실행할 수 있는 것은 싣는다(D3c-2). 이것을 실패시키는 것: helper의 runnable 거르기를
+    // 지우는 것(실행할 수 없는 것도 실림), 실행할 수 있는 것을 빼는 것.
     #[test]
     fn a_language_that_cannot_run_is_not_asked_about() {
-        let unit = ExecUnit {
-            id: "custom/deno".into(),
+        let unit = |id: &str, interpreter: Option<&str>| ExecUnit {
+            id: id.into(),
             policy: ExecPolicy::Language {
-                interpreter: Some("deno".into()),
+                interpreter: interpreter.map(Into::into),
                 version_argv: vec!["--version".into()],
                 detect_files: vec!["deno.json".into()],
                 cwd: None,
@@ -777,12 +777,18 @@ mod query_tests {
             shown_at: Vec::new(),
             not_run: None,
         };
-        let units = [unit];
-        assert_eq!(
-            bingsu_core::collection::language::user_queries(&units).len(),
-            1
-        );
-        assert!(super::user_queries(&units).is_empty());
+        let mut off = unit("custom/off", Some("deno"));
+        off.not_run = Some(bingsu_core::config::compile::NotRun::Disabled);
+        let units = [
+            unit("custom/deno", Some("deno")),
+            unit("custom/none", None),
+            off,
+        ];
+        let ids: Vec<Vec<u8>> = super::user_queries(&units)
+            .into_iter()
+            .map(|q| q.id)
+            .collect();
+        assert_eq!(ids, [b"custom/deno".to_vec()]);
     }
 }
 

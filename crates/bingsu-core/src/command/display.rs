@@ -6,7 +6,8 @@
 //!   epoch, context, clock, roots, cwd) and its clock is this prompt's;
 //! - the entry completed before this prompt began;
 //! - the unit runs now (no `not_run`) and its policy digest is the one the
-//!   entry ran with;
+//!   entry ran with (`plan::entry_digest`: for a language unit, with its
+//!   `detect_files`);
 //! - this shell's original environment digest (the keep list, `LC_*` and
 //!   the unit's `env_allow`) is the one the entry ran with;
 //! - the entry succeeded (a failure shows nothing) and carries no `match`
@@ -36,7 +37,6 @@ use super::{
     builtin::Language,
     plan::{self, Environ},
     response::{Binding, Response, Status},
-    wire::policy_digest,
 };
 use crate::{config::compile::ExecUnit, handoff::Origin, snapshot::Clock};
 use alloc::vec::Vec;
@@ -91,12 +91,7 @@ pub fn value<'r>(prompt: &mut Prompt<'r>, unit: &ExecUnit, origin: Origin) -> Op
     }
     let runnable = plan::runnable(unit)?;
     let entry = prompt.response.entry(origin, &unit.id)?;
-    let policy = policy_digest(
-        &runnable.policy,
-        runnable.cwd,
-        runnable.timeout,
-        &runnable.env_allow,
-    );
+    let policy = plan::entry_digest(&runnable);
     (entry.status == Status::Ok
         && entry.pattern == [0; 32]
         && entry.completed_at < prompt.entry.now

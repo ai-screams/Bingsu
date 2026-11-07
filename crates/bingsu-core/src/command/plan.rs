@@ -33,18 +33,27 @@ pub struct Runnable {
     /// Nanoseconds, as configured (the supervisor cuts it to `TIMEOUT_MAX`).
     pub timeout: u64,
     pub env_allow: Vec<Vec<u8>>,
+    /// A language unit's `detect_files`; empty for a command.
+    pub detect: Vec<Vec<u8>>,
 }
 
 /// The grant form of a compiled unit, or `None` when it must not run: a
 /// `not_run` reason (unreachable band, untrusted file, disabled), no grant
-/// policy (plain `shell`, language unit), or a `cwd` value outside the two.
+/// policy (plain `shell`, a language unit without `interpreter`), or a `cwd`
+/// value outside the two.
 pub fn runnable(u: &ExecUnit) -> Option<Runnable> {
     if u.not_run.is_some() {
         return None;
     }
     let policy = Policy::from_config(&u.policy)?;
-    let ExecPolicy::Command { cwd, env_allow, .. } = &u.policy else {
-        return None;
+    let (cwd, env_allow, detect) = match &u.policy {
+        ExecPolicy::Command { cwd, env_allow, .. } => (cwd, env_allow, &[][..]),
+        ExecPolicy::Language {
+            cwd,
+            env_allow,
+            detect_files,
+            ..
+        } => (cwd, env_allow, detect_files.as_slice()),
     };
     let cwd = match cwd.as_deref() {
         None | Some("neutral") => Cwd::Neutral,
@@ -60,7 +69,30 @@ pub fn runnable(u: &ExecUnit) -> Option<Runnable> {
         cwd,
         timeout,
         env_allow: env_allow.iter().map(|n| n.as_bytes().to_vec()).collect(),
+        detect: detect.iter().map(|n| n.as_bytes().to_vec()).collect(),
     })
+}
+
+/// The policy digest a unit's response entry is bound to: the grant's
+/// (`wire::policy_digest`) for a command, and for a language unit that one
+/// with its `detect_files` too (D3c-2 ruling Q3), so other files that mark
+/// the language never stand for the value decided with these. The grant
+/// keeps `policy_digest`, which the supervisor checks the unit against.
+pub fn entry_digest(r: &Runnable) -> [u8; 32] {
+    let grant = super::wire::policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
+    // Fails without it: a_language_digest_binds_its_files.
+    if r.detect.is_empty() {
+        return grant;
+    }
+    let mut b = Vec::new();
+    b.extend_from_slice(b"bingsu-language-policy-v1\0");
+    b.extend_from_slice(&grant);
+    b.extend_from_slice(&(r.detect.len() as u64).to_le_bytes());
+    for name in &r.detect {
+        b.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        b.extend_from_slice(name);
+    }
+    crate::collection::cwd_hash::sha256(&b)
 }
 
 /// What `Environ::parse` left out, for the helper's log line.
@@ -301,6 +333,57 @@ mod tests {
             shell: None,
             unsafe_shell: false,
         }
+    }
+
+    fn language(interpreter: Option<&str>, detect: &[&str]) -> ExecPolicy {
+        ExecPolicy::Language {
+            interpreter: interpreter.map(String::from),
+            version_argv: vec!["--version".into()],
+            detect_files: detect.iter().map(|w| String::from(*w)).collect(),
+            cwd: Some("untrusted-current".into()),
+            env_allow: vec!["DENO_DIR".into()],
+        }
+    }
+
+    // D3c-2: 사용자 정의 language 단위는 argv [interpreter, version…]로, 자기 cwd·env_allow로 실행한다.
+    // interpreter가 없거나 비면 실행하지 않는다. 이것을 실패시키는 것: language를 grant 정책으로 바꾸지 않는 것,
+    // version 인자를 빼는 것, 빈 interpreter를 받는 것, language의 cwd·env_allow 대신 기본값을 쓰는 것.
+    #[test]
+    fn a_language_unit_runs_its_interpreter_and_version() {
+        let r = runnable(&unit(language(Some("deno"), &["deno.json"]))).unwrap();
+        assert_eq!(
+            r.policy,
+            Policy::Argv {
+                argv: vec![b"deno".to_vec(), b"--version".to_vec()]
+            }
+        );
+        assert_eq!(r.cwd, Cwd::UntrustedCurrent);
+        assert_eq!(r.env_allow, [b"DENO_DIR".to_vec()]);
+        assert_eq!(r.detect, [b"deno.json".to_vec()]);
+        assert!(runnable(&unit(language(None, &["deno.json"]))).is_none());
+        assert!(runnable(&unit(language(Some(""), &["deno.json"]))).is_none());
+    }
+
+    // 항목의 정책 요약값: 명령은 grant 요약값 그대로, language는 detect_files까지 묶는다(D3c-2 Q3). 감지 이름이
+    // 다르면 요약값이 다르다. 이것을 실패시키는 것: language에도 grant 요약값만 쓰는 것, 명령의 요약값을 바꾸는 것,
+    // 이름마다의 길이 머리를 빼는 것(["ab","c"]와 ["a","bc"]가 같아짐).
+    #[test]
+    fn a_language_digest_binds_its_files() {
+        let cmd = runnable(&unit(command(&["k"], None))).unwrap();
+        assert_eq!(
+            entry_digest(&cmd),
+            policy_digest(&cmd.policy, cmd.cwd, cmd.timeout, &cmd.env_allow)
+        );
+        let a = runnable(&unit(language(Some("deno"), &["deno.json"]))).unwrap();
+        let b = runnable(&unit(language(Some("deno"), &["deno.jsonc"]))).unwrap();
+        assert_ne!(
+            entry_digest(&a),
+            policy_digest(&a.policy, a.cwd, a.timeout, &a.env_allow)
+        );
+        assert_ne!(entry_digest(&a), entry_digest(&b));
+        let ab = runnable(&unit(language(Some("deno"), &["ab", "c"]))).unwrap();
+        let a_b = runnable(&unit(language(Some("deno"), &["a", "bc"]))).unwrap();
+        assert_ne!(entry_digest(&ab), entry_digest(&a_b));
     }
 
     // 이것을 실패시키는 것: runnable의 `not_run.is_some()` 거름을 지우는 것(도달할 수 없는 구간·믿을 수

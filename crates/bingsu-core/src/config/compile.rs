@@ -2147,7 +2147,7 @@ mod tests {
     // 그리는(실행될 수 있는) 명령·언어 segment는 설정 하나에 32개까지다(계획 U-9d, 명령 응답의 항목 상한). 그리지
     // 않는 선언은 세지 않고, 좁은 폭 구간 하나에서만 그리거나 필드 참조로만 그리는 단위도 센다. 이것을 실패시키는
     // 것: 상한 검사를 지우는 것, 상한을 33 이상으로 두는 것, 그리지 않는 선언까지 세는 것, 좁은 폭에서만 그리는
-    // 단위를 빼는 것.
+    // 단위를 빼는 것, language 단위를 세지 않는 것.
     #[test]
     fn at_most_32_drawn_exec_units() {
         let declare = |from: usize, n: usize| {
@@ -2213,20 +2213,23 @@ mod tests {
             "{:?}",
             codes_of(&read(&off, &[]))
         );
-        // Language placeholders run nothing yet: 33 drawn count none.
-        let languages = (0..33)
-            .map(|i| {
-                alloc::format!(
-                    "[segment.\"custom/c{i:03}\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n"
-                )
-            })
-            .collect::<String>()
-            + &draw(33);
-        assert!(
-            read(&languages, &[]).snapshot.is_some(),
-            "{:?}",
-            codes_of(&read(&languages, &[]))
-        );
+        // A language unit runs its interpreter, so it counts like a command:
+        // 32 drawn languages compile, a 33rd is refused.
+        let languages = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    alloc::format!(
+                        "[segment.\"custom/c{i:03}\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n"
+                    )
+                })
+                .collect::<String>()
+                + &draw(n)
+        };
+        let ok = read(&languages(32), &[]);
+        let codes = codes_of(&ok);
+        let c = ok.snapshot.unwrap_or_else(|| panic!("{codes:?}"));
+        assert_eq!(drawn(&c), 32);
+        assert!(read(&languages(33), &[]).snapshot.is_none());
     }
 
     // C5: env segment는 실행 단위가 아니라 32개 상한에 세지 않는다. 실행 가능한 command 32개와 그리는 env 하나는

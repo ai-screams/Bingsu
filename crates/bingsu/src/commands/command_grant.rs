@@ -497,7 +497,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             let Some(vars) = &vars else { return true };
             let env = plan::env_digest(vars, &r.env_allow);
             environments.push((id.to_string(), env));
-            let policy = policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
+            let policy = plan::entry_digest(r);
             let cache_ns = cache_ms.unwrap_or(0).saturating_mul(1_000_000);
             let hit = current
                 .as_ref()
@@ -1302,8 +1302,7 @@ impl Round {
             ended_at: now,
             stdout: Vec::new(),
         };
-        let policy = policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
-        response::entry_for(id.to_owned(), policy, env, now, &failed)
+        response::entry_for(id.to_owned(), plan::entry_digest(r), env, now, &failed)
     }
 
     /// The response entries of this round's config results (builtin probes
@@ -1325,13 +1324,15 @@ impl Round {
                     .iter()
                     .find(|(id, _)| *id == unit.id)?
                     .1;
-                let e = response::entry_for(
-                    unit.id.clone(),
-                    unit.digest,
-                    env,
-                    self.publish.clock.now,
-                    o,
-                )?;
+                // The entry's digest: the grant's, and a language unit's
+                // `detect_files` too (`plan::entry_digest`).
+                let policy = self
+                    .runnable
+                    .iter()
+                    .find(|(id, _)| *id == unit.id)
+                    .map_or(unit.digest, |(_, r)| plan::entry_digest(r));
+                let e =
+                    response::entry_for(unit.id.clone(), policy, env, self.publish.clock.now, o)?;
                 Some(if self.language_units.contains(&unit.id) {
                     language_entry(e)
                 } else {
@@ -1502,6 +1503,7 @@ mod tests {
                 cwd: Cwd::Neutral,
                 timeout: plan::TIMEOUT_DEFAULT,
                 env_allow: env_allow.iter().map(|n| n.as_bytes().to_vec()).collect(),
+                detect: Vec::new(),
             },
         )
     }
@@ -1861,6 +1863,7 @@ mod tests {
                 cwd: Cwd::Neutral,
                 timeout: plan::TIMEOUT_DEFAULT,
                 env_allow: Vec::new(),
+                detect: Vec::new(),
             },
         );
         let run = |cwd: &Path| {
