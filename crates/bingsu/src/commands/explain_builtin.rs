@@ -14,7 +14,6 @@ use super::{
     collection_store,
     command_grant::{self, Languages, Root},
     group_policy::SystemGroups,
-    init::roots::Roots,
     snapshot_store::CheckedContextFd,
 };
 use bingsu_core::{
@@ -54,7 +53,9 @@ pub(crate) enum NotDecided {
     Unsettled,
     NoAnswer,
     Environment,
+    TooLarge,
     Folder,
+    NoCwd,
 }
 
 impl NotDecided {
@@ -66,7 +67,9 @@ impl NotDecided {
             Self::Unsettled => "the folder facts do not settle the repository",
             Self::NoAnswer => "the collection has no answer for it",
             Self::Environment => "the shell's environment has duplicate or malformed entries",
+            Self::TooLarge => "the shell's environment is too large for the prompt to pass on",
             Self::Folder => "the shell's folder could not be read",
+            Self::NoCwd => "the current folder cannot be read",
         }
     }
 }
@@ -87,6 +90,11 @@ pub(crate) fn decide(
     me: u32,
     groups: &mut SystemGroups,
 ) -> Decision {
+    // The prompt hands the helper no environment past one frame
+    // (`env_frame::encode`), and the helper then decides nothing.
+    if environment.len() > bingsu_core::command::env_frame::BODY_MAX {
+        return Decision::NotDecided(NotDecided::TooLarge);
+    }
     let vars = Environ::parse(environment);
     // The helper decides nothing from such a frame (`builtin_probe::whole`).
     let Some(vars) = builtin_probe::whole(&vars) else {
@@ -142,27 +150,26 @@ pub(crate) fn line(language: &Language, d: &Decision) -> String {
     }
 }
 
+/// Where the saved folder facts live: the runtime folder (as it is now,
+/// found without making or changing anything) and the two roots.
+pub(crate) struct Place {
+    pub runtime: super::runtime_root::Pinned,
+    pub config: Vec<u8>,
+    pub state: Vec<u8>,
+}
+
 /// The folder facts the last round saved for `cwd`, if this build
 /// collected them for these roots in this boot (E2 builtin ruling Q1: the
 /// parts of the binding that do not depend on the terminal's width).
 pub(crate) fn saved_facts(
-    roots: &Roots,
+    place: &Place,
     cwd: &[u8],
     now: Clock,
     me: u32,
     groups: &mut SystemGroups,
 ) -> Option<Completed> {
-    let runtime = roots.runtime.as_ref()?;
-    let config = roots.config.as_ref()?;
-    let state = roots.state.as_ref()?;
-    let pin = super::runtime_root::Pinned {
-        dev: runtime.dev,
-        ino: runtime.ino,
-        path: runtime.path.clone(),
-    };
-    let config = config.path.as_os_str().as_bytes();
-    let state = state.as_os_str().as_bytes();
-    let context = CheckedContextFd::open(&pin, config, state, me, groups, false).ok()?;
+    let (config, state) = (place.config.as_slice(), place.state.as_slice());
+    let context = CheckedContextFd::open(&place.runtime, config, state, me, groups, false).ok()?;
     let completed = collection_store::read_saved_response(&context, cwd).ok()??;
     let here = Here {
         build_id: bingsu_identity::build_id(),
@@ -210,9 +217,9 @@ impl Here<'_> {
 /// language.
 pub(crate) fn section(
     config: &CompiledConfig,
-    roots: &Roots,
+    place: Option<&Place>,
     environment: &[u8],
-    cwd: &[u8],
+    cwd: Option<&[u8]>,
     now: Option<Clock>,
     me: u32,
     groups: &mut SystemGroups,
@@ -221,7 +228,12 @@ pub(crate) fn section(
     if languages.is_empty() {
         return String::new();
     }
-    let facts = now.and_then(|now| saved_facts(roots, cwd, now, me, groups).map(|c| (c, now)));
+    let facts = match (place, cwd, now) {
+        (Some(place), Some(cwd), Some(now)) => {
+            saved_facts(place, cwd, now, me, groups).map(|c| (c, now))
+        }
+        _ => None,
+    };
     let mut out = String::from("builtin languages (--explain; ");
     match &facts {
         Some((c, now)) => {
@@ -234,13 +246,15 @@ pub(crate) fn section(
         None => out.push_str("no folder facts for this folder; "),
     }
     out.push_str(
-        "executables as a round finds them, inside the repository rules, which can differ from the execution section; nothing is run):\n",
+        "executables as a round finds them, inside the repository rules, which can differ from the execution section; \
+         shell environment entries without '=' are not seen here, so a round can differ; nothing is run):\n",
     );
     let answers = facts.as_ref().map(|(c, _)| Languages::from_result(c));
     for language in languages {
-        let d = match &answers {
-            Some(a) => decide(language, a, environment, cwd, me, groups),
-            None => Decision::NotDecided(NotDecided::NoFacts),
+        let d = match (&answers, cwd) {
+            (_, None) => Decision::NotDecided(NotDecided::NoCwd),
+            (Some(a), Some(cwd)) => decide(language, a, environment, cwd, me, groups),
+            (None, Some(_)) => Decision::NotDecided(NotDecided::NoFacts),
         };
         out.push_str(&line(language, &d));
         out.push('\n');
@@ -310,33 +324,78 @@ mod tests {
         drawn(c).iter().map(|l| l.id).collect()
     }
 
-    // 그리는 언어가 없으면 절 자체가 없다. 이것을 실패시키는 것: 빈 목록에도 머리말을 쓰는 것.
+    // 그리는 언어가 없으면 절 자체가 없다. 현재 폴더를 읽지 못하면 절은 남기고 언어마다 그 이유를 쓴다. 머리말은
+    // `=` 없는 환경 항목을 보지 못한다고 적는다. 이것을 실패시키는 것: 빈 목록에도 머리말을 쓰는 것, 현재 폴더가
+    // 없을 때 절을 빼거나 "no folder facts"로 쓰는 것.
     #[test]
     fn no_drawn_language_writes_no_section() {
-        let roots = Roots {
-            runtime: None,
-            config: None,
-            state: None,
-            log: None,
-        };
         let me = super::super::sys::current_uid();
         let none = section(
             &compiled(""),
-            &roots,
+            None,
             PATHLESS,
-            b"/",
+            Some(b"/"),
             None,
             me,
             &mut groups(),
         );
         assert_eq!(none, "");
         let node = compiled("[layout.line2]\nleft=['node','char']\n");
-        let one = section(&node, &roots, PATHLESS, b"/", None, me, &mut groups());
+        let one = section(&node, None, PATHLESS, Some(b"/"), None, me, &mut groups());
         assert!(
             one.starts_with("builtin languages (--explain; no folder facts"),
             "{one}"
         );
+        assert!(
+            one.contains("entries without '=' are not seen here"),
+            "{one}"
+        );
         assert!(one.ends_with("node  not decided: no folder facts were collected for this folder by this build in this boot\n"));
+        let gone = section(&node, None, PATHLESS, None, None, me, &mut groups());
+        assert!(
+            gone.ends_with("\nnode  not decided: the current folder cannot be read\n"),
+            "{gone}"
+        );
+    }
+
+    // 셸 환경이 프롬프트가 넘기는 frame 본문 상한을 넘으면 helper가 환경을 받지 못하므로 정하지 않는다. 상한까지는
+    // 정한다. 이것을 실패시키는 것: 크기 검사를 지우는 것, 상한을 하나 줄이거나 늘리는 것.
+    #[test]
+    fn an_environment_past_the_frame_is_not_decided() {
+        use bingsu_core::command::env_frame::BODY_MAX;
+        let me = super::super::sys::current_uid();
+        let outside = Languages::of(vec![(b"node".to_vec(), Version::None)], Root::Outside);
+        let sized = |n: usize| {
+            let mut e = PATHLESS.to_vec();
+            let pad = n - e.len() - b"PAD=\0".len();
+            e.extend_from_slice(b"PAD=");
+            e.extend(std::iter::repeat_n(b'x', pad));
+            e.push(0);
+            assert_eq!(e.len(), n);
+            e
+        };
+        assert!(matches!(
+            decide(
+                language("node"),
+                &outside,
+                &sized(BODY_MAX),
+                b"/",
+                me,
+                &mut groups()
+            ),
+            Decision::Planned(_)
+        ));
+        assert_eq!(
+            decide(
+                language("node"),
+                &outside,
+                &sized(BODY_MAX + 1),
+                b"/",
+                me,
+                &mut groups()
+            ),
+            Decision::NotDecided(NotDecided::TooLarge)
+        );
     }
 
     // 그리는 언어만 보인다: 어느 폭의 줄이든 그 segment나 필드를 그리면 넣고, 그리지 않는 언어는 뺀다(E2 내장 판정
@@ -485,7 +544,7 @@ mod tests {
 
     // 저장된 수집 응답은 폭과 무관한 binding 칸이 모두 맞을 때만 쓴다(E2 내장 판정 Q1): build, 두 뿌리, cwd, 시계의
     // boot·kind·domain·resume, 지금보다 늦지 않은 완료. 폭에 따르는 mask와 path_query는 보지 않는다. 이것을
-    // 실패시키는 것: 그 비교를 하나씩 지우는 것, mask를 비교하는 것(폭이 다른 프롬프트의 응답을 버림).
+    // 실패시키는 것: 그 비교를 하나씩 지우는 것, mask나 path_query를 비교하는 것(폭이 다른 프롬프트의 응답을 버림).
     #[test]
     fn saved_facts_fit_only_this_build_roots_folder_and_boot() {
         use bingsu_core::collection::wire::{Binding, BuildId};
@@ -525,6 +584,11 @@ mod tests {
         let mut wide = good.clone();
         wide.mask = 0xff;
         assert!(here.fits(&wide, 1_000));
+        let mut queried = good.clone();
+        queried.path_query =
+            bingsu_core::collection::path_facts::PathQuery::for_path(b"/w", Some(b"/w"), true);
+        assert_ne!(queried.path_query, good.path_query);
+        assert!(here.fits(&queried, 1_000));
         assert!(!here.fits(&good, 1_001));
         let moved: [fn(&mut Binding); 8] = [
             |b| b.build_id = BuildId([8; 32]),

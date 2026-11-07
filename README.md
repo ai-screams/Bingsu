@@ -158,7 +158,9 @@ in the hooks retain their original bytes. Displayed paths with removed control c
 - Local config value edits preserve bytes outside the changed value, including comments, order and other quotes.
   The changed value uses the caller's TOML spelling, including its quotes.
 - `config check` and `config path` have no command deadline and can wait on a stalled mount; `config check` also
-  opens the executables a command segment would run, which can wait the same way. Commands that change
+  opens the executables a command segment would run, which can wait the same way. `config check --explain` also
+  reads the saved folder facts, looks for repositories above the current folder and opens the `PATH` folders a
+  builtin language would be looked up in, each of which can wait the same way. Commands that change
   settings have a three-second limit. The prompt's 50 ms and refresh work's 500 ms budgets are unchanged.
 - A deadline cannot interrupt kernel I/O in uninterruptible sleep, including hard NFS or some FUSE operations.
   macOS timer coalescing can delay alarm delivery by several milliseconds. On Linux, a blocked write during suspend

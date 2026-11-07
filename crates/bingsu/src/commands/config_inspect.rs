@@ -576,33 +576,82 @@ fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> S
 }
 
 /// The builtin language section of `--explain` (`explain_builtin`), from
-/// the roots init pinned (else the current ones), this process's
-/// environment and the shell's folder.
+/// the roots init pinned (else the current ones, found without making or
+/// changing anything), this process's environment and the shell's folder.
+/// With no builtin language drawn, nothing is looked up.
 fn builtin_section(i: &Inspection, user: &User, env: &TrustedEnv) -> String {
     use super::explain_builtin as b;
     let Some(c) = &i.report.snapshot else {
         return String::new();
     };
-    // The pinned roots when init set them (asked only then: without a pin
-    // `pinned_roots` says so on stderr), else the current ones.
-    let pinned = TrustedEnv::pinned_roots()
-        .is_some()
-        .then(|| ctx::pinned_roots(user).ok().flatten())
-        .flatten();
-    let roots = pinned.unwrap_or_else(|| roots::resolve(env, &user.pw.home, &user.pw.name));
-    let (environment, pwd) = TrustedEnv::shell();
-    let Some(cwd) = b::shell_folder(pwd.as_deref()) else {
+    // Fails without it: explain_writes_nothing (no language drawn).
+    if b::drawn(c).is_empty() {
         return String::new();
-    };
+    }
+    let place = place_of(user, env);
+    let (environment, pwd) = TrustedEnv::shell();
+    let cwd = b::shell_folder(pwd.as_deref());
     b::section(
         c,
-        &roots,
+        place.as_ref(),
         &environment,
-        &cwd,
+        cwd.as_deref(),
         crate::prompt_io::observe_clock().ok(),
         user.me,
         &mut SystemGroups::new(&user.pw.name),
     )
+}
+
+/// The runtime folder and roots of the saved folder facts. The pinned
+/// roots when init exported them (asked only then: without a pin
+/// `pinned_roots` says so on stderr); else the current candidates, read
+/// only: `roots::resolve` would make the runtime folder or fix its mode,
+/// which a check must not do. Fails without it: explain_writes_nothing.
+fn place_of(user: &User, env: &TrustedEnv) -> Option<super::explain_builtin::Place> {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    let pinned = TrustedEnv::pinned_roots()
+        .is_some()
+        .then(|| ctx::pinned_roots(user).ok().flatten())
+        .flatten();
+    let (runtime, config, state) = match pinned {
+        Some(r) => {
+            let rt = r.runtime?;
+            (
+                super::runtime_root::Pinned {
+                    dev: rt.dev,
+                    ino: rt.ino,
+                    path: rt.path,
+                },
+                r.config?.path,
+                r.state?,
+            )
+        }
+        None => {
+            let path = std::fs::canonicalize(roots::runtime_candidate(env, &user.pw.home)).ok()?;
+            let m = std::fs::symlink_metadata(&path).ok()?;
+            let config = ConfigRootPin::check(
+                &roots::config_candidate(env, &user.pw.home),
+                user.me,
+                &mut SystemGroups::new(&user.pw.name),
+            )
+            .ok()?
+            .path;
+            (
+                super::runtime_root::Pinned {
+                    dev: m.dev(),
+                    ino: m.ino(),
+                    path,
+                },
+                config,
+                roots::state_root(env, &user.pw.home)?,
+            )
+        }
+    };
+    Some(super::explain_builtin::Place {
+        runtime,
+        config: config.as_os_str().as_bytes().to_vec(),
+        state: state.as_os_str().as_bytes().to_vec(),
+    })
 }
 
 /// What `run_with` adds to the reading: nothing (`config path`), the

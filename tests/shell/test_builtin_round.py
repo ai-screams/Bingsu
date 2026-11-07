@@ -132,6 +132,17 @@ def test_explain_shows_what_a_round_would_decide(tmp_path, _native_boot_required
     runs = [line for line in after.splitlines() if line.startswith("node  runs ")]
     assert len(runs) == 1 and runs[0].endswith("/bin/node --version"), after
     assert counted(node) == 0, "explain ran the probe"
+    # A valid response under a store folder others may read (0755) is not
+    # read: the store's folder checks refuse it, as the helper's do.
+    stores = list((Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu").rglob("collections-v1/*/store"))
+    assert len(stores) == 1, stores
+    stores[0].chmod(0o755)
+    try:
+        opened = explain(session)
+    finally:
+        stores[0].chmod(0o700)
+    assert "node  not decided: no folder facts" in opened, opened
+    assert "python  shows 3.12.1" in explain(session)
 
 
 # 프로브의 첫 줄에서 버전만 값으로 남긴다. 버전이 없는 줄은 값 없는 실패 항목이고 원본 줄도 남기지 않는다. 이것을
