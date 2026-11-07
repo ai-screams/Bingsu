@@ -772,5 +772,44 @@ mod tests {
         assert_eq!(compile("{x.a}", &dup_ids).unwrap_err().kind, BadCatalog);
         let good = [d("x", AZ), d("y", AZ)];
         assert!(compile("{y.z}", &good).is_ok());
+        // A shorter id after its own prefix, and a field name given twice.
+        // Fails without it: str_lt deciding equal prefixes by `!=` on length.
+        let prefix_ids = [d("aa", AZ), d("a", AZ)];
+        assert_eq!(compile("", &prefix_ids).unwrap_err().kind, BadCatalog);
+        const AA: &[FieldDecl] = &[
+            FieldDecl {
+                name: "a",
+                ty: FieldType::Bool,
+            },
+            FieldDecl {
+                name: "a",
+                ty: FieldType::Bool,
+            },
+        ];
+        assert_eq!(
+            compile("{x.a}", &[d("x", AA)]).unwrap_err().kind,
+            BadCatalog
+        );
+    }
+
+    // 사용자 segment 이름 목록은 두 진입점 모두에서 엄격한 오름차순이어야 한다. 이것을 실패시키는 것:
+    // compile_sorted의 customs 순서 검사를 지우는 것, 그 검사를 compile_with에만 두는 것.
+    #[test]
+    fn custom_ids_must_be_strictly_ascending_on_both_entries() {
+        for customs in [["custom/b", "custom/a"], ["custom/a", "custom/a"]] {
+            assert_eq!(
+                compile_builtin("", &customs).unwrap_err().kind,
+                BadCatalog,
+                "{customs:?}"
+            );
+            assert_eq!(
+                compile_with("", crate::field::BUILTIN, &customs)
+                    .unwrap_err()
+                    .kind,
+                BadCatalog,
+                "{customs:?}"
+            );
+        }
+        assert!(compile_builtin("", &["custom/a", "custom/b"]).is_ok());
     }
 }
