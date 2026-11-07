@@ -355,12 +355,44 @@ fn index16(i: usize, sp: Span) -> Result<u16, CompileError> {
 
 /// Lookups are binary searches, so ids and field names must be strictly
 /// ascending. The catalog is outside input (M3 installs declarations).
-fn catalog_sorted(catalog: &[SegmentDecl]) -> bool {
-    catalog.windows(2).all(|w| w[0].id < w[1].id)
-        && catalog
-            .iter()
-            .all(|d| d.fields.windows(2).all(|w| w[0].name < w[1].name))
+/// A `const fn`, so the built-in catalog's order is checked once, when this
+/// crate is compiled (the assertion below).
+const fn catalog_sorted(catalog: &[SegmentDecl]) -> bool {
+    let mut i = 0;
+    while i < catalog.len() {
+        if i + 1 < catalog.len() && !str_lt(catalog[i].id, catalog[i + 1].id) {
+            return false;
+        }
+        let fields = catalog[i].fields;
+        let mut j = 0;
+        while j + 1 < fields.len() {
+            if !str_lt(fields[j].name, fields[j + 1].name) {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
 }
+
+/// `a < b` as `str` orders them (bytewise), in a `const fn`.
+const fn str_lt(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut i = 0;
+    while i < a.len() && i < b.len() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+        i += 1;
+    }
+    a.len() < b.len()
+}
+
+/// The built-in catalog is sorted; checked at build time, so
+/// `compile_builtin` does not walk it again on every template (a config or
+/// the default theme compiles several).
+const _: () = assert!(catalog_sorted(crate::field::BUILTIN));
 
 fn one_arg(args: &[String], sp: Span) -> Result<&str, CompileError> {
     match args {
@@ -532,7 +564,25 @@ pub fn compile_with(
     catalog: &[SegmentDecl],
     customs: &[&str],
 ) -> Result<Vec<CompiledLine>, CompileError> {
-    if !catalog_sorted(catalog) || !customs.windows(2).all(|w| w[0] < w[1]) {
+    if !catalog_sorted(catalog) {
+        return Err(err(CompileErrorKind::BadCatalog, Span { start: 0, end: 0 }));
+    }
+    compile_sorted(src, catalog, customs)
+}
+
+/// `compile_with` against `field::BUILTIN`, whose order the build already
+/// checked.
+pub fn compile_builtin(src: &str, customs: &[&str]) -> Result<Vec<CompiledLine>, CompileError> {
+    compile_sorted(src, crate::field::BUILTIN, customs)
+}
+
+/// `catalog` is known to be sorted.
+fn compile_sorted(
+    src: &str,
+    catalog: &[SegmentDecl],
+    customs: &[&str],
+) -> Result<Vec<CompiledLine>, CompileError> {
+    if !customs.windows(2).all(|w| w[0] < w[1]) {
         return Err(err(CompileErrorKind::BadCatalog, Span { start: 0, end: 0 }));
     }
     let tree = parse(src).map_err(|e| err(CompileErrorKind::Syntax(e.kind), e.span))?;
@@ -722,5 +772,44 @@ mod tests {
         assert_eq!(compile("{x.a}", &dup_ids).unwrap_err().kind, BadCatalog);
         let good = [d("x", AZ), d("y", AZ)];
         assert!(compile("{y.z}", &good).is_ok());
+        // A shorter id after its own prefix, and a field name given twice.
+        // Fails without it: str_lt deciding equal prefixes by `!=` on length.
+        let prefix_ids = [d("aa", AZ), d("a", AZ)];
+        assert_eq!(compile("", &prefix_ids).unwrap_err().kind, BadCatalog);
+        const AA: &[FieldDecl] = &[
+            FieldDecl {
+                name: "a",
+                ty: FieldType::Bool,
+            },
+            FieldDecl {
+                name: "a",
+                ty: FieldType::Bool,
+            },
+        ];
+        assert_eq!(
+            compile("{x.a}", &[d("x", AA)]).unwrap_err().kind,
+            BadCatalog
+        );
+    }
+
+    // 사용자 segment 이름 목록은 두 진입점 모두에서 엄격한 오름차순이어야 한다. 이것을 실패시키는 것:
+    // compile_sorted의 customs 순서 검사를 지우는 것, 그 검사를 compile_with에만 두는 것.
+    #[test]
+    fn custom_ids_must_be_strictly_ascending_on_both_entries() {
+        for customs in [["custom/b", "custom/a"], ["custom/a", "custom/a"]] {
+            assert_eq!(
+                compile_builtin("", &customs).unwrap_err().kind,
+                BadCatalog,
+                "{customs:?}"
+            );
+            assert_eq!(
+                compile_with("", crate::field::BUILTIN, &customs)
+                    .unwrap_err()
+                    .kind,
+                BadCatalog,
+                "{customs:?}"
+            );
+        }
+        assert!(compile_builtin("", &["custom/a", "custom/b"]).is_ok());
     }
 }

@@ -35,7 +35,7 @@ use crate::layout::{SegmentSetup, When};
 use crate::render::Theme;
 use crate::shorten::Method;
 use crate::style::{Joining, LineLayout, StyleOptions, generate, preset};
-use crate::template::compile::{CompiledLine, FillKind, Node, Shape, compile_with};
+use crate::template::compile::{CompiledLine, FillKind, Node, Shape, compile_builtin};
 use crate::template::syntax::{Span as TSpan, Syntax, parse as parse_template};
 use crate::width::WidthProfile;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -948,7 +948,7 @@ pub fn compile(
                     .map_err(|_| vec![bad(where_, "layout", "", "a layout that fits a template")])?
             }
         };
-        let compiled = compile_with(&text, BUILTIN, &texts)
+        let compiled = compile_builtin(&text, &texts)
             .map_err(|_| vec![bad(where_, "layout", "", "a layout that compiles")])?;
         // A theme may change how the prompt looks, never erase it: a
         // shape-only template that draws none of the required segments
@@ -1034,7 +1034,7 @@ pub fn compile(
         widths,
         ..
     } = banded;
-    let one = |src: &str| compile_with(src, BUILTIN, &[]).map(|mut v| v.remove(0));
+    let one = |src: &str| compile_builtin(src, &[]).map(|mut v| v.remove(0));
     let transient = one("{char}").map_err(|_| Vec::new())?;
     let vi = one("{char}").map_err(|_| Vec::new())?;
     let dir_methods: Vec<Method> = match get(r, &["segment", "dir", "shorten"]) {
