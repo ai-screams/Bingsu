@@ -66,6 +66,10 @@ pub(crate) struct Inputs<'a> {
     /// The builtin languages whose segments this round draws (D3 ruling
     /// Q6); empty on a redraw.
     pub builtins: &'a [&'static Language],
+    /// Where `prepare` leaves the re-matched entries of a round that runs
+    /// nothing (`Skip::Reapplied`), for the helper to publish once the
+    /// round's marker stands.
+    pub reapply: &'a std::cell::Cell<Option<Box<Publish>>>,
 }
 
 /// Why a round runs no supervisor, for the helper's log.
@@ -90,11 +94,14 @@ pub(crate) enum Skip {
     /// user's and 0500.
     Neutral,
     Failed,
+    /// Nothing runs, but cache hits were re-matched under a changed `match`
+    /// (U-9c): the helper publishes them once this round's marker stands.
+    Reapplied,
 }
 impl Skip {
     pub(crate) fn message(self) -> Option<&'static str> {
         Some(match self {
-            Self::NoUnits => return None,
+            Self::NoUnits | Self::Reapplied => return None,
             Self::NoSession => "command round skipped: no session value from the shell",
             Self::NoRelay => "command round skipped: no trusted relay on this platform",
             #[cfg(target_os = "macos")]
@@ -152,12 +159,17 @@ pub(crate) struct Round {
 /// The command response of a round: its context, binding, and for each
 /// unit to run the original environment digest it is bound to; the attempt
 /// times of the units for round robin; when the round started.
-struct Publish {
+pub(crate) struct Publish {
     context: super::snapshot_store::CheckedContextFd,
     binding: response::Binding,
     clock: bingsu_core::snapshot::Clock,
     environments: Vec<(String, [u8; 32])>,
     attempts: Vec<(String, u64)>,
+    /// Each runnable unit's `match`, applied to its result (U-9c).
+    patterns: Vec<(String, Option<String>)>,
+    /// Cache hits re-matched under a changed `match`, published with the
+    /// round's results without running.
+    reapplied: Vec<response::Entry>,
 }
 
 /// Script copies of one round. Linux runs a script through a sealed memfd
@@ -419,7 +431,13 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         .config
         .exec_units
         .iter()
-        .filter_map(|u| plan::runnable(u).map(|r| (u.id.as_str(), r, u.cache_ms)))
+        .filter_map(|u| {
+            plan::runnable(u).map(|r| (u.id.as_str(), r, u.cache_ms, u.pattern.as_deref()))
+        })
+        .collect();
+    let patterns: Vec<(String, Option<String>)> = runnable
+        .iter()
+        .map(|(id, _, _, p)| (id.to_string(), p.map(str::to_owned)))
         .collect();
     let binding = i.pwd.map(|cwd| response::Binding {
         build_id: bingsu_core::collection::wire::BuildId(bingsu_identity::build_id().0),
@@ -446,21 +464,25 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     };
     let vars = i.environment.as_ref().ok().map(|body| Environ::parse(body));
     let mut environments = Vec::new();
+    let mut reapplied = Vec::new();
     let runnable: Vec<_> = runnable
         .into_iter()
-        .filter(|(id, r, cache_ms)| {
+        .filter(|(id, r, cache_ms, pattern)| {
             let Some(vars) = &vars else { return true };
             let env = plan::env_digest(vars, &r.env_allow);
             environments.push((id.to_string(), env));
             let policy = policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
             let cache_ns = cache_ms.unwrap_or(0).saturating_mul(1_000_000);
-            let hit = current
-                .as_ref()
-                .and_then(|c| c.entry(Origin::Config, id))
-                .is_some_and(|e| e.hit(&policy, &env, i.now.now, cache_ns));
+            let entry = current.as_ref().and_then(|c| c.entry(Origin::Config, id));
+            let hit = entry.is_some_and(|e| e.hit(&policy, &env, i.now.now, cache_ns));
+            // A hit matched under another `match` is re-matched, not run
+            // again (U-9c).
+            if let (true, Some(e)) = (hit, entry) {
+                reapplied.extend(super::command_match::reapplied(e, *pattern));
+            }
             !hit
         })
-        .map(|(id, r, _)| (id, r))
+        .map(|(id, r, _, _)| (id, r))
         .collect();
     let attempts = current
         .as_ref()
@@ -486,6 +508,20 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             && let Ok(_lock) = close_only_lock(i.runtime, &lock_name(session), i.me, true)
         {
             let _ = session_reclaim(i, session);
+        }
+        if let (false, Some(binding), Ok(context)) =
+            (reapplied.is_empty(), binding, i.context.try_clone())
+        {
+            i.reapply.set(Some(Box::new(Publish {
+                context,
+                binding,
+                clock: i.now,
+                environments,
+                attempts,
+                patterns,
+                reapplied,
+            })));
+            return Err(Skip::Reapplied);
         }
         return Err(Skip::NoUnits);
     }
@@ -600,6 +636,8 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             clock: i.now,
             environments,
             attempts,
+            patterns,
+            reapplied,
         },
         builtins,
         probes_allowed,
@@ -1185,6 +1223,7 @@ impl Round {
     fn publish_results(&self, report: &mut Report, unresolved: &[String]) {
         let mut entries = self.entries(&report.results);
         entries.extend(self.decided.iter().cloned());
+        entries.extend(self.publish.reapplied.iter().cloned());
         if let Ok(now) = now_ns() {
             entries.extend(
                 unresolved
@@ -1193,7 +1232,7 @@ impl Round {
             );
         }
         if !entries.is_empty() {
-            match self.publish_entries(&entries) {
+            match self.publish.publish_entries(&entries) {
                 Ok(published) => report.published = Some(published),
                 Err(_) => report.publish_failed = true,
             }
@@ -1214,6 +1253,8 @@ impl Round {
             stdout: Vec::new(),
         };
         let policy = policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
+        // A failed entry shows nothing and is never re-matched, so its
+        // pattern digest stays all zeros.
         response::entry_for(id.to_owned(), policy, env, now, &failed)
     }
 
@@ -1236,7 +1277,17 @@ impl Round {
                     .iter()
                     .find(|(id, _)| *id == unit.id)?
                     .1;
-                response::entry_for(unit.id.clone(), unit.digest, env, self.publish.clock.now, o)
+                let e = response::entry_for(
+                    unit.id.clone(),
+                    unit.digest,
+                    env,
+                    self.publish.clock.now,
+                    o,
+                )?;
+                Some(super::command_match::bind(
+                    e,
+                    self.publish.pattern(&unit.id),
+                ))
             })
             .chain(probes)
             .collect()
@@ -1267,6 +1318,21 @@ impl Round {
         }
         Some(e)
     }
+}
+
+impl Publish {
+    /// The `match` of runnable unit `id`.
+    fn pattern(&self, id: &str) -> Option<&str> {
+        self.patterns
+            .iter()
+            .find(|(u, _)| u == id)
+            .and_then(|(_, p)| p.as_deref())
+    }
+
+    /// Publishes the re-matched entries of a round where nothing runs.
+    pub(crate) fn publish_reapplied(&self) -> Result<response::Response, StoreError> {
+        self.publish_entries(&self.reapplied)
+    }
 
     /// Publishes `entries` into the command response of this context and
     /// cwd: the store of the collection response, under its lock (C4 ruling
@@ -1276,7 +1342,7 @@ impl Round {
         &self,
         entries: &[response::Entry],
     ) -> Result<response::Response, StoreError> {
-        let p = &self.publish;
+        let p = self;
         let now = bingsu_core::snapshot::Clock {
             now: now_ns().map_err(StoreError::Io)?,
             ..p.clock

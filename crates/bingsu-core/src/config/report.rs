@@ -53,6 +53,19 @@ fn below(files: &[Found], id: SourceId) -> Vec<SourceId> {
         .collect()
 }
 
+impl ConfigReport {
+    /// Adds diagnostics a caller decided after compiling (the CLI's `match`
+    /// check, C4c ruling Q1), in the report's order.
+    pub fn add_diagnostics(&mut self, more: Vec<Diagnostic>) {
+        if more.is_empty() {
+            return;
+        }
+        let mut all = core::mem::take(&mut self.diagnostics);
+        all.extend(more);
+        self.diagnostics = sorted(all);
+    }
+}
+
 fn sorted(mut d: Vec<Diagnostic>) -> Vec<Diagnostic> {
     let key = |d: &Diagnostic| {
         let (src, at) = match d.at {

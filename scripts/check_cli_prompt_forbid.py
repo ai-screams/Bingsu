@@ -94,7 +94,7 @@ def check_product_fixture_isolation(binary=None):
     if len(targets) != 1 or targets[0][0] != "bingsu-core-tests" or targets[0][1]["kind"] != ["test"]:
         bad.append("collector fixture must be exactly one test target in bingsu-core-tests")
     for package in packages:
-        if package["name"] in {"bingsu", "bingsu-core", "bingsu-collect", "bingsu-identity"}:
+        if package["name"] in {"bingsu", "bingsu-core", "bingsu-collect", "bingsu-identity", "bingsu-match"}:
             if any(d["name"] == "bingsu-core-tests" for d in package["dependencies"]):
                 bad.append("product dependency reaches the collector fixture package")
     if binary is not None:

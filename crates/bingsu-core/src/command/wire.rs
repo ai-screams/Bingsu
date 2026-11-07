@@ -167,6 +167,19 @@ impl Message {
     }
 }
 
+/// Digest of a config unit's `match` (U-9c): the response entry carries it,
+/// and the prompt draws an entry only when it equals the digest of the
+/// snapshot unit's pattern. No pattern is all zeros, as before `match`.
+pub fn pattern_digest(pattern: Option<&str>) -> [u8; 32] {
+    let Some(p) = pattern else {
+        return [0; 32];
+    };
+    let mut b = Vec::with_capacity(p.len() + 16);
+    b.extend_from_slice(b"bingsu-match-v1\0");
+    b.extend_from_slice(p.as_bytes());
+    sha256(&b)
+}
+
 /// Digest of what a config unit runs: the policy kind byte, every argv word
 /// or the script with its length, the cwd kind and the timeout.
 pub fn policy_digest(policy: &Policy, cwd: Cwd, timeout: u64, env_allow: &[Vec<u8>]) -> [u8; 32] {

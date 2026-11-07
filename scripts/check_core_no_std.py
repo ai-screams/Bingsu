@@ -57,6 +57,27 @@ BINGSU_GRAPH = {
     # The shared no_std identity library, not the worker binary's OS modules.
     ("bingsu-identity", "0.0.0", "crates/bingsu-identity/Cargo.toml"): ((), ("custom-build", "lib")),
     ("libc", "0.2.191", CRATES_IO): (("default", "std"), ("custom-build", "lib")),
+    # A command segment's `match` (U-9c, U-28): the CLI's own crate and the
+    # standard regex with Unicode classes and no perf engines (C4c ruling
+    # Q6), so a perf or other feature turned on fails here. regex-syntax's
+    # `default` comes from proptest in the workspace resolution.
+    ("bingsu-match", "0.0.0", "crates/bingsu-match/Cargo.toml"): ((), ("lib",)),
+    ("regex", "1.13.1", CRATES_IO): (
+        ("std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat",
+         "unicode-perl", "unicode-script", "unicode-segment"),
+        ("lib",),
+    ),
+    ("regex-automata", "0.4.18", CRATES_IO): (
+        ("alloc", "dfa-search", "meta", "nfa-pikevm", "nfa-thompson", "std", "syntax", "unicode",
+         "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat", "unicode-perl",
+         "unicode-script", "unicode-segment", "unicode-word-boundary"),
+        ("lib",),
+    ),
+    ("regex-syntax", "0.8.11", CRATES_IO): (
+        ("default", "std", "unicode", "unicode-age", "unicode-bool", "unicode-case",
+         "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"),
+        ("lib",),
+    ),
 }
 PINS = {"bingsu-core": CORE_GRAPH, "bingsu": BINGSU_GRAPH}
 # Build scripts read at these versions: they print cargo:rustc-cfg,

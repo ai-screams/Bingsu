@@ -381,6 +381,7 @@ fn user_queries_leave_out_bad_names() {
         approved_by: vec![],
         shown_at: vec![],
         not_run,
+        pattern: None,
     };
     let units = [
         unit("custom/deno", &["deno.json"], None),

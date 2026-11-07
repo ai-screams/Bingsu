@@ -52,6 +52,7 @@ mod cases {
             approved_by: Vec::new(),
             shown_at: Vec::new(),
             not_run: None,
+            pattern: None,
         }
     }
     /// The entry the helper publishes for `u` run in `environ`.
@@ -294,6 +295,37 @@ mod cases {
             shown(&response(patterned), &u, Origin::Config, true, ENV, 11),
             None
         );
+    }
+
+    // C4c(U-9c): `match`가 있는 단위는 그 패턴 요약값으로 맞춘 항목만 그린다. 옛 패턴(또는 패턴 없이) 맞춘 항목은
+    // 숨기고, 패턴 없는 단위는 요약값 0인 항목만 그린다. 이것을 실패시키는 것: 패턴 요약값 비교를 지우는 것(옛
+    // 패턴 값을 그림), 비교를 요약값 0으로 되돌리는 것(새 패턴 값을 숨김), 스냅샷 대신 다른 패턴의 요약값을 쓰는 것.
+    #[test]
+    fn a_patterned_unit_shows_only_entries_matched_with_its_pattern() {
+        use crate::command::wire::pattern_digest;
+        let mut u = unit(&["kubectx"]);
+        u.pattern = Some(r"([^/]+)$".into());
+        let mut e = ran(&u, Origin::Config, ENV);
+        e.pattern = pattern_digest(u.pattern.as_deref());
+        assert_eq!(
+            shown(&response(e.clone()), &u, Origin::Config, true, ENV, 11).as_deref(),
+            Some("prod")
+        );
+        let mut old = e.clone();
+        old.pattern = pattern_digest(Some("(.*)"));
+        assert_eq!(
+            shown(&response(old), &u, Origin::Config, true, ENV, 11),
+            None
+        );
+        let mut plain = e;
+        plain.pattern = [0; 32];
+        assert_eq!(
+            shown(&response(plain), &u, Origin::Config, true, ENV, 11),
+            None
+        );
+        assert_eq!(pattern_digest(None), [0; 32]);
+        assert_ne!(pattern_digest(Some("")), [0; 32]);
+        assert_ne!(pattern_digest(Some("a")), pattern_digest(Some("b")));
     }
 
     const PY_ENV: &[u8] = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/u\0";

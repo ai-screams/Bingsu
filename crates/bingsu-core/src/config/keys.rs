@@ -561,6 +561,16 @@ pub const KEYS: &[KeyDef] = &[
     .example("\"command\"")
     .exec(),
     key(
+        "segment.*.match",
+        Ty::Str,
+        Advanced,
+        "A regular expression that picks the value from the first output line.",
+        "출력 첫 줄에서 값을 고르는 정규식.",
+    )
+    .exec()
+    .kinds(CMD)
+    .example("\"([^/]+)$\""),
+    key(
         "segment.*.shell",
         Ty::Str,
         Expert,

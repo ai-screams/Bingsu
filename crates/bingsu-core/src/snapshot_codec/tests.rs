@@ -227,9 +227,28 @@ mod cases {
             approved_by: vec![],
             shown_at: vec![],
             not_run: Some(NotRun::Disabled),
+            pattern: None,
         });
         assert_eq!(encode_compiled(&c), Err(Error::Limit));
         assert_eq!(decode_compiled(&vec![0; MAX_BYTES + 1]), Err(Error::Limit));
+    }
+
+    // C4c: 단위의 `match`와 꺼짐 이유 MatchInvalid(태그 5)가 왕복한다. 이것을 실패시키는 것: pattern을 쓰거나 읽지
+    // 않는 것, MatchInvalid 태그를 다른 이유로 읽는 것.
+    #[test]
+    fn a_units_match_and_match_invalid_round_trip() {
+        let mut c = crate::config::report::tests::read(
+            "[segment.\"custom/m\"]\nkind = \"command\"\ncommand = [\"k\"]\nmatch = \"([^/]+)$\"\n[layout.line1]\nleft = [\"custom/m\", \"char\"]\n",
+            &[],
+        )
+        .snapshot
+        .unwrap();
+        assert_eq!(c.exec_units[0].pattern.as_deref(), Some("([^/]+)$"));
+        assert_eq!(decode_compiled(&encode_compiled(&c).unwrap()).unwrap(), c);
+        c.exec_units[0].not_run = Some(NotRun::MatchInvalid);
+        assert_eq!(decode_compiled(&encode_compiled(&c).unwrap()).unwrap(), c);
+        c.exec_units[0].pattern = None;
+        assert_eq!(decode_compiled(&encode_compiled(&c).unwrap()).unwrap(), c);
     }
 
     // 이것을 실패시키는 것: 구획 안의 남는 바이트를 허용하는 것.
@@ -747,6 +766,7 @@ mod cases {
             approved_by: vec![],
             shown_at: vec![],
             not_run: Some(NotRun::Disabled),
+            pattern: None,
         };
         let mut c = base.clone();
         c.exec_units.push(unit);

@@ -524,6 +524,7 @@ impl Wire for ExecUnit {
         self.approved_by.put(o);
         self.shown_at.put(o);
         self.not_run.put(o);
+        self.pattern.put(o);
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Self {
@@ -535,6 +536,7 @@ impl Wire for ExecUnit {
             approved_by: Wire::get(r)?,
             shown_at: Wire::get(r)?,
             not_run: Wire::get(r)?,
+            pattern: Wire::get(r)?,
         })
     }
 }
@@ -801,6 +803,7 @@ impl Wire for NotRun {
             }
             Self::UnknownBand => 3u8.put(o),
             Self::ShellNotAllowed => 4u8.put(o),
+            Self::MatchInvalid => 5u8.put(o),
         }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
@@ -810,6 +813,7 @@ impl Wire for NotRun {
             2 => Self::UnsafeFile { key: Wire::get(r)? },
             3 => Self::UnknownBand,
             4 => Self::ShellNotAllowed,
+            5 => Self::MatchInvalid,
             _ => return Err(Error::Tag),
         })
     }
