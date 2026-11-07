@@ -7,6 +7,7 @@
 *	*	origin	bingsu-collect@0.0.0	workspace:crates/bingsu-collect	MIT OR Apache-2.0	-
 *	*	origin	bingsu-core@0.0.0	workspace:crates/bingsu-core	MIT OR Apache-2.0	-
 *	*	origin	bingsu-identity@0.0.0	workspace:crates/bingsu-identity	MIT OR Apache-2.0	-
+*	*	origin	bingsu-match@0.0.0	workspace:crates/bingsu-match	MIT OR Apache-2.0	-
 *	*	origin	bingsu@0.0.0	workspace:crates/bingsu	MIT OR Apache-2.0	-
 *	*	origin	bitflags@2.13.2	registry+https://github.com/rust-lang/crates.io-index	MIT OR Apache-2.0	3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06
 *	*	origin	bstr@1.13.1	registry+https://github.com/rust-lang/crates.io-index	MIT OR Apache-2.0	6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f
@@ -71,6 +72,8 @@
 *	*	origin	parking_lot_core@0.9.12	registry+https://github.com/rust-lang/crates.io-index	MIT OR Apache-2.0	2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1
 *	*	origin	prodash@31.0.1	registry+https://github.com/rust-lang/crates.io-index	MIT	cf52d87428247c5aa3760ac8e7d8b13ec7b3579b955a8c3f311668b6860acba5
 *	*	origin	regex-automata@0.4.18	registry+https://github.com/rust-lang/crates.io-index	MIT OR Apache-2.0	ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2
+*	*	origin	regex-syntax@0.8.11	registry+https://github.com/rust-lang/crates.io-index	MIT OR Apache-2.0	d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4
+*	*	origin	regex@1.13.1	registry+https://github.com/rust-lang/crates.io-index	MIT OR Apache-2.0	f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d
 *	*	origin	rustix@1.1.5	registry+https://github.com/rust-lang/crates.io-index	Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT	891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d
 *	*	origin	same-file@1.0.6	registry+https://github.com/rust-lang/crates.io-index	Unlicense/MIT	93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502
 *	*	origin	scopeguard@1.2.0	registry+https://github.com/rust-lang/crates.io-index	MIT OR Apache-2.0	94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49
@@ -1328,10 +1331,15 @@ aarch64-apple-darwin	product-all	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec-1.1
 aarch64-apple-darwin	product-all	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 aarch64-apple-darwin	product-all	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 aarch64-apple-darwin	product-all	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+aarch64-apple-darwin	product-all	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 aarch64-apple-darwin	product-all	edge	bingsu@0.0.0	bingsu-bench	bingsu-bench@0.0.0
 aarch64-apple-darwin	product-all	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 aarch64-apple-darwin	product-all	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+aarch64-apple-darwin	product-all	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 aarch64-apple-darwin	product-all	edge	bingsu@0.0.0	libc	libc@0.2.191
+aarch64-apple-darwin	product-all	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+aarch64-apple-darwin	product-all	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+aarch64-apple-darwin	product-all	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 aarch64-apple-darwin	product-all	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 aarch64-apple-darwin	product-all	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 aarch64-apple-darwin	product-all	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -1340,9 +1348,13 @@ aarch64-apple-darwin	product-all	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow
 aarch64-apple-darwin	product-all	node	bingsu-bench@0.0.0	-	-
 aarch64-apple-darwin	product-all	node	bingsu-core@0.0.0	-	-
 aarch64-apple-darwin	product-all	node	bingsu-identity@0.0.0	bench-build	-
+aarch64-apple-darwin	product-all	node	bingsu-match@0.0.0	-	-
 aarch64-apple-darwin	product-all	node	bingsu@0.0.0	bench-stubs	-
 aarch64-apple-darwin	product-all	node	libc@0.2.191	default,std	-
 aarch64-apple-darwin	product-all	node	libm@0.2.16	-	-
+aarch64-apple-darwin	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+aarch64-apple-darwin	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+aarch64-apple-darwin	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-apple-darwin	product-all	node	serde_spanned@1.1.2	alloc	-
 aarch64-apple-darwin	product-all	node	toml@1.1.8+spec-1.1.0	parse	-
 aarch64-apple-darwin	product-all	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -1354,9 +1366,14 @@ aarch64-apple-darwin	product-default	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec
 aarch64-apple-darwin	product-default	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 aarch64-apple-darwin	product-default	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 aarch64-apple-darwin	product-default	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+aarch64-apple-darwin	product-default	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 aarch64-apple-darwin	product-default	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 aarch64-apple-darwin	product-default	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+aarch64-apple-darwin	product-default	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 aarch64-apple-darwin	product-default	edge	bingsu@0.0.0	libc	libc@0.2.191
+aarch64-apple-darwin	product-default	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+aarch64-apple-darwin	product-default	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+aarch64-apple-darwin	product-default	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 aarch64-apple-darwin	product-default	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 aarch64-apple-darwin	product-default	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 aarch64-apple-darwin	product-default	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -1364,9 +1381,13 @@ aarch64-apple-darwin	product-default	edge	toml@1.1.8+spec-1.1.0	winnow	winnow@1.
 aarch64-apple-darwin	product-default	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow@1.0.4
 aarch64-apple-darwin	product-default	node	bingsu-core@0.0.0	-	-
 aarch64-apple-darwin	product-default	node	bingsu-identity@0.0.0	-	-
+aarch64-apple-darwin	product-default	node	bingsu-match@0.0.0	-	-
 aarch64-apple-darwin	product-default	node	bingsu@0.0.0	-	-
 aarch64-apple-darwin	product-default	node	libc@0.2.191	default,std	-
 aarch64-apple-darwin	product-default	node	libm@0.2.16	-	-
+aarch64-apple-darwin	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+aarch64-apple-darwin	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+aarch64-apple-darwin	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-apple-darwin	product-default	node	serde_spanned@1.1.2	alloc	-
 aarch64-apple-darwin	product-default	node	toml@1.1.8+spec-1.1.0	parse	-
 aarch64-apple-darwin	product-default	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -2604,10 +2625,15 @@ aarch64-unknown-linux-gnu	product-all	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spe
 aarch64-unknown-linux-gnu	product-all	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 aarch64-unknown-linux-gnu	product-all	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 aarch64-unknown-linux-gnu	product-all	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+aarch64-unknown-linux-gnu	product-all	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	bingsu-bench	bingsu-bench@0.0.0
 aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	libc	libc@0.2.191
+aarch64-unknown-linux-gnu	product-all	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+aarch64-unknown-linux-gnu	product-all	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+aarch64-unknown-linux-gnu	product-all	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 aarch64-unknown-linux-gnu	product-all	edge	seccompiler@0.5.0	libc	libc@0.2.191
 aarch64-unknown-linux-gnu	product-all	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 aarch64-unknown-linux-gnu	product-all	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
@@ -2617,9 +2643,13 @@ aarch64-unknown-linux-gnu	product-all	edge	toml_parser@1.1.5+spec-1.1.0	winnow	w
 aarch64-unknown-linux-gnu	product-all	node	bingsu-bench@0.0.0	-	-
 aarch64-unknown-linux-gnu	product-all	node	bingsu-core@0.0.0	-	-
 aarch64-unknown-linux-gnu	product-all	node	bingsu-identity@0.0.0	bench-build	-
+aarch64-unknown-linux-gnu	product-all	node	bingsu-match@0.0.0	-	-
 aarch64-unknown-linux-gnu	product-all	node	bingsu@0.0.0	bench-stubs	-
 aarch64-unknown-linux-gnu	product-all	node	libc@0.2.191	default,std	-
 aarch64-unknown-linux-gnu	product-all	node	libm@0.2.16	-	-
+aarch64-unknown-linux-gnu	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+aarch64-unknown-linux-gnu	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+aarch64-unknown-linux-gnu	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-unknown-linux-gnu	product-all	node	seccompiler@0.5.0	-	-
 aarch64-unknown-linux-gnu	product-all	node	serde_spanned@1.1.2	alloc	-
 aarch64-unknown-linux-gnu	product-all	node	toml@1.1.8+spec-1.1.0	parse	-
@@ -2632,9 +2662,14 @@ aarch64-unknown-linux-gnu	product-default	edge	bingsu-core@0.0.0	toml	toml@1.1.8
 aarch64-unknown-linux-gnu	product-default	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 aarch64-unknown-linux-gnu	product-default	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 aarch64-unknown-linux-gnu	product-default	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+aarch64-unknown-linux-gnu	product-default	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.0.0	libc	libc@0.2.191
+aarch64-unknown-linux-gnu	product-default	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+aarch64-unknown-linux-gnu	product-default	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+aarch64-unknown-linux-gnu	product-default	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 aarch64-unknown-linux-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 aarch64-unknown-linux-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 aarch64-unknown-linux-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -2642,9 +2677,13 @@ aarch64-unknown-linux-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	winnow	winn
 aarch64-unknown-linux-gnu	product-default	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow@1.0.4
 aarch64-unknown-linux-gnu	product-default	node	bingsu-core@0.0.0	-	-
 aarch64-unknown-linux-gnu	product-default	node	bingsu-identity@0.0.0	-	-
+aarch64-unknown-linux-gnu	product-default	node	bingsu-match@0.0.0	-	-
 aarch64-unknown-linux-gnu	product-default	node	bingsu@0.0.0	-	-
 aarch64-unknown-linux-gnu	product-default	node	libc@0.2.191	default,std	-
 aarch64-unknown-linux-gnu	product-default	node	libm@0.2.16	-	-
+aarch64-unknown-linux-gnu	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+aarch64-unknown-linux-gnu	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+aarch64-unknown-linux-gnu	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-unknown-linux-gnu	product-default	node	serde_spanned@1.1.2	alloc	-
 aarch64-unknown-linux-gnu	product-default	node	toml@1.1.8+spec-1.1.0	parse	-
 aarch64-unknown-linux-gnu	product-default	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -3882,10 +3921,15 @@ aarch64-unknown-linux-musl	product-all	edge	bingsu-core@0.0.0	toml	toml@1.1.8+sp
 aarch64-unknown-linux-musl	product-all	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 aarch64-unknown-linux-musl	product-all	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 aarch64-unknown-linux-musl	product-all	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+aarch64-unknown-linux-musl	product-all	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 aarch64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	bingsu-bench	bingsu-bench@0.0.0
 aarch64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 aarch64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+aarch64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 aarch64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	libc	libc@0.2.191
+aarch64-unknown-linux-musl	product-all	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+aarch64-unknown-linux-musl	product-all	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+aarch64-unknown-linux-musl	product-all	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 aarch64-unknown-linux-musl	product-all	edge	seccompiler@0.5.0	libc	libc@0.2.191
 aarch64-unknown-linux-musl	product-all	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 aarch64-unknown-linux-musl	product-all	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
@@ -3895,9 +3939,13 @@ aarch64-unknown-linux-musl	product-all	edge	toml_parser@1.1.5+spec-1.1.0	winnow	
 aarch64-unknown-linux-musl	product-all	node	bingsu-bench@0.0.0	-	-
 aarch64-unknown-linux-musl	product-all	node	bingsu-core@0.0.0	-	-
 aarch64-unknown-linux-musl	product-all	node	bingsu-identity@0.0.0	bench-build	-
+aarch64-unknown-linux-musl	product-all	node	bingsu-match@0.0.0	-	-
 aarch64-unknown-linux-musl	product-all	node	bingsu@0.0.0	bench-stubs	-
 aarch64-unknown-linux-musl	product-all	node	libc@0.2.191	default,std	-
 aarch64-unknown-linux-musl	product-all	node	libm@0.2.16	-	-
+aarch64-unknown-linux-musl	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+aarch64-unknown-linux-musl	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+aarch64-unknown-linux-musl	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-unknown-linux-musl	product-all	node	seccompiler@0.5.0	-	-
 aarch64-unknown-linux-musl	product-all	node	serde_spanned@1.1.2	alloc	-
 aarch64-unknown-linux-musl	product-all	node	toml@1.1.8+spec-1.1.0	parse	-
@@ -3910,9 +3958,14 @@ aarch64-unknown-linux-musl	product-default	edge	bingsu-core@0.0.0	toml	toml@1.1.
 aarch64-unknown-linux-musl	product-default	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 aarch64-unknown-linux-musl	product-default	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 aarch64-unknown-linux-musl	product-default	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+aarch64-unknown-linux-musl	product-default	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 aarch64-unknown-linux-musl	product-default	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 aarch64-unknown-linux-musl	product-default	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+aarch64-unknown-linux-musl	product-default	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 aarch64-unknown-linux-musl	product-default	edge	bingsu@0.0.0	libc	libc@0.2.191
+aarch64-unknown-linux-musl	product-default	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+aarch64-unknown-linux-musl	product-default	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+aarch64-unknown-linux-musl	product-default	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 aarch64-unknown-linux-musl	product-default	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 aarch64-unknown-linux-musl	product-default	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 aarch64-unknown-linux-musl	product-default	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -3920,9 +3973,13 @@ aarch64-unknown-linux-musl	product-default	edge	toml@1.1.8+spec-1.1.0	winnow	win
 aarch64-unknown-linux-musl	product-default	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow@1.0.4
 aarch64-unknown-linux-musl	product-default	node	bingsu-core@0.0.0	-	-
 aarch64-unknown-linux-musl	product-default	node	bingsu-identity@0.0.0	-	-
+aarch64-unknown-linux-musl	product-default	node	bingsu-match@0.0.0	-	-
 aarch64-unknown-linux-musl	product-default	node	bingsu@0.0.0	-	-
 aarch64-unknown-linux-musl	product-default	node	libc@0.2.191	default,std	-
 aarch64-unknown-linux-musl	product-default	node	libm@0.2.16	-	-
+aarch64-unknown-linux-musl	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+aarch64-unknown-linux-musl	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+aarch64-unknown-linux-musl	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-unknown-linux-musl	product-default	node	serde_spanned@1.1.2	alloc	-
 aarch64-unknown-linux-musl	product-default	node	toml@1.1.8+spec-1.1.0	parse	-
 aarch64-unknown-linux-musl	product-default	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -5164,10 +5221,15 @@ x86_64-apple-darwin	product-all	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec-1.1.
 x86_64-apple-darwin	product-all	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 x86_64-apple-darwin	product-all	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 x86_64-apple-darwin	product-all	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+x86_64-apple-darwin	product-all	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 x86_64-apple-darwin	product-all	edge	bingsu@0.0.0	bingsu-bench	bingsu-bench@0.0.0
 x86_64-apple-darwin	product-all	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 x86_64-apple-darwin	product-all	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+x86_64-apple-darwin	product-all	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 x86_64-apple-darwin	product-all	edge	bingsu@0.0.0	libc	libc@0.2.191
+x86_64-apple-darwin	product-all	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+x86_64-apple-darwin	product-all	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+x86_64-apple-darwin	product-all	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 x86_64-apple-darwin	product-all	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 x86_64-apple-darwin	product-all	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 x86_64-apple-darwin	product-all	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -5176,9 +5238,13 @@ x86_64-apple-darwin	product-all	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow@
 x86_64-apple-darwin	product-all	node	bingsu-bench@0.0.0	-	-
 x86_64-apple-darwin	product-all	node	bingsu-core@0.0.0	-	-
 x86_64-apple-darwin	product-all	node	bingsu-identity@0.0.0	bench-build	-
+x86_64-apple-darwin	product-all	node	bingsu-match@0.0.0	-	-
 x86_64-apple-darwin	product-all	node	bingsu@0.0.0	bench-stubs	-
 x86_64-apple-darwin	product-all	node	libc@0.2.191	default,std	-
 x86_64-apple-darwin	product-all	node	libm@0.2.16	-	-
+x86_64-apple-darwin	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+x86_64-apple-darwin	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+x86_64-apple-darwin	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-apple-darwin	product-all	node	serde_spanned@1.1.2	alloc	-
 x86_64-apple-darwin	product-all	node	toml@1.1.8+spec-1.1.0	parse	-
 x86_64-apple-darwin	product-all	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -5190,9 +5256,14 @@ x86_64-apple-darwin	product-default	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec-
 x86_64-apple-darwin	product-default	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 x86_64-apple-darwin	product-default	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 x86_64-apple-darwin	product-default	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+x86_64-apple-darwin	product-default	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 x86_64-apple-darwin	product-default	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 x86_64-apple-darwin	product-default	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+x86_64-apple-darwin	product-default	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 x86_64-apple-darwin	product-default	edge	bingsu@0.0.0	libc	libc@0.2.191
+x86_64-apple-darwin	product-default	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+x86_64-apple-darwin	product-default	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+x86_64-apple-darwin	product-default	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 x86_64-apple-darwin	product-default	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 x86_64-apple-darwin	product-default	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 x86_64-apple-darwin	product-default	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -5200,9 +5271,13 @@ x86_64-apple-darwin	product-default	edge	toml@1.1.8+spec-1.1.0	winnow	winnow@1.0
 x86_64-apple-darwin	product-default	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow@1.0.4
 x86_64-apple-darwin	product-default	node	bingsu-core@0.0.0	-	-
 x86_64-apple-darwin	product-default	node	bingsu-identity@0.0.0	-	-
+x86_64-apple-darwin	product-default	node	bingsu-match@0.0.0	-	-
 x86_64-apple-darwin	product-default	node	bingsu@0.0.0	-	-
 x86_64-apple-darwin	product-default	node	libc@0.2.191	default,std	-
 x86_64-apple-darwin	product-default	node	libm@0.2.16	-	-
+x86_64-apple-darwin	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+x86_64-apple-darwin	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+x86_64-apple-darwin	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-apple-darwin	product-default	node	serde_spanned@1.1.2	alloc	-
 x86_64-apple-darwin	product-default	node	toml@1.1.8+spec-1.1.0	parse	-
 x86_64-apple-darwin	product-default	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -6433,9 +6508,14 @@ x86_64-pc-windows-gnu	product-all	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec-1.
 x86_64-pc-windows-gnu	product-all	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 x86_64-pc-windows-gnu	product-all	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 x86_64-pc-windows-gnu	product-all	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+x86_64-pc-windows-gnu	product-all	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 x86_64-pc-windows-gnu	product-all	edge	bingsu@0.0.0	bingsu-bench	bingsu-bench@0.0.0
 x86_64-pc-windows-gnu	product-all	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 x86_64-pc-windows-gnu	product-all	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+x86_64-pc-windows-gnu	product-all	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
+x86_64-pc-windows-gnu	product-all	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+x86_64-pc-windows-gnu	product-all	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+x86_64-pc-windows-gnu	product-all	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 x86_64-pc-windows-gnu	product-all	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 x86_64-pc-windows-gnu	product-all	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 x86_64-pc-windows-gnu	product-all	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -6444,8 +6524,12 @@ x86_64-pc-windows-gnu	product-all	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winno
 x86_64-pc-windows-gnu	product-all	node	bingsu-bench@0.0.0	-	-
 x86_64-pc-windows-gnu	product-all	node	bingsu-core@0.0.0	-	-
 x86_64-pc-windows-gnu	product-all	node	bingsu-identity@0.0.0	bench-build	-
+x86_64-pc-windows-gnu	product-all	node	bingsu-match@0.0.0	-	-
 x86_64-pc-windows-gnu	product-all	node	bingsu@0.0.0	bench-stubs	-
 x86_64-pc-windows-gnu	product-all	node	libm@0.2.16	-	-
+x86_64-pc-windows-gnu	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+x86_64-pc-windows-gnu	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+x86_64-pc-windows-gnu	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-pc-windows-gnu	product-all	node	serde_spanned@1.1.2	alloc	-
 x86_64-pc-windows-gnu	product-all	node	toml@1.1.8+spec-1.1.0	parse	-
 x86_64-pc-windows-gnu	product-all	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -6457,8 +6541,13 @@ x86_64-pc-windows-gnu	product-default	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spe
 x86_64-pc-windows-gnu	product-default	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 x86_64-pc-windows-gnu	product-default	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 x86_64-pc-windows-gnu	product-default	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+x86_64-pc-windows-gnu	product-default	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 x86_64-pc-windows-gnu	product-default	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 x86_64-pc-windows-gnu	product-default	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+x86_64-pc-windows-gnu	product-default	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
+x86_64-pc-windows-gnu	product-default	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+x86_64-pc-windows-gnu	product-default	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+x86_64-pc-windows-gnu	product-default	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 x86_64-pc-windows-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 x86_64-pc-windows-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 x86_64-pc-windows-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -6466,8 +6555,12 @@ x86_64-pc-windows-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	winnow	winnow@1
 x86_64-pc-windows-gnu	product-default	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow@1.0.4
 x86_64-pc-windows-gnu	product-default	node	bingsu-core@0.0.0	-	-
 x86_64-pc-windows-gnu	product-default	node	bingsu-identity@0.0.0	-	-
+x86_64-pc-windows-gnu	product-default	node	bingsu-match@0.0.0	-	-
 x86_64-pc-windows-gnu	product-default	node	bingsu@0.0.0	-	-
 x86_64-pc-windows-gnu	product-default	node	libm@0.2.16	-	-
+x86_64-pc-windows-gnu	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+x86_64-pc-windows-gnu	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+x86_64-pc-windows-gnu	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-pc-windows-gnu	product-default	node	serde_spanned@1.1.2	alloc	-
 x86_64-pc-windows-gnu	product-default	node	toml@1.1.8+spec-1.1.0	parse	-
 x86_64-pc-windows-gnu	product-default	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -7705,10 +7798,15 @@ x86_64-unknown-linux-gnu	product-all	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spec
 x86_64-unknown-linux-gnu	product-all	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 x86_64-unknown-linux-gnu	product-all	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 x86_64-unknown-linux-gnu	product-all	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+x86_64-unknown-linux-gnu	product-all	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	bingsu-bench	bingsu-bench@0.0.0
 x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.0.0	libc	libc@0.2.191
+x86_64-unknown-linux-gnu	product-all	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+x86_64-unknown-linux-gnu	product-all	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+x86_64-unknown-linux-gnu	product-all	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 x86_64-unknown-linux-gnu	product-all	edge	seccompiler@0.5.0	libc	libc@0.2.191
 x86_64-unknown-linux-gnu	product-all	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 x86_64-unknown-linux-gnu	product-all	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
@@ -7718,9 +7816,13 @@ x86_64-unknown-linux-gnu	product-all	edge	toml_parser@1.1.5+spec-1.1.0	winnow	wi
 x86_64-unknown-linux-gnu	product-all	node	bingsu-bench@0.0.0	-	-
 x86_64-unknown-linux-gnu	product-all	node	bingsu-core@0.0.0	-	-
 x86_64-unknown-linux-gnu	product-all	node	bingsu-identity@0.0.0	bench-build	-
+x86_64-unknown-linux-gnu	product-all	node	bingsu-match@0.0.0	-	-
 x86_64-unknown-linux-gnu	product-all	node	bingsu@0.0.0	bench-stubs	-
 x86_64-unknown-linux-gnu	product-all	node	libc@0.2.191	default,std	-
 x86_64-unknown-linux-gnu	product-all	node	libm@0.2.16	-	-
+x86_64-unknown-linux-gnu	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+x86_64-unknown-linux-gnu	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+x86_64-unknown-linux-gnu	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-unknown-linux-gnu	product-all	node	seccompiler@0.5.0	-	-
 x86_64-unknown-linux-gnu	product-all	node	serde_spanned@1.1.2	alloc	-
 x86_64-unknown-linux-gnu	product-all	node	toml@1.1.8+spec-1.1.0	parse	-
@@ -7733,9 +7835,14 @@ x86_64-unknown-linux-gnu	product-default	edge	bingsu-core@0.0.0	toml	toml@1.1.8+
 x86_64-unknown-linux-gnu	product-default	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 x86_64-unknown-linux-gnu	product-default	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 x86_64-unknown-linux-gnu	product-default	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+x86_64-unknown-linux-gnu	product-default	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.0.0	libc	libc@0.2.191
+x86_64-unknown-linux-gnu	product-default	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+x86_64-unknown-linux-gnu	product-default	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+x86_64-unknown-linux-gnu	product-default	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 x86_64-unknown-linux-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 x86_64-unknown-linux-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 x86_64-unknown-linux-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -7743,9 +7850,13 @@ x86_64-unknown-linux-gnu	product-default	edge	toml@1.1.8+spec-1.1.0	winnow	winno
 x86_64-unknown-linux-gnu	product-default	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow@1.0.4
 x86_64-unknown-linux-gnu	product-default	node	bingsu-core@0.0.0	-	-
 x86_64-unknown-linux-gnu	product-default	node	bingsu-identity@0.0.0	-	-
+x86_64-unknown-linux-gnu	product-default	node	bingsu-match@0.0.0	-	-
 x86_64-unknown-linux-gnu	product-default	node	bingsu@0.0.0	-	-
 x86_64-unknown-linux-gnu	product-default	node	libc@0.2.191	default,std	-
 x86_64-unknown-linux-gnu	product-default	node	libm@0.2.16	-	-
+x86_64-unknown-linux-gnu	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+x86_64-unknown-linux-gnu	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+x86_64-unknown-linux-gnu	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-unknown-linux-gnu	product-default	node	serde_spanned@1.1.2	alloc	-
 x86_64-unknown-linux-gnu	product-default	node	toml@1.1.8+spec-1.1.0	parse	-
 x86_64-unknown-linux-gnu	product-default	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
@@ -8983,10 +9094,15 @@ x86_64-unknown-linux-musl	product-all	edge	bingsu-core@0.0.0	toml	toml@1.1.8+spe
 x86_64-unknown-linux-musl	product-all	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 x86_64-unknown-linux-musl	product-all	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 x86_64-unknown-linux-musl	product-all	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+x86_64-unknown-linux-musl	product-all	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 x86_64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	bingsu-bench	bingsu-bench@0.0.0
 x86_64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 x86_64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+x86_64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 x86_64-unknown-linux-musl	product-all	edge	bingsu@0.0.0	libc	libc@0.2.191
+x86_64-unknown-linux-musl	product-all	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+x86_64-unknown-linux-musl	product-all	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+x86_64-unknown-linux-musl	product-all	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 x86_64-unknown-linux-musl	product-all	edge	seccompiler@0.5.0	libc	libc@0.2.191
 x86_64-unknown-linux-musl	product-all	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 x86_64-unknown-linux-musl	product-all	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
@@ -8996,9 +9112,13 @@ x86_64-unknown-linux-musl	product-all	edge	toml_parser@1.1.5+spec-1.1.0	winnow	w
 x86_64-unknown-linux-musl	product-all	node	bingsu-bench@0.0.0	-	-
 x86_64-unknown-linux-musl	product-all	node	bingsu-core@0.0.0	-	-
 x86_64-unknown-linux-musl	product-all	node	bingsu-identity@0.0.0	bench-build	-
+x86_64-unknown-linux-musl	product-all	node	bingsu-match@0.0.0	-	-
 x86_64-unknown-linux-musl	product-all	node	bingsu@0.0.0	bench-stubs	-
 x86_64-unknown-linux-musl	product-all	node	libc@0.2.191	default,std	-
 x86_64-unknown-linux-musl	product-all	node	libm@0.2.16	-	-
+x86_64-unknown-linux-musl	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+x86_64-unknown-linux-musl	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+x86_64-unknown-linux-musl	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-unknown-linux-musl	product-all	node	seccompiler@0.5.0	-	-
 x86_64-unknown-linux-musl	product-all	node	serde_spanned@1.1.2	alloc	-
 x86_64-unknown-linux-musl	product-all	node	toml@1.1.8+spec-1.1.0	parse	-
@@ -9011,9 +9131,14 @@ x86_64-unknown-linux-musl	product-default	edge	bingsu-core@0.0.0	toml	toml@1.1.8
 x86_64-unknown-linux-musl	product-default	edge	bingsu-core@0.0.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
 x86_64-unknown-linux-musl	product-default	edge	bingsu-core@0.0.0	unicode-segmentation	unicode-segmentation@1.13.3
 x86_64-unknown-linux-musl	product-default	edge	bingsu-identity@0.0.0	bingsu-core	bingsu-core@0.0.0
+x86_64-unknown-linux-musl	product-default	edge	bingsu-match@0.0.0	regex	regex@1.13.1
 x86_64-unknown-linux-musl	product-default	edge	bingsu@0.0.0	bingsu-core	bingsu-core@0.0.0
 x86_64-unknown-linux-musl	product-default	edge	bingsu@0.0.0	bingsu-identity	bingsu-identity@0.0.0
+x86_64-unknown-linux-musl	product-default	edge	bingsu@0.0.0	bingsu-match	bingsu-match@0.0.0
 x86_64-unknown-linux-musl	product-default	edge	bingsu@0.0.0	libc	libc@0.2.191
+x86_64-unknown-linux-musl	product-default	edge	regex-automata@0.4.18	regex-syntax	regex-syntax@0.8.11
+x86_64-unknown-linux-musl	product-default	edge	regex@1.13.1	regex-automata	regex-automata@0.4.18
+x86_64-unknown-linux-musl	product-default	edge	regex@1.13.1	regex-syntax	regex-syntax@0.8.11
 x86_64-unknown-linux-musl	product-default	edge	toml@1.1.8+spec-1.1.0	serde_spanned	serde_spanned@1.1.2
 x86_64-unknown-linux-musl	product-default	edge	toml@1.1.8+spec-1.1.0	toml_datetime	toml_datetime@1.1.2+spec-1.1.0
 x86_64-unknown-linux-musl	product-default	edge	toml@1.1.8+spec-1.1.0	toml_parser	toml_parser@1.1.5+spec-1.1.0
@@ -9021,9 +9146,13 @@ x86_64-unknown-linux-musl	product-default	edge	toml@1.1.8+spec-1.1.0	winnow	winn
 x86_64-unknown-linux-musl	product-default	edge	toml_parser@1.1.5+spec-1.1.0	winnow	winnow@1.0.4
 x86_64-unknown-linux-musl	product-default	node	bingsu-core@0.0.0	-	-
 x86_64-unknown-linux-musl	product-default	node	bingsu-identity@0.0.0	-	-
+x86_64-unknown-linux-musl	product-default	node	bingsu-match@0.0.0	-	-
 x86_64-unknown-linux-musl	product-default	node	bingsu@0.0.0	-	-
 x86_64-unknown-linux-musl	product-default	node	libc@0.2.191	default,std	-
 x86_64-unknown-linux-musl	product-default	node	libm@0.2.16	-	-
+x86_64-unknown-linux-musl	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
+x86_64-unknown-linux-musl	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
+x86_64-unknown-linux-musl	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-unknown-linux-musl	product-default	node	serde_spanned@1.1.2	alloc	-
 x86_64-unknown-linux-musl	product-default	node	toml@1.1.8+spec-1.1.0	parse	-
 x86_64-unknown-linux-musl	product-default	node	toml_datetime@1.1.2+spec-1.1.0	alloc	-
