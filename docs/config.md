@@ -121,8 +121,8 @@ most 64 KiB, and have at most 16 capture groups; `config check` reports one past
 segment off. Long repeats of Unicode classes, such as `\w{10}`, are past the limit; `\w+` is not.
 
 Changing only `match`, or removing it, does not run the command again: the next round applies the new pattern to
-the stored line, or shows the whole line again. Until then the old value is hidden rather than shown under the new
-pattern.
+the stored line, or shows the whole line again. Right after the edit the prompt can still show the old value until
+that round publishes the new one; it never shows a value picked by a pattern other than the one in the config it reads.
 
 ## Current limits
 
