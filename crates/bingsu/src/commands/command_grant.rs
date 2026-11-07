@@ -170,6 +170,8 @@ pub(crate) struct Publish {
     /// Cache hits re-matched under a changed `match`, published with the
     /// round's results without running.
     reapplied: Vec<response::Entry>,
+    /// The round's match time (U-29), shared by re-matching and results.
+    budget: super::command_match::Budget,
 }
 
 /// Script copies of one round. Linux runs a script through a sealed memfd
@@ -465,6 +467,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     let vars = i.environment.as_ref().ok().map(|body| Environ::parse(body));
     let mut environments = Vec::new();
     let mut reapplied = Vec::new();
+    let budget = super::command_match::Budget::new();
     let runnable: Vec<_> = runnable
         .into_iter()
         .filter(|(id, r, cache_ms, pattern)| {
@@ -478,7 +481,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             // A hit matched under another `match` is re-matched, not run
             // again (U-9c).
             if let (true, Some(e)) = (hit, entry) {
-                reapplied.extend(super::command_match::reapplied(e, *pattern));
+                reapplied.extend(budget.reapplied(e, *pattern));
             }
             !hit
         })
@@ -509,8 +512,12 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         {
             let _ = session_reclaim(i, session);
         }
-        if let (false, Some(binding), Ok(context)) =
-            (reapplied.is_empty(), binding, i.context.try_clone())
+        // The context is duplicated only for entries to publish: a round
+        // with nothing to do keeps the helper's descriptor calls (fsbudget).
+        // Fails without the order: test_live_helper_calls_match_stage_formula.
+        if !reapplied.is_empty()
+            && let Some(binding) = binding
+            && let Ok(context) = i.context.try_clone()
         {
             i.reapply.set(Some(Box::new(Publish {
                 context,
@@ -520,6 +527,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
                 attempts,
                 patterns,
                 reapplied,
+                budget,
             })));
             return Err(Skip::Reapplied);
         }
@@ -638,6 +646,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             attempts,
             patterns,
             reapplied,
+            budget,
         },
         builtins,
         probes_allowed,
@@ -1284,10 +1293,7 @@ impl Round {
                     self.publish.clock.now,
                     o,
                 )?;
-                Some(super::command_match::bind(
-                    e,
-                    self.publish.pattern(&unit.id),
-                ))
+                Some(self.publish.budget.bind(e, self.publish.pattern(&unit.id)))
             })
             .chain(probes)
             .collect()

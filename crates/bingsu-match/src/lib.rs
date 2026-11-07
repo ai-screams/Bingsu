@@ -6,14 +6,20 @@
 //! pattern digest in the command response with its snapshot's.
 #![forbid(unsafe_code)]
 
-/// Bytes the compiled program of one pattern may take. Without the perf
-/// engines the search is a Pike VM whose time grows with this size: at
-/// 256 KiB the slowest accepted pattern measured took about 1.8 ms on a
-/// 4 KB line (`[\s\S]{500}`), so 32 units stay well inside the helper's
-/// 500 ms work budget; at 1 MiB one pattern took 18 ms. Version and path
-/// patterns (`([^/]+)$`, `(?P<value>[0-9]+\.[0-9]+\.[0-9]+)`, `\w{10}`)
-/// fit with room to spare.
-pub const SIZE_LIMIT: usize = 256 * 1024;
+/// Bytes the compiled program of one pattern may take (U-29). Without the
+/// perf engines the search is a Pike VM whose time grows with the states a
+/// line keeps alive: at 256 KiB a pattern of thousands of alternatives took
+/// over a second on a 4 KB line. At 64 KiB, with `MAX_PATTERN_BYTES`, the
+/// slowest shape measured is a short bounded repeat, tens of milliseconds a
+/// line; the helper's round budget (`commands::command_match`) bounds the
+/// sum. Version and path patterns (`([^/]+)$`,
+/// `(?P<value>[0-9]+\.[0-9]+\.[0-9]+)`, `(?P<value>\w+)`) fit; a long Unicode
+/// class repeat such as `\w{10}` does not.
+pub const SIZE_LIMIT: usize = 64 * 1024;
+/// Bytes of pattern text (U-29): thousands of alternatives fit 64 KiB of
+/// program yet keep thousands of states alive; 256 bytes leaves room for
+/// any version or path pattern.
+pub const MAX_PATTERN_BYTES: usize = 256;
 /// Capture groups one pattern may have. The Pike VM keeps two tables of
 /// one slot pair per group for every state, so groups multiply the memory
 /// the size limit allows: 1,500 groups under 256 KiB would take about
@@ -46,9 +52,15 @@ enum Group {
 pub struct Error(pub String);
 
 impl Matcher {
-    /// Compiles `pattern` under `SIZE_LIMIT` with at most `MAX_GROUPS`
-    /// capture groups.
+    /// Compiles `pattern` of at most `MAX_PATTERN_BYTES` under `SIZE_LIMIT`
+    /// with at most `MAX_GROUPS` capture groups.
     pub fn new(pattern: &str) -> Result<Self, Error> {
+        if pattern.len() > MAX_PATTERN_BYTES {
+            return Err(Error(format!(
+                "{} bytes exceed the pattern limit of {MAX_PATTERN_BYTES}",
+                pattern.len()
+            )));
+        }
         let regex = regex::RegexBuilder::new(pattern)
             .size_limit(SIZE_LIMIT)
             .build()
@@ -120,23 +132,31 @@ mod tests {
         assert_eq!(value(r"(?P<value>\w+)", "caf\u{e9}!"), "caf\u{e9}");
     }
 
-    // 크기 상한: 버전·경로 패턴과 `\w{10}`은 받고, 큰 반복(`\w{50}`, `[\s\S]{1000}`, 중첩 반복)은 문법 대신 상한으로
-    // 거부한다. 이것을 실패시키는 것: size_limit 지정을 빼는 것(기본 10 MiB가 큰 패턴을 받음), 상한을 1 MiB 이상으로
-    // 올리는 것(`\w{50}`을 받음), 64 KiB 아래로 내리는 것(`\w{10}`을 거부).
+    // 크기 상한(U-29): 프로그램 64 KiB, 패턴 글 256 B. 버전·경로 패턴은 받고, 경계 바로 위(`[\s\S]{158}`, 257 B)와
+    // `\w{10}`, 중첩 반복은 거부한다. 이것을 실패시키는 것: size_limit 지정을 빼는 것(기본 10 MiB), 상한을 80 KiB
+    // 이상으로 올리는 것(`{158}`을 받음), 48 KiB 이하로 내리는 것(`{157}`을 거부), 패턴 길이 검사를 지우거나 257 B
+    // 이상으로 늘리는 것, 255 B 이하로 줄이는 것.
     #[test]
     fn the_size_limit_takes_version_patterns_and_refuses_large_programs() {
         for ok in [
             r"([^/]+)$",
             r"(?P<value>[0-9]+\.[0-9]+\.[0-9]+)",
-            r"\w{10}",
+            r"(?P<value>\w+)",
             r"(a|b)*a(a|b){20}",
+            r"[\s\S]{157}",
         ] {
             assert!(Matcher::new(ok).is_ok(), "{ok}");
         }
-        for big in [r"\w{50}", r"[\s\S]{1000}", r"((a{1000}){1000}){1000}"] {
+        // 64 KiB of program: `[\s\S]{157}` fits, `{158}` does not (it would
+        // fit 80 KiB); `{157}` would not fit 48 KiB (117 at most).
+        for big in [r"[\s\S]{158}", r"\w{10}", r"((a{1000}){1000}){1000}"] {
             let e = Matcher::new(big).unwrap_err();
             assert!(e.0.contains("size limit"), "{big}: {}", e.0);
         }
+        // 256 bytes of pattern text, then refused before compiling.
+        assert!(Matcher::new(&"a".repeat(256)).is_ok());
+        let e = Matcher::new(&"a".repeat(257)).unwrap_err();
+        assert!(e.0.contains("pattern limit"), "{}", e.0);
         assert!(Matcher::new("(unclosed").is_err());
     }
 

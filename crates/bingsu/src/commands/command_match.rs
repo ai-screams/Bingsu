@@ -86,6 +86,67 @@ pub(crate) fn reapplied(current: &Entry, pattern: Option<&str>) -> Option<Entry>
     Some(e)
 }
 
+/// Time one round may spend matching (U-29). A search cannot stop halfway,
+/// so the budget is checked between units: a round spends at most this plus
+/// one unit's search.
+pub(crate) const ROUND_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The match time a round has spent, across its re-matched cache hits and
+/// its results.
+pub(crate) struct Budget {
+    spent: std::cell::Cell<std::time::Duration>,
+    now: Box<dyn Fn() -> std::time::Instant>,
+}
+
+impl Budget {
+    pub(crate) fn new() -> Self {
+        Self::with_clock(Box::new(std::time::Instant::now))
+    }
+
+    fn with_clock(now: Box<dyn Fn() -> std::time::Instant>) -> Self {
+        Self {
+            spent: std::cell::Cell::new(std::time::Duration::ZERO),
+            now,
+        }
+    }
+
+    fn timed<T>(&self, f: impl FnOnce() -> T) -> T {
+        let start = (self.now)();
+        let out = f();
+        let took = (self.now)().saturating_duration_since(start);
+        self.spent.set(self.spent.get() + took);
+        out
+    }
+
+    fn over(&self) -> bool {
+        // Fails without it: a_round_past_its_budget_fails_the_rest.
+        self.spent.get() >= ROUND_BUDGET
+    }
+
+    /// `bind`, within the round's budget: once it is spent, a success that
+    /// needs its pattern is published as a failure (shown as nothing, run
+    /// again after the 10 s failure cache) instead of matched.
+    pub(crate) fn bind(&self, mut e: Entry, pattern: Option<&str>) -> Entry {
+        if pattern.is_some() && e.status == Status::Ok && self.over() {
+            e.status = Status::Failed;
+            e.value.clear();
+            e.raw.clear();
+            e.pattern = pattern_digest(pattern);
+            return e;
+        }
+        self.timed(|| bind(e, pattern))
+    }
+
+    /// `reapplied`, within the round's budget: once it is spent, the stale
+    /// entry stays (hidden by its digest) for a later round to re-match.
+    pub(crate) fn reapplied(&self, current: &Entry, pattern: Option<&str>) -> Option<Entry> {
+        if self.over() {
+            return None;
+        }
+        self.timed(|| reapplied(current, pattern))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +282,38 @@ mod tests {
         assert_eq!(missed.value, "");
         assert_eq!(reapplied(&missed, None).unwrap().value, "a/b/kube-ctx");
         assert!(reapplied(&bind(entry("x", Status::Failed), None), Some("(x)")).is_none());
+    }
+
+    // U-29 회차 예산: 매칭에 쓴 시간이 예산(250 ms)에 닿으면 남은 성공 항목은 그 회차에 Failed로 발행되고(값 없음),
+    // 패턴이 없는 항목과 이미 실패한 항목은 그대로다. 다시 맞추기는 예산이 다하면 미룬다. 확인은 단위 사이에서만
+    // 한다. 이것을 실패시키는 것: 예산 확인을 지우는 것, 경계를 넘김(>)으로 바꾸는 것, 매칭 시간을 쌓지 않는 것,
+    // 패턴 없는 항목까지 실패로 만드는 것, 다시 맞추기에 예산을 걸지 않는 것.
+    #[test]
+    fn a_round_past_its_budget_fails_the_rest() {
+        // Reads go 0, 125, 125, 250, …: one bind (two reads) spends 125 ms.
+        let tick = std::cell::Cell::new(0u64);
+        let base = std::time::Instant::now();
+        let clock = move || {
+            tick.set(tick.get() + 1);
+            base + std::time::Duration::from_millis(125 * (tick.get() / 2))
+        };
+        let budget = Budget::with_clock(Box::new(clock));
+        let p = Some("go([0-9.]+)");
+        let first = budget.bind(entry("go version go1.2", Status::Ok), p);
+        assert_eq!((first.status, first.value.as_str()), (Status::Ok, "1.2"));
+        let second = budget.bind(entry("go version go1.3", Status::Ok), p);
+        assert_eq!(second.status, Status::Ok, "spent {:?}", budget.spent.get());
+        // 250 ms spent: the rest of the round does not match.
+        assert_eq!(budget.spent.get(), ROUND_BUDGET);
+        let late = budget.bind(entry("go version go1.4", Status::Ok), p);
+        assert_eq!(
+            (late.status, late.value.as_str(), late.raw.as_str()),
+            (Status::Failed, "", "")
+        );
+        assert_eq!(late.pattern, pattern_digest(p));
+        let plain = budget.bind(entry("plain", Status::Ok), None);
+        assert_eq!((plain.status, plain.value.as_str()), (Status::Ok, "plain"));
+        let old = bind(entry("a/b/c", Status::Ok), Some("(.*)"));
+        assert_eq!(budget.reapplied(&old, Some("([^/]+)$")), None);
     }
 }
