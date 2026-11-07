@@ -869,7 +869,7 @@ COMMAND_RESPONSE_MAX = 471_082
 
 def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,
                                collectors=None, repository_roots=None, repository_evidence=(), platform=None,
-                               front_deadline=False, headers=RESPONSE_HEADERS, helper_exe=None):
+                               front_deadline=False, headers=RESPONSE_HEADERS, entry="cli", helper_exe=None):
     """`collectors` is the exact count a live capture arranged; stored traces
     leave it None and may hold at most one. With `repository_roots`, a
     collector's calls after its request are audited by assert_repository_trace
@@ -880,10 +880,11 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
     musl's O_CLOEXEC fcntl); stored traces leave it None. `front_deadline`
     judges a front that SIGALRM ended before its filter (deadline_shape):
     no filter and no record, every front call held to the pre-filter rules.
-    `helper_exe` is the hook's `--helper-exe=` (bingsu beside a traced
-    `bingsu-prompt`); without it the front `exe` is the helper (`bingsu prompt`)."""
+    `entry` is the prompt entry the trace ran: "cli" (`bingsu prompt`, its
+    own helper; stored traces) or "dedicated" (`bingsu-prompt`, whose helper
+    is the hook's `--helper-exe=` path, `helper_exe`)."""
     from fsbudget.attribute import assert_repository_trace, collector_attribute
-    helper = helper_exe or exe
+    helper = trace_helper(exe, entry, helper_exe)
     collector_exe = collector_exe or os.path.join(os.path.dirname(exe), "bingsu-collect")
     _, scoped = tree(lines, exe)
     # E4: a default screen in a Git repository starts at most one collector.
@@ -906,7 +907,18 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1, global_inputs=global_inputs,
                                 collector_exe=collector_exe, check_collection=True,
                                 audited_collector=int(roots[0]) if window else None, platform=platform,
-                                front_deadline=front_deadline, headers=headers, helper_exe=helper)
+                                front_deadline=front_deadline, headers=headers, entry=entry, helper_exe=helper)
+
+
+def trace_helper(front, entry, helper_exe):
+    """The helper a traced front may start: itself for the cli entry; for the
+    dedicated entry only the hook's `--helper-exe=` path, never itself (it
+    starts no helper without that word)."""
+    # 이것을 실패시키는 것: 전용 front가 helper 경로 없이 자기 자신을 helper로 띄우는 trace를 받는 것.
+    if entry == "cli":
+        return front
+    assert entry == "dedicated" and helper_exe and helper_exe != front, ("dedicated helper", entry, front, helper_exe)
+    return helper_exe
 
 
 def assert_historical_prompt_trace_budget(lines, exe, pinned):
@@ -916,8 +928,8 @@ def assert_historical_prompt_trace_budget(lines, exe, pinned):
 
 def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inputs=(),
                                 collector_exe=None, check_collection=False, audited_collector=None, platform=None,
-                                front_deadline=False, headers=RESPONSE_HEADERS, helper_exe=None):
-    helper_exe = helper_exe or exe
+                                front_deadline=False, headers=RESPONSE_HEADERS, entry="cli", helper_exe=None):
+    helper_exe = trace_helper(exe, entry, helper_exe)
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
@@ -1236,7 +1248,8 @@ def allowlist_capture(base, case):
     return SimpleNamespace(
         lines=trace.read_text(errors="replace").splitlines(), trace=trace,
         # execve names the pinned path (the symlink); its target never shows.
-        exe=str(inst.front()), helper_exe=str(inst.exe), collector_exe=collector_exe, global_inputs=global_inputs,
+        exe=str(inst.front()), entry="dedicated" if inst.dedicated else "cli", helper_exe=str(inst.exe),
+        collector_exe=collector_exe, global_inputs=global_inputs,
         global_present=global_present, collectors=int(case != "no-collection"),
         pinned=[os.path.realpath(trusted[k] + sub) for k, sub in
                 (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
@@ -1255,7 +1268,9 @@ def judge_allowlist(cap, shape=None):
     evidence; front-alarm the front's filter and record, the exact collector
     count and both coverage checks. Every path, call and audit rule stays."""
     assert_prompt_trace_budget(cap.lines, cap.exe, cap.pinned, global_inputs=cap.global_inputs,
-                               collector_exe=cap.collector_exe, helper_exe=cap.helper_exe,
+                               collector_exe=cap.collector_exe,
+                               # Stored captures predate bingsu-prompt: the cli entry.
+                               entry=getattr(cap, "entry", "cli"), helper_exe=getattr(cap, "helper_exe", None),
                                collectors=None if shape == "front-alarm" else cap.collectors,
                                repository_roots=cap.roots,
                                repository_evidence=() if shape else cap.evidence,
@@ -2649,7 +2664,8 @@ def child_capture(tmp_path):
         # What a full trace judgment needs after the fixture is gone.
         env, repo = fixture.env, os.path.realpath(fixture.pwd)
         (base / "context.json").write_text(json.dumps({
-            "exe": str(fixture.inst.front()), "helper_exe": str(fixture.inst.exe), "collector_exe": fixture.collector,
+            "exe": str(fixture.inst.front()), "entry": "dedicated" if fixture.inst.dedicated else "cli",
+            "helper_exe": str(fixture.inst.exe), "collector_exe": fixture.collector,
             "pinned": [os.path.realpath(env[k] + sub) for k, sub in
                        (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                         ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))],
@@ -2886,7 +2902,8 @@ def judge_marker_trace(cap, shape=None):
     c = cap.context
     # 이것을 실패시키는 것: 버리는 마감 시도의 경로·syscall 금지 판정을 건너뛰는 것.
     assert_prompt_trace_budget(cap.untimed, c["exe"], c["pinned"], global_inputs=tuple(c["global_inputs"]),
-                               helper_exe=c.get("helper_exe"),
+                               # Stored contexts predate bingsu-prompt: the cli entry.
+                               entry=c.get("entry", "cli"), helper_exe=c.get("helper_exe"),
                                collector_exe=c["collector_exe"], collectors=None,
                                repository_roots=c["roots"], repository_evidence=(),
                                # 이것을 실패시키는 것: 비지 않은 stdout에서 필터·기록 쓰기를 면제하는 것.
