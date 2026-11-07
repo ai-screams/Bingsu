@@ -621,6 +621,30 @@ pub(crate) fn read_commands(
         .ok()
         .filter(|r| r.binding == *binding))
 }
+/// The collection response saved for `cwd`, read without the store lock
+/// and without making anything (`config check --explain`). `None` when
+/// there is none or it is damaged; the caller compares its binding.
+pub(crate) fn read_saved_response(
+    context: &CheckedContextFd,
+    cwd: &[u8],
+) -> Result<Option<Completed>, StoreError> {
+    let me = sys::current_uid();
+    let address = bingsu_core::collection::cwd_hash::address(cwd);
+    let mut dir = context.dir.try_clone()?;
+    for name in ["collections-v1", address.as_str(), "store"] {
+        let child = match sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(name)) {
+            Ok(child) => child,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        snapshot_store::check_directory(&child, me)?;
+        dir = child;
+    }
+    let Some((_, bytes)) = read_checked(&dir, RESPONSE, STREAM_MAX, me)? else {
+        return Ok(None);
+    };
+    Ok(Completed::decode_with_catalog(&bytes, bingsu_core::field::BUILTIN).ok())
+}
 // Deliberately no Drop unlock. The supervisor retains its duplicate until both
 // publication and reap, or its existing absolute helper deadline.
 pub(crate) fn close_only_lock(

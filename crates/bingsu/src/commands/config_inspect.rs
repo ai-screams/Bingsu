@@ -575,6 +575,87 @@ fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> S
     out
 }
 
+/// The builtin language section of `--explain` (`explain_builtin`), from
+/// the roots init pinned (else the current ones, found without making or
+/// changing anything), this process's environment and the shell's folder.
+/// With no builtin language drawn, nothing is looked up.
+fn builtin_section(i: &Inspection, user: &User, env: &TrustedEnv) -> String {
+    use super::explain_builtin as b;
+    let Some(c) = &i.report.snapshot else {
+        return String::new();
+    };
+    // With the roots now read only, no test fails without this return (the
+    // output and the files are the same); it stays so a layout without a
+    // builtin language reads nothing more and waits on no stalled mount.
+    if b::drawn(c).is_empty() {
+        return String::new();
+    }
+    let place = place_of(user, env);
+    let (environment, pwd) = TrustedEnv::shell();
+    let cwd = b::shell_folder(pwd.as_deref());
+    b::section(
+        c,
+        place.as_ref(),
+        &environment,
+        cwd.as_deref(),
+        crate::prompt_io::observe_clock().ok(),
+        user.me,
+        &mut SystemGroups::new(&user.pw.name),
+    )
+}
+
+/// The runtime folder and roots of the saved folder facts. The pinned
+/// roots when init exported them (asked only then: without a pin
+/// `pinned_roots` says so on stderr); else the current candidates, read
+/// only: `roots::resolve` would make the runtime folder or fix its mode,
+/// which a check must not do. Fails without it: explain_writes_nothing.
+fn place_of(user: &User, env: &TrustedEnv) -> Option<super::explain_builtin::Place> {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    let pinned = TrustedEnv::pinned_roots()
+        .is_some()
+        .then(|| ctx::pinned_roots(user).ok().flatten())
+        .flatten();
+    let (runtime, config, state) = match pinned {
+        Some(r) => {
+            let rt = r.runtime?;
+            (
+                super::runtime_root::Pinned {
+                    dev: rt.dev,
+                    ino: rt.ino,
+                    path: rt.path,
+                },
+                r.config?.path,
+                r.state?,
+            )
+        }
+        None => {
+            let path = std::fs::canonicalize(roots::runtime_candidate(env, &user.pw.home)).ok()?;
+            let m = std::fs::symlink_metadata(&path).ok()?;
+            let config = ConfigRootPin::check(
+                &roots::config_candidate(env, &user.pw.home),
+                user.me,
+                &mut SystemGroups::new(&user.pw.name),
+            )
+            .ok()?
+            .path;
+            (
+                super::runtime_root::Pinned {
+                    dev: m.dev(),
+                    ino: m.ino(),
+                    path,
+                },
+                config,
+                roots::state_root(env, &user.pw.home)?,
+            )
+        }
+    };
+    Some(super::explain_builtin::Place {
+        runtime,
+        config: config.as_os_str().as_bytes().to_vec(),
+        state: state.as_os_str().as_bytes().to_vec(),
+    })
+}
+
 /// What `run_with` adds to the reading: nothing (`config path`), the
 /// executor's lookups and W411 (`config check`), and the execution section
 /// (`config check --explain`).
@@ -612,6 +693,7 @@ fn run_with(
             // Fails without it: explain_shows_not_run_reason.
             if extra == Extra::Explain {
                 text.push_str(&render_explain(&i, &found));
+                text.push_str(&builtin_section(&i, &user, &env));
             }
             if !ctx::print(&text) {
                 return ctx::code(EXIT_FAILED);
