@@ -704,6 +704,17 @@ pub const KEYS: &[KeyDef] = &[
 ];
 
 fn matches(pattern: &str, path: &[&str]) -> bool {
+    // Most rows differ in the first name: compare it before splitting. Every
+    // row's first name is a literal (`keys_first_names_are_literal`). A
+    // config read looks each key up against every row.
+    // A filter only: the walk below decides; this skips rows whose text
+    // cannot start with the first name.
+    if path
+        .first()
+        .is_some_and(|first| !pattern.starts_with(first))
+    {
+        return false;
+    }
     let mut p = pattern.split('.');
     let mut n = 0;
     for seg in path {
@@ -907,5 +918,15 @@ mod tests {
             lookup(&["segment", "dir", "command"]).is_some(),
             "segment.* keys still match"
         );
+    }
+
+    // 모든 행의 첫 이름은 `*`가 아닌 글자다. matches가 첫 이름을 글자로 먼저 비교하기 때문이다. 이것을 실패시키는
+    // 것: 첫 이름이 `*`인 행을 더하는 것.
+    #[test]
+    fn keys_first_names_are_literal() {
+        for k in KEYS {
+            let first = k.path.split('.').next().unwrap();
+            assert!(first != "*" && !first.is_empty(), "{}", k.path);
+        }
     }
 }
