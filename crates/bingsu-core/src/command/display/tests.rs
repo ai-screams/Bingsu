@@ -7,7 +7,7 @@ mod cases {
         config::compile::{ExecPolicy, NotRun},
         snapshot,
     };
-    use alloc::{string::String, vec, vec::Vec};
+    use alloc::{format, string::String, vec, vec::Vec};
 
     const ENV: &[u8] = b"PATH=/usr/bin\0KUBECONFIG=/a\0LC_TIME=C\0";
 
@@ -294,5 +294,149 @@ mod cases {
             shown(&response(patterned), &u, Origin::Config, true, ENV, 11),
             None
         );
+    }
+
+    const PY_ENV: &[u8] = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/u\0";
+
+    /// The entry the helper publishes for `python` decided in `environ`.
+    fn python_entry(environ: &[u8]) -> Entry {
+        let python = crate::command::builtin::language(b"python").unwrap();
+        Entry {
+            origin: Origin::Builtin,
+            id: "python".into(),
+            policy: [4; 32],
+            environment: python.env_digest(&Environ::parse(environ)),
+            pattern: [0; 32],
+            attempted_at: 5,
+            completed_at: 10,
+            status: Status::Ok,
+            value: "3.12.1".into(),
+            raw: "3.12.1".into(),
+        }
+    }
+    fn version(r: &Response, environ: &[u8], now: u64, eligible: bool) -> Option<String> {
+        let expected = binding();
+        let vars = Environ::parse(environ);
+        let prompt = Prompt::new(r, &expected, clock(now), &vars, eligible)?;
+        let python = crate::command::builtin::language(b"python").unwrap();
+        builtin_value(&prompt, python).map(String::from)
+    }
+
+    // D3b Q1–Q3: 내장 언어 값은 응답 묶음·시계·완료 시각·성공·패턴 없음과, 이 셸의 그 언어 변수 환경 요약값이
+    // 맞을 때만 그리고, 값은 버전 이름이어야 한다. 표식 자격과 정책 요약값은 보지 않는다. 이것을 실패시키는 것:
+    // 환경 요약값 비교를 지우는 것(PYENV_VERSION이 다른 셸에 값이 샘), 상태·패턴·완료 시각·버전 문법 검사를 하나씩
+    // 지우는 것, origin을 가리지 않는 것(같은 id의 설정 항목을 그림), 표식 자격을 거는 것.
+    #[test]
+    fn a_builtin_version_needs_this_shells_language_environment() {
+        let r = response(python_entry(PY_ENV));
+        assert_eq!(version(&r, PY_ENV, 11, true).as_deref(), Some("3.12.1"));
+        assert_eq!(version(&r, PY_ENV, 11, false).as_deref(), Some("3.12.1"));
+        // Another shell in the same folder: another PYENV_VERSION, another HOME,
+        // a manager folder variable it sets.
+        let other = b"PATH=/usr/bin\0PYENV_VERSION=3.11.0\0HOME=/home/u\0";
+        assert_eq!(version(&r, other, 11, true), None);
+        let home = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/v\0";
+        assert_eq!(version(&r, home, 11, true), None);
+        let asdf = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/u\0ASDF_DIR=/a\0";
+        assert_eq!(version(&r, asdf, 11, true), None);
+        // A variable no language reads does not hide it.
+        let unrelated = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/u\0EDITOR=vi\0";
+        assert_eq!(version(&r, unrelated, 11, true).as_deref(), Some("3.12.1"));
+        assert_eq!(version(&r, PY_ENV, 10, true), None);
+        let mut e = python_entry(PY_ENV);
+        e.status = Status::Failed;
+        assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+        let mut e = python_entry(PY_ENV);
+        e.pattern = [1; 32];
+        assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+        let mut e = python_entry(PY_ENV);
+        e.value = "3.12 beta".into();
+        assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+        let mut e = python_entry(PY_ENV);
+        e.origin = Origin::Config;
+        assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+    }
+
+    // 환경을 온전히 읽지 못한 셸(같은 이름이 두 번, 잘못된 항목)은 내장 값을 그리지 않는다. helper도 그런 frame에서는
+    // 정하지 않는다. 같은 이름 두 번은 둘 다 버려져 그 변수가 없는 셸과 요약값이 같아지기 때문이다. 이것을 실패시키는
+    // 것: builtin_value에서 버린 항목 검사를 지우는 것(셸 B가 셸 A의 3.12.1을 그림), 중복이나 잘못된 항목 한쪽만 세는 것.
+    #[test]
+    fn a_shell_not_read_whole_shows_no_builtin_version() {
+        let a = b"PATH=/usr/bin\0HOME=/home/u\0";
+        let r = response(python_entry(a));
+        assert_eq!(version(&r, a, 11, true).as_deref(), Some("3.12.1"));
+        let twice = b"PATH=/usr/bin\0HOME=/home/u\0PYENV_VERSION=3.11.9\0PYENV_VERSION=3.10.14\0";
+        assert_eq!(version(&r, twice, 11, true), None);
+        let malformed = b"PATH=/usr/bin\0HOME=/home/u\0NOEQUALS\0";
+        assert_eq!(version(&r, malformed, 11, true), None);
+    }
+
+    // 언어마다 값을 묶는 셸 변수를 공유 표와 따로 이 시험에 적는다. 각 변수가 없을 때 정한 값은, 그 변수를 빈 값으로
+    // 두거나 넣은 셸에서 숨고, 값이 있을 때 정한 값은 다른 값을 넣은 셸에서 숨는다. 이것을 실패시키는 것: 공유 표에서
+    // 변수 하나를 지우는 것(예: PYENV_DIR), 해석기 없는 관리자 변수 하나를 지우는 것.
+    #[test]
+    fn each_language_is_bound_by_its_own_variables() {
+        const UNSUPPORTED: [&str; 8] = [
+            "ASDF_DATA_DIR",
+            "ASDF_DIR",
+            "MISE_DATA_DIR",
+            "MISE_SHIMS_DIR",
+            "XDG_DATA_HOME",
+            "VOLTA_HOME",
+            "NODENV_ROOT",
+            "GOENV_ROOT",
+        ];
+        let own: [(&str, &[&str]); 4] = [
+            ("node", &[]),
+            (
+                "python",
+                &[
+                    "PYENV_ROOT",
+                    "PYENV_VERSION",
+                    "PYENV_DIR",
+                    "PYENV_HOOK_PATH",
+                    "DEVELOPER_DIR",
+                ],
+            ),
+            ("rust", &["RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN"]),
+            ("go", &[]),
+        ];
+        let base = "PATH=/usr/bin\0HOME=/home/u\0";
+        for (id, names) in own {
+            let language = crate::command::builtin::language(id.as_bytes()).unwrap();
+            let decided = |environ: &str| Entry {
+                origin: Origin::Builtin,
+                id: id.into(),
+                policy: [4; 32],
+                environment: language.env_digest(&Environ::parse(environ.as_bytes())),
+                pattern: [0; 32],
+                attempted_at: 5,
+                completed_at: 10,
+                status: Status::Ok,
+                value: "1.2.3".into(),
+                raw: String::new(),
+            };
+            let shows = |r: &Response, environ: &str| {
+                let expected = binding();
+                let vars = Environ::parse(environ.as_bytes());
+                let prompt = Prompt::new(r, &expected, clock(11), &vars, true).unwrap();
+                builtin_value(&prompt, language).is_some()
+            };
+            for name in names.iter().chain(UNSUPPORTED.iter()) {
+                let without = response(decided(base));
+                assert!(shows(&without, base), "{id} {name}");
+                for value in ["", "/x"] {
+                    let set = format!("{base}{name}={value}\0");
+                    assert!(!shows(&without, &set), "{id} {name}={value:?}");
+                }
+                let with = format!("{base}{name}=/x\0");
+                let decided_with = response(decided(&with));
+                assert!(shows(&decided_with, &with), "{id} {name}");
+                assert!(
+                    !shows(&decided_with, &format!("{base}{name}=/y\0")),
+                    "{id} {name}"
+                );
+            }
+        }
     }
 }

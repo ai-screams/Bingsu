@@ -1441,4 +1441,106 @@ mod cases {
         ));
         assert!(!p.accepts_collection(CollectionCopy::Current, at(STREAM_MAX + 1)));
     }
+
+    /// A layout that draws the node segment.
+    const NODE: &str = "[layout.line2]\nleft=['node','char']";
+    /// A command response with node's version as the helper publishes it
+    /// for this prompt, decided in `frame`.
+    fn language_response(value: &str, frame: &[u8]) -> Vec<u8> {
+        use crate::command::{builtin, plan, response as cr};
+        let s = snapshot(NODE);
+        let vars = plan::Environ::parse(crate::command::env_frame::body(frame).unwrap());
+        cr::Response {
+            binding: cr::Binding {
+                build_id: BuildId([8; 32]),
+                boot: s.id.boot,
+                epoch: s.id.epoch,
+                context: s.id.context,
+                clock_kind: clock().kind,
+                domain: clock().domain,
+                resume: clock().resume,
+                config: b"/c".to_vec(),
+                state: b"/s".to_vec(),
+                cwd: b"/x/project".to_vec(),
+            },
+            entries: vec![cr::Entry {
+                origin: crate::handoff::Origin::Builtin,
+                id: "node".into(),
+                policy: [4; 32],
+                environment: builtin::language(b"node").unwrap().env_digest(&vars),
+                pattern: [0; 32],
+                attempted_at: 40,
+                completed_at: 50,
+                status: cr::Status::Ok,
+                value: value.into(),
+                raw: value.into(),
+            }],
+        }
+        .encode()
+        .unwrap()
+    }
+    fn languaged(value: &str) -> Harness {
+        let s = snapshot(NODE);
+        let mut h = Harness::new();
+        h.current = Some(s.encode(1, 0).unwrap());
+        h.marker = Some(marker(&s).encode().to_vec());
+        h.environment = Some(frame());
+        h.entry = Some(clock());
+        h.commands = Some(language_response(value, &frame()));
+        h
+    }
+
+    // D3b: 그리는 내장 언어 segment는 응답의 버전을 그린다. 표식이 없어도(내장 값에는 표식 조건이 없음) 그리고,
+    // redraw에서도 그린다. 이것을 실패시키는 것: draws_commands가 언어 segment를 보지 않는 것(응답을 읽지 않음),
+    // finish가 언어 값을 render에 넘기지 않는 것, 언어 값에 표식 조건을 거는 것.
+    #[test]
+    fn a_drawn_language_segment_shows_its_version() {
+        for (case, redraw, marker) in [
+            ("plain", false, true),
+            ("redraw", true, true),
+            ("no marker", false, false),
+        ] {
+            let mut h = languaged("22.11.0");
+            if !marker {
+                h.marker = None;
+            }
+            let mut a = args();
+            if redraw {
+                a.push(b"--redraw");
+            }
+            let r = h.run(&a, Mode::Dark);
+            assert!(reads_commands(&h), "{case}");
+            assert!(record(&r).contains("22.11.0"), "{case}: {}", record(&r));
+        }
+    }
+
+    // 다른 셸의 언어 값은 그리지 않는다: 응답 항목의 환경 요약값을 만든 frame과 이 프롬프트의 frame이 언어 변수에서
+    // 다르면 숨긴다(D3b Q1). frame이 없으면 응답을 읽지 않고 숨긴다. 언어 segment를 그리지 않는 설정은 응답을
+    // 읽지 않는다. 이것을 실패시키는 것: 앞단에서 환경 요약값 비교를 지우는 것, draws_commands의 frame 조건을
+    // 지우는 것, 언어 segment를 그리지 않을 때도 읽는 것.
+    #[test]
+    fn a_language_version_needs_this_shells_frame() {
+        let mut h = languaged("22.11.0");
+        let other = crate::command::env_frame::encode([
+            b"PATH=/usr/bin\0".as_slice(),
+            b"LANG=C\0",
+            b"VOLTA_HOME=/v\0",
+        ])
+        .unwrap();
+        h.environment = Some(other);
+        let r = h.run(&args(), Mode::Dark);
+        assert!(reads_commands(&h));
+        assert!(!record(&r).contains("22.11.0"), "{}", record(&r));
+        let mut h = languaged("22.11.0");
+        h.environment = None;
+        let r = h.run(&args(), Mode::Dark);
+        assert!(!reads_commands(&h));
+        assert!(!record(&r).contains("22.11.0"));
+        let mut h = languaged("22.11.0");
+        let s = snapshot("[layout.line2]\nleft=['dir','char']");
+        h.current = Some(s.encode(1, 0).unwrap());
+        h.marker = Some(marker(&s).encode().to_vec());
+        h.run(&args(), Mode::Dark);
+        assert!(!reads_commands(&h));
+    }
 }

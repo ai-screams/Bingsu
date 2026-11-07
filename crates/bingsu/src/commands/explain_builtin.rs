@@ -10,7 +10,7 @@
 //! for these roots and this folder in this boot, and shown with their age:
 //! they may be out of date.
 use super::{
-    builtin_probe::{self, Action, LANGUAGES, Language, Planned},
+    builtin_probe::{self, Action, Planned},
     collection_store,
     command_grant::{self, Languages, Root},
     group_policy::SystemGroups,
@@ -18,7 +18,11 @@ use super::{
 };
 use bingsu_core::{
     collection::response::Completed,
-    command::{plan::Environ, profile},
+    command::{
+        builtin::{LANGUAGES, Language},
+        plan::Environ,
+        profile,
+    },
     config::compile::CompiledConfig,
     field::BUILTIN,
     snapshot::Clock,

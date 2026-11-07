@@ -7,7 +7,7 @@
 //! has every result, so its end of file tells the supervisor the helper is
 //! gone. Results are checked and dropped here; publishing them is C4.
 use super::{
-    builtin_probe::{self, Action, Language, Planned},
+    builtin_probe::{self, Action, Planned},
     collection_store::close_only_lock,
     collector_process::{OwnedChild, now_ns, pipe},
     command_process, exec_path,
@@ -18,6 +18,7 @@ use super::{
 };
 use bingsu_core::{
     command::{
+        builtin::Language,
         cgroup,
         plan::{self, Environ},
         response,
