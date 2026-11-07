@@ -33,6 +33,9 @@ pub enum Ty {
         max: f64,
     },
     Str,
+    /// An environment variable name: `[A-Za-z_][A-Za-z0-9_]*`, 1 to 64
+    /// bytes (`check::ENV_NAME_PATTERN`).
+    EnvName,
     /// A string drawn in the prompt: no control, bidi or invisible
     /// characters (`sanitize::is_removed`; ZWJ and variation selectors stay).
     Text,
@@ -519,6 +522,16 @@ pub const KEYS: &[KeyDef] = &[
     .exec()
     .example("true"),
     key(
+        "segment.*.env",
+        Ty::EnvName,
+        Advanced,
+        "Environment variable to show.",
+        "보일 환경 변수.",
+    )
+    .exec()
+    .kinds(&["env"])
+    .example("\"AWS_PROFILE\""),
+    key(
         "segment.*.env_allow",
         Ty::Strings,
         Expert,
@@ -586,16 +599,6 @@ pub const KEYS: &[KeyDef] = &[
     .exec()
     .kinds(CMD)
     .example("false"),
-    key(
-        "segment.*.var",
-        Ty::Str,
-        Advanced,
-        "Environment variable to show.",
-        "보일 환경 변수.",
-    )
-    .exec()
-    .kinds(&["env"])
-    .example("\"AWS_PROFILE\""),
     key(
         "segment.*.version",
         Ty::Strings,

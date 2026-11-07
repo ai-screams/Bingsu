@@ -412,16 +412,17 @@ fn only_drawn_enabled_text_is_declared() {
     assert_eq!(ids, ["custom/a"]);
 }
 
-// command 세그먼트는 text와 같은 번호 규칙으로 그려지는 목록에 들고 N502를 내지 않는다. env는 아직(C5) 그리지
-// 않고 N502를 낸다. 이것을 실패시키는 것: command를 그리는 종류에서 빼는 것(목록에 없음, N502), env를 그리기
-// 시작하는 것.
+// command·env 세그먼트는 text와 같은 번호 규칙으로 그려지는 목록에 들고 N502를 내지 않는다. language는 아직 그리지
+// 않고 N502를 낸다. 이것을 실패시키는 것: command나 env를 그리는 종류에서 빼는 것(목록에 없음, N502), language를
+// 그리기 시작하는 것.
 #[test]
-fn command_segment_is_drawn_env_stays_hidden() {
+fn command_and_env_segments_are_drawn_language_stays_hidden() {
     use bingsu_core::config::compile::CustomKind;
     let cfg = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\n\
                [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\n\
-               [segment.\"custom/e\"]\nkind = \"env\"\nvar = \"E\"\n\
-               [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"char\"]\n";
+               [segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\n\
+               [segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n\
+               [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"custom/l\", \"char\"]\n";
     let r = fixture::report(cfg);
     let drawn_later: Vec<_> = r
         .diagnostics
@@ -434,20 +435,22 @@ fn command_segment_is_drawn_env_stays_hidden() {
         kinds,
         [
             ("custom/a", &CustomKind::Text("A".into())),
+            ("custom/e", &CustomKind::Env("E".into())),
             ("custom/k", &CustomKind::Command)
         ]
     );
     assert_eq!(drawn_later.len(), 1, "{drawn_later:?}");
 }
 
-// 꺼진 text·command 세그먼트는 "아직 그리지 않는 종류"가 아니므로 N502를 내지 않는다. 그리지 않는 종류(env)만
-// 낸다. 이것을 실패시키는 것: N502 조건에서 그리는 종류 검사를 지우는 것(꺼진 둘에도 N502).
+// 꺼진 text·command·env 세그먼트는 "아직 그리지 않는 종류"가 아니므로 N502를 내지 않는다. 그리지 않는 종류
+// (language)만 낸다. 이것을 실패시키는 것: N502 조건에서 그리는 종류 검사를 지우는 것(꺼진 셋에도 N502).
 #[test]
-fn a_turned_off_text_or_command_segment_is_not_drawn_later() {
+fn a_turned_off_text_command_or_env_segment_is_not_drawn_later() {
     let cfg = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\nenabled = false\n\
                [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\nenabled = false\n\
-               [segment.\"custom/e\"]\nkind = \"env\"\nvar = \"E\"\n\
-               [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"char\"]\n";
+               [segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\nenabled = false\n\
+               [segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n\
+               [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"custom/l\", \"char\"]\n";
     let r = fixture::report(cfg);
     let drawn_later: Vec<_> = r
         .diagnostics

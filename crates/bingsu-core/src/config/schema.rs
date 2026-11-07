@@ -7,7 +7,7 @@
 //! (`additionalProperties: false`): an unknown key is an error, as in
 //! `config check`. Plugin fields cannot be listed ahead of time; `config
 //! check` checks them from the installed declarations.
-use crate::config::check::DURATION_PATTERN;
+use crate::config::check::{DURATION_PATTERN, ENV_NAME_PATTERN};
 use crate::config::keys::{KEYS, KINDS, KeyDef, Level, Ty};
 use crate::config::merge::KeyClass;
 use alloc::string::String;
@@ -381,6 +381,11 @@ fn node_at(
                 fields.push(("pattern", core::mem::take(&mut v)));
             }
         }
+        Ty::EnvName => {
+            fields.push(("type", String::from("\"string\"")));
+            esc(ENV_NAME_PATTERN, &mut v);
+            fields.push(("pattern", core::mem::take(&mut v)));
+        }
         Ty::Duration => {
             fields.push(("type", String::from("\"string\"")));
             esc(DURATION_PATTERN, &mut v);
@@ -489,6 +494,7 @@ fn node_at(
         Ty::Text => Some("text"),
         Ty::Color => Some("color"),
         Ty::Duration => Some("duration"),
+        Ty::EnvName => Some("env-name"),
         _ => None,
     };
     if let Some(name) = corpus_type {

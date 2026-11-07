@@ -1,0 +1,22 @@
+[
+  ["AWS_PROFILE", true],
+  ["_", true],
+  ["a", true],
+  ["Z9", true],
+  ["__x_1", true],
+  ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", true],
+  ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", false],
+  ["", false],
+  ["1A", false],
+  ["9", false],
+  ["A-B", false],
+  ["A B", false],
+  ["A=B", false],
+  ["A.B", false],
+  ["가", false],
+  ["A\u0000", false],
+  ["A\n", false],
+  ["$A", false],
+  ["A$", false],
+  ["ÄB", false]
+]

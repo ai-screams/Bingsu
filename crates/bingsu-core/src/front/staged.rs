@@ -955,11 +955,16 @@ struct CommandValues {
     languages: Vec<(usize, String)>,
 }
 
-/// The value of each user segment that is a command, in `custom` order
-/// (`None` elsewhere): `command::display` against this prompt's binding,
-/// entry clock, environment frame body and display eligibility (`eligible`: the
-/// marker verdict that also makes the snapshot's units eligible).
-fn command_values(
+/// The value of each user segment that is a command or an env segment, in
+/// `custom` order (`None` elsewhere), and each drawn builtin language's
+/// version. A command's value and a language's version are
+/// `command::display` against this prompt's binding, entry clock,
+/// environment frame body and display eligibility (`eligible`: the marker
+/// verdict that also makes the snapshot's units eligible). An env segment's
+/// is its variable in the same frame body, the shell's environment as the
+/// prompt received it: unset, empty, named twice or past the frame's cap (no
+/// frame) draws nothing.
+fn custom_values(
     entry: Option<Clock>,
     build_id: Option<BuildId>,
     environment: Option<&[u8]>,
@@ -977,8 +982,20 @@ fn command_values(
         custom: vec![None; custom.len()],
         languages: Vec::new(),
     };
-    let (Some(response), Some(entry), Some(build_id), Some(body)) =
-        (observed.commands.as_deref(), entry, build_id, environment)
+    let Some(body) = environment else {
+        return out;
+    };
+    // Parsed once, and only for a value that needs it: an env segment, or
+    // the command response below (command values and builtin languages).
+    let mut parsed = None;
+    for (i, segment) in custom.iter().enumerate() {
+        if let CustomKind::Env(name) = &segment.kind {
+            let vars = parsed.get_or_insert_with(|| Environ::parse(body));
+            out.custom[i] = crate::command::plan::env_segment_value(vars, name);
+        }
+    }
+    let (Some(response), Some(entry), Some(build_id)) =
+        (observed.commands.as_deref(), entry, build_id)
     else {
         return out;
     };
@@ -1001,8 +1018,8 @@ fn command_values(
         state,
         cwd,
     };
-    let vars = Environ::parse(body);
-    let Some(mut prompt) = display::Prompt::new(response, &expected, entry, &vars, eligible) else {
+    let vars = parsed.get_or_insert_with(|| Environ::parse(body));
+    let Some(mut prompt) = display::Prompt::new(response, &expected, entry, vars, eligible) else {
         return out;
     };
     for (i, segment) in custom.iter().enumerate() {
@@ -1112,7 +1129,7 @@ pub fn finish_with_catalog(
             }
         }
     }
-    let commands = command_values(
+    let commands = custom_values(
         plan.entry,
         plan.build_id,
         // A frame kept by `with_environment` has a checked body after its header.

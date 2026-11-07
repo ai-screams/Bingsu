@@ -114,6 +114,12 @@ harness = false
 test = false
 
 [[bench]]
+# M6 C5: the prompt's env segment lookup over a full environment frame and cut.
+name = "env_segment"
+harness = false
+test = false
+
+[[bench]]
 # M6 D3b: the prompt's builtin language versions from a full command response.
 name = "language"
 harness = false

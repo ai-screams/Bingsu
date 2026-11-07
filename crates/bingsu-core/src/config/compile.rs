@@ -143,6 +143,9 @@ pub enum CustomKind {
     /// `kind = "command"`: the unit's value from the command response; a
     /// segment with no value draws nothing.
     Command,
+    /// `kind = "env"`: the value of this variable in the prompt's own
+    /// environment, cut like text; unset or empty draws nothing.
+    Env(String),
 }
 
 /// Per `field::BUILTIN` index: priority, required, shorten methods, when.
@@ -854,10 +857,43 @@ pub fn compile(
         int(r, &["width", "emoji"]).unwrap_or(2) as u8,
     )
     .unwrap_or(WidthProfile::DEFAULT);
-    // Without a declared text or command segment nothing is looked up, so
-    // the usual config compiles exactly as it did before user segments.
+    let shown_bands = selectable(&banded.order, &banded.bands);
+    // What a trusted layout can draw is judged on the trusted merge alone: a
+    // shape-only source may re-order or resize bands, but must not make a band
+    // reachable that the trusted sources never reach. A trusted merge whose
+    // bands fail to order approves nothing.
+    let approved_bands = bands_of(trusted).map_or_else(
+        |_| BTreeSet::new(),
+        |t| {
+            let full = &banded.names;
+            crate::bands::selection_table(&t.order, &t.bands)
+                .into_iter()
+                .filter_map(|(_, _, b)| match b {
+                    None => Some(None),
+                    Some(i) => full
+                        .iter()
+                        .position(|n| *n == t.names[i])
+                        .map(|j| Some(j as u16)),
+                })
+                .collect()
+        },
+    );
+    let reach = Reach {
+        approved: approved_bands,
+        shown: shown_bands,
+    };
+    // Without a declared user segment of a drawn kind nothing is looked up,
+    // so the usual config compiles exactly as it did before user segments.
     let custom = if declares_custom(r) {
-        custom_segments(r, &drawn(r, &banded.names), profile, &mut notes)?
+        custom_segments(
+            r,
+            &drawn(r, &banded.names),
+            &drawn(&trusted.root, &banded.names),
+            banded.names.len(),
+            &reach,
+            profile,
+            &mut notes,
+        )?
     } else {
         Vec::new()
     };
@@ -1006,27 +1042,6 @@ pub fn compile(
             notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id));
         }
     }
-    let shown_bands = selectable(&banded.order, &banded.bands);
-    // What a trusted layout can draw is judged on the trusted merge alone: a
-    // shape-only source may re-order or resize bands, but must not make a band
-    // reachable that the trusted sources never reach. A trusted merge whose
-    // bands fail to order approves nothing.
-    let approved_bands = bands_of(trusted).map_or_else(
-        |_| BTreeSet::new(),
-        |t| {
-            let full = &banded.names;
-            crate::bands::selection_table(&t.order, &t.bands)
-                .into_iter()
-                .filter_map(|(_, _, b)| match b {
-                    None => Some(None),
-                    Some(i) => full
-                        .iter()
-                        .position(|n| *n == t.names[i])
-                        .map(|j| Some(j as u16)),
-                })
-                .collect()
-        },
-    );
     let Bands {
         bands,
         names: band_names,
@@ -1064,16 +1079,7 @@ pub fn compile(
             }
         }
     }
-    let exec_units = exec_units(
-        r,
-        &trusted.root,
-        &band_names,
-        &Reach {
-            approved: approved_bands,
-            shown: shown_bands,
-        },
-        &mut notes,
-    )?;
+    let exec_units = exec_units(r, &trusted.root, &band_names, &reach, &mut notes)?;
     let icons = IconSet::parse(s(r, &["icons"]).unwrap_or(default_str("icons")))
         .unwrap_or(IconSet::Unicode);
     let duration_min_ms = optional_duration(s(r, &["segment", "duration", "min"]))
@@ -1138,7 +1144,7 @@ pub(crate) fn layout_verdict(
 }
 
 /// The user segment kinds a layout draws.
-const DRAWN_KINDS: [&str; 2] = ["text", "command"];
+const DRAWN_KINDS: [&str; 3] = ["text", "command", "env"];
 
 /// Whether segment `id` is declared with a kind the prompt draws.
 fn drawn_kind(r: &MTable, id: &str) -> bool {
@@ -1157,14 +1163,21 @@ fn declares_custom(r: &MTable) -> bool {
     })
 }
 
-/// The `kind = "text"` and `kind = "command"` segments some layout draws,
+/// The `kind = "text"`, `"command"` and `"env"` segments some layout draws,
 /// sorted by id. A segment turned off (`enabled = false`, or from a file
 /// that failed the safety check) is not drawn; a missing `text` shows
 /// nothing. A command segment carries no value here: the prompt fills it
-/// from the command response, and draws nothing without one.
+/// from the command response, and draws nothing without one. An env segment
+/// carries the name of its variable, which the prompt reads from its own
+/// environment; like a command it shows only where a trusted layout draws
+/// it (`layout_verdict`, `trusted` the references of the trusted merge), so
+/// a repository's config cannot put the user's variables on screen.
 fn custom_segments(
     r: &MTable,
     drawn: &BTreeMap<String, Vec<LayoutRef>>,
+    trusted: &BTreeMap<String, Vec<LayoutRef>>,
+    band_count: usize,
+    reach: &Reach,
     profile: WidthProfile,
     notes: &mut Vec<Diagnostic>,
 ) -> Result<Vec<CustomSegment>, Vec<Diagnostic>> {
@@ -1186,10 +1199,24 @@ fn custom_segments(
         {
             continue;
         }
+        if kind == "env" {
+            let approved_by = trusted.get(&e.key).map_or(&[][..], |v| v.as_slice());
+            let shown_at = drawn.get(&e.key).map_or(&[][..], |v| v.as_slice());
+            if layout_verdict(approved_by, shown_at, band_count, reach).is_some() {
+                notes.push(
+                    Diagnostic::new(codes::NOT_RUN_UNTRUSTED_LAYOUT, at(&e.node))
+                        .arg("id", e.key.clone()),
+                );
+                continue;
+            }
+        }
         out.push(CustomSegment {
             id: e.key.clone(),
             kind: if kind == "command" {
                 CustomKind::Command
+            } else if kind == "env" {
+                // Checked as a variable name (`check::env_name`) before compile.
+                CustomKind::Env(s(t, &["env"]).unwrap_or_default().into())
             } else {
                 // Cut here, to the cells the field shows, so the stored text
                 // is what the front draws and always fits the codec's byte
@@ -1213,7 +1240,7 @@ fn custom_segments(
             place_of(r, &["segment"]),
             "segment",
             &alloc::format!("{}", out.len()),
-            "at most 256 drawn text and command segments",
+            "at most 256 drawn text, command and env segments",
         )]);
     }
     Ok(out)
@@ -2178,6 +2205,37 @@ mod tests {
         );
     }
 
+    // C5: env segment는 실행 단위가 아니라 32개 상한에 세지 않는다. 실행 가능한 command 32개와 그리는 env 하나는
+    // compile되고 실행 단위는 정확히 32개다. 이것을 실패시키는 것: env를 실행 단위로 만들거나 상한 계수에 넣는 것.
+    #[test]
+    fn an_env_segment_is_not_an_exec_unit() {
+        let mut src: String = (0..32)
+            .map(|i| {
+                alloc::format!(
+                    "[segment.\"custom/c{i:03}\"]\nkind = \"command\"\ncommand = [\"true\"]\n"
+                )
+            })
+            .collect();
+        src.push_str("[segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\n");
+        let ids: Vec<String> = (0..32)
+            .map(|i| alloc::format!("\"custom/c{i:03}\""))
+            .collect();
+        src.push_str(&alloc::format!(
+            "[layout.line1]\nleft = [{}, \"custom/e\"]\n",
+            ids.join(", ")
+        ));
+        let r = read(&src, &[]);
+        let codes = codes_of(&r);
+        let c = r.snapshot.unwrap_or_else(|| panic!("{codes:?}"));
+        assert_eq!(c.exec_units.len(), 32);
+        assert!(c.exec_units.iter().all(|u| u.not_run.is_none()));
+        assert!(
+            c.custom
+                .iter()
+                .any(|s| s.kind == CustomKind::Env("E".into()))
+        );
+    }
+
     #[test]
     fn exec_units_keep_their_whole_policy() {
         let c = compiled(
@@ -2471,6 +2529,39 @@ mod tests {
             not_run("extends = [\"shape-order\"]\n", &[("shape-order", shape)]),
             Some(NotRun::NotInTrustedLayout)
         );
+    }
+
+    // C5: 모양 전용 파일이 구간 폭만 바꿔 신뢰 설정에서 가려진 구간을 되살려도, 그 구간에만 있는 env segment는
+    // 그리지 않는다(명령 쪽 시험과 같은 모양). 양성 대조: 신뢰 설정 안에서 닿는 구간이면 그린다. 이것을 실패시키는
+    // 것: env의 승인 참조 도달을 전체 병합의 구간으로 판정하는 것.
+    #[test]
+    fn test_shape_only_file_cannot_make_a_hidden_band_show_env() {
+        const E: &str = "[segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\n";
+        let root = |hidden_min: u16| {
+            alloc::format!(
+                "{E}[layout.line1]\nleft = [\"char\"]\n[layout.when.cover]\norder = 1\n[layout.when.hidden]\norder = 2\nmin_cols = {hidden_min}\nmax_cols = 130\n[layout.when.hidden.line1]\nleft = [\"custom/e\", \"char\"]\n"
+            )
+        };
+        let shown = |src: &str, list: &[(&'static str, &str)]| {
+            let r = read(src, list);
+            let codes = codes_of(&r);
+            !r.snapshot
+                .unwrap_or_else(|| panic!("{codes:?}"))
+                .custom
+                .is_empty()
+        };
+        let shape = "[layout.when.cover]\nmax_cols = 100\n";
+        assert!(!shown(&root(120), &[]));
+        assert!(!shown(
+            &alloc::format!("extends = [\"shape-order\"]\n{}", root(120)),
+            &[("shape-order", shape)]
+        ));
+        // Without the cover band the trusted config reaches the hidden band:
+        // it shows.
+        assert!(shown(
+            &root(120).replacen("[layout.when.cover]\norder = 1\n", "", 1),
+            &[]
+        ));
     }
 
     fn exec_not_run(root: &str, shape: &str) -> Vec<Option<NotRun>> {
