@@ -738,7 +738,7 @@ cache = "30s"
     }
 
     // 이것을 실패시키는 것: kind 없는 사용자 세그먼트를 받거나, kind에 맞지 않는 키·내장 세그먼트의 명령 키를 받는 것,
-    // 모양 전용 파일에서 kind가 버려진 세그먼트를 오류로 보는 것(P-S3).
+    // language에 `match`를 여는 것, 모양 전용 파일에서 kind가 버려진 세그먼트를 오류로 보는 것(P-S3).
     #[test]
     fn kinds_decide_the_keys() {
         assert_eq!(
@@ -751,6 +751,14 @@ cache = "30s"
         );
         assert_eq!(
             codes_of("[segment.dir]\ncommand = [\"ls\"]\n"),
+            [codes::KEY_NOT_FOR_KIND]
+        );
+        // `match` is a command key: a language shows the version word.
+        assert_eq!(
+            codes_of(
+                "[segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\n\
+                 interpreter = \"deno\"\nmatch = \"(.*)\"\n"
+            ),
             [codes::KEY_NOT_FOR_KIND]
         );
         assert_eq!(codes_of("[segment.dir]\nenabled = false\n"), []);

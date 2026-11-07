@@ -135,6 +135,8 @@ pub fn units(c: &CompiledConfig) -> Vec<UnitView> {
                     interpreter,
                     version_argv,
                     detect_files,
+                    cwd,
+                    env_allow,
                 } => {
                     // Fails without it: explain_shows_shell_relative_and_language_units.
                     rows.push(Row {
@@ -154,8 +156,23 @@ pub fn units(c: &CompiledConfig) -> Vec<UnitView> {
                         value: version_argv.join(" "),
                         from: from("version"),
                     });
+                    rows.push(Row {
+                        key: "cwd",
+                        value: cwd.clone().unwrap_or_else(|| "neutral".into()),
+                        from: from("cwd"),
+                    });
                     rows.push(limit("timeout", u.timeout_ms, from("timeout")));
                     rows.push(limit("cache", u.cache_ms, from("cache")));
+                    for name in env_allow {
+                        environment.push(EnvName {
+                            name: name.clone(),
+                            from: from("env_allow"),
+                        });
+                    }
+                    environment.push(EnvName {
+                        name: keep_names(),
+                        from: From::KeepList,
+                    });
                     "language"
                 }
             };

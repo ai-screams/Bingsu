@@ -153,8 +153,16 @@ in the hooks retain their original bytes. Displayed paths with removed control c
 ## Current limits
 
 - The default prompt remains two lines at narrow widths, including in fish; segments move or disappear as width permits.
-- A user-defined language segment (`kind = "language"`) takes `detect_files` (1 to 16 file names), `interpreter`
-  and `version`; `config check` checks them and `--explain` shows them, but the version command does not run yet.
+- A user-defined language segment (`kind = "language"`) runs its `interpreter` with its `version` arguments only where
+  one of its `detect_files` is in the shell's folder or a folder above it (up to the repository root, at most 32 up), and shows the
+  first version-like word of the first line printed. The interpreter is looked up like a command's first word: an
+  absolute path (spaces allowed), or a name without whitespace searched in `PATH`; a relative path such as `./deno`
+  never runs.
+  With `cwd = "untrusted-current"`, an interpreter that is a version manager's shim (mise's links to its binary, for example) lets
+  the repository's files choose which version, and so which binary, runs. Commands carry the same risk, but a language
+  segment is the place this setting gets chosen to show each project's version. The files are found by the
+  folder collection, so the version shows from the prompt after the round that found them. Once the files are gone the
+  segment hides from the next round on; with `cache` set, it keeps its last value until the cache time ends.
 - If a shape-only source fails checking or compilation during config inspection, it and its descendants are dropped
   and the already loaded data is merged, checked and compiled again; the remaining files are not read again.
 - Local config value edits preserve bytes outside the changed value, including comments, order and other quotes.

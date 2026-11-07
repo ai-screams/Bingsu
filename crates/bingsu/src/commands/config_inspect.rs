@@ -403,12 +403,12 @@ fn lookups(
         .iter()
         .filter(|u| u.not_run.is_none())
         .filter_map(|u| {
-            let ExecPolicy::Command { argv, shell, .. } = &u.policy else {
-                return None;
-            };
-            let word: &str = match shell {
-                Some(_) => "/bin/sh",
-                None => argv.first()?,
+            let word: &str = match &u.policy {
+                ExecPolicy::Command { shell: Some(_), .. } => "/bin/sh",
+                ExecPolicy::Command { argv, .. } => argv.first()?,
+                // A language unit runs its interpreter (D3c-2).
+                // Fails without it: explain_shows_shell_relative_and_language_units.
+                ExecPolicy::Language { interpreter, .. } => interpreter.as_deref()?,
             };
             Some((u.id.clone(), word))
         })
@@ -531,13 +531,13 @@ fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> S
                         u.kind
                     );
                 }
-                // A language segment's version command does not run yet
-                // (D3c rulings: its run comes with the next change).
-                // Fails without it: explain_shows_shell_relative_and_language_units.
+                // A language unit runs only where its marker files are
+                // found (D3c-2). Fails without it:
+                // explain_shows_shell_relative_and_language_units.
                 _ if u.kind == "language" => {
                     let _ = writeln!(
                         out,
-                        "{}  {}, not run yet: language version commands run in a later version",
+                        "{}  {}, runs where its detect files are found",
                         clean(&u.id),
                         u.kind
                     );

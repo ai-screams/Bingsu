@@ -61,6 +61,8 @@ pub fn config() -> CompiledConfig {
             interpreter: Some("python".into()),
             version_argv: vec!["--version".into()],
             detect_files: vec!["pyproject.toml".into()],
+            cwd: None,
+            env_allow: Vec::new(),
         },
         timeout_ms: Some(999),
         cache_ms: Some(30000),

@@ -424,14 +424,15 @@ mod cases {
         let original = snapshot_codec::encode_compiled(&config).unwrap();
         // 이것을 실패시키는 것: 크기 사전 계산에서 schema bytes를 빼 재할당하게 만드는 것.
         assert_eq!(original.capacity(), original.len());
-        assert_eq!(&original[..12], b"BNGCFG11\x0b\0\x02\0");
+        assert_eq!(&original[..12], b"BNGCFG12\x0c\0\x02\0");
         assert_eq!(snapshot_codec::decode_compiled(&original), Ok(config));
         for version in [0u16, 1, 3, u16::MAX] {
             let mut bytes = original.clone();
             bytes[10..12].copy_from_slice(&version.to_le_bytes());
             assert_eq!(snapshot_codec::decode_compiled(&bytes), Err(Error::Tag));
         }
-        for (offset, value) in [(7, b'2'), (8, 2)] {
+        // BNGCFG11 (the previous magic) and another version byte.
+        for (offset, value) in [(7, b'1'), (8, 2)] {
             let mut bytes = original.clone();
             bytes[offset] = value;
             assert_eq!(snapshot_codec::decode_compiled(&bytes), Err(Error::Tag));

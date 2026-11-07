@@ -90,6 +90,24 @@ const fn stable(
     }
 }
 
+/// A code that is no longer emitted. It keeps its number and texts so an
+/// old report still reads; a new condition takes a new number.
+const fn deprecated(
+    code: DiagCode,
+    since: &'static str,
+    what: &'static str,
+    why: &'static str,
+    fix: &'static str,
+) -> CodeInfo {
+    CodeInfo {
+        code,
+        status: CodeStatus::Deprecated { since },
+        what,
+        why,
+        fix,
+    }
+}
+
 /// Every code, by number.
 pub const CODES: &[CodeInfo] = &[
     stable(
@@ -314,8 +332,11 @@ pub const CODES: &[CodeInfo] = &[
         "a template takes precedence over style keys",
         "remove the unused keys, or the template",
     ),
-    stable(
+    // Deprecated: every user segment kind is drawn (text, command, env and
+    // language), so no declared segment is left to wait for a later version.
+    deprecated(
         CUSTOM_DRAWN_LATER,
+        "0.0.0",
         "segment `{id}` is not drawn yet",
         "user segments are drawn once user commands run (a later version)",
         "keep it; it starts showing after an upgrade",

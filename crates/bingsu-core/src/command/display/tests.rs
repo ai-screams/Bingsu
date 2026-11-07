@@ -61,7 +61,7 @@ mod cases {
         Entry {
             origin,
             id: u.id.clone(),
-            policy: policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow),
+            policy: plan::entry_digest(&r),
             environment: plan::env_digest(&Environ::parse(environ), &r.env_allow),
             pattern: [0; 32],
             attempted_at: 5,
@@ -470,5 +470,41 @@ mod cases {
                 );
             }
         }
+    }
+
+    // 사용자 정의 language 단위의 값은 감지 이름까지 묶인 요약값(plan::entry_digest)이 맞을 때만 그린다(D3c-2 Q3).
+    // detect_files를 바꾼 설정에서는 이전 값을 그리지 않는다. 이것을 실패시키는 것: 앞단이 grant 요약값(감지 이름
+    // 없음)으로 비교하는 것.
+    #[test]
+    fn a_language_value_is_bound_to_its_files() {
+        let lang = |detect: &str| ExecUnit {
+            id: "custom/deno".into(),
+            policy: ExecPolicy::Language {
+                interpreter: Some("deno".into()),
+                version_argv: vec!["--version".into()],
+                detect_files: vec![detect.into()],
+                cwd: None,
+                env_allow: Vec::new(),
+            },
+            timeout_ms: None,
+            cache_ms: None,
+            origins: Vec::new(),
+            approved_by: Vec::new(),
+            shown_at: Vec::new(),
+            not_run: None,
+            pattern: None,
+        };
+        let u = lang("deno.json");
+        let mut e = ran(&u, Origin::Config, ENV);
+        e.value = "2.1.4".into();
+        let r = response(e);
+        assert_eq!(
+            shown(&r, &u, Origin::Config, true, ENV, 11).as_deref(),
+            Some("2.1.4")
+        );
+        assert_eq!(
+            shown(&r, &lang("deno.jsonc"), Origin::Config, true, ENV, 11),
+            None
+        );
     }
 }
