@@ -2098,6 +2098,37 @@ mod tests {
         );
     }
 
+    // C5: env segment는 실행 단위가 아니라 32개 상한에 세지 않는다. 실행 가능한 command 32개와 그리는 env 하나는
+    // compile되고 실행 단위는 정확히 32개다. 이것을 실패시키는 것: env를 실행 단위로 만들거나 상한 계수에 넣는 것.
+    #[test]
+    fn an_env_segment_is_not_an_exec_unit() {
+        let mut src: String = (0..32)
+            .map(|i| {
+                alloc::format!(
+                    "[segment.\"custom/c{i:03}\"]\nkind = \"command\"\ncommand = [\"true\"]\n"
+                )
+            })
+            .collect();
+        src.push_str("[segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\n");
+        let ids: Vec<String> = (0..32)
+            .map(|i| alloc::format!("\"custom/c{i:03}\""))
+            .collect();
+        src.push_str(&alloc::format!(
+            "[layout.line1]\nleft = [{}, \"custom/e\"]\n",
+            ids.join(", ")
+        ));
+        let r = read(&src, &[]);
+        let codes = codes_of(&r);
+        let c = r.snapshot.unwrap_or_else(|| panic!("{codes:?}"));
+        assert_eq!(c.exec_units.len(), 32);
+        assert!(c.exec_units.iter().all(|u| u.not_run.is_none()));
+        assert!(
+            c.custom
+                .iter()
+                .any(|s| s.kind == CustomKind::Env("E".into()))
+        );
+    }
+
     #[test]
     fn exec_units_keep_their_whole_policy() {
         let c = compiled(
@@ -2320,6 +2351,39 @@ mod tests {
             not_run("extends = [\"shape-order\"]\n", &[("shape-order", shape)]),
             Some(NotRun::NotInTrustedLayout)
         );
+    }
+
+    // C5: 모양 전용 파일이 구간 폭만 바꿔 신뢰 설정에서 가려진 구간을 되살려도, 그 구간에만 있는 env segment는
+    // 그리지 않는다(명령 쪽 시험과 같은 모양). 양성 대조: 신뢰 설정 안에서 닿는 구간이면 그린다. 이것을 실패시키는
+    // 것: env의 승인 참조 도달을 전체 병합의 구간으로 판정하는 것.
+    #[test]
+    fn test_shape_only_file_cannot_make_a_hidden_band_show_env() {
+        const E: &str = "[segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\n";
+        let root = |hidden_min: u16| {
+            alloc::format!(
+                "{E}[layout.line1]\nleft = [\"char\"]\n[layout.when.cover]\norder = 1\n[layout.when.hidden]\norder = 2\nmin_cols = {hidden_min}\nmax_cols = 130\n[layout.when.hidden.line1]\nleft = [\"custom/e\", \"char\"]\n"
+            )
+        };
+        let shown = |src: &str, list: &[(&'static str, &str)]| {
+            let r = read(src, list);
+            let codes = codes_of(&r);
+            !r.snapshot
+                .unwrap_or_else(|| panic!("{codes:?}"))
+                .custom
+                .is_empty()
+        };
+        let shape = "[layout.when.cover]\nmax_cols = 100\n";
+        assert!(!shown(&root(120), &[]));
+        assert!(!shown(
+            &alloc::format!("extends = [\"shape-order\"]\n{}", root(120)),
+            &[("shape-order", shape)]
+        ));
+        // Without the cover band the trusted config reaches the hidden band:
+        // it shows.
+        assert!(shown(
+            &root(120).replacen("[layout.when.cover]\norder = 1\n", "", 1),
+            &[]
+        ));
     }
 
     fn exec_not_run(root: &str, shape: &str) -> Vec<Option<NotRun>> {

@@ -1329,6 +1329,39 @@ mod cases {
         );
     }
 
+    // env 값은 정제 뒤에 자른다: 지워지는 글자로 시작하는 긴 값도 그 뒤의 글이 보인다. 빈 값은 구분자와 함께
+    // 빠져, 그 segment가 레이아웃에 없는 것과 같은 레코드다. 이것을 실패시키는 것: 원문을 정제 전에 바이트 상한에서
+    // 자르는 것(read_prefix를 원문에 쓰는 것), 빈 값을 빈 text로 그려 구분자를 남기는 것.
+    #[test]
+    fn env_values_are_sanitized_before_the_cut_and_empty_drops_the_separators() {
+        let esc = [
+            b"AWS_PROFILE=".to_vec(),
+            b"\x1b".repeat(272),
+            b"VISIBLE\0".to_vec(),
+        ]
+        .concat();
+        let rlo = [
+            b"AWS_PROFILE=".to_vec(),
+            "\u{202E}".repeat(91).into_bytes(),
+            b"dev\0".to_vec(),
+        ]
+        .concat();
+        for entry in [esc, rlo] {
+            let mut h = with_env(ENV_SEG, &[entry.as_slice()]);
+            let out = record(&h.run(&args(), Mode::Dark));
+            assert!(out.contains("VISIBLE") || out.contains("dev"), "{out:?}");
+        }
+        let two = "[segment.\"custom/aws\"]\nkind='env'\nenv='AWS_PROFILE'\n[segment.\"custom/t\"]\nkind='text'\ntext='TT'\n";
+        let with_seg = alloc::format!("{two}[layout.line2]\nleft=['custom/t','custom/aws','char']");
+        let without = alloc::format!("{two}[layout.line2]\nleft=['custom/t','char']");
+        let mut empty = with_env(&with_seg, &[b"AWS_PROFILE=\0"]);
+        let mut absent = with_env(&without, &[b"AWS_PROFILE=\0"]);
+        assert_eq!(
+            record(&empty.run(&args(), Mode::Dark)),
+            record(&absent.run(&args(), Mode::Dark))
+        );
+    }
+
     // 양성 대조: 스냅샷이 그리는 command 세그먼트는 이 프롬프트의 응답 값을 그린다. 이것을 실패시키는 것: 명령 응답
     // 읽기를 빼는 것, finish가 값을 render에 넘기지 않는 것.
     #[test]

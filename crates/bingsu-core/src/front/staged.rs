@@ -948,10 +948,13 @@ fn custom_values(
     let Some(body) = environment else {
         return out;
     };
-    let vars = Environ::parse(body);
+    // Parsed once, and only for a value that needs it: an env segment, or
+    // a command response below.
+    let mut parsed = None;
     for (i, segment) in custom.iter().enumerate() {
         if let CustomKind::Env(name) = &segment.kind {
-            out[i] = crate::command::plan::env_segment_value(&vars, name);
+            let vars = parsed.get_or_insert_with(|| Environ::parse(body));
+            out[i] = crate::command::plan::env_segment_value(vars, name);
         }
     }
     let (Some(response), Some(entry), Some(build_id)) =
@@ -978,7 +981,8 @@ fn custom_values(
         state,
         cwd,
     };
-    let Some(mut prompt) = display::Prompt::new(response, &expected, entry, &vars, eligible) else {
+    let vars = parsed.get_or_insert_with(|| Environ::parse(body));
+    let Some(mut prompt) = display::Prompt::new(response, &expected, entry, vars, eligible) else {
         return out;
     };
     for (i, segment) in custom.iter().enumerate() {

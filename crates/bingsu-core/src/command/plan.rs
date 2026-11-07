@@ -123,13 +123,16 @@ impl<'a> Environ<'a> {
 }
 
 /// What an env segment draws for variable `name` of this environment (C5):
-/// the part of its value the cut reads (`Clean::read_prefix`), invalid UTF-8
-/// replaced; nothing when it is unset or named twice (`Environ` drops both).
-/// An empty value draws nothing as empty text does.
+/// its raw value sanitized up to what the cut reads
+/// (`Clean::sanitized_prefix`), never copied whole; nothing when it is unset
+/// or named twice (`Environ` drops both). An empty value draws nothing as
+/// empty text does.
 pub fn env_segment_value(vars: &Environ<'_>, name: &str) -> Option<String> {
     let value = vars.get(name.as_bytes())?;
-    let text = String::from_utf8_lossy(value);
-    Some(crate::field::Clean::read_prefix(&text, crate::field::CUSTOM_TEXT_CELLS).into())
+    Some(crate::field::Clean::sanitized_prefix(
+        value,
+        crate::field::CUSTOM_TEXT_CELLS,
+    ))
 }
 
 /// The original environment digest of a config unit (spec section 4
