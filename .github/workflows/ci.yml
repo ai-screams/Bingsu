@@ -456,8 +456,7 @@ jobs:
       - name: Product binaries hold no collector fixture
         run: |
           cargo build -j 2 -p core-cfg-check
-          python3 scripts/check_cli_prompt_forbid.py --checker target/debug/core-cfg-check \
-            --product-binary target/release/bingsu --product-binary target/release/bingsu-prompt
+          python3 scripts/check_cli_prompt_forbid.py --checker target/debug/core-cfg-check --product-binary target/release/bingsu --product-binary target/release/bingsu-prompt
       - name: Prepare Python audit tests
         run: |
           python3 -m venv "$RUNNER_TEMP/collector-tests"
