@@ -96,20 +96,34 @@ impl Catalog<'_> {
     /// that draws only a user language still collects, so its files are
     /// found. One rule for the helper's request and the front's expected
     /// binding (D3a review M2).
+    ///
+    /// Inlined, with the facts asked only when the catalog grants the dir
+    /// worker: a caller whose catalog grants none (the historical M3b
+    /// policy bench, `product_mask_zero`) then drops the whole mask at
+    /// compile time, as it did before user languages. With either part
+    /// missing, that bench on x86_64 costs one more instruction per band
+    /// (53,262 to about 57,640 over 4,096 bands). Neither changes a result
+    /// (the mask is cut to `allowed` at the end), so no test sees them; the
+    /// instruction count does.
+    #[inline(always)]
     pub fn worker_mask<L: LayoutView>(&self, config: &L, width: u16, redraw: bool) -> u32 {
         if redraw {
             return 0;
         }
         let drawn = builtin_mask(config, width);
+        let allowed = self.workers & self.declared_mask();
+        let dir = 1 << super::DIR_SEGMENT;
         // Fails without it: language_segments_ask_for_the_folder_facts, and
         // test_builtin_probe_never_runs_from_the_repository; without the
         // user language half, a_drawn_user_language_asks_for_the_folder_facts.
-        let facts = if drawn & LANGUAGE_SEGMENTS != 0 || draws_user_language(config, width) {
-            1 << super::DIR_SEGMENT
+        let facts = if allowed & dir != 0
+            && (drawn & LANGUAGE_SEGMENTS != 0 || draws_user_language(config, width))
+        {
+            dir
         } else {
             0
         };
-        (drawn | facts) & self.workers & self.declared_mask()
+        (drawn | facts) & allowed
     }
 }
 
