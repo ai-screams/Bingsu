@@ -1362,14 +1362,18 @@ TABLE_SYSCALLS = {r[0] for r in _ROWS if r[0] != "-"}
 # 정상 프롬프트에서 호출이 EPERM으로 거부되는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 @pytest.mark.parametrize("pwd", ["/srv/p", "/" + "a/" * 32767])
-def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd):
+@pytest.mark.parametrize("entry", ["bingsu", "bingsu-prompt"])
+def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd, entry):
     """Every call the prompt makes after its seccomp filter is installed
     (strace -e trace=all, from the PR_SET_SECCOMP line on) is a row of the
     table, and none is refused: the table is complete for this libc and
     allocator. LD_PRELOAD in the environment (an allocator under test) is
     passed through."""
     assert shutil.which("strace"), "Linux syscall gate must execute strace"
-    exe = str(Install(tmp_path).exe)
+    # Both entries compile the same filter; each binary links its own libc
+    # and allocator code, so each is traced.
+    install = Install(tmp_path)
+    exe = str(install.exe if entry == "bingsu" else install.prompt)
     trace = tmp_path / "trace"
     args = [exe, "prompt", "--ctx", "1", "--record", "B1", "--width", "100", "--runtime-root=1:2:/r",
             "--shell", "bash", "--pwd", pwd, "--status", "1"]
