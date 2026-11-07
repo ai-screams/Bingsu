@@ -869,7 +869,7 @@ COMMAND_RESPONSE_MAX = 471_082
 
 def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,
                                collectors=None, repository_roots=None, repository_evidence=(), platform=None,
-                               front_deadline=False, headers=RESPONSE_HEADERS):
+                               front_deadline=False, headers=RESPONSE_HEADERS, helper_exe=None):
     """`collectors` is the exact count a live capture arranged; stored traces
     leave it None and may hold at most one. With `repository_roots`, a
     collector's calls after its request are audited by assert_repository_trace
@@ -879,8 +879,11 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
     admits that platform's exact libc start-up primitives (STARTUP_PRIMITIVES,
     musl's O_CLOEXEC fcntl); stored traces leave it None. `front_deadline`
     judges a front that SIGALRM ended before its filter (deadline_shape):
-    no filter and no record, every front call held to the pre-filter rules."""
+    no filter and no record, every front call held to the pre-filter rules.
+    `helper_exe` is the hook's `--helper-exe=` (bingsu beside a traced
+    `bingsu-prompt`); without it the front `exe` is the helper (`bingsu prompt`)."""
     from fsbudget.attribute import assert_repository_trace, collector_attribute
+    helper = helper_exe or exe
     collector_exe = collector_exe or os.path.join(os.path.dirname(exe), "bingsu-collect")
     _, scoped = tree(lines, exe)
     # E4: a default screen in a Git repository starts at most one collector.
@@ -891,7 +894,7 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
         assert len(roots) == collectors, ("collector count", len(roots), collectors)
     assert len(roots) <= 1, ("extra collector", len(roots))
     window = bool(roots) and repository_roots is not None
-    roles = collector_attribute(scoped, {"front": exe, "helper": exe,
+    roles = collector_attribute(scoped, {"front": exe, "helper": helper,
                                 "collector": collector_exe, "collectors": len(roots), "platform": platform},
                                 repository_window=window)
     assert not roles.errors, roles.errors
@@ -903,7 +906,7 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1, global_inputs=global_inputs,
                                 collector_exe=collector_exe, check_collection=True,
                                 audited_collector=int(roots[0]) if window else None, platform=platform,
-                                front_deadline=front_deadline, headers=headers)
+                                front_deadline=front_deadline, headers=headers, helper_exe=helper)
 
 
 def assert_historical_prompt_trace_budget(lines, exe, pinned):
@@ -913,7 +916,8 @@ def assert_historical_prompt_trace_budget(lines, exe, pinned):
 
 def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inputs=(),
                                 collector_exe=None, check_collection=False, audited_collector=None, platform=None,
-                                front_deadline=False, headers=RESPONSE_HEADERS):
+                                front_deadline=False, headers=RESPONSE_HEADERS, helper_exe=None):
+    helper_exe = helper_exe or exe
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
@@ -987,12 +991,12 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     execs = [c for c in helper if c.name in {"execve", "execveat"}]
     refresh = [c for c in execs if c.pid == helper_pid]
     # 이것을 실패시키는 것: 고정 exe/argv[1]/빈 환경 계약을 깨거나 helper를 재-exec하는 것.
-    assert len(refresh) == 1 and fixed_exec(refresh[0], exe, "__refresh-v1"), refresh
+    assert len(refresh) == 1 and fixed_exec(refresh[0], helper_exe, "__refresh-v1"), refresh
     # With CLONE_VFORK, exec has released the parent, but strace can print
     # the child's execve *resumed* line after the parent's prctl. Compare
     # entry lines, not the parser's completion order, across these two PIDs.
     exec_entry = next(i for i, line in enumerate(scoped)
-                      if line.split()[0] == str(helper_pid) and is_root(line, exe))
+                      if line.split()[0] == str(helper_pid) and is_root(line, helper_exe))
     filter_entry = next((i for i, line in enumerate(scoped)
                          if line.split()[0] == str(root) and "PR_SET_SECCOMP" in line), len(scoped))
     assert exec_entry < filter_entry, refresh
@@ -1013,7 +1017,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     # Exactly the pinned collector executable/verb, no additional argv and an
     # empty environment. Only archived captures use the old in-binary stub.
     collectors = [c for c in execs if c.pid != helper_pid]
-    collector_path = collector_exe or exe
+    collector_path = collector_exe or helper_exe
     collector_verb = "__collect-v1" if collector_exe else "__collect-legacy-v1"
     assert len(collectors) <= collector_limit and all(fixed_exec(c, collector_path, collector_verb) for c in collectors), collectors
     mains = {helper_pid} | {c.pid for c in collectors}
@@ -1035,7 +1039,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     assert set(map(int, pids)) == {root, helper_pid, *children}, ("unbudgeted child", pids)
     created = set()
     global_held = {}
-    exe_walks = {pid: HelperExecutableWalk(exe) for pid in owners}
+    exe_walks = {pid: HelperExecutableWalk(helper_exe) for pid in owners}
     collector_walk = HelperCollectorExecutable(collector_exe) if collector_exe else None
     for c in helper:
         if c.name == "restart_syscall":
@@ -1131,7 +1135,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
             # 이것을 실패시키는 것: exe를 걷기 뿌리에서 빼는 것(컨테이너에서 bin 조상 stat이 거부된다).
             # Link targets learned earlier need the same no-follow ancestor
             # traversal and metadata checks to verify the executable binding.
-            walk_roots = [*pinned, exe, *exe_walk.roots]
+            walk_roots = [*pinned, helper_exe, *exe_walk.roots]
             if collector_owner:
                 walk_roots.append(collector_exe)
             walk = helper_walk_step(c, path, walk_roots)
@@ -1145,7 +1149,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
                 assert exe_walk.file_op(c, path), ("helper executable path", c, path)
                 continue
             assert (system or detached or walk or nss_root or creation or chain_stat or ancestor_stat
-                    or allowed(path, c.args, exe, pinned, allow_walk=False)), ("helper path", c, path)
+                    or allowed(path, c.args, helper_exe, pinned, allow_walk=False)), ("helper path", c, path)
         exe_walk.observe(c)
         if collector_owner:
             collector_walk.observe(c)
@@ -2882,6 +2886,7 @@ def judge_marker_trace(cap, shape=None):
     c = cap.context
     # 이것을 실패시키는 것: 버리는 마감 시도의 경로·syscall 금지 판정을 건너뛰는 것.
     assert_prompt_trace_budget(cap.untimed, c["exe"], c["pinned"], global_inputs=tuple(c["global_inputs"]),
+                               helper_exe=c.get("helper_exe"),
                                collector_exe=c["collector_exe"], collectors=None,
                                repository_roots=c["roots"], repository_evidence=(),
                                # 이것을 실패시키는 것: 비지 않은 stdout에서 필터·기록 쓰기를 면제하는 것.
