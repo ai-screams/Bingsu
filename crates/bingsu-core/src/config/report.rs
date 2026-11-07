@@ -333,8 +333,8 @@ pub(crate) mod tests {
     // 빈 그룹을 남기는 것(그룹은 참조가 있어야 컴파일된다), 다른 참조가 있는 그룹까지 지우는 것.
     #[test]
     fn custom_ids_in_a_template_drop_only_that_reference() {
-        // `env` is drawn from C5; `text` and `command` are drawn now.
-        let decl = "[segment.\"custom/t\"]\nkind = \"language\"\n";
+        // `language` is not drawn yet; `text`, `command` and `env` are.
+        let decl = "[segment.\"custom/t\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n";
         let tpl = |t: &str| alloc::format!("[style]\ntemplate = \"{t}\"\n");
         let want = nodes_of(&read(&tpl("{dir} {@group}<{git}>{@end}{@nl}{char}"), &[]));
         let with = "{@group}[{custom/t}]{@end}{dir} {@group}<{git}{custom/t.x}>{@end}{@nl}{char}";
@@ -679,7 +679,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(d.via.len(), 2);
         let r = read(
-            "[segment.\"custom/t\"]\nkind='language'\n[style]\ntemplate='{dir}{custom/t}'\n",
+            "[segment.\"custom/t\"]\nkind='language'\ndetect_files=['deno.json']\ninterpreter='deno'\n[style]\ntemplate='{dir}{custom/t}'\n",
             &[],
         );
         let d = r

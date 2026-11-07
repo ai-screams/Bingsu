@@ -103,6 +103,48 @@ def test_builtin_probe_runs_once_and_is_cached(tmp_path, _native_boot_required):
     assert counted(node) == 1, "a cached probe ran again"
 
 
+def explain(session):
+    """`config check --explain` run from the session's shell folder."""
+    env = dict(session.env, PWD=str(session.pwd))
+    r = subprocess.run([str(session._launcher), "config", "check", "--explain"], cwd=session.pwd, env=env,
+                       capture_output=True, timeout=20)
+    return r.stdout.decode()
+
+
+# E2 내장 절: config check --explain이 그리는 언어마다 회차가 지금 정할 것을 보인다. 저장된 폴더 사실이 없으면
+# 정하지 않았다고 쓰고, 회차 뒤에는 pyenv 빠른 경로의 버전과 node probe의 실행 파일을 보이며, 아무것도 실행하지
+# 않는다. 이것을 실패시키는 것: 내장 절을 붙이지 않는 것, 저장된 수집 응답을 읽지 않는 것(늘 정하지 않음),
+# explain이 probe를 실행하는 것.
+def test_explain_shows_what_a_round_would_decide(tmp_path, _native_boot_required):
+    session = session_with(tmp_path, "python", "node")
+    pyenv_fast(session)
+    node = install(session.base / "bin", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    session.init()
+    before = explain(session)
+    assert "builtin languages (--explain;" in before, before
+    assert "node  not decided: no folder facts" in before, before
+    ready(session)
+    published_rounds(session)
+    Path(f"{node}.runs").unlink(missing_ok=True)
+    after = explain(session)
+    assert "python  shows 3.12.1 without running anything" in after, after
+    runs = [line for line in after.splitlines() if line.startswith("node  runs ")]
+    assert len(runs) == 1 and runs[0].endswith("/bin/node --version"), after
+    assert counted(node) == 0, "explain ran the probe"
+    # A valid response under a store folder others may read (0755) is not
+    # read: the store's folder checks refuse it, as the helper's do.
+    stores = list((Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu").rglob("collections-v1/*/store"))
+    assert len(stores) == 1, stores
+    stores[0].chmod(0o755)
+    try:
+        opened = explain(session)
+    finally:
+        stores[0].chmod(0o700)
+    assert "node  not decided: no folder facts" in opened, opened
+    assert "python  shows 3.12.1" in explain(session)
+
+
 # D3b: 앞단이 이 셸의 내장 언어 버전을 프롬프트에 그린다. 같은 폴더라도 언어 변수가 다른 셸(여기서는 volta
 # 폴더 변수)에는 그 값을 그리지 않는다(D3b Q1). 이것을 실패시키는 것: 앞단이 언어 segment의 응답 값을 채우지
 # 않는 것, 앞단의 환경 요약값 비교를 빼는 것(다른 셸에도 보임).

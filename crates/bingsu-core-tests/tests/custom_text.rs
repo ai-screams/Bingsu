@@ -421,7 +421,7 @@ fn command_and_env_segments_are_drawn_language_stays_hidden() {
     let cfg = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\n\
                [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\n\
                [segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\n\
-               [segment.\"custom/l\"]\nkind = \"language\"\n\
+               [segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n\
                [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"custom/l\", \"char\"]\n";
     let r = fixture::report(cfg);
     let drawn_later: Vec<_> = r
@@ -449,7 +449,7 @@ fn a_turned_off_text_command_or_env_segment_is_not_drawn_later() {
     let cfg = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\nenabled = false\n\
                [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\nenabled = false\n\
                [segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\nenabled = false\n\
-               [segment.\"custom/l\"]\nkind = \"language\"\n\
+               [segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n\
                [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"custom/l\", \"char\"]\n";
     let r = fixture::report(cfg);
     let drawn_later: Vec<_> = r

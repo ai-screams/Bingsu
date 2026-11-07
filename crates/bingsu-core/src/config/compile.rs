@@ -73,9 +73,9 @@ pub enum ExecPolicy {
         shell: Option<String>,
         unsafe_shell: bool,
     },
-    /// A user-defined language version. Its keys (interpreter, version
-    /// command, files that mark the language) come with M6; the fields are
-    /// here so the format does not change then.
+    /// A user-defined language version: `interpreter`, its `version`
+    /// arguments and the `detect_files` that mark the language's project
+    /// (`language_form` checks them). It does not run yet.
     Language {
         interpreter: Option<String>,
         version_argv: Vec<String>,
@@ -1283,6 +1283,106 @@ fn unsafe_exec_key(
 /// the facts they need).
 const PLACEHOLDER: &str = "{dir}";
 
+/// A language segment's shape (D3c rulings): `detect_files`, one to
+/// `collection::language::NAMES_MAX` file names, each one path component
+/// the worker can look for (`collection::language::name_ok`), none given
+/// twice; `interpreter`, a word without NUL; `version`, words without NUL.
+/// Problems are errors in `notes`.
+fn language_form(seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) {
+    use crate::collection::language::{NAMES_MAX, name_ok};
+    let item = |n: &MNode, span| Place::Source {
+        id: n.origin.source,
+        span,
+    };
+    match t.get("detect_files") {
+        None => notes.push(bad(
+            at(seg),
+            "detect_files",
+            "nothing",
+            "the file names that mark this language's project",
+        )),
+        Some(
+            n @ MNode {
+                value: MValue::Array(names),
+                ..
+            },
+        ) => {
+            // Fails without it: language_keys_are_checked (empty, 17 names).
+            if names.is_empty() || names.len() > NAMES_MAX {
+                notes.push(bad(
+                    at(n),
+                    "detect_files",
+                    &alloc::format!("{} names", names.len()),
+                    "1 to 16 file names",
+                ));
+            }
+            let mut seen: Vec<&str> = Vec::new();
+            for w in names {
+                let Value::Str(v) = &w.value else { continue };
+                // Fails without it: language_keys_are_checked (a path, `..`,
+                // a name given twice).
+                if !name_ok(v.as_bytes()) {
+                    notes.push(bad(
+                        item(n, w.span),
+                        "detect_files",
+                        &alloc::format!("\"{v}\""),
+                        "one file name: not empty, no `/` or NUL, not `.` or `..`, at most 255 bytes",
+                    ));
+                } else if seen.contains(&v.as_str()) {
+                    notes.push(bad(
+                        item(n, w.span),
+                        "detect_files",
+                        &alloc::format!("\"{v}\""),
+                        "each name once",
+                    ));
+                }
+                seen.push(v);
+            }
+        }
+        Some(_) => {}
+    }
+    match t.get("interpreter") {
+        None => notes.push(bad(
+            at(seg),
+            "interpreter",
+            "nothing",
+            "the program that prints the version",
+        )),
+        // Fails without it: language_keys_are_checked (an empty word, NUL).
+        Some(
+            n @ MNode {
+                value: MValue::Scalar(Value::Str(v)),
+                ..
+            },
+        ) if v.is_empty() || v.contains('\0') => notes.push(bad(
+            at(n),
+            "interpreter",
+            &alloc::format!("\"{v}\""),
+            "a program name or absolute path, not empty, without NUL",
+        )),
+        Some(_) => {}
+    }
+    if let Some(
+        n @ MNode {
+            value: MValue::Array(words),
+            ..
+        },
+    ) = t.get("version")
+    {
+        for w in words {
+            // Fails without it: language_keys_are_checked (NUL in an argument).
+            if matches!(&w.value, Value::Str(v) if v.contains('\0')) {
+                notes.push(bad(
+                    item(n, w.span),
+                    "version",
+                    "an argument with NUL",
+                    "arguments without NUL",
+                ));
+            }
+        }
+    }
+}
+
 /// The form rules of one `kind = "command"` segment (spec section 3 "사용자
 /// 명령 실행 모델"): `command` or `shell`, never both; `shell` only with
 /// `unsafe_shell = true`; one of the two, with at least one word; a placeholder only as one whole `command` element
@@ -1419,9 +1519,9 @@ fn exec_units(
                 unsafe_shell: boolean(t, &["unsafe_shell"]) == Some(true),
             },
             Some("language") => ExecPolicy::Language {
-                interpreter: None,
-                version_argv: Vec::new(),
-                detect_files: Vec::new(),
+                interpreter: str_of("interpreter"),
+                version_argv: list("version"),
+                detect_files: list("detect_files"),
             },
             _ => continue,
         };
@@ -1431,6 +1531,9 @@ fn exec_units(
         let shown_at = shown.get(&e.key).cloned().unwrap_or_default();
         // Only a command segment needs `command` or `shell`; a language
         // segment cannot hold them (E206).
+        if matches!(&policy, ExecPolicy::Language { .. }) {
+            language_form(&e.node, t, notes);
+        }
         let not_run = if matches!(&policy, ExecPolicy::Command { .. })
             && command_form(&e.key, &e.node, t, notes)
         {
@@ -2088,7 +2191,11 @@ mod tests {
         );
         // Language placeholders run nothing yet: 33 drawn count none.
         let languages = (0..33)
-            .map(|i| alloc::format!("[segment.\"custom/c{i:03}\"]\nkind = \"language\"\n"))
+            .map(|i| {
+                alloc::format!(
+                    "[segment.\"custom/c{i:03}\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n"
+                )
+            })
             .collect::<String>()
             + &draw(33);
         assert!(
@@ -2157,12 +2264,83 @@ mod tests {
             ["kind", "command", "cwd", "env_allow", "timeout", "cache"]
         );
         let c = compiled(
-            "[segment.\"custom/l\"]\nkind = \"language\"\n[layout.line1]\nleft = [\"custom/l\"]\n",
+            "[segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\", \"deno.jsonc\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\n[layout.line1]\nleft = [\"custom/l\"]\n",
         );
-        assert!(matches!(
+        assert_eq!(
             c.exec_units[0].policy,
-            ExecPolicy::Language { .. }
-        ));
+            ExecPolicy::Language {
+                interpreter: Some("deno".into()),
+                version_argv: vec!["--version".into()],
+                detect_files: vec!["deno.json".into(), "deno.jsonc".into()],
+            }
+        );
+    }
+
+    // 사용자 정의 language segment의 키 검사(D3c 판정): detect_files는 1–16개의 파일 이름이고 각각 경로 한
+    // 마디(수집 작업 프로세스가 찾을 수 있는 이름)이며 같은 이름은 한 번만, interpreter는 비지 않고 NUL이 없으며,
+    // version 인자에 NUL이 없다. 둘 중 하나라도 없으면 오류다. 이것을 실패시키는 것: 개수 검사를 지우거나 상한을
+    // 바꾸는 것, 이름 검사(name_ok)를 지우는 것, 중복 검사를 지우는 것, interpreter·detect_files 필수를 지우는 것,
+    // 빈 interpreter나 NUL을 받는 것, version의 NUL을 받는 것.
+    #[test]
+    fn language_keys_are_checked() {
+        let lang = |keys: &str| {
+            alloc::format!(
+                "[segment.\"custom/l\"]\nkind = \"language\"\n{keys}[layout.line1]\nleft = [\"custom/l\"]\n"
+            )
+        };
+        let names = |n: usize| {
+            (0..n)
+                .map(|i| alloc::format!("\"m{i}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let good = "interpreter = \"deno\"\nversion = [\"--version\"]\n";
+        let ok = [
+            alloc::format!("detect_files = [\"deno.json\"]\n{good}"),
+            alloc::format!("detect_files = [{}]\n{good}", names(16)),
+            "detect_files = [\"a\"]\ninterpreter = \"/opt/deno/bin/deno\"\n".into(),
+        ];
+        // A drawn language segment carries N502 (drawn from a later version).
+        let only_later =
+            |r: &crate::config::report::ConfigReport| codes_of(r) == [codes::CUSTOM_DRAWN_LATER];
+        for keys in ok {
+            let r = read(&lang(&keys), &[]);
+            assert!(only_later(&r), "{keys}: {:?}", codes_of(&r));
+            assert!(r.snapshot.is_some(), "{keys}");
+        }
+        let bad = [
+            good.into(),
+            alloc::format!("detect_files = []\n{good}"),
+            alloc::format!("detect_files = [{}]\n{good}", names(17)),
+            alloc::format!("detect_files = [\"a/b\"]\n{good}"),
+            alloc::format!("detect_files = [\"..\"]\n{good}"),
+            alloc::format!("detect_files = [\".\"]\n{good}"),
+            alloc::format!("detect_files = [\"a\\u0000b\"]\n{good}"),
+            alloc::format!("detect_files = [\"{}\"]\n{good}", "x".repeat(256)),
+            alloc::format!("detect_files = [\"a\", \"b\", \"a\"]\n{good}"),
+            "detect_files = [\"a\"]\n".into(),
+            "detect_files = [\"a\"]\ninterpreter = \"\"\n".into(),
+            "detect_files = [\"a\"]\ninterpreter = \"de\\u0000no\"\n".into(),
+            "detect_files = [\"a\"]\ninterpreter = \"deno\"\nversion = [\"--v\\u0000\"]\n".into(),
+        ];
+        for keys in bad {
+            let r = read(&lang(&keys), &[]);
+            assert!(
+                codes_of(&r).contains(&codes::BAD_VALUE),
+                "{keys}: {:?}",
+                codes_of(&r)
+            );
+            assert!(r.snapshot.is_none(), "{keys}");
+        }
+        // 255 bytes is one name still.
+        let r = read(
+            &lang(&alloc::format!(
+                "detect_files = [\"{}\"]\n{good}",
+                "x".repeat(255)
+            )),
+            &[],
+        );
+        assert!(only_later(&r), "{:?}", codes_of(&r));
     }
 
     // 이것을 실패시키는 것: 안전 검사에 실패한 파일의 실행 키로 명령을 켜는 것(이름은 알려야 함).

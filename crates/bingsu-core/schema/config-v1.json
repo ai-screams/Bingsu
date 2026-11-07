@@ -645,6 +645,15 @@
             "x-bingsu-level": "expert",
             "x-bingsu-exec": true
           },
+          "detect_files": {
+            "type": "array",
+            "items": { "type": "string" },
+            "examples": [["deno.json", "deno.jsonc"]],
+            "description": "File names that mark this language's project, looked for in the current folder and up to the repository root.",
+            "x-bingsu-description-ko": "이 언어의 프로젝트를 알리는 파일 이름. 현재 폴더와 위로 저장소 뿌리까지 찾음.",
+            "x-bingsu-level": "advanced",
+            "x-bingsu-exec": true
+          },
           "enabled": {
             "type": "boolean",
             "examples": [true],
@@ -670,6 +679,14 @@
             "description": "Environment variables passed to the command.",
             "x-bingsu-description-ko": "명령에 넘길 환경 변수.",
             "x-bingsu-level": "expert",
+            "x-bingsu-exec": true
+          },
+          "interpreter": {
+            "type": "string",
+            "examples": ["deno"],
+            "description": "The program that prints the version, as the first word of a command.",
+            "x-bingsu-description-ko": "버전을 출력하는 프로그램(명령의 첫 단어처럼).",
+            "x-bingsu-level": "advanced",
             "x-bingsu-exec": true
           },
           "kind": {
@@ -714,9 +731,18 @@
             "x-bingsu-description-ko": "`shell`을 허용.",
             "x-bingsu-level": "expert",
             "x-bingsu-exec": true
+          },
+          "version": {
+            "type": "array",
+            "items": { "type": "string" },
+            "examples": [["--version"]],
+            "description": "Arguments that make `interpreter` print its version.",
+            "x-bingsu-description-ko": "`interpreter`가 버전을 출력하게 하는 인자.",
+            "x-bingsu-level": "advanced",
+            "x-bingsu-exec": true
           }
         },
-        "allOf": [{ "if": { "required": ["kind"], "properties": { "kind": { "const": "command" } } }, "then": { "properties": { "env": false, "text": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "text" } } }, "then": { "properties": { "cache": false, "command": false, "cwd": false, "env": false, "env_allow": false, "shell": false, "timeout": false, "unsafe_shell": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "env" } } }, "then": { "properties": { "cache": false, "command": false, "cwd": false, "env_allow": false, "shell": false, "text": false, "timeout": false, "unsafe_shell": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "language" } } }, "then": { "properties": { "command": false, "cwd": false, "env": false, "env_allow": false, "shell": false, "text": false, "unsafe_shell": false } } }],
+        "allOf": [{ "if": { "required": ["kind"], "properties": { "kind": { "const": "command" } } }, "then": { "properties": { "detect_files": false, "env": false, "interpreter": false, "text": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "text" } } }, "then": { "properties": { "cache": false, "command": false, "cwd": false, "detect_files": false, "env": false, "env_allow": false, "interpreter": false, "shell": false, "timeout": false, "unsafe_shell": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "env" } } }, "then": { "properties": { "cache": false, "command": false, "cwd": false, "detect_files": false, "env_allow": false, "interpreter": false, "shell": false, "text": false, "timeout": false, "unsafe_shell": false, "version": false } } }, { "if": { "required": ["kind"], "properties": { "kind": { "const": "language" } } }, "then": { "properties": { "command": false, "cwd": false, "env": false, "env_allow": false, "shell": false, "text": false, "unsafe_shell": false } } }],
         "additionalProperties": false,
         "description": "One segment.",
         "x-bingsu-description-ko": "세그먼트 하나.",

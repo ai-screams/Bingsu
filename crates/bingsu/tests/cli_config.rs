@@ -133,6 +133,30 @@ fn check_and_path_write_nothing() {
     }
 }
 
+// config check --explain is a read too, with or without a builtin language drawn: on a fresh machine
+// it makes no runtime, state or cache folder, and with everything in place it changes nothing.
+// 이것을 실패시키는 것: 내장 언어 절이 뿌리를 찾으며 런타임 폴더를 만들거나 권한을 바꾸는 것(roots::resolve),
+// 그리는 언어가 없는데도 뿌리를 찾는 것.
+#[test]
+fn explain_writes_nothing() {
+    const NODE: &str = "[layout.line2]\nleft=['node','char']\n";
+    for (tag, toml) in [("plain", VALID), ("node", NODE)] {
+        let e = Env::new("cli_config", &format!("explain-ro-{tag}"));
+        e.put_config("config.toml", toml);
+        let before = e.tree();
+        let o = e.run(&["config", "check", "--explain"]);
+        assert_eq!(o.status.code(), Some(0), "{tag}: {}", text(&o.stderr));
+        assert_eq!(e.tree(), before, "{tag} on a fresh machine");
+        let chosen = e.put("other/work.toml", toml);
+        let o = e.run(&["config", "use", chosen.to_str().unwrap()]);
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+        let before = e.tree();
+        let o = e.run(&["config", "check", "--explain"]);
+        assert_eq!(o.status.code(), Some(0), "{tag}: {}", text(&o.stderr));
+        assert_eq!(e.tree(), before, "{tag} with everything in place");
+    }
+}
+
 // check prints the files in apply order, the diagnostics, the width table and a verdict; a valid
 // settings folder exits 0, an error exits 1 and names the code.
 // 이것을 실패시키는 것: 오류가 있는데 종료 코드 0, 진단·폭 표를 출력에서 빼는 것, 적용 순서를 바꾸는 것.
@@ -558,6 +582,34 @@ fn explain_shows_origin_per_key() {
     assert!(line("executable", "echo").contains("/bin/echo"), "{stdout}");
 }
 
+// language 단위의 interpreter와 version은 각자 자기 파일과 줄을 출처로 보인다(extends나 conf.d로 다른 파일에서
+// 올 수 있음, D3c-1 리뷰 L1). 이것을 실패시키는 것: version 줄의 출처를 interpreter의 것으로 쓰는 것, 두 키를 한
+// 줄로 합치는 것.
+#[test]
+fn explain_shows_each_language_key_from_its_file() {
+    let e = Env::new("cli_config", "explain-lang-origin");
+    e.put_config(
+        "config.toml",
+        "[segment.\"custom/deno\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n[layout.line1]\nleft = [\"dir\", \"custom/deno\"]\n",
+    );
+    e.put_config(
+        "conf.d/20-version.toml",
+        "[segment.\"custom/deno\"]\nversion = [\"-V\"]\n",
+    );
+    let (code, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
+    assert_eq!(code, Some(0), "{stdout}");
+    let line = |key: &str| {
+        stdout
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(key))
+            .unwrap_or_else(|| panic!("{key}: {stdout}"))
+            .to_owned()
+    };
+    assert!(line("interpreter").contains("config.toml:4"), "{stdout}");
+    assert!(line("version").contains("20-version.toml:2"), "{stdout}");
+    assert!(line("detect").contains("config.toml:3"), "{stdout}");
+}
+
 // GATE-EXPLAIN.3: 실행하지 않는 단위는 이유와 그 진단 코드를 보인다(남이 쓸 수 있는 파일의 command → W405).
 // 이것을 실패시키는 것: 이유 칸을 빼는 것, check --explain이 설명 절을 붙이지 않는 것.
 #[test]
@@ -635,7 +687,7 @@ fn explain_shows_shell_relative_and_language_units() {
     let e = Env::new("cli_config", "explain-kinds");
     e.put_config(
         "config.toml",
-        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
+        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\ntimeout = \"123ms\"\ncache = \"7s\"\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
     );
     let (_, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
     let section = |id: &str| {
@@ -660,10 +712,33 @@ fn explain_shows_shell_relative_and_language_units() {
             .any(|l| l.trim_start().starts_with("executable") && l.contains("refused")),
         "{rel}"
     );
+    let lang = section("custom/lang");
     assert!(
-        section("custom/lang").starts_with("custom/lang  language"),
+        lang.starts_with("custom/lang  language, not run yet:"),
         "{stdout}"
     );
+    assert!(
+        lang.lines()
+            .any(|l| l.split_whitespace().take(2).eq(["detect", "deno.json"])),
+        "{lang}"
+    );
+    assert!(
+        lang.lines()
+            .any(|l| l.split_whitespace().take(2).eq(["interpreter", "deno"])),
+        "{lang}"
+    );
+    assert!(
+        lang.lines()
+            .any(|l| l.split_whitespace().take(2).eq(["version", "--version"])),
+        "{lang}"
+    );
+    for (key, value) in [("timeout", "123 ms"), ("cache", "7000 ms")] {
+        assert!(
+            lang.lines()
+                .any(|l| l.trim_start().starts_with(key) && l.contains(value)),
+            "{key} {value}: {lang}"
+        );
+    }
 }
 
 // 시간 상한·캐시·명시한 cwd는 각자 값과 출처를 보이고, 셸 단위는 셸 본문을 보인다. 정제한 PATH로 찾으므로, 앞쪽
