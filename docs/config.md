@@ -120,7 +120,9 @@ The syntax is that of the Rust `regex` crate, with Unicode classes. A pattern ma
 most 64 KiB, and have at most 16 capture groups; `config check` reports one past these limits and turns only that
 segment off. Long repeats of Unicode classes, such as `\w{10}`, are past the limit; `\w+` is not.
 
-Changing only `match` does not run the command again: the next round applies the new pattern to the stored line.
+Changing only `match`, or removing it, does not run the command again: the next round applies the new pattern to
+the stored line, or shows the whole line again. Until then the old value is hidden rather than shown under the new
+pattern.
 
 ## Current limits
 
@@ -128,8 +130,9 @@ Changing only `match` does not run the command again: the next round applies the
   (`.python-version`, `rust-toolchain.toml`) changes.
 - A shell environment over 64 KiB is not passed to the helper: command and `env` segments then show nothing. A
   variable named twice in the environment is not shown and not passed.
-- Patterns are applied within about 250 ms per round. A config with many slow patterns can see some of them published
-  as failures, which show nothing, in every round.
+- Patterns are applied within about 250 ms per round. Past that, the remaining results of the round are published
+  as failures, which show nothing and run again after 10 seconds; a config with many slow patterns can see some of
+  them hidden in every round.
 - A cached value can be reused within `cache` even if `{dir}` now means another folder, `PATH` now finds another
   program, or a script's contents changed. The default `cache` of 0 is not affected.
 - A repository that has no `.git` entry (a bare repository, or one placed with `GIT_DIR`) does not keep its folders
