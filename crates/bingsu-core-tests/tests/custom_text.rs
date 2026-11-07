@@ -412,8 +412,8 @@ fn only_drawn_enabled_text_is_declared() {
     assert_eq!(ids, ["custom/a"]);
 }
 
-// command·env·language 세그먼트는 text와 같은 번호 규칙으로 그려지는 목록에 들고 N502를 내지 않는다(D3c-2부터
-// language도 그린다). 이것을 실패시키는 것: 셋 중 하나를 그리는 종류에서 빼는 것(목록에 없음, N502).
+// command·env·language 세그먼트는 text와 같은 번호 규칙으로 그려지는 목록에 든다(D3c-2부터 language도 그린다).
+// 이것을 실패시키는 것: 셋 중 하나를 그리는 종류에서 빼는 것(목록에 없음).
 #[test]
 fn command_env_and_language_segments_are_drawn() {
     use bingsu_core::config::compile::CustomKind;
@@ -423,11 +423,6 @@ fn command_env_and_language_segments_are_drawn() {
                [segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n\
                [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"custom/l\", \"char\"]\n";
     let r = fixture::report(cfg);
-    let drawn_later: Vec<_> = r
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == codes::CUSTOM_DRAWN_LATER)
-        .collect();
     let c = r.snapshot.unwrap();
     let kinds: Vec<_> = c.custom.iter().map(|t| (t.id.as_str(), &t.kind)).collect();
     assert_eq!(
@@ -439,25 +434,18 @@ fn command_env_and_language_segments_are_drawn() {
             ("custom/l", &CustomKind::Language)
         ]
     );
-    assert!(drawn_later.is_empty(), "{drawn_later:?}");
 }
 
-// 꺼진 text·command·env 세그먼트는 "아직 그리지 않는 종류"가 아니므로 N502를 내지 않고 그리지도 않는다. 켜진
-// language는 그린다. 이것을 실패시키는 것: N502 조건에서 꺼짐 검사를 지우는 것, 꺼진 세그먼트를 목록에 싣는 것.
+// 꺼진 text·command·env 세그먼트는 그리지 않고, 켜진 language는 그린다. 이것을 실패시키는 것: 꺼진 세그먼트를
+// 목록에 싣는 것, 켜진 language를 빼는 것.
 #[test]
-fn a_turned_off_text_command_or_env_segment_is_not_drawn_later() {
+fn a_turned_off_text_command_or_env_segment_is_not_drawn() {
     let cfg = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\nenabled = false\n\
                [segment.\"custom/a\"]\nkind = \"text\"\ntext = \"A\"\nenabled = false\n\
                [segment.\"custom/e\"]\nkind = \"env\"\nenv = \"E\"\nenabled = false\n\
                [segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n\
                [layout.line1]\nleft = [\"custom/k\", \"custom/a\", \"custom/e\", \"custom/l\", \"char\"]\n";
     let r = fixture::report(cfg);
-    let drawn_later: Vec<_> = r
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == codes::CUSTOM_DRAWN_LATER)
-        .collect();
-    assert!(drawn_later.is_empty(), "{drawn_later:?}");
     let c = r.snapshot.unwrap();
     let ids: Vec<_> = c.custom.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, ["custom/l"]);

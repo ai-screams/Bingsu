@@ -433,8 +433,8 @@ pub(crate) fn template_ids(text: &str) -> Vec<String> {
     out
 }
 
-/// `text` without custom references other than the drawn text segments
-/// `texts` (command and language segments are drawn from M6) or disabled built-ins:
+/// `text` without custom references other than the drawn user segments
+/// `texts`, and without disabled built-ins:
 /// each is cut out, and so is a group left without a reference (a
 /// group needs one to compile). A template that does not parse is kept as
 /// it is, so the compile reports it.
@@ -486,14 +486,6 @@ fn without_hidden(text: &str, off: &BTreeSet<&str>, texts: &[&str]) -> String {
     }
     out.push_str(&text[at..]);
     out
-}
-
-/// Whether `[segment."<id>"]` is declared.
-fn declared(r: &MTable, id: &str) -> bool {
-    matches!(
-        get(r, &["segment", id]).map(|n| &n.value),
-        Some(MValue::Table(_))
-    )
 }
 
 /// The index of a band name; a name `names` lacks gets `names.len()`, which
@@ -979,8 +971,8 @@ pub fn compile(
                 if options != StyleOptions::default() || lay.lines.iter().any(|l| l.written) {
                     notes.push(Diagnostic::new(codes::TEMPLATE_REPLACES_STYLE, where_));
                 }
-                // `custom/…` is drawn from M6 (N502 when declared, W408 when
-                // not): only that reference goes, the rest compiles.
+                // A `custom/…` reference that is not drawn (turned off, or
+                // undeclared, which W408 names) goes alone; the rest compiles.
                 without_hidden(t, &off, &texts)
             }
             _ => {
@@ -1027,26 +1019,6 @@ pub fn compile(
             }
         }
         variants.push(compiled);
-    }
-    for (id, refs) in drawn(r, &banded.names) {
-        // N502 is for a kind the prompt does not draw yet. A text or command
-        // segment missing from `texts` is turned off (`enabled = false`, or
-        // its keys came from a file that failed the safety check, which says
-        // so itself): it never starts showing after an upgrade.
-        if id.starts_with("custom/")
-            && declared(r, &id)
-            && !drawn_kind(r, &id)
-            && !texts.contains(&id.as_str())
-        {
-            let place = refs
-                .first()
-                .and_then(|r| r.origin)
-                .map_or(Place::Builtin, |o| Place::Source {
-                    id: o.source,
-                    span: o.span,
-                });
-            notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id));
-        }
     }
     let Bands {
         bands,
@@ -1151,14 +1123,6 @@ pub(crate) fn layout_verdict(
 
 /// The user segment kinds a layout draws.
 const DRAWN_KINDS: [&str; 4] = ["text", "command", "env", "language"];
-
-/// Whether segment `id` is declared with a kind the prompt draws.
-fn drawn_kind(r: &MTable, id: &str) -> bool {
-    matches!(
-        get(r, &["segment", id]).map(|n| &n.value),
-        Some(MValue::Table(t)) if s(t, &["kind"]).is_some_and(|k| DRAWN_KINDS.contains(&k))
-    )
-}
 
 /// Whether any `custom/…` segment is declared with a drawn kind.
 fn declares_custom(r: &MTable) -> bool {
@@ -1853,7 +1817,7 @@ mod tests {
         ),
         (
             "segment.*.text",
-            "user segments are drawn from M6; N502 says so",
+            "a text segment shows only where a layout draws it",
         ),
         ("layout.transient", "planned for M4 and M5; N503 says so"),
     ];
