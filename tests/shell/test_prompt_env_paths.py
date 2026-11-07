@@ -2514,7 +2514,9 @@ def front_capture(request, tmp_path_factory):
     lock = None
     try:
         config = {'selected-band': 'bands', 'env-segment': 'env_segment'}.get(case, 'plain')
-        fixture = HelperStageFixture('unchanged', config=config)
+        # The shipped front: bingsu-prompt. The fallback entry's calls after
+        # the filter are held to the table by test_calls_after_the_filter_are_in_the_table.
+        fixture = HelperStageFixture('unchanged', config=config, entry="dedicated")
         lock = (fixture.store / 'snapshot.lock').open('rb')
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = bytearray((fixture.store / 'snapshot').read_bytes())
@@ -2561,7 +2563,9 @@ def front_capture(request, tmp_path_factory):
         (artifacts / 'stderr').write_bytes(result.stderr)
         pinned = [os.path.realpath(Path(fixture.env[key]) / 'bingsu')
                   for key in ('XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME')]
-        yield trace.read_text().splitlines(), str(fixture.inst.exe), pinned, fixture.store, attempts, evidence
+        lines = trace.read_text().splitlines()
+        assert_dedicated_front(lines, fixture.inst)
+        yield lines, str(fixture.inst.front()), pinned, fixture.store, attempts, evidence
     except BaseException as error:
         evidence['failure'] = str(error)
         raise
@@ -3523,6 +3527,13 @@ def test_target_links_count_same_folder_hops(tmp_path):
 COMMAND_FRONT_SHAPES = ("no_response", "unread", "unread_narrow", "read")
 
 
+def assert_dedicated_front(lines, inst):
+    """The traced prompt is the shipped `bingsu-prompt` front, which init chose."""
+    # 이것을 실패시키는 것: front 축 gate가 fallback(`bingsu prompt`) front를 재는 것.
+    fronts = [line for line in lines if re.search(r'execve\("[^"]+", \["[^"]+", "prompt"', line) and line.rstrip().endswith("= 0")]
+    assert inst.dedicated and fronts and all(f'execve("{inst.prompt}"' in line for line in fronts), fronts
+
+
 def front_calls(lines, exe):
     """The prompt process's calls of a traced prompt and its filter boundary."""
     from fsbudget.strace_parse import Trace
@@ -3549,7 +3560,7 @@ def test_live_front_command_response_shapes(shape, tmp_path):
     require_release_helper(real_bin())
     stage = {"no_response": "collect", "unread": "command_hit", "unread_narrow": "command_hit",
              "read": "command_hit"}[shape]
-    fixture = HelperStageFixture(stage)
+    fixture = HelperStageFixture(stage, entry="dedicated")
     try:
         if shape in ("unread", "unread_narrow"):
             # The unit stays declared and its response stays; the screen at
@@ -3561,7 +3572,8 @@ def test_live_front_command_response_shapes(shape, tmp_path):
         fixture.prompt(trace)
         wait_helpers(fixture.base)
         lines = trace.read_text(errors="replace").splitlines()
-        front, boundary = front_calls(lines, str(fixture.inst.exe))
+        assert_dedicated_front(lines, fixture.inst)
+        front, boundary = front_calls(lines, str(fixture.inst.front()))
         pinned = [os.path.realpath(Path(fixture.env[key]) / "bingsu")
                   for key in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME")]
         cwd = os.fsencode(str(fixture.pwd))
