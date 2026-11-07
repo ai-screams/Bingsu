@@ -137,6 +137,7 @@ const SHAPES: &[&str] = &["triangle", "round", "slant", "flat"];
 const SHORTEN: &[&str] = &["none", "repo", "abbrev", "depth", "unique"];
 const CMD: &[&str] = &["command"];
 const CMD_LANG: &[&str] = &["command", "language"];
+const LANG: &[&str] = &["language"];
 
 /// Every key, sorted by path.
 pub const KEYS: &[KeyDef] = &[
@@ -499,6 +500,16 @@ pub const KEYS: &[KeyDef] = &[
     .kinds(CMD)
     .example("\"neutral\""),
     key(
+        "segment.*.detect_files",
+        Ty::Strings,
+        Advanced,
+        "File names that mark this language's project, looked for in the current folder and up to the repository root.",
+        "이 언어의 프로젝트를 알리는 파일 이름. 현재 폴더와 위로 저장소 뿌리까지 찾음.",
+    )
+    .exec()
+    .kinds(LANG)
+    .example("[\"deno.json\", \"deno.jsonc\"]"),
+    key(
         "segment.*.enabled",
         Ty::Bool,
         Basic,
@@ -517,6 +528,16 @@ pub const KEYS: &[KeyDef] = &[
     .exec()
     .kinds(CMD)
     .example("[\"KUBECONFIG\"]"),
+    key(
+        "segment.*.interpreter",
+        Ty::Str,
+        Advanced,
+        "The program that prints the version, as the first word of a command.",
+        "버전을 출력하는 프로그램(명령의 첫 단어처럼).",
+    )
+    .exec()
+    .kinds(LANG)
+    .example("\"deno\""),
     key(
         "segment.*.kind",
         Ty::Enum(&KINDS),
@@ -575,6 +596,16 @@ pub const KEYS: &[KeyDef] = &[
     .exec()
     .kinds(&["env"])
     .example("\"AWS_PROFILE\""),
+    key(
+        "segment.*.version",
+        Ty::Strings,
+        Advanced,
+        "Arguments that make `interpreter` print its version.",
+        "`interpreter`가 버전을 출력하게 하는 인자.",
+    )
+    .exec()
+    .kinds(LANG)
+    .example("[\"--version\"]"),
     key(
         "segment.dir",
         Ty::Table,
@@ -673,6 +704,17 @@ pub const KEYS: &[KeyDef] = &[
 ];
 
 fn matches(pattern: &str, path: &[&str]) -> bool {
+    // Most rows differ in the first name: compare it before splitting. Every
+    // row's first name is a literal (`keys_first_names_are_literal`). A
+    // config read looks each key up against every row.
+    // A filter only: the walk below decides; this skips rows whose text
+    // cannot start with the first name.
+    if path
+        .first()
+        .is_some_and(|first| !pattern.starts_with(first))
+    {
+        return false;
+    }
     let mut p = pattern.split('.');
     let mut n = 0;
     for seg in path {
@@ -876,5 +918,15 @@ mod tests {
             lookup(&["segment", "dir", "command"]).is_some(),
             "segment.* keys still match"
         );
+    }
+
+    // 모든 행의 첫 이름은 `*`가 아닌 글자다. matches가 첫 이름을 글자로 먼저 비교하기 때문이다. 이것을 실패시키는
+    // 것: 첫 이름이 `*`인 행을 더하는 것.
+    #[test]
+    fn keys_first_names_are_literal() {
+        for k in KEYS {
+            let first = k.path.split('.').next().unwrap();
+            assert!(first != "*" && !first.is_empty(), "{}", k.path);
+        }
     }
 }

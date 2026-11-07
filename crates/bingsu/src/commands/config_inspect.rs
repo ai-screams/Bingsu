@@ -529,6 +529,17 @@ fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> S
                         u.kind
                     );
                 }
+                // A language segment's version command does not run yet
+                // (D3c rulings: its run comes with the next change).
+                // Fails without it: explain_shows_shell_relative_and_language_units.
+                _ if u.kind == "language" => {
+                    let _ = writeln!(
+                        out,
+                        "{}  {}, not run yet: language version commands run in a later version",
+                        clean(&u.id),
+                        u.kind
+                    );
+                }
                 _ => {
                     let _ = writeln!(out, "{}  {}, runs", clean(&u.id), u.kind);
                 }
