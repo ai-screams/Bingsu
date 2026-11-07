@@ -7,6 +7,8 @@ use std::process::ExitCode;
 #[cfg(unix)]
 mod build_identity;
 #[cfg(unix)]
+pub(crate) mod builtin_probe;
+#[cfg(unix)]
 #[cfg_attr(
     not(test),
     allow(dead_code, reason = "N2 connects the store and clock")
@@ -97,7 +99,6 @@ pub(crate) mod sys;
 #[cfg(unix)]
 mod trust_record;
 #[cfg(unix)]
-#[allow(dead_code, reason = "D3 connects the resolver to the builtin probes")]
 pub(crate) mod version_manager;
 
 #[used]

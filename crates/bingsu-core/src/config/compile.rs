@@ -120,6 +120,11 @@ pub struct ExecUnit {
 /// Most user segments a config draws, text and command together (the
 /// snapshot carries each one).
 pub const MAX_CUSTOM_TEXT: usize = 256;
+/// Command and language segments one config may draw: those a trusted
+/// layout draws at some width and that may run (plan U-9d: 32 units, the
+/// command response's `ENTRIES_MAX`, which holds only units that run). A
+/// declared segment no layout draws is not counted.
+pub const MAX_EXEC_UNITS: usize = 32;
 
 /// A user `custom/…` segment a layout draws. Its segment number is
 /// `field::BUILTIN.len()` plus its place in `CompiledConfig::custom`, which
@@ -1068,7 +1073,7 @@ pub fn compile(
             shown: shown_bands,
         },
         &mut notes,
-    );
+    )?;
     let icons = IconSet::parse(s(r, &["icons"]).unwrap_or(default_str("icons")))
         .unwrap_or(IconSet::Unicode);
     let duration_min_ms = optional_duration(s(r, &["segment", "duration", "min"]))
@@ -1362,7 +1367,7 @@ fn exec_units(
     names: &[String],
     reach: &Reach,
     notes: &mut Vec<Diagnostic>,
-) -> Vec<ExecUnit> {
+) -> Result<Vec<ExecUnit>, Vec<Diagnostic>> {
     // A unit runs when a trusted layout draws it and it is still drawn.
     let (approved, shown) = (drawn(trusted, names), drawn(r, names));
     let mut out = Vec::new();
@@ -1426,7 +1431,24 @@ fn exec_units(
             not_run,
         });
     }
-    out
+    // Only units that may run count: drawn by a trusted layout at some
+    // width (a field reference such as `{custom/x.value}` draws it too), not
+    // turned off, and of a kind that runs. The prompt's display and the
+    // helper's round decide with the same function (`plan::runnable`).
+    // Fails without it: at_most_32_drawn_exec_units.
+    let drawn = out
+        .iter()
+        .filter(|u| crate::command::plan::runnable(u).is_some())
+        .count();
+    if drawn > MAX_EXEC_UNITS {
+        return Err(vec![bad(
+            place_of(r, &["segment"]),
+            "segment",
+            &alloc::format!("{drawn} drawn"),
+            "at most 32 drawn command and language segments",
+        )]);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1968,6 +1990,87 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 실행 정책 필드(cwd·env_allow·timeout·cache·shell)와 키별 출처를 snapshot에서 버리는 것.
+    // 그리는(실행될 수 있는) 명령·언어 segment는 설정 하나에 32개까지다(계획 U-9d, 명령 응답의 항목 상한). 그리지
+    // 않는 선언은 세지 않고, 좁은 폭 구간 하나에서만 그리거나 필드 참조로만 그리는 단위도 센다. 이것을 실패시키는
+    // 것: 상한 검사를 지우는 것, 상한을 33 이상으로 두는 것, 그리지 않는 선언까지 세는 것, 좁은 폭에서만 그리는
+    // 단위를 빼는 것.
+    #[test]
+    fn at_most_32_drawn_exec_units() {
+        let declare = |from: usize, n: usize| {
+            (from..from + n)
+                .map(|i| {
+                    alloc::format!(
+                        "[segment.\"custom/c{i:03}\"]\nkind = \"command\"\ncommand = [\"true\"]\n"
+                    )
+                })
+                .collect::<String>()
+        };
+        let draw = |n: usize| {
+            let ids: Vec<String> = (0..n)
+                .map(|i| alloc::format!("\"custom/c{i:03}\""))
+                .collect();
+            alloc::format!("[layout.line1]\nleft = [{}]\n", ids.join(", "))
+        };
+        let drawn =
+            |c: &CompiledConfig| c.exec_units.iter().filter(|u| u.not_run.is_none()).count();
+        // 32 drawn beside 200 declared and not drawn: valid.
+        let ok = read(&(declare(0, 232) + &draw(32)), &[]);
+        let c = ok.snapshot.expect("32 drawn");
+        assert_eq!((c.exec_units.len(), drawn(&c)), (232, 32));
+        // 33 drawn: E203.
+        let over = read(&(declare(0, 33) + &draw(33)), &[]);
+        assert!(over.snapshot.is_none());
+        assert!(
+            codes_of(&over).contains(&codes::BAD_VALUE),
+            "{:?}",
+            codes_of(&over)
+        );
+        // 32 drawn on the line, the 33rd only in a narrow band's template,
+        // through a field reference: counted.
+        let narrow = declare(0, 33)
+            + &draw(32)
+            + "[layout.when.narrow.style]\ntemplate = \"{custom/c032.value}{char}\"\n";
+        let banded = read(&narrow, &[]);
+        assert!(banded.snapshot.is_none(), "{:?}", codes_of(&banded));
+        assert!(codes_of(&banded).contains(&codes::BAD_VALUE));
+        // The diagnostic names the drawn count and says "drawn".
+        let d = over
+            .diagnostics
+            .iter()
+            .find(|d| d.code == codes::BAD_VALUE)
+            .unwrap();
+        let arg = |name: &str| {
+            d.args
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.value.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(arg("found"), "33 drawn");
+        assert!(arg("expected").contains("drawn"), "{}", arg("expected"));
+        // 33 drawn, one turned off: 32 may run.
+        let off = declare(0, 33).replacen(
+            "kind = \"command\"\n",
+            "kind = \"command\"\nenabled = false\n",
+            1,
+        ) + &draw(33);
+        assert!(
+            read(&off, &[]).snapshot.is_some(),
+            "{:?}",
+            codes_of(&read(&off, &[]))
+        );
+        // Language placeholders run nothing yet: 33 drawn count none.
+        let languages = (0..33)
+            .map(|i| alloc::format!("[segment.\"custom/c{i:03}\"]\nkind = \"language\"\n"))
+            .collect::<String>()
+            + &draw(33);
+        assert!(
+            read(&languages, &[]).snapshot.is_some(),
+            "{:?}",
+            codes_of(&read(&languages, &[]))
+        );
+    }
+
     #[test]
     fn exec_units_keep_their_whole_policy() {
         let c = compiled(

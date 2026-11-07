@@ -2,10 +2,10 @@
 //! It gathers the facts the pure rules (`bingsu_core::collection::manager`)
 //! decide on: which manager's shim the language's command is, the manager's
 //! folders from the shell environment, rustup's settings file and one
-//! install check. It runs in the helper before its filter, beside the
-//! executable lookup, once the marker is staged (D2 ruling Q1; the marker is
-//! installed only after the filter); the collector's read confinement is not
-//! widened.
+//! install check. It runs in the helper's command round after the
+//! marker is installed (D3a), beside the executable lookup of config units:
+//! the helper's filter refuses only process and signal calls, so the reads
+//! here pass it; the collector's read confinement is not widened.
 //!
 //! Nothing here runs a program. A wrong answer can only show a wrong
 //! version without running it or run the version command (D3) when it was
@@ -114,7 +114,12 @@ fn home_of(vars: &Environ<'_>, name: &[u8], fallback: &str) -> Option<PathBuf> {
 ///   `/usr/local/share/mise/shims` for system shims
 ///   (https://mise.jdx.dev/directories.html);
 /// - volta: `$VOLTA_HOME`, else `~/.volta`, shims in `bin/`
-///   (https://docs.volta.sh/advanced/installers).
+///   (https://docs.volta.sh/advanced/installers);
+/// - nodenv: `$NODENV_ROOT`, else `~/.nodenv`, shims in `shims/`, and goenv:
+///   `$GOENV_ROOT`, else `~/.goenv`, shims in `shims/` (each one's
+///   `libexec/*-rehash`: `SHIM_PATH="${NODENV_ROOT}/shims"`, and the same
+///   for goenv). Their shims are `#!/usr/bin/env bash` scripts (the same
+///   files' prototype), which a probe never runs anyway (D3a ruling R2).
 ///
 /// Every candidate is listed: a folder that does not exist matches nothing.
 fn unsupported(vars: &Environ<'_>) -> Vec<PathBuf> {
@@ -132,6 +137,9 @@ fn unsupported(vars: &Environ<'_>) -> Vec<PathBuf> {
         vars.get(b"MISE_SHIMS_DIR").and_then(folder),
         Some(PathBuf::from("/usr/local/share/mise/shims")),
         home_of(vars, b"VOLTA_HOME", ".volta").map(|p| p.join("bin")),
+        // Fails without each: homes_follow_the_environment (nodenv, goenv).
+        home_of(vars, b"NODENV_ROOT", ".nodenv").map(shims),
+        home_of(vars, b"GOENV_ROOT", ".goenv").map(shims),
     ]
     .into_iter()
     .flatten()
@@ -156,20 +164,30 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
 }
 
 /// Which shim `folder` (the first sanitized `PATH` folder holding the
-/// command's name) is. `canonical`, when the lookup resolved the command,
+/// command's name) is; `command` is the manager the language has a
+/// resolver for (none for Node and Go, whose managers have none). `canonical`, when the lookup resolved the command,
 /// is its canonical file: rustup installed by a package manager links
 /// `rustc` to `rustup` elsewhere.
 pub(crate) fn classify(
-    command: Manager,
+    command: Option<Manager>,
     folder: &Path,
     canonical: Option<&Path>,
     homes: &Homes,
 ) -> Shim {
+    // The folder `PATH` names, and the folder the file really lives in: a
+    // link or a renamed copy elsewhere on `PATH` still counts as the
+    // manager's (D3a security review S-M1).
     let here = identity(folder);
-    let same = |candidate: &Path| here.is_some() && identity(candidate) == here;
+    let home = canonical.and_then(Path::parent).and_then(identity);
+    let same = |candidate: &Path| {
+        let there = identity(candidate);
+        // Fails without the second: classify_table (a link to the cargo
+        // bin folder's proxy from another folder).
+        there.is_some() && (there == here || there == home)
+    };
     // Fails without it: classify_table (pyenv shims folder, also through a
     // link).
-    if command == Manager::Pyenv
+    if command == Some(Manager::Pyenv)
         && homes
             .pyenv
             .as_ref()
@@ -178,7 +196,7 @@ pub(crate) fn classify(
         return Shim::Manager(Manager::Pyenv);
     }
     // Fails without it: classify_table (cargo bin folder).
-    if command == Manager::Rustup
+    if command == Some(Manager::Rustup)
         && homes
             .cargo
             .as_ref()
@@ -191,10 +209,25 @@ pub(crate) fn classify(
         return Shim::Unsupported;
     }
     // Fails without it: classify_table (a linked rustup).
-    if command == Manager::Rustup
+    if command == Some(Manager::Rustup)
         && canonical
             .and_then(Path::file_name)
             .is_some_and(|name| name == "rustup" || name == "rustup-init")
+    {
+        return Shim::Manager(Manager::Rustup);
+    }
+    // A proxy hard-linked elsewhere is the same file as `<cargo>/bin/rustup`
+    // (security review S-M1).
+    // Fails without it: classify_table (a hard-linked proxy).
+    if command == Some(Manager::Rustup)
+        && canonical.is_some_and(|file| {
+            let file = identity(file);
+            file.is_some()
+                && homes
+                    .cargo
+                    .as_ref()
+                    .is_some_and(|cargo| identity(&cargo.join("bin/rustup")) == file)
+        })
     {
         return Shim::Manager(Manager::Rustup);
     }
@@ -276,13 +309,57 @@ pub(crate) fn read_settings(home: &File, cwd: &[u8], me: u32) -> Settings {
     }
 }
 
+/// The links followed inside a version's `bin` (D3a ruling P1): CPython's
+/// own install makes `python3` a link to `python3.X`, one step.
+pub(crate) const BIN_LINKS_MAX: usize = 4;
+
+/// The command in a version's opened `bin`, as the name of the regular file
+/// it is: the name itself, or where its links lead, each link's target a
+/// bare name (no `/`) in the same folder, at most `BIN_LINKS_MAX` links
+/// (D3a ruling P1). The file must pass the trust rule.
+fn command_file(bin: &File, command: &[u8], me: u32) -> Result<Vec<u8>, Install> {
+    let mut name = command.to_vec();
+    for links in 0..=BIN_LINKS_MAX {
+        let result = sys::open_file_at_nofollow(bin.as_fd(), OsStr::from_bytes(&name));
+        let is_link = matches!(&result, Err(e) if e.raw_os_error() == Some(libc::ELOOP));
+        if !is_link {
+            // Fails without it: bin_links_stay_in_the_folder (an untrusted
+            // target).
+            let file = opened(result, me)?;
+            // Fails without it: pyenv_needs_the_command_in_the_version (a
+            // folder named like the command).
+            if !file.metadata().is_ok_and(|m| m.file_type().is_file()) {
+                return Err(Install::Untrusted);
+            }
+            return Ok(name);
+        }
+        // Fails without it: bin_links_stay_in_the_folder (five links).
+        if links == BIN_LINKS_MAX {
+            return Err(Install::Untrusted);
+        }
+        let target = sys::read_link_at(bin.as_fd(), OsStr::from_bytes(&name))
+            .map_err(|_| Install::Untrusted)?
+            .into_os_string()
+            .into_encoded_bytes();
+        // Fails without it: bin_links_stay_in_the_folder (a target with
+        // `/`, which also covers another folder).
+        if target.contains(&b'/') {
+            return Err(Install::Untrusted);
+        }
+        name = target;
+    }
+    Err(Install::Untrusted)
+}
+
 /// The install check below the opened home: `<folder>/<value>[-<host>]`
 /// opened one name at a time, never through a link, as folders, each
 /// trusted; for pyenv also `bin/<command>` inside it, a trusted regular
-/// file (pyenv itself looks for the command there). `value` and `host` each
-/// pass the version grammar (D1), so the name has no `/` and no `..`;
-/// joined it may reach 65 bytes, which is why the parts are checked and not
-/// the whole.
+/// file (pyenv itself looks for the command there), reached through links
+/// only as [`command_file`] allows. `value` and `host` each pass the
+/// version grammar (D1), so the name has no `/` and no `..`; joined it may
+/// reach 65 bytes, which is why the parts are checked and not the whole.
+/// The round uses [`installed_as`]; the D2 tests pin the rules through this.
+#[cfg(test)]
 pub(crate) fn installed(
     home: &File,
     folder: &[u8],
@@ -291,16 +368,29 @@ pub(crate) fn installed(
     command: Option<&[u8]>,
     me: u32,
 ) -> Install {
+    installed_as(home, folder, value, host, command, me).0
+}
+
+/// `installed`, with the name of the command's regular file in `bin` when
+/// one was checked.
+fn installed_as(
+    home: &File,
+    folder: &[u8],
+    value: &[u8],
+    host: Option<&[u8]>,
+    command: Option<&[u8]>,
+    me: u32,
+) -> (Install, Option<Vec<u8>>) {
     // Fails without it: install_check_opens_one_folder (`../x`, a host
     // with `/`).
     if !version_ok(value) || !host.is_none_or(version_ok) {
-        return Install::Untrusted;
+        return (Install::Untrusted, None);
     }
     let name = match host {
         Some(host) => [value, b"-", host].concat(),
         None => value.to_vec(),
     };
-    let check = || -> Result<(), Install> {
+    let check = || -> Result<Option<Vec<u8>>, Install> {
         let dir = opened(
             sys::open_dir_at_nofollow(home.as_fd(), OsStr::from_bytes(folder)),
             me,
@@ -311,33 +401,42 @@ pub(crate) fn installed(
             me,
         )?;
         let Some(command) = command else {
-            return Ok(());
+            return Ok(None);
         };
         // Fails without it: pyenv_needs_the_command_in_the_version.
         let bin = opened(
             sys::open_dir_at_nofollow(leaf.as_fd(), OsStr::new("bin")),
             me,
         )?;
-        let file = opened(
-            sys::open_file_at_nofollow(bin.as_fd(), OsStr::from_bytes(command)),
-            me,
-        )?;
-        // Fails without it: pyenv_needs_the_command_in_the_version (a
-        // folder named like the command).
-        if !file.metadata().is_ok_and(|m| m.file_type().is_file()) {
-            return Err(Install::Untrusted);
-        }
-        Ok(())
+        command_file(&bin, command, me).map(Some)
     };
     match check() {
-        Ok(()) => Install::Present,
-        Err(answer) => answer,
+        Ok(name) => (Install::Present, name),
+        Err(answer) => (answer, None),
     }
 }
 
+/// What the install check saw, for a choice that runs the manager's own file.
+struct Checked {
+    install: Install,
+    /// The command's regular file in `bin` (pyenv), links followed.
+    command: Option<Vec<u8>>,
+    home: PathBuf,
+    folder: Vec<u8>,
+    value: Vec<u8>,
+    host: Option<Vec<u8>>,
+}
+
+/// The decision and, when the plan reached the install check, what it saw.
+struct Resolved {
+    decision: Decision,
+    checked: Option<Checked>,
+}
+
 /// One language's decision, given what its command is. `command` is the
-/// command name pyenv's version must hold in its `bin` (D3 runs it); `me`
-/// is the helper's user.
+/// command name pyenv's version must hold in its `bin`; `me` is the helper's
+/// user. The round uses [`choose`]; the D2 tests pin the rules through this.
+#[cfg(test)]
 pub(crate) fn decide(
     shim: Shim,
     vars: Option<&Environ<'_>>,
@@ -347,11 +446,36 @@ pub(crate) fn decide(
     cwd: &[u8],
     me: u32,
 ) -> Option<Decision> {
+    resolve(shim, vars, homes, selection, command, cwd, me).map(|r| r.decision)
+}
+
+fn home_path(manager: Manager, homes: &Homes) -> Option<&Path> {
+    match manager {
+        Manager::Rustup => homes.rustup.as_deref(),
+        Manager::Pyenv => homes.pyenv.as_deref(),
+    }
+}
+
+fn resolve(
+    shim: Shim,
+    vars: Option<&Environ<'_>>,
+    homes: &Homes,
+    selection: Selection<'_>,
+    command: &[u8],
+    cwd: &[u8],
+    me: u32,
+) -> Option<Resolved> {
+    let done = |decision| {
+        Some(Resolved {
+            decision,
+            checked: None,
+        })
+    };
     let manager = match shim {
         Shim::Manager(manager) => manager,
         // The caller hides the value and reports the shim (U-12 R2).
         Shim::Unsupported => return None,
-        Shim::None => return Some(Decision::Run(None)),
+        Shim::None => return done(Decision::Run(None)),
     };
     // Fails without it: decide_reads_the_facts (an override variable in the
     // env frame).
@@ -365,23 +489,20 @@ pub(crate) fn decide(
     // Fails without it: decide_reads_the_facts (no settings read for an
     // override).
     if let Some(decision) = manager::early(override_set, selection) {
-        return Some(decision);
+        return done(decision);
     }
-    let path = match manager {
-        Manager::Rustup => homes.rustup.as_deref(),
-        Manager::Pyenv => homes.pyenv.as_deref(),
-    };
+    let path = home_path(manager, homes);
     let home = match path.map(|p| open_home(p, me)) {
         Some(Ok(home)) => Some(home),
         // Fails without it: decide_reads_the_facts (an untrusted home).
-        Some(Err(Install::Untrusted)) => return Some(Decision::Hidden(Hidden::Untrusted)),
+        Some(Err(Install::Untrusted)) => return done(Decision::Hidden(Hidden::Untrusted)),
         // pyenv with no root has nothing installed: the plan goes on and its
         // install check answers absent (H1's absent: the command runs with
         // the selected name).
         _ if manager == Manager::Pyenv => None,
         // rustup with no home has no settings: overrides and the host are
         // unknown, so no name is known to select.
-        _ => return Some(Decision::Run(None)),
+        _ => return done(Decision::Run(None)),
     };
     let settings = match (manager, &home) {
         (Manager::Rustup, Some(home)) => read_settings(home, cwd, me),
@@ -394,8 +515,8 @@ pub(crate) fn decide(
         settings: &settings,
         build_host: BUILD_HOST,
     };
-    Some(match manager::plan(&facts) {
-        Plan::Done(decision) => decision,
+    match manager::plan(&facts) {
+        Plan::Done(decision) => done(decision),
         Plan::Check {
             folder,
             value,
@@ -404,13 +525,191 @@ pub(crate) fn decide(
             let command = (manager == Manager::Pyenv).then_some(command);
             // Fails without it: decide_reads_the_facts (a missing pyenv root
             // runs the selected name).
-            let install = match &home {
-                Some(home) => installed(home, &folder, &value, host.as_deref(), command, me),
-                None => Install::Absent,
+            let (install, file) = match &home {
+                Some(home) => installed_as(home, &folder, &value, host.as_deref(), command, me),
+                None => (Install::Absent, None),
             };
-            manager::installed(&value, install)
+            Some(Resolved {
+                decision: manager::installed(&value, install),
+                checked: path.map(|home| Checked {
+                    install,
+                    command: file,
+                    home: home.to_path_buf(),
+                    folder,
+                    value,
+                    host,
+                }),
+            })
         }
-    })
+    }
+}
+
+/// What the helper does about one builtin language (D3a).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// Show this version; nothing runs.
+    Fast(Vec<u8>),
+    /// Run the command the sanitized `PATH` resolved (not a shim).
+    RunFound,
+    /// Run this file of the manager's own install directly (never its shim
+    /// or proxy), with the toolchain name for Rust. The caller checks it
+    /// with the executable rules before it reaches a grant.
+    RunManaged {
+        executable: PathBuf,
+        toolchain: Option<Vec<u8>>,
+    },
+    /// Show nothing; the reason goes to the log.
+    Hidden(&'static str),
+    /// A manager without a resolver (U-12 R2): hidden, with a diagnostic.
+    Unsupported,
+}
+
+/// The manager's own file for `value`: `versions/<v>/bin/<command>` (pyenv)
+/// or `toolchains/<v>-<host>/bin/rustc` (rustup).
+fn managed_file(manager: Manager, c: &Checked, command: &[u8]) -> PathBuf {
+    let name = match &c.host {
+        Some(host) => [c.value.as_slice(), b"-", host].concat(),
+        None => c.value.clone(),
+    };
+    // pyenv: the regular file the install check reached, links followed
+    // (D3a ruling P1: the final name goes to the executable rules).
+    // Fails without it: bin_links_stay_in_the_folder (the run names
+    // python3.12).
+    let leaf = match manager {
+        Manager::Pyenv => c.command.as_deref().unwrap_or(command),
+        Manager::Rustup => b"rustc",
+    };
+    c.home
+        .join(OsStr::from_bytes(&c.folder))
+        .join(OsStr::from_bytes(&name))
+        .join("bin")
+        .join(OsStr::from_bytes(leaf))
+}
+
+/// The manager's override variable when it alone names a usable version
+/// (D3 rulings Q1 and Q2, P2): a grammar-checked name that is not pyenv's
+/// `system` (a `:` list never passes the grammar). For pyenv, only
+/// `PYENV_HOOK_PATH` beside it leaves the value unknown: pyenv-version-name
+/// (master) reads the version file only `if [ -z "${PYENV_VERSION:-}" ]`
+/// (its lines 24–27) and then sources every `version-name` hook (lines 30
+/// and 35–37), and `PYENV_DIR` is read only by pyenv-version-file
+/// (`find_local_version_file "${PYENV_DIR:=$PWD}"`), which that branch
+/// skips.
+fn override_value<'a>(manager: Manager, vars: &Environ<'a>) -> Option<&'a [u8]> {
+    let (first, unknown): (&[u8], &[&[u8]]) = match manager {
+        Manager::Rustup => (b"RUSTUP_TOOLCHAIN", &[]),
+        Manager::Pyenv => (b"PYENV_VERSION", &[b"PYENV_HOOK_PATH"]),
+    };
+    let value = vars.get(first)?;
+    // Fails without each: plan_follows_the_rulings (`system`, a path-shaped
+    // name, PYENV_HOOK_PATH beside PYENV_VERSION; PYENV_DIR beside it is
+    // used).
+    (version_ok(value)
+        && value != b"system"
+        && !unknown.iter().any(|name| vars.get(name).is_some()))
+    .then_some(value)
+}
+
+/// One builtin language's choice (D3 rulings Q1, Q2 and the D3a acceptance
+/// rules): what the resolver decided, turned into what runs. A manager's
+/// shim or proxy never runs: a decision to run with no usable name, a
+/// version that is not installed or an untrusted tree is hidden.
+pub(crate) fn choose(
+    shim: Shim,
+    vars: Option<&Environ<'_>>,
+    homes: &Homes,
+    selection: Selection<'_>,
+    command: &[u8],
+    cwd: &[u8],
+    me: u32,
+) -> Choice {
+    let manager = match shim {
+        Shim::Unsupported => return Choice::Unsupported,
+        Shim::None => return Choice::RunFound,
+        Shim::Manager(manager) => manager,
+    };
+    if let Some(value) = vars.and_then(|v| override_value(manager, v)) {
+        return run_override(manager, homes, value, command, cwd, me);
+    }
+    let Some(r) = resolve(shim, vars, homes, selection, command, cwd, me) else {
+        return Choice::Unsupported;
+    };
+    match (r.decision, r.checked) {
+        (Decision::Fast(value), _) => Choice::Fast(value),
+        (Decision::Hidden(Hidden::ToolchainPath), _) => Choice::Hidden("a path toolchain"),
+        (Decision::Hidden(Hidden::Untrusted), _) => Choice::Hidden("an untrusted manager tree"),
+        // Installed under a name that is not itself the version (`stable`,
+        // `3.12`): run that install's own file.
+        // Fails without it: plan_follows_the_rulings (a channel runs).
+        (
+            Decision::Run(Some(_)),
+            Some(
+                c @ Checked {
+                    install: Install::Present,
+                    ..
+                },
+            ),
+        ) => Choice::RunManaged {
+            executable: managed_file(manager, &c, command),
+            toolchain: (manager == Manager::Rustup).then(|| c.value.clone()),
+        },
+        (Decision::Run(Some(_)), _) => Choice::Hidden("the selected version is not installed"),
+        // Fails without it: plan_follows_the_rulings (no name: hidden,
+        // never the shim).
+        (Decision::Run(None), _) => Choice::Hidden("the manager's choice is not known"),
+    }
+}
+
+/// An override variable's version: installed and trusted, it runs; otherwise
+/// hidden.
+fn run_override(
+    manager: Manager,
+    homes: &Homes,
+    value: &[u8],
+    command: &[u8],
+    cwd: &[u8],
+    me: u32,
+) -> Choice {
+    let Some(path) = home_path(manager, homes) else {
+        return Choice::Hidden("the manager's folder is not known");
+    };
+    let home = match open_home(path, me) {
+        Ok(home) => home,
+        Err(_) => return Choice::Hidden("the manager's folder is missing or untrusted"),
+    };
+    let (folder, host): (&[u8], Option<Vec<u8>>) = match manager {
+        Manager::Pyenv => (b"versions", None),
+        Manager::Rustup => {
+            let host = match read_settings(&home, cwd, me) {
+                // Fails without it: override_follows_settings_and_cwd_is_canonical.
+                Settings::Known {
+                    host: Some(host), ..
+                } => host,
+                _ => BUILD_HOST.to_vec(),
+            };
+            (b"toolchains", Some(host))
+        }
+    };
+    let leaf = (manager == Manager::Pyenv).then_some(command);
+    // Fails without it: plan_follows_the_rulings (an override that is not
+    // installed is hidden).
+    match installed_as(&home, folder, value, host.as_deref(), leaf, me) {
+        (Install::Present, file) => {
+            let c = Checked {
+                install: Install::Present,
+                command: file,
+                home: path.to_path_buf(),
+                folder: folder.to_vec(),
+                value: value.to_vec(),
+                host,
+            };
+            Choice::RunManaged {
+                executable: managed_file(manager, &c, command),
+                toolchain: (manager == Manager::Rustup).then(|| value.to_vec()),
+            }
+        }
+        _ => Choice::Hidden("the override's version is not installed or untrusted"),
+    }
 }
 
 #[cfg(test)]
@@ -473,7 +772,8 @@ mod tests {
     // 관리자 폴더는 셸 환경에서 온다: 변수가 있으면 그 값, 없으면 각 도구 문서의 기본값. 상대 경로와 `..`가 든 값은
     // 모른다. mise는 MISE_DATA_DIR이 없으면 XDG_DATA_HOME/mise, asdf는 ASDF_DIR도, mise는 MISE_SHIMS_DIR과 시스템
     // shim 폴더도 본다(리뷰 M9). 이것을 실패시키는 것: folder()의 절대 경로 검사나 `..` 검사를 지우는 것, 변수보다
-    // HOME 기본값을 먼저 쓰는 것, XDG_DATA_HOME·ASDF_DIR·MISE_SHIMS_DIR 칸을 지우는 것.
+    // HOME 기본값을 먼저 쓰는 것, XDG_DATA_HOME·ASDF_DIR·MISE_SHIMS_DIR 칸을 지우는 것, nodenv·goenv 칸을 지우는
+    // 것(D3a 판정 R2).
     #[test]
     fn homes_follow_the_environment() {
         let body = environ(&[
@@ -494,10 +794,14 @@ mod tests {
                 p("/h/.local/share/mise/shims"),
                 p("/usr/local/share/mise/shims"),
                 p("/h/.volta/bin"),
+                p("/h/.nodenv/shims"),
+                p("/h/.goenv/shims"),
             ]
         );
         let body = environ(&[
             "HOME=/h",
+            "NODENV_ROOT=/nr",
+            "GOENV_ROOT=/gr",
             "XDG_DATA_HOME=/x",
             "ASDF_DIR=/ad",
             "MISE_SHIMS_DIR=/ms",
@@ -512,6 +816,8 @@ mod tests {
                 p("/ms"),
                 p("/usr/local/share/mise/shims"),
                 p("/h/.volta/bin"),
+                p("/nr/shims"),
+                p("/gr/shims"),
             ]
         );
         let body = environ(&["HOME=/h", "XDG_DATA_HOME=/x", "MISE_DATA_DIR=/md"]);
@@ -528,7 +834,8 @@ mod tests {
     // shim 판별 표. 폴더는 (dev, ino)로 비교하므로 링크로 이름 붙인 관리자 폴더도 알아본다. 이것을 실패시키는
     // 것: pyenv shims·cargo bin·asdf shims 폴더 비교를 지우는 것, 다른 언어의 관리자 폴더를 받는 것(rustc가 pyenv
     // shims에 있어도 pyenv가 아님), 연결된 rustup 바이너리를 놓치는 것, 이름 문자열로 비교하는 것(링크 별칭을
-    // 놓침), 둘 다 없는 폴더를 같다고 보는 것.
+    // 놓침), 둘 다 없는 폴더를 같다고 보는 것, 파일이 실제로 있는 폴더를 보지 않는 것(다른 PATH 폴더의 링크),
+    // rustup proxy의 하드 링크를 놓치는 것(D3a 보안 리뷰 S-M1).
     #[test]
     fn classify_table() {
         let s = Scratch::new("classify");
@@ -550,46 +857,53 @@ mod tests {
             pyenv: Some(missing.clone()),
             ..Homes::default()
         };
-        let cases: [(Manager, PathBuf, Option<PathBuf>, &Homes, Shim); 10] = [
+        type Case<'a> = (Option<Manager>, PathBuf, Option<PathBuf>, &'a Homes, Shim);
+        let cases: [Case<'_>; 13] = [
             (
-                Manager::Pyenv,
+                Some(Manager::Pyenv),
                 at(".pyenv/shims"),
                 None,
                 &h,
                 Shim::Manager(Manager::Pyenv),
             ),
             (
-                Manager::Pyenv,
+                Some(Manager::Pyenv),
                 at("alias"),
                 None,
                 &h,
                 Shim::Manager(Manager::Pyenv),
             ),
-            (Manager::Rustup, at(".pyenv/shims"), None, &h, Shim::None),
             (
-                Manager::Rustup,
+                Some(Manager::Rustup),
+                at(".pyenv/shims"),
+                None,
+                &h,
+                Shim::None,
+            ),
+            (
+                Some(Manager::Rustup),
                 at(".cargo/bin"),
                 None,
                 &h,
                 Shim::Manager(Manager::Rustup),
             ),
-            (Manager::Pyenv, at(".cargo/bin"), None, &h, Shim::None),
+            (Some(Manager::Pyenv), at(".cargo/bin"), None, &h, Shim::None),
             (
-                Manager::Pyenv,
+                Some(Manager::Pyenv),
                 at(".asdf/shims"),
                 None,
                 &h,
                 Shim::Unsupported,
             ),
             (
-                Manager::Rustup,
+                Some(Manager::Rustup),
                 at(".volta/bin"),
                 None,
                 &h,
                 Shim::Unsupported,
             ),
             (
-                Manager::Rustup,
+                Some(Manager::Rustup),
                 at("usr/bin"),
                 Some(PathBuf::from(
                     "/opt/homebrew/Cellar/rustup/1.29.2/bin/rustup-init",
@@ -598,17 +912,27 @@ mod tests {
                 Shim::Manager(Manager::Rustup),
             ),
             (
-                Manager::Rustup,
+                Some(Manager::Rustup),
                 at("usr/bin"),
                 Some(PathBuf::from("/usr/lib/rust/bin/rustc")),
                 &h,
                 Shim::None,
             ),
             (
-                Manager::Pyenv,
+                Some(Manager::Pyenv),
                 missing.join("shims"),
                 None,
                 &lone,
+                Shim::None,
+            ),
+            // Node and Go: only the managers without a resolver are known.
+            (None, at(".volta/bin"), None, &h, Shim::Unsupported),
+            (None, at(".pyenv/shims"), None, &h, Shim::None),
+            (
+                None,
+                at("usr/bin"),
+                Some(PathBuf::from("/usr/lib/rustup/bin/rustup")),
+                &h,
                 Shim::None,
             ),
         ];
@@ -620,6 +944,20 @@ mod tests {
                 folder.display()
             );
         }
+        // A link or a hard-linked copy on another PATH folder is still the
+        // manager's (security review S-M1).
+        fs::create_dir_all(at("bin2")).unwrap();
+        fs::write(at(".cargo/bin/rustup"), b"proxy").unwrap();
+        fs::hard_link(at(".cargo/bin/rustup"), at("bin2/rustc")).unwrap();
+        fs::write(at("bin2/node"), b"node").unwrap();
+        fs::write(at(".asdf/shims/node"), b"shim").unwrap();
+        let rs = Some(Manager::Rustup);
+        let c = |command, file: &str| classify(command, &at("bin2"), Some(&at(file)), &h);
+        assert_eq!(c(rs, ".cargo/bin/rustc"), Shim::Manager(Manager::Rustup));
+        assert_eq!(c(rs, "bin2/rustc"), Shim::Manager(Manager::Rustup));
+        assert_eq!(c(None, ".asdf/shims/node"), Shim::Unsupported);
+        assert_eq!(c(None, "bin2/node"), Shim::None);
+        assert_eq!(c(rs, "bin2/node"), Shim::None);
     }
 
     // settings.toml은 링크가 아닌 일반 파일을 64 KiB까지만 읽는다. FIFO는 open에서 막히지 않고 모름이 되고,
@@ -1048,5 +1386,112 @@ mod tests {
         AFTER_STAT.with(|hook| *hook.borrow_mut() = None);
         assert_eq!(got, Some(Decision::Fast(b"1.80.0".to_vec())));
         assert!(s.0.join("moved").join(&toolchain).is_dir());
+    }
+
+    // bin 안의 링크는 대상이 '/' 없는 이름이고 같은 bin 폴더의 신뢰된 일반 파일일 때만, 링크 4개까지 따라간다
+    // (D3a 판정 P1, CPython의 python3 -> python3.X). 실행 파일은 그 최종 이름이다. 이것을 실패시키는 것: 대상의
+    // '/' 검사를 지우는 것(../, 절대 경로로 다른 폴더), 링크 상한을 늘리는 것(5개), 최종 대상의 신뢰 검사를
+    // 지우는 것(0777 대상), managed_file이 최종 이름 대신 명령 이름을 쓰는 것.
+    #[test]
+    fn bin_links_stay_in_the_folder() {
+        use std::os::unix::fs::symlink;
+        if crate::commands::exec_path::test_skip_as_root() {
+            return;
+        }
+        let s = Scratch::new("binlinks");
+        let root = s.0.join("pyenv");
+        let other = s.0.join("elsewhere");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("python3.12"), b"").unwrap();
+        mode(&other.join("python3.12"), 0o755);
+        let version = |v: &str, links: &[(&str, &str)], files: &[(&str, u32)]| {
+            let bin = root.join("versions").join(v).join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            for (name, bits) in files {
+                fs::write(bin.join(name), b"").unwrap();
+                mode(&bin.join(name), *bits);
+            }
+            for (name, target) in links {
+                symlink(target, bin.join(name)).unwrap();
+            }
+            for p in [
+                &root,
+                &root.join("versions"),
+                &root.join("versions").join(v),
+                &bin,
+            ] {
+                mode(p, 0o755);
+            }
+        };
+        version(
+            "1.0.1",
+            &[("python3", "python3.12")],
+            &[("python3.12", 0o755)],
+        );
+        version(
+            "1.0.2",
+            &[("python3", "../bin/python3.12")],
+            &[("python3.12", 0o755)],
+        );
+        let away = format!("{}", other.join("python3.12").display());
+        version("1.0.3", &[("python3", &away)], &[]);
+        version(
+            "1.0.4",
+            &[("python3", "a1"), ("a1", "a2"), ("a2", "a3"), ("a3", "a4")],
+            &[("a4", 0o755)],
+        );
+        version(
+            "1.0.5",
+            &[
+                ("python3", "a1"),
+                ("a1", "a2"),
+                ("a2", "a3"),
+                ("a3", "a4"),
+                ("a4", "a5"),
+            ],
+            &[("a5", 0o755)],
+        );
+        version(
+            "1.0.6",
+            &[("python3", "python3.12")],
+            &[("python3.12", 0o777)],
+        );
+        // A short name runs its install (no fast path).
+        version(
+            "1.0",
+            &[("python3", "python3.12")],
+            &[("python3.12", 0o755)],
+        );
+        let h = home(&root);
+        let at = |v: &[u8]| installed_as(&h, b"versions", v, None, Some(b"python3"), me());
+        assert_eq!(
+            at(b"1.0.1"),
+            (Install::Present, Some(b"python3.12".to_vec()))
+        );
+        assert_eq!(at(b"1.0.2").0, Install::Untrusted);
+        assert_eq!(at(b"1.0.3").0, Install::Untrusted);
+        assert_eq!(at(b"1.0.4"), (Install::Present, Some(b"a4".to_vec())));
+        assert_eq!(at(b"1.0.5").0, Install::Untrusted);
+        assert_eq!(at(b"1.0.6").0, Install::Untrusted);
+        // The managed executable is the final name.
+        let body = environ(&[&format!("PYENV_ROOT={}", root.display())]);
+        let vars = Environ::parse(&body);
+        let homes = homes(&vars);
+        let choice = choose(
+            Shim::Manager(Manager::Pyenv),
+            Some(&vars),
+            &homes,
+            Selection::Value(b"1.0"),
+            b"python3",
+            b"/w",
+            me(),
+        );
+        assert_eq!(
+            choice,
+            Choice::RunManaged {
+                executable: root.join("versions/1.0/bin/python3.12"),
+                toolchain: None,
+            }
+        );
     }
 }

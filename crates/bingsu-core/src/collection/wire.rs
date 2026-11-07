@@ -903,11 +903,12 @@ impl Transcript {
         // The stored record: base, updates and languages, and the language
         // section's queries and count (`room` kept `stored` within it).
         add_budget(self.stored, STREAM_MAX - self.room()?, STREAM_MAX)?;
-        // Language results alone make no record: the newest record is the one
-        // the prompt reads, and one without updates would leave every
-        // segment of the previous record pending (git included). They are
-        // kept only beside at least one update.
-        if self.updates.is_empty() {
+        // Language results alone are still this round's answer: the helper
+        // hands them to the builtin probes (D3a ruling Q-B, U-3 L2). The store
+        // publishes no record without an update (`CollectionStore::publish`),
+        // so they never make the newest record the prompt reads.
+        // Fails without it: language_results_alone_reach_the_round.
+        if self.updates.is_empty() && self.languages.is_empty() {
             return Ok(None);
         }
         let mut languages = self.languages;

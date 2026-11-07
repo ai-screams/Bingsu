@@ -191,9 +191,42 @@ pub fn request(
     request_id: wire::RequestId,
     budget_ms: u32,
 ) -> Result<Option<wire::Request>, wire::ProtocolError> {
-    if binding.mask == 0 {
+    request_with_languages(catalog, binding, request_id, budget_ms, Vec::new())
+}
+
+/// The `dir` segment's index: its worker reports the folder facts, the
+/// repository root among them.
+pub const DIR_SEGMENT: u16 = 1;
+
+/// The builtin languages whose segments `drawn` (the layout's built-in
+/// segment bits at this width) shows, each asked about on its own (D3a
+/// rulings Q-A and Q6), in the language table's order.
+pub fn builtin_languages(drawn: u32) -> Vec<language::LanguageQuery> {
+    language::BUILTIN
+        .iter()
+        .filter(|b| {
+            crate::field::BUILTIN
+                .binary_search_by(|d| d.id.as_bytes().cmp(b.id))
+                .is_ok_and(|i| drawn & 1u32.checked_shl(i as u32).unwrap_or(0) != 0)
+        })
+        .map(|b| b.query())
+        .collect()
+}
+
+/// `request`, with `languages` asked about too: a round that draws only a
+/// language segment still collects (its worker mask may be empty).
+pub fn request_with_languages(
+    catalog: &selection::Catalog<'_>,
+    binding: wire::Binding,
+    request_id: wire::RequestId,
+    budget_ms: u32,
+    languages: Vec<language::LanguageQuery>,
+) -> Result<Option<wire::Request>, wire::ProtocolError> {
+    // Fails without the language test: requests_follow_language_segments.
+    if binding.mask == 0 && languages.is_empty() {
         return Ok(None);
     }
+
     if binding.mask & !(catalog.workers & catalog.declared_mask()) != 0 {
         return Err(wire::ProtocolError::Schema);
     }
@@ -204,7 +237,7 @@ pub fn request(
         environment: Vec::new(),
         global_excludes_known: false,
         global_excludes: Vec::new(),
-        languages: Vec::new(),
+        languages,
     };
     request.encode_body()?;
     Ok(Some(request))

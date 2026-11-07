@@ -614,9 +614,12 @@ mod cases {
         c.band_names.clear();
         c.widths.clear();
         bad.push(c);
+        // The wire table has no length of its own (sparse, always
+        // `field::BUILTIN.len()` on decode), so only encode can see a short one;
+        // sparse_setup_bounds covers the wire.
         let mut c = base.clone();
         c.setup.pop();
-        bad.push(c);
+        assert_eq!(encode_compiled(&c), Err(Error::Shape));
         let mut c = base.clone();
         c.palette.tokens.pop();
         bad.push(c);
@@ -1081,6 +1084,149 @@ mod cases {
             changed[i] ^= 255;
             let _ = decode_compiled(&changed);
         }
+    }
+
+    fn setup_bytes(table: &[Setup]) -> Vec<u8> {
+        let mut w = Writer {
+            bytes: Some(Vec::new()),
+            len: 0,
+            error: None,
+            segs: usize::MAX,
+        };
+        put_setup(table, &mut w);
+        assert_eq!(w.error, None);
+        w.bytes.unwrap()
+    }
+    fn read_setup(b: &[u8]) -> Result<Vec<Setup>, Error> {
+        let mut r = Reader {
+            rest: b,
+            budget: MAX_ALLOC,
+            segs: crate::field::BUILTIN.len(),
+        };
+        let t = get_setup(&mut r)?;
+        assert!(r.rest.is_empty());
+        Ok(t)
+    }
+
+    // 세그먼트 설정 표는 기본값이 아닌 항목만 싣고, decode는 언제나 BUILTIN 길이의 dense 표를 낸다. 기본 테마와
+    // 모든 항목이 기본값이 아닌 표 양쪽에서 encode->decode가 dense 표와 같다. 이것을 실패시키는 것: decode가
+    // 빠진 index를 기본값이 아닌 값으로 채우는 것, encode가 기본값 항목을 빼지 않는 것(크기 검사), index를
+    // 어긋나게 쓰는 것.
+    #[test]
+    fn sparse_setup_round_trips_to_the_dense_table() {
+        let len = crate::field::BUILTIN.len();
+        let base = config();
+        assert_eq!(base.setup.len(), len);
+        let changed = base.setup.iter().filter(|s| **s != plain_setup()).count();
+        assert!(0 < changed && changed < len, "{changed} of {len}");
+        let b = setup_bytes(&base.setup);
+        // Count, then (u16 index, setup) per changed entry only.
+        let entries: usize = base
+            .setup
+            .iter()
+            .filter(|s| **s != plain_setup())
+            .map(|s| 2 + bytes(s).len())
+            .sum();
+        assert_eq!(b.len(), 4 + entries);
+        assert_eq!(read_setup(&b).unwrap(), base.setup);
+        let mut all = base.clone();
+        for (i, s) in all.setup.iter_mut().enumerate() {
+            s.priority = i as u16 + 1;
+            s.required = i % 2 == 0;
+            s.when = When::Always;
+            s.methods = vec![Method::Depth(i as u16)];
+        }
+        assert_eq!(read_setup(&setup_bytes(&all.setup)).unwrap(), all.setup);
+        for c in [base, all] {
+            let back = decode_compiled(&encode_compiled(&c).unwrap()).unwrap();
+            assert_eq!(back.setup, c.setup);
+            assert_eq!(back, c);
+        }
+    }
+
+    // 항목 안 Setup의 decode 오류는 그대로 전파된다. 이것을 실패시키는 것: get_setup이 Setup::get 오류를 삼키고
+    // 그 칸을 기본값으로 두는 것.
+    #[test]
+    fn sparse_setup_entry_errors_propagate() {
+        // Count 1, index 0, priority 7, required, no methods, then a bad
+        // When tag.
+        let bad: [u8; 13] = [1, 0, 0, 0, 0, 0, 7, 0, 1, 0, 0, 0, 0];
+        let mut tag = bad.to_vec();
+        tag.push(0xFF);
+        assert_eq!(read_setup(&tag), Err(Error::Tag));
+        assert_eq!(read_setup(&bad), Err(Error::Short));
+    }
+
+    // codec의 기본 Setup은 compile이 설정 없는 내장 segment에 주는 값과 같다. 다르면 sparse 표가 그 칸을 바꾼다.
+    // 이것을 실패시키는 것: plain_setup이나 compile의 기본값 중 하나만 바꾸는 것(예: When::Always).
+    #[test]
+    fn plain_setup_is_what_compile_gives_an_untouched_segment() {
+        let c = config();
+        let set: Vec<&str> = crate::default_theme::SETUP
+            .iter()
+            .map(|(id, ..)| *id)
+            .collect();
+        let untouched: Vec<usize> = crate::field::BUILTIN
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| !set.contains(&d.id) && d.id != "dir")
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!untouched.is_empty());
+        for i in untouched {
+            assert_eq!(c.setup[i], plain_setup(), "{}", crate::field::BUILTIN[i].id);
+        }
+    }
+
+    // decode는 표 크기를 넘는 개수, 표 밖 index, 반복·내림차순 index를 거부하고, 마지막 index와 빈 표는 받는다.
+    // 이것을 실패시키는 것: 개수 검사를 지우는 것(Short로 바뀜), index 범위 검사를 마지막 칸으로 접는 것,
+    // 오름차순 검사를 지우거나 같은 index를 허용하는 것, dense 표를 decode 예산에 매기지 않는 것.
+    #[test]
+    fn sparse_setup_bounds() {
+        let len = crate::field::BUILTIN.len();
+        let one = bytes(&Setup {
+            priority: 7,
+            required: true,
+            methods: vec![],
+            when: When::Always,
+        });
+        let forge = |count: u32, idx: &[u16]| {
+            let mut b = count.to_le_bytes().to_vec();
+            for i in idx {
+                b.extend_from_slice(&i.to_le_bytes());
+                b.extend_from_slice(&one);
+            }
+            b
+        };
+        assert_eq!(read_setup(&forge(len as u32 + 1, &[])), Err(Error::Limit));
+        assert_eq!(read_setup(&forge(1, &[len as u16])), Err(Error::Shape));
+        assert_eq!(read_setup(&forge(2, &[3, 3])), Err(Error::Shape));
+        assert_eq!(read_setup(&forge(2, &[4, 3])), Err(Error::Shape));
+        let last = read_setup(&forge(1, &[len as u16 - 1])).unwrap();
+        assert_eq!(last.len(), len);
+        assert_eq!(last[len - 1].priority, 7);
+        assert!(last[..len - 1].iter().all(|s| *s == plain_setup()));
+        let none = read_setup(&forge(0, &[])).unwrap();
+        assert_eq!(none, vec![plain_setup(); len]);
+        let two = read_setup(&forge(2, &[3, 4])).unwrap();
+        assert_eq!((two[3].priority, two[4].priority), (7, 7));
+        // The dense table is charged to the decode budget even when the wire
+        // carries no entry.
+        let table = len * core::mem::size_of::<Setup>();
+        let empty = forge(0, &[]);
+        let mut r = Reader {
+            rest: &empty,
+            budget: table - 1,
+            segs: len,
+        };
+        assert_eq!(get_setup(&mut r), Err(Error::Limit));
+        let mut r = Reader {
+            rest: &empty,
+            budget: table,
+            segs: len,
+        };
+        assert!(get_setup(&mut r).is_ok());
+        assert_eq!(r.budget, 0);
     }
 }
 

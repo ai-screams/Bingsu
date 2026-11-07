@@ -237,6 +237,7 @@ mod tests {
                 profile: 1,
                 executable: b"/usr/bin/python3".to_vec(),
                 pin: None,
+                toolchain: None,
             }],
         }
     }

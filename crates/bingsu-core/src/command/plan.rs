@@ -527,6 +527,7 @@ mod tests {
             profile: 1,
             executable: b"/usr/bin/go".to_vec(),
             pin: None,
+            toolchain: None,
         });
         assert!(result_fits(&g, &outcome(Origin::Builtin, 0, 5, 6)));
         assert!(!result_fits(&g, &outcome(Origin::Config, 1, 5, 6)));
@@ -541,6 +542,7 @@ mod tests {
             profile: 1,
             executable: b"/usr/bin/go".to_vec(),
             pin: None,
+            toolchain: None,
         });
         let first = outcome(Origin::Config, 0, 5, 6);
         assert!(accept(&g, &[], &first));

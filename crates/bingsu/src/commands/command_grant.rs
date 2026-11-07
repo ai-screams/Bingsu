@@ -7,6 +7,7 @@
 //! has every result, so its end of file tells the supervisor the helper is
 //! gone. Results are checked and dropped here; publishing them is C4.
 use super::{
+    builtin_probe::{self, Action, Language, Planned},
     collection_store::close_only_lock,
     collector_process::{OwnedChild, now_ns, pipe},
     command_process, exec_path,
@@ -61,13 +62,16 @@ pub(crate) struct Inputs<'a> {
     pub exe: &'a OsStr,
     pub me: u32,
     pub helper_deadline: u64,
+    /// The builtin languages whose segments this round draws (D3 ruling
+    /// Q6); empty on a redraw.
+    pub builtins: &'a [&'static Language],
 }
 
 /// Why a round runs no supervisor, for the helper's log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Skip {
     /// No config unit may run (none, all with a `not_run` reason, or every
-    /// one a cache hit).
+    /// one a cache hit) and no builtin language is drawn.
     NoUnits,
     NoEnvironment(NoEnv),
     /// No session value or no shell folder in the envelope.
@@ -127,6 +131,18 @@ pub(crate) struct Round {
     pub notes: Vec<&'static str>,
     /// Where and how the round's results are published (C4).
     publish: Publish,
+    /// The builtin languages drawn this round (D3a).
+    builtins: Vec<&'static Language>,
+    /// Whether probes may run: the neutral folder they run in passed.
+    probes_allowed: bool,
+    /// The command response read before the round, for the probes' cache.
+    current: Option<response::Response>,
+    /// The plan of each probe in `grant.probes`, by index.
+    probes: Vec<Planned>,
+    /// Builtin entries decided without running anything (shown or hidden).
+    decided: Vec<response::Entry>,
+    /// Why builtin languages were hidden, for the helper's log.
+    pub hidden: Vec<&'static str>,
     /// The session lock; the supervisor holds its own copy. Dropped last:
     /// the reclaim after the supervisor runs while it is still held.
     _lock: File,
@@ -247,6 +263,83 @@ impl Scripts {
     }
 }
 
+/// This round's language answers, by the asked language's id (U-3 L2): what
+/// the collector found for each version selection file. Empty when the
+/// collection did not run or did not finish.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Languages {
+    answers: Vec<(Vec<u8>, bingsu_core::collection::language::Version)>,
+    /// What the folder facts say of the repository (D3a review H1).
+    root: Root,
+}
+
+/// The repository the folder facts found for the shell's folder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Root {
+    /// No facts, or facts that could not settle it: an alias folder path,
+    /// a search cut at its depth limit. Builtin languages are not decided.
+    #[default]
+    Unknown,
+    /// Confirmed outside any repository.
+    Outside,
+    /// Inside, the root at this component of the shell's folder.
+    Repo(u16),
+}
+
+impl Root {
+    /// From one round's folder facts (re-review H1: `in_repo` unknown, or
+    /// in a repository whose root component is not known, is unknown).
+    pub(crate) fn of(facts: &bingsu_core::collection::path_facts::PathFactInput) -> Self {
+        // Fails without each: roots_stay_unknown_unless_settled.
+        match (facts.in_repo, facts.repo_component) {
+            (Some(false), _) => Self::Outside,
+            (Some(true), Some(component)) => Self::Repo(component),
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl Languages {
+    /// The answers of a finished collection, by the asked language's id.
+    pub(crate) fn from_result(c: &bingsu_core::collection::response::Completed) -> Self {
+        let answers = c
+            .languages
+            .iter()
+            .filter_map(|l| {
+                let q = c.language_queries.get(usize::from(l.index))?;
+                Some((q.id.clone(), l.version.clone()))
+            })
+            .collect();
+        let root = c
+            .updates
+            .iter()
+            .find_map(|u| u.facts.as_ref())
+            .map_or(Root::Unknown, Root::of);
+        Self { answers, root }
+    }
+
+    /// Whether the builtin languages may be decided this round: the
+    /// collection answered them, and its folder facts name the same
+    /// repository the round searches with (`repo`). Without the facts the
+    /// shell's folder would stand for the repository, and an executable
+    /// inside the real one could run (D3a review H1).
+    pub(crate) fn ready(&self, repo: Option<u16>) -> bool {
+        // Fails without each: a_round_with_nothing_to_decide_searches_nothing,
+        // and test_builtin_probe_never_runs_from_the_repository (no facts).
+        !self.answers.is_empty()
+            && match self.root {
+                Root::Unknown => false,
+                Root::Outside => repo.is_none(),
+                Root::Repo(component) => repo == Some(component),
+            }
+    }
+
+    /// The answer for language `id`, if the collection gave one.
+    pub(crate) fn get(&self, id: &[u8]) -> Option<&bingsu_core::collection::language::Version> {
+        self.answers.iter().find(|(a, _)| a == id).map(|(_, v)| v)
+    }
+}
+
 /// The first 16 bytes of sha256(session), hex: names the session's lock and
 /// its script copies, never the raw session value.
 fn session_tag(session: &[u8]) -> String {
@@ -328,7 +421,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     // The cache (U-16 K1): a unit whose entry is bound to this round, to its
     // policy and to this shell's original environment, and still stands,
     // runs nothing. Read without the lock; a damaged one is no cache.
-    let current = match (&binding, runnable.is_empty()) {
+    let current = match (&binding, runnable.is_empty() && i.builtins.is_empty()) {
         // Only a response bound to exactly this binding (built from this
         // round's clock) is returned.
         (Some(b), false) => super::collection_store::read_commands(i.context, b)
@@ -364,7 +457,12 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
                 .collect()
         })
         .unwrap_or_default();
-    if runnable.is_empty() {
+    let builtins = i.builtins.to_vec();
+    // A drawn builtin language spawns the supervisor even with no config
+    // unit (D3a ruling Q-C (a)): whether it runs is known only once the
+    // collection answered, after the marker.
+    // Fails without it: test_builtin_probe_runs_once_and_is_cached.
+    if runnable.is_empty() && builtins.is_empty() {
         // A config with command units reclaims what an earlier supervisor of
         // the session left even when no unit runs this round (C4 ruling Q4);
         // one without any touches nothing. A busy lock is a live supervisor.
@@ -413,11 +511,16 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     let scripts = Scripts::default();
     let mut runnable = runnable;
     let mut neutral_refused = 0;
+    let mut probes_allowed = true;
     if !neutral(i.runtime, i.me).map_err(|_| Skip::Failed)? {
         let before = runnable.len();
         runnable.retain(|(_, r)| r.cwd != Cwd::Neutral);
         neutral_refused = before - runnable.len();
-        if runnable.is_empty() {
+        // Probes run in the neutral folder too: none runs, but a value
+        // decided without running is still published.
+        // Fails without it: test_builtin_fast_value_survives_a_bad_neutral_folder.
+        probes_allowed = false;
+        if runnable.is_empty() && builtins.is_empty() {
             return Err(Skip::Neutral);
         }
     }
@@ -483,6 +586,12 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             environments,
             attempts,
         },
+        builtins,
+        probes_allowed,
+        current,
+        probes: Vec::new(),
+        decided: Vec::new(),
+        hidden: Vec::new(),
         _lock: lock,
     })
 }
@@ -543,44 +652,73 @@ struct Resolved {
 /// its target environment and the digest of its policy before `{dir}`. A
 /// unit whose relay input would pass `RELAY_INPUT_MAX`, or that would push
 /// the grant past one frame, is left out alone; the others still run.
+/// The repository and the sanitized `PATH` folders of one round, which
+/// the config units and the builtin languages share: walking every `PATH`
+/// entry under the ancestor and group rules is the round's largest cost
+/// (about 30 ms on macOS with a long `PATH`, D3a measurement), so it runs
+/// once.
+struct Search {
+    /// Every repository the shell is in, by identity (`search`).
+    repo: Vec<bingsu_core::command::path::Id>,
+    folders: Vec<std::path::PathBuf>,
+    /// No collected repository root: the shell's folder stood for it.
+    fallback: bool,
+}
+
+/// The repositories the shell is in, by identity, for the PATH and
+/// executable rules: the root this round's collection reported, else the
+/// shell's own folder (C2 ruling J9), and every folder at or above the
+/// shell's that holds `.git` (U-24), so a round without a collected root
+/// still keeps a repository's folders out. The config units and the builtin
+/// languages share this one list and its one walk. A folder that cannot be
+/// read refuses the round, both its units and its languages.
+fn search(
+    environment: &[u8],
+    cwd: &[u8],
+    collected: Option<u16>,
+    me: u32,
+    groups: &mut SystemGroups,
+) -> Result<Search, Skip> {
+    let folder = plan::repo_folder(cwd, collected);
+    let mut repo: Vec<_> = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder))))
+        .map_err(|_| Skip::Failed)?
+        .into_iter()
+        .collect();
+    let scanned =
+        exec_path::repo_ancestors(Path::new(OsStr::from_bytes(cwd))).map_err(|_| Skip::Failed)?;
+    for id in scanned {
+        if !repo.contains(&id) {
+            repo.push(id);
+        }
+    }
+    let vars = Environ::parse(environment);
+    let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), &repo, me, groups);
+    Ok(Search {
+        repo,
+        folders,
+        fallback: collected.is_none(),
+    })
+}
+
 #[allow(clippy::too_many_arguments, reason = "one round's fixed inputs")]
 fn units(
     runnable: &[(String, plan::Runnable)],
     tried: &[(String, u64)],
     environment: &[u8],
     base: &Grant,
-    collected: Option<u16>,
+    found: &Search,
     me: u32,
     groups: &mut SystemGroups,
     scripts: &mut Scripts,
-) -> Result<Resolved, Skip> {
+) -> Resolved {
     let mut out = Resolved {
-        repo_fallback: collected.is_none(),
+        repo_fallback: found.fallback,
         ..Resolved::default()
     };
-    // The repositories the shell is in, by identity, for the PATH and
-    // executable rules: the root this round's collection reported, else the
-    // shell's own folder (C2 ruling J9), and every folder at or above the
-    // shell's that holds `.git` (U-24), so a round without a collected root
-    // still keeps a repository's folders out. Command rounds only. A folder
-    // that cannot be read refuses the round.
-    let folder = plan::repo_folder(&base.cwd, collected);
-    let mut repos: Vec<_> = exec_path::repo_id(Some(Path::new(OsStr::from_bytes(&folder))))
-        .map_err(|_| Skip::Failed)?
-        .into_iter()
-        .collect();
-    let scanned = exec_path::repo_ancestors(Path::new(OsStr::from_bytes(&base.cwd)))
-        .map_err(|_| Skip::Failed)?;
-    for id in scanned {
-        if !repos.contains(&id) {
-            repos.push(id);
-        }
-    }
-    let repo = repos.as_slice();
     let vars = Environ::parse(environment);
     out.dropped = vars.dropped;
-    let folders = exec_path::sanitize(vars.get(b"PATH").unwrap_or_default(), repo, me, groups);
-    let path = exec_path::path_value(&folders);
+    let (repo, folders) = (found.repo.as_slice(), &found.folders);
+    let path = exec_path::path_value(folders);
     // Round robin: never tried first, then the attempt longest ago.
     let attempts: Vec<(&str, Option<u64>)> = runnable
         .iter()
@@ -596,7 +734,7 @@ fn units(
             Policy::Argv { argv } => argv[0].as_slice(),
             Policy::UnsafeShell { .. } => SHELL,
         };
-        let Ok((found, checked)) = exec_path::lookup_open(word, &folders, repo, me, groups) else {
+        let Ok((found, checked)) = exec_path::lookup_open(word, folders, repo, me, groups) else {
             out.unresolved += 1;
             out.unresolved_ids.push(id.clone());
             continue;
@@ -644,7 +782,7 @@ fn units(
         }
     }
     out.units = trial.units;
-    Ok(out)
+    out
 }
 
 /// Writes all of `bytes` to the non-blocking `fd` by `until_ns`, waiting in
@@ -745,6 +883,13 @@ pub(crate) struct Report {
     pub published: Option<response::Response>,
     /// Results came back but could not be published (store busy or unsafe).
     pub publish_failed: bool,
+    /// Why builtin languages were hidden this round (D3 ruling Q4: the
+    /// reason goes to the log, never to the prompt).
+    pub hidden: Vec<&'static str>,
+    /// The round walked `PATH` (debug log; D3a re-review M3).
+    pub searched: bool,
+    /// Shell folders made canonical for rustup (debug log).
+    pub resolved: u32,
 }
 
 impl Round {
@@ -804,40 +949,51 @@ impl Round {
         mut self,
         permit: Permit,
         repo: Option<u16>,
+        languages: &Languages,
         me: u32,
         groups: &mut SystemGroups,
     ) -> Report {
         self.grant.permit = permit;
         let mut report = Report::default();
-        let unresolved = match units(
+        let builtins = !self.builtins.is_empty() && languages.ready(repo);
+        // Nothing to search for: no PATH walk, no folder read (D3a security
+        // review S-M3).
+        if !searches(!self.runnable.is_empty(), builtins) {
+            report.notes = self.abandon();
+            return report;
+        }
+        report.searched = true;
+        let Ok(found) = search(&self.environment, &self.grant.cwd, repo, me, groups) else {
+            report.failed = true;
+            report.notes = self.abandon();
+            return report;
+        };
+        let resolved = units(
             &self.runnable,
             &self.publish.attempts,
             &self.environment,
             &self.grant,
-            repo,
+            &found,
             me,
             groups,
             &mut self.scripts,
-        ) {
-            Ok(resolved) => {
-                report.unresolved = resolved.unresolved;
-                report.oversize = resolved.oversize;
-                report.repo_fallback = resolved.repo_fallback;
-                report.dropped = resolved.dropped;
-                self.grant.units = resolved.units;
-                if self.grant.units.is_empty() {
-                    self.publish_results(&mut report, &resolved.unresolved_ids);
-                    report.notes = self.abandon();
-                    return report;
-                }
-                resolved.unresolved_ids
-            }
-            Err(_) => {
-                report.failed = true;
-                report.notes = self.abandon();
-                return report;
-            }
-        };
+        );
+        report.unresolved = resolved.unresolved;
+        report.oversize = resolved.oversize;
+        report.repo_fallback = resolved.repo_fallback;
+        report.dropped = resolved.dropped;
+        self.grant.units = resolved.units;
+        if builtins {
+            report.resolved = self.plan_builtins(languages, &found, me, groups);
+        }
+        report.hidden = std::mem::take(&mut self.hidden);
+        // Fails without the probes: test_builtin_probe_runs_once_and_is_cached.
+        if self.grant.units.is_empty() && self.grant.probes.is_empty() {
+            self.publish_results(&mut report, &resolved.unresolved_ids);
+            report.notes = self.abandon();
+            return report;
+        }
+        let unresolved = resolved.unresolved_ids;
         let end = self
             .grant
             .helper_deadline
@@ -910,11 +1066,110 @@ impl Round {
         report
     }
 
+    /// The builtin languages of this round (D3a): each decided without
+    /// running (shown or hidden), or a probe added to the grant unless its
+    /// cached result stands. A language the collection did not answer
+    /// (it did not run or did not finish) is left as it was.
+    /// Returns how many times the shell's folder was made canonical.
+    fn plan_builtins(
+        &mut self,
+        languages: &Languages,
+        found: &Search,
+        me: u32,
+        groups: &mut SystemGroups,
+    ) -> u32 {
+        if self.builtins.is_empty() {
+            return 0;
+        }
+        let environment = self.environment.clone();
+        let vars = Environ::parse(&environment);
+        let shell_folder = self.grant.cwd.clone();
+        let resolved = std::cell::Cell::new(0);
+        let c = builtin_probe::Context {
+            vars: builtin_probe::whole(&vars),
+            folders: &found.folders,
+            repo: &found.repo,
+            cwd: &shell_folder,
+            me,
+            xcode_link: Path::new(builtin_probe::XCODE_SELECT_LINK),
+            command_line_tools: Path::new(builtin_probe::COMMAND_LINE_TOOLS),
+            resolved: &resolved,
+        };
+        let now = now_ns().unwrap_or(self.publish.clock.now);
+        for language in self.builtins.clone() {
+            let Some(version) = languages.get(language.id.as_bytes()) else {
+                continue;
+            };
+            let p = builtin_probe::plan(language, version, &c, groups);
+            let current = self
+                .current
+                .as_ref()
+                .and_then(|r| r.entry(Origin::Builtin, language.id))
+                .cloned();
+            let current = current.as_ref();
+            let (status, value) = match &p.action {
+                Action::Show(value) => (response::Status::Ok, value.clone()),
+                Action::Hide(why) => {
+                    self.hidden.push(why);
+                    (response::Status::Failed, String::new())
+                }
+                Action::Run(probe) => {
+                    self.run_probe(&p, probe.clone(), current);
+                    continue;
+                }
+            };
+            // The same decision already published is not written again: a
+            // fast or hidden value costs a store write only when it changes.
+            // Fails without it: test_builtin_fast_value_is_written_once.
+            let same = current.is_some_and(|e| {
+                e.policy == p.policy
+                    && e.environment == p.environment
+                    && e.status == status
+                    && e.value == value
+            });
+            if !same {
+                self.decided.push(decided(&p, now, status, value));
+            }
+        }
+        resolved.get()
+    }
+
+    /// Adds `probe` to the grant unless its cached result stands or it does
+    /// not fit the grant frame.
+    fn run_probe(&mut self, p: &Planned, probe: wire::Probe, current: Option<&response::Entry>) {
+        if !self.probes_allowed {
+            self.hidden.push(NEUTRAL_REFUSED);
+            return;
+        }
+        {
+            // Fails without it: test_builtin_probe_runs_once_and_is_cached.
+            let hit = current.is_some_and(|e| {
+                e.hit(
+                    &p.policy,
+                    &p.environment,
+                    self.publish.clock.now,
+                    builtin_probe::PROBE_CACHE_NS,
+                )
+            });
+            if hit {
+                return;
+            }
+            if !fits(&self.grant, &probe) {
+                self.hidden
+                    .push("a builtin probe does not fit the grant frame");
+                return;
+            }
+            self.grant.probes.push(probe);
+            self.probes.push(p.clone());
+        }
+    }
+
     /// Publishes the round's results and, as failed attempts at this time,
     /// the units that could not run (C4a review M2: not resolved, or over
     /// the relay input cap).
     fn publish_results(&self, report: &mut Report, unresolved: &[String]) {
         let mut entries = self.entries(&report.results);
+        entries.extend(self.decided.iter().cloned());
         if let Ok(now) = now_ns() {
             entries.extend(
                 unresolved
@@ -951,6 +1206,10 @@ impl Round {
     /// are D3's): each bound to the unit's policy digest and the original
     /// environment digest it ran with.
     fn entries(&self, results: &[Outcome]) -> Vec<response::Entry> {
+        let probes = results
+            .iter()
+            .filter(|o| o.origin == Origin::Builtin)
+            .filter_map(|o| self.probe_entry(o));
         results
             .iter()
             .filter(|o| o.origin == Origin::Config)
@@ -964,7 +1223,34 @@ impl Round {
                     .1;
                 response::entry_for(unit.id.clone(), unit.digest, env, self.publish.clock.now, o)
             })
+            .chain(probes)
             .collect()
+    }
+
+    /// A probe's entry: its version cut from the first line it printed
+    /// (`Python 3.12.1` shows `3.12.1`); a line with no version is a failed
+    /// probe with no value.
+    fn probe_entry(&self, o: &Outcome) -> Option<response::Entry> {
+        let p = self.probes.get(usize::from(o.index))?;
+        let mut e = response::entry_for(
+            p.language.id.to_owned(),
+            p.policy,
+            p.environment,
+            self.publish.clock.now,
+            o,
+        )?;
+        if e.status == response::Status::Ok {
+            // Fails without it: test_builtin_probe_publishes_only_a_version.
+            match bingsu_core::command::profile::version(p.language.profile, &e.raw) {
+                Some(v) => e.value = v.to_owned(),
+                None => {
+                    e.status = response::Status::Failed;
+                    e.value.clear();
+                    e.raw.clear();
+                }
+            }
+        }
+        Some(e)
     }
 
     /// Publishes `entries` into the command response of this context and
@@ -987,6 +1273,38 @@ impl Round {
             }
             super::collection_store::Admission::Deferred(_) => Err(StoreError::Busy),
         }
+    }
+}
+
+/// Whether `grant` with `probe` added still encodes as one frame; the
+/// units were fitted first, so a probe that does not fit is left out alone.
+fn fits(grant: &Grant, probe: &wire::Probe) -> bool {
+    let mut trial = grant.clone();
+    trial.probes.push(probe.clone());
+    // Fails without it: a_probe_past_the_frame_is_left_out.
+    wire::encode(&Message::Grant(trial)).is_ok()
+}
+
+/// Whether a round walks `PATH` at all: only for config units to run or
+/// builtin languages the collection answered (D3a security review S-M3).
+fn searches(config_units: bool, builtins: bool) -> bool {
+    // Fails without it: a_round_with_nothing_to_decide_searches_nothing.
+    config_units || builtins
+}
+
+/// A builtin entry decided without running anything, at `now`.
+fn decided(p: &Planned, now: u64, status: response::Status, value: String) -> response::Entry {
+    response::Entry {
+        origin: Origin::Builtin,
+        id: p.language.id.to_owned(),
+        policy: p.policy,
+        environment: p.environment,
+        pattern: [0; 32],
+        attempted_at: now,
+        completed_at: now,
+        status,
+        raw: value.clone(),
+        value,
     }
 }
 
@@ -1023,6 +1341,77 @@ mod tests {
             },
         )
     }
+    // 폴더 사실이 저장소를 확정했을 때만 내장 언어를 정한다. in_repo를 모르거나(탐색 깊이 제한) 저장소 안인데 뿌리
+    // 위치를 모르면(별칭 경로) 미확정이다(D3a 재리뷰 H1). 이것을 실패시키는 것: 미확정을 저장소 밖으로 보는 것,
+    // 뿌리 위치 없는 저장소 안을 받는 것.
+    #[test]
+    fn roots_stay_unknown_unless_settled() {
+        use bingsu_core::collection::path_facts::PathFactInput;
+        let of = |in_repo, repo_component| {
+            Root::of(&PathFactInput {
+                in_repo,
+                repo_component,
+                ..PathFactInput::default()
+            })
+        };
+        assert_eq!(of(Some(false), None), Root::Outside);
+        assert_eq!(of(Some(true), Some(1)), Root::Repo(1));
+        assert_eq!(of(None, None), Root::Unknown);
+        assert_eq!(of(Some(true), None), Root::Unknown);
+        assert_eq!(of(None, Some(1)), Root::Unknown);
+    }
+
+    // 수집 답과 같은 저장소의 폴더 사실이 있을 때만 내장 언어를 정하고(D3a 리뷰 H1), 할 일이 없는 회차는 PATH를
+    // 걷지 않는다(보안 리뷰 S-M3). 이것을 실패시키는 것: 폴더 사실 없이 내장 언어를 정하는 것(셸 폴더가 저장소를
+    // 대신함), 다른 저장소의 사실을 받는 것, 답 없는 회차를 정하는 것, 할 일이 없어도 탐색하는 것.
+    #[test]
+    fn a_round_with_nothing_to_decide_searches_nothing() {
+        use bingsu_core::collection::language::Version;
+        let answered = |root| Languages {
+            answers: vec![(b"node".to_vec(), Version::None)],
+            root,
+        };
+        assert!(answered(Root::Outside).ready(None));
+        assert!(!answered(Root::Outside).ready(Some(2)));
+        assert!(answered(Root::Repo(2)).ready(Some(2)));
+        assert!(!answered(Root::Unknown).ready(None));
+        assert!(!answered(Root::Repo(2)).ready(Some(3)));
+        assert!(
+            !Languages {
+                answers: Vec::new(),
+                root: Root::Outside
+            }
+            .ready(None)
+        );
+        assert!(!searches(false, false));
+        assert!(searches(true, false));
+        assert!(searches(false, true));
+    }
+
+    // 허가 프레임을 거의 채운 grant에는 probe를 더하지 않는다(그 probe만 빠지고 회차는 그대로). 이것을 실패시키는
+    // 것: fits가 인코딩 실패를 보지 않는 것.
+    #[test]
+    fn a_probe_past_the_frame_is_left_out() {
+        let probe = wire::Probe {
+            profile: bingsu_core::command::profile::NODE,
+            executable: b"/usr/bin/node".to_vec(),
+            pin: None,
+            toolchain: None,
+        };
+        let mut g = base();
+        assert!(fits(&g, &probe));
+        // The longest shell folder that still encodes: the grant is full.
+        let full = (1..wire::FRAME_MAX)
+            .rev()
+            .find(|n| {
+                g.cwd = [b"/".as_slice(), &vec![b'a'; *n]].concat();
+                wire::encode(&Message::Grant(g.clone())).is_ok()
+            })
+            .unwrap();
+        g.cwd = [b"/".as_slice(), &vec![b'a'; full]].concat();
+        assert!(!fits(&g, &probe));
+    }
+
     fn base() -> Grant {
         Grant {
             permit: Permit {
@@ -1130,12 +1519,18 @@ mod tests {
             &[],
             &big(20 * 1024),
             &base(),
-            None,
+            &search(
+                &big(20 * 1024),
+                &base().cwd,
+                None,
+                sys::current_uid(),
+                &mut groups(),
+            )
+            .unwrap(),
             sys::current_uid(),
             &mut groups(),
             &mut Scripts::default(),
-        )
-        .unwrap();
+        );
         assert_eq!((got.units.len(), got.oversize), (1, 1));
         assert_eq!(got.units[0].id, "custom/small");
         let eight: Vec<_> = (0..8)
@@ -1146,12 +1541,18 @@ mod tests {
             &[],
             &big(15 * 1024),
             &base(),
-            None,
+            &search(
+                &big(15 * 1024),
+                &base().cwd,
+                None,
+                sys::current_uid(),
+                &mut groups(),
+            )
+            .unwrap(),
             sys::current_uid(),
             &mut groups(),
             &mut Scripts::default(),
-        )
-        .unwrap();
+        );
         assert!(
             got.oversize > 0 && !got.units.is_empty(),
             "{} {}",
@@ -1173,12 +1574,11 @@ mod tests {
             &[],
             env,
             &base(),
-            None,
+            &search(env, &base().cwd, None, sys::current_uid(), &mut groups()).unwrap(),
             sys::current_uid(),
             &mut groups(),
             &mut Scripts::default(),
-        )
-        .unwrap();
+        );
         assert!(got.repo_fallback);
         assert_eq!(
             got.dropped,
@@ -1192,12 +1592,11 @@ mod tests {
             &[],
             env,
             &base(),
-            Some(0),
+            &search(env, &base().cwd, Some(0), sys::current_uid(), &mut groups()).unwrap(),
             sys::current_uid(),
             &mut groups(),
             &mut Scripts::default(),
-        )
-        .unwrap();
+        );
         assert!(!got.repo_fallback);
     }
 
@@ -1241,16 +1640,17 @@ mod tests {
         let run = |cwd: &Path| {
             let mut grant = base();
             grant.cwd = cwd.as_os_str().as_bytes().to_vec();
-            units(
+            let found = search(&env, &grant.cwd, None, sys::current_uid(), &mut groups())?;
+            Ok::<_, Skip>(units(
                 std::slice::from_ref(&unit),
                 &[],
                 &env,
                 &grant,
-                None,
+                &found,
                 sys::current_uid(),
                 &mut groups(),
                 &mut Scripts::default(),
-            )
+            ))
         };
         let sub = repo.join("sub");
         assert_eq!(run(&sub).unwrap().unresolved, 0, "control: no repository");

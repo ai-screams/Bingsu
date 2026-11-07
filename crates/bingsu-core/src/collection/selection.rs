@@ -13,6 +13,42 @@ pub struct Catalog<'a> {
     pub workers: u32,
 }
 
+/// The bits of the builtin language segments in `field::BUILTIN`.
+pub const LANGUAGE_SEGMENTS: u32 = language_segments();
+
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn language_segments() -> u32 {
+    let mut mask = 0;
+    let mut i = 0;
+    while i < field::BUILTIN.len() && i < 32 {
+        let mut j = 0;
+        while j < super::language::BUILTIN.len() {
+            if same(
+                field::BUILTIN[i].id.as_bytes(),
+                super::language::BUILTIN[j].id,
+            ) {
+                mask |= 1 << i;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    mask
+}
+
 /// Only directory facts and Git have shipped worker capability.
 pub const PRODUCT: Catalog<'static> = Catalog {
     segments: field::BUILTIN,
@@ -51,11 +87,24 @@ impl Catalog<'_> {
             .unwrap_or(0)
     }
 
+    /// The workers a round asks: those of the drawn segments, and the
+    /// folder facts (the `dir` worker) whenever a builtin language is
+    /// drawn, since their repository root bounds the builtin probes' PATH
+    /// and executable rules (D3a review H1). One rule for the helper's
+    /// request and the front's expected binding (D3a review M2).
     pub fn worker_mask<L: LayoutView>(&self, config: &L, width: u16, redraw: bool) -> u32 {
         if redraw {
             return 0;
         }
-        builtin_mask(config, width) & self.workers & self.declared_mask()
+        let drawn = builtin_mask(config, width);
+        // Fails without it: language_segments_ask_for_the_folder_facts, and
+        // test_builtin_probe_never_runs_from_the_repository.
+        let facts = if drawn & LANGUAGE_SEGMENTS != 0 {
+            1 << super::DIR_SEGMENT
+        } else {
+            0
+        };
+        (drawn | facts) & self.workers & self.declared_mask()
     }
 }
 

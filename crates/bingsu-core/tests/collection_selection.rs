@@ -560,3 +560,29 @@ fn helper_handoff_reserializes_oversized_width() {
     assert_eq!(words[width_at + 1].as_ref(), b"0");
     assert!(words.iter().all(|w| w.len() < oversized.len()));
 }
+
+// 내장 언어 segment를 그리면 dir 폴더 사실을 함께 묻는다. 도우미 요청과 앞단의 기대 binding이 같은 함수로 이 mask를
+// 얻으므로 둘이 어긋나지 않는다(D3a 리뷰 H1, M2). redraw는 아무것도 묻지 않는다. 이것을 실패시키는 것: 언어
+// segment에 dir 비트를 더하지 않는 것, 언어가 없어도 더하는 것, 언어 비트 표에서 한 언어를 빠뜨리는 것.
+#[test]
+fn language_segments_ask_for_the_folder_facts() {
+    for (template, expected) in [
+        ("{node}{char}", 2),
+        ("{git}{node}{char}", 10),
+        ("{python}{char}", 2),
+        ("{rust}{char}", 2),
+        ("{go}{char}", 2),
+        ("{git}{char}", 8),
+        ("{time}{char}", 0),
+    ] {
+        let c = config(&format!(
+            "[style]\ntemplate='{template}'\n[layout.when.narrow.style]\ntemplate='{template}'\n"
+        ));
+        assert_eq!(
+            selection::worker_mask(&c, 80, false),
+            expected,
+            "{template}"
+        );
+        assert_eq!(selection::worker_mask(&c, 80, true), 0, "{template}");
+    }
+}

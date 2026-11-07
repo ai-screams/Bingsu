@@ -1002,7 +1002,7 @@ fn untrusted_text_is_resanitized() {
     assert_eq!(response::declared_len(&bad), Err(E::Budget));
     // Exercise every explicit field tag with the product declarations.
     let mut q = request(false);
-    q.binding.mask = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 6);
+    q.binding.mask = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 10);
     let mut t = Transcript::new(&q);
     t.accept(frame(&q, Kind::Ready, &ready(q.binding.mask)))
         .unwrap();
@@ -1015,7 +1015,7 @@ fn untrusted_text_is_resanitized() {
             b"",
             &[(0, 0, 1, vec![4, 0, 0, 0, 1]), text_field(2, b"branch")],
         ),
-        update(6, b"", &[(0, 0, 2, (-4i64).to_le_bytes().to_vec())]),
+        update(10, b"", &[(0, 0, 2, (-4i64).to_le_bytes().to_vec())]),
     ] {
         t.accept(frame(&q, Kind::Update, &p)).unwrap();
     }

@@ -343,3 +343,46 @@ fn decoded_global_excludes_reach_collection_through_exchange() {
         &Field::known(FieldValue::Bool(false))
     );
 }
+
+// 언어만 묻는 요청(worker mask 0)도 worker의 두 번째 정책 검사를 통과해 수집한다. 그 검사는 helper와 같은
+// 규칙(request_with_languages)을 쓴다(D3a 리뷰 M2). 이것을 실패시키는 것: 재검사가 언어를 버리는
+// collection::request를 쓰는 것(수집이 아예 일어나지 않음).
+#[test]
+fn a_language_only_request_is_collected() {
+    if !isolated("a_language_only_request_is_collected") {
+        return;
+    }
+    let folder = Dir::new("lang-only");
+    let lock_dir = Dir::new("lock-lang");
+    let lock = File::create(lock_dir.0.join("lock")).unwrap();
+    let build = BuildId([7; 32]);
+    let mut request = request(folder.0.as_os_str().as_bytes(), build);
+    request.binding.mask = 0;
+    request.global_excludes = Vec::new();
+    request.languages = vec![bingsu_core::collection::language::BUILTIN[0].query()];
+    let (request_read, mut request_write) = pipe();
+    let (mut result_read, result_write) = pipe();
+    request_write.write_all(&request_frames(&request)).unwrap();
+    drop(request_write);
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        result_read.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let mut fds = sys::worker_fds_for_test(result_write, request_read, lock);
+    let mut asked = Vec::new();
+    worker::exchange_for_test(
+        &mut fds,
+        &GIT_ONLY,
+        build,
+        Duration::from_secs(120),
+        |decoded, _sink, _deadline| {
+            asked = decoded.languages.iter().map(|q| q.id.clone()).collect();
+            Ok(())
+        },
+    )
+    .unwrap();
+    drop(fds);
+    let _ = reader.join().unwrap();
+    assert_eq!(asked, vec![b"node".to_vec()]);
+}
