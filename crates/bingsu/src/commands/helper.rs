@@ -146,16 +146,12 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 // D1 (ruling Q1): the user-defined languages' detect_files;
                 // the built-in four are asked for by their segments (D3). After
                 // the global excludes, so queries that do not fit what the
-                // request leaves are the ones dropped, never the excludes. No
-                // test fails without this block yet: the detect_files key opens
-                // in D3, which tests it end to end with the key (ruling Q8).
+                // request leaves are the ones dropped, never the excludes.
                 if let Some((config, _)) = display {
                     // After the builtin languages: a user query that does
                     // not fit drops the user queries, never the builtins.
                     let builtins = request.languages.len();
-                    request
-                        .languages
-                        .extend(collection::language::user_queries(&config.exec_units));
+                    request.languages.extend(user_queries(&config.exec_units));
                     if request.encode_body().is_err() {
                         request.languages.truncate(builtins);
                     }
@@ -700,6 +696,22 @@ fn drawn_builtins(
         .collect()
 }
 
+/// The user-defined languages the round asks the collection about: only
+/// units that may run (`plan::runnable`), so a language that cannot run
+/// yet costs the collection no marker lookups and no share of its time
+/// (D3c-1 review M1). Fails without the filter:
+/// a_language_that_cannot_run_is_not_asked_about.
+fn user_queries(
+    units: &[bingsu_core::config::compile::ExecUnit],
+) -> Vec<collection::language::LanguageQuery> {
+    let runnable: Vec<_> = units
+        .iter()
+        .filter(|u| bingsu_core::command::plan::runnable(u).is_some())
+        .cloned()
+        .collect();
+    collection::language::user_queries(&runnable)
+}
+
 pub(crate) fn selected_request(
     catalog: &collection::selection::Catalog<'_>,
     e: &bingsu_core::envelope::Envelope,
@@ -738,6 +750,38 @@ pub(crate) fn selected_request(
         languages,
     )
     .map_err(|_| super::snapshot_store::StoreError::Unsafe)
+}
+
+#[cfg(test)]
+mod query_tests {
+    use bingsu_core::config::compile::{ExecPolicy, ExecUnit};
+
+    // 아직 실행할 수 없는 사용자 언어(D3c-1)는 수집 질의에 싣지 않는다. 표시 파일 조회가 수집 시간을 쓰지 않게
+    // 하려는 것이다. 양성 대조로, 같은 단위를 core의 질의 함수에 바로 넣으면 질의 하나가 된다. 이것을 실패시키는
+    // 것: helper의 runnable 거르기를 지우는 것.
+    #[test]
+    fn a_language_that_cannot_run_is_not_asked_about() {
+        let unit = ExecUnit {
+            id: "custom/deno".into(),
+            policy: ExecPolicy::Language {
+                interpreter: Some("deno".into()),
+                version_argv: vec!["--version".into()],
+                detect_files: vec!["deno.json".into()],
+            },
+            timeout_ms: None,
+            cache_ms: None,
+            origins: Vec::new(),
+            approved_by: Vec::new(),
+            shown_at: Vec::new(),
+            not_run: None,
+        };
+        let units = [unit];
+        assert_eq!(
+            bingsu_core::collection::language::user_queries(&units).len(),
+            1
+        );
+        assert!(super::user_queries(&units).is_empty());
+    }
 }
 
 #[cfg(test)]

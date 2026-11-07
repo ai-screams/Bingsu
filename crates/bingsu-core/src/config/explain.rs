@@ -138,15 +138,17 @@ pub fn units(c: &CompiledConfig) -> Vec<UnitView> {
                         value: detect_files.join(" "),
                         from: from("detect_files"),
                     });
-                    let mut version = interpreter.clone().unwrap_or_default();
-                    for a in version_argv {
-                        version.push(' ');
-                        version.push_str(a);
-                    }
+                    // Each key with its own origin: `extends` can bring
+                    // them from different files (D3c-1 review L1).
+                    rows.push(Row {
+                        key: "interpreter",
+                        value: interpreter.clone().unwrap_or_default(),
+                        from: from("interpreter"),
+                    });
                     rows.push(Row {
                         key: "version",
-                        value: version,
-                        from: from("interpreter"),
+                        value: version_argv.join(" "),
+                        from: from("version"),
                     });
                     rows.push(limit("timeout", u.timeout_ms, from("timeout")));
                     rows.push(limit("cache", u.cache_ms, from("cache")));

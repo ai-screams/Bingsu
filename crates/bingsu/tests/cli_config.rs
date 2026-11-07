@@ -558,6 +558,34 @@ fn explain_shows_origin_per_key() {
     assert!(line("executable", "echo").contains("/bin/echo"), "{stdout}");
 }
 
+// language 단위의 interpreter와 version은 각자 자기 파일과 줄을 출처로 보인다(extends나 conf.d로 다른 파일에서
+// 올 수 있음, D3c-1 리뷰 L1). 이것을 실패시키는 것: version 줄의 출처를 interpreter의 것으로 쓰는 것, 두 키를 한
+// 줄로 합치는 것.
+#[test]
+fn explain_shows_each_language_key_from_its_file() {
+    let e = Env::new("cli_config", "explain-lang-origin");
+    e.put_config(
+        "config.toml",
+        "[segment.\"custom/deno\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n[layout.line1]\nleft = [\"dir\", \"custom/deno\"]\n",
+    );
+    e.put_config(
+        "conf.d/20-version.toml",
+        "[segment.\"custom/deno\"]\nversion = [\"-V\"]\n",
+    );
+    let (code, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
+    assert_eq!(code, Some(0), "{stdout}");
+    let line = |key: &str| {
+        stdout
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(key))
+            .unwrap_or_else(|| panic!("{key}: {stdout}"))
+            .to_owned()
+    };
+    assert!(line("interpreter").contains("config.toml:4"), "{stdout}");
+    assert!(line("version").contains("20-version.toml:2"), "{stdout}");
+    assert!(line("detect").contains("config.toml:3"), "{stdout}");
+}
+
 // GATE-EXPLAIN.3: 실행하지 않는 단위는 이유와 그 진단 코드를 보인다(남이 쓸 수 있는 파일의 command → W405).
 // 이것을 실패시키는 것: 이유 칸을 빼는 것, check --explain이 설명 절을 붙이지 않는 것.
 #[test]
@@ -635,7 +663,7 @@ fn explain_shows_shell_relative_and_language_units() {
     let e = Env::new("cli_config", "explain-kinds");
     e.put_config(
         "config.toml",
-        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
+        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\ntimeout = \"123ms\"\ncache = \"7s\"\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
     );
     let (_, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
     let section = |id: &str| {
@@ -671,12 +699,22 @@ fn explain_shows_shell_relative_and_language_units() {
         "{lang}"
     );
     assert!(
-        lang.lines().any(|l| l
-            .split_whitespace()
-            .take(3)
-            .eq(["version", "deno", "--version"])),
+        lang.lines()
+            .any(|l| l.split_whitespace().take(2).eq(["interpreter", "deno"])),
         "{lang}"
     );
+    assert!(
+        lang.lines()
+            .any(|l| l.split_whitespace().take(2).eq(["version", "--version"])),
+        "{lang}"
+    );
+    for (key, value) in [("timeout", "123 ms"), ("cache", "7000 ms")] {
+        assert!(
+            lang.lines()
+                .any(|l| l.trim_start().starts_with(key) && l.contains(value)),
+            "{key} {value}: {lang}"
+        );
+    }
 }
 
 // 시간 상한·캐시·명시한 cwd는 각자 값과 출처를 보이고, 셸 단위는 셸 본문을 보인다. 정제한 PATH로 찾으므로, 앞쪽
