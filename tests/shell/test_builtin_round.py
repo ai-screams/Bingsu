@@ -103,6 +103,23 @@ def test_builtin_probe_runs_once_and_is_cached(tmp_path, _native_boot_required):
     assert counted(node) == 1, "a cached probe ran again"
 
 
+# D3b: 앞단이 이 셸의 내장 언어 버전을 프롬프트에 그린다. 같은 폴더라도 언어 변수가 다른 셸(여기서는 volta
+# 폴더 변수)에는 그 값을 그리지 않는다(D3b Q1). 이것을 실패시키는 것: 앞단이 언어 segment의 응답 값을 채우지
+# 않는 것, 앞단의 환경 요약값 비교를 빼는 것(다른 셸에도 보임).
+def test_builtin_version_is_drawn_for_its_own_shell(tmp_path, _native_boot_required):
+    session = session_with(tmp_path, "node")
+    node = install(session.base / "bin", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    ready(session)
+    published_rounds(session)
+    assert b"18.20.4" in command_response(session)
+    assert b"18.20.4" in session.prompt()
+    session.wait_quiet(timeout=8)
+    session.env["VOLTA_HOME"] = str(session.base / "volta")
+    assert b"18.20.4" not in session.prompt()
+    session.wait_quiet(timeout=8)
+
+
 # 프로브의 첫 줄에서 버전만 값으로 남긴다. 버전이 없는 줄은 값 없는 실패 항목이고 원본 줄도 남기지 않는다. 이것을
 # 실패시키는 것: probe_entry의 버전 추출을 지우는 것(첫 줄이 그대로 값이 됨).
 def test_builtin_probe_publishes_only_a_version(tmp_path, _native_boot_required):
