@@ -2,6 +2,7 @@
 //! overflow or conditional groups. A catalog grants worker capability separately.
 use super::path_facts::PathQuery;
 use crate::{
+    config::compile::CustomKind,
     field::{self, SegmentDecl},
     layout_view::LayoutView,
     template::compile::{CompiledLine, Node},
@@ -88,24 +89,61 @@ impl Catalog<'_> {
     }
 
     /// The workers a round asks: those of the drawn segments, and the
-    /// folder facts (the `dir` worker) whenever a builtin language is
-    /// drawn, since their repository root bounds the builtin probes' PATH
-    /// and executable rules (D3a review H1). One rule for the helper's
-    /// request and the front's expected binding (D3a review M2).
+    /// folder facts (the `dir` worker) whenever a language is drawn: a
+    /// builtin one, since the repository root bounds the builtin probes'
+    /// PATH and executable rules (D3a review H1), or a user language that
+    /// may run, whose detect files are searched up to that root. A layout
+    /// that draws only a user language still collects, so its files are
+    /// found. One rule for the helper's request and the front's expected
+    /// binding (D3a review M2).
     pub fn worker_mask<L: LayoutView>(&self, config: &L, width: u16, redraw: bool) -> u32 {
         if redraw {
             return 0;
         }
         let drawn = builtin_mask(config, width);
         // Fails without it: language_segments_ask_for_the_folder_facts, and
-        // test_builtin_probe_never_runs_from_the_repository.
-        let facts = if drawn & LANGUAGE_SEGMENTS != 0 {
+        // test_builtin_probe_never_runs_from_the_repository; without the
+        // user language half, a_drawn_user_language_asks_for_the_folder_facts.
+        let facts = if drawn & LANGUAGE_SEGMENTS != 0 || draws_user_language(config, width) {
             1 << super::DIR_SEGMENT
         } else {
             0
         };
         (drawn | facts) & self.workers & self.declared_mask()
     }
+}
+
+/// Whether the lines drawn at `width` show a user language segment whose
+/// unit may run: drawn by a trusted layout and turned on (`not_run` is
+/// none), the units the helper asks the collection about. Most configs
+/// declare no language, and they stop at the first check.
+fn draws_user_language<L: LayoutView>(config: &L, width: u16) -> bool {
+    let shared = config.shared();
+    let language = |seg: u16| {
+        usize::from(seg)
+            .checked_sub(field::BUILTIN.len())
+            .and_then(|i| shared.custom.get(i))
+            .is_some_and(|c| {
+                matches!(c.kind, CustomKind::Language)
+                    && shared
+                        .exec_units
+                        .iter()
+                        .any(|u| u.id == c.id && u.not_run.is_none())
+            })
+    };
+    if !shared
+        .custom
+        .iter()
+        .any(|c| matches!(c.kind, CustomKind::Language))
+    {
+        return false;
+    }
+    config.lines_at(width).is_some_and(|lines| {
+        lines.iter().flat_map(|l| l.nodes()).any(|node| match node {
+            Node::Segment { seg, .. } | Node::Field { seg, .. } => language(*seg),
+            _ => false,
+        })
+    })
 }
 
 pub fn worker_mask<L: LayoutView>(config: &L, width: u16, redraw: bool) -> u32 {
