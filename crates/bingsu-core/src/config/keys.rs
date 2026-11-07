@@ -728,6 +728,15 @@ fn matches(pattern: &str, path: &[&str]) -> bool {
     {
         return false;
     }
+    // The same for the last name: rows under `segment.*` share the first
+    // name, so a key of a user segment would otherwise walk every one of
+    // them. A row ending in `*` can match any last name.
+    if path
+        .last()
+        .is_some_and(|last| !pattern.ends_with(last) && !pattern.ends_with('*'))
+    {
+        return false;
+    }
     let mut p = pattern.split('.');
     let mut n = 0;
     for seg in path {
