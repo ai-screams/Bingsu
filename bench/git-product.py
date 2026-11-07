@@ -45,9 +45,21 @@ CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 #   prompts pass no session, so no unit runs and nothing is published. Its
 #   difference from max is the cost of drawing command values (U-23).
 # - prompt-commands-redraw: the max config, redrawn (`--redraw`: no helper).
+# - prompt-commands-max-empty-redraw: the empty max config, redrawn. Neither
+#   redraw starts a helper, so its difference from the redraw case is the
+#   prompt's own cost of drawing command values (m6-P1).
+# - prompt-text-max: the max layout and width with 32 text segments of the
+#   same values instead of commands; its difference from max is what the
+#   command feature itself adds (reading, decoding, deciding), apart from
+#   drawing 32 wide segments (U-23).
 SESSION = "0123456789abcdef0123456789abcdef"
 COMMAND_CASES = ("prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
-                 "prompt-commands-max-empty", "prompt-commands-redraw")
+                 "prompt-commands-max-empty", "prompt-commands-redraw", "prompt-commands-max-empty-redraw",
+                 "prompt-text-max")
+EMPTY_CASES = ("prompt-commands-max-empty", "prompt-commands-max-empty-redraw")
+REDRAW_CASES = ("prompt-commands-redraw", "prompt-commands-max-empty-redraw")
+# Cases without any command response for the whole run.
+NO_RESPONSE_CASES = EMPTY_CASES + ("prompt-text-max",)
 ALL_CASES = CASES + COMMAND_CASES
 STAGES = ("A", "PathFacts", "B", "C", "D")
 
@@ -431,11 +443,15 @@ def command_setup(case, directory):
             values.append(data)
             argv.append(["/usr/bin/head", "-c", "4096", str(path)])
     lines = []
+    if case == "prompt-text-max":
+        for i, value in enumerate(values):
+            lines.append(f"[segment.\"custom/k{i:02}\"]\nkind = 'text'\ntext = {json.dumps(value.decode())}\n")
+        argv = []
     for i, words in enumerate(argv):
         quoted = ", ".join(json.dumps(w) for w in words)
         allowed = f"env_allow = [{', '.join(json.dumps(n) for n in allow[i])}]\n" if allow[i] else ""
         lines.append(f"[segment.\"custom/k{i:02}\"]\nkind = 'command'\ncommand = [{quoted}]\ncache = '3600s'\n{allowed}")
-    ids = ", ".join(f"'custom/k{i:02}'" for i in range(len(argv)))
+    ids = ", ".join(f"'custom/k{i:02}'" for i in range(len(values)))
     config = "icons = 'ascii'\n" + "".join(lines) + f"[layout.line1]\nleft = [{ids}, 'char']\n"
     return config, env, {f"custom/k{i:02}": v for i, v in enumerate(values)}
 
@@ -468,6 +484,23 @@ def response_units(directory):
     return {}
 
 
+def shown_value(value):
+    """The value the helper publishes for a first line `value`: the prefix
+    the prompt reads to cut a user segment (`Clean::read_prefix`, 64 cells:
+    272 bytes, back to a character boundary)."""
+    end = min(len(value), 64 * 4 + 16)
+    while end < len(value) and end > 0 and value[end] & 0xC0 == 0x80:
+        end -= 1
+    return value[:end]
+
+
+def response_ready(units, values):
+    """Whether the published units are exactly `values`, each a success
+    holding the whole value or its read prefix (`shown_value`)."""
+    return set(units) == set(values) and all(
+        units[name] in ((0, value), (0, shown_value(value))) for name, value in values.items())
+
+
 def drawn_units(values, record):
     """How many units of `values` the record shows, by their marks."""
     return sum(v[:4] in record for v in values.values())
@@ -483,7 +516,7 @@ def command_context(binary, directory, case):
     # The shell hooks pass a session value on every prompt; command units run
     # only with one. The empty case passes none: the helper still starts every
     # prompt, but runs no unit and publishes no command response.
-    empty = case == "prompt-commands-max-empty"
+    empty = case in EMPTY_CASES
     if not empty:
         command = [*command, "--session", SESSION]
     if len(values) == 32:
@@ -492,23 +525,33 @@ def command_context(binary, directory, case):
         command[command.index("--width") + 1] = "2400"
     if not values:
         return command, env, values, None
+    if case == "prompt-text-max":
+        result = M3B.run(command, env=env)
+        drawn = drawn_units(values, result.stdout)
+        if not M3B.normal_record(result) or any(directory.rglob("store/command")) or drawn != len(values):
+            raise ValueError(f"{case}: a command response exists or the prompt draws {drawn} units")
+        return command, env, values, drawn
     if empty:
+        if case in REDRAW_CASES:
+            command = [*command, "--redraw"]
         result = M3B.run(command, env=env)
         drawn = drawn_units(values, result.stdout)
         if not M3B.normal_record(result) or any(directory.rglob("store/command")) or drawn:
             raise ValueError(f"{case}: a command response exists or the prompt draws {drawn} units")
         return command, env, values, 0
     # Each prompt starts a refresh helper, which runs at most eight units a
-    # round and caches the results: wait until every unit succeeded with its value.
-    want = {name: (0, value) for name, value in values.items()}
+    # round and caches the results: wait until every unit succeeded with its
+    # value. A build that publishes only the part the prompt reads stores the
+    # read prefix; an older one (the base of a comparison) stores the whole
+    # value. Either is ready.
     for _ in range(400):
         result = M3B.run(command, env=env)
-        if M3B.normal_record(result) and response_units(directory) == want:
+        if M3B.normal_record(result) and response_ready(response_units(directory), values):
             break
         time.sleep(0.05)
     else:
         raise ValueError(f"{case}: the command response never held every unit's value")
-    if case == "prompt-commands-redraw":
+    if case in REDRAW_CASES:
         command = [*command, "--redraw"]
     drawn = drawn_units(values, M3B.run(command, env=env).stdout)
     if drawn not in (0, len(values)):
@@ -540,7 +583,7 @@ def observe_command(binary, contexts, directory, case):
     if now != drawn:
         return {"status": "BLOCKED", "reason": f"drew {now} of {len(values)} units, the warm prompt {drawn}"}
     # The empty case stays without a response for the whole run.
-    if case == "prompt-commands-max-empty" and any(directory.rglob("store/command")):
+    if case in NO_RESPONSE_CASES and any(directory.rglob("store/command")):
         return {"status": "BLOCKED", "reason": "a command response was published"}
     return {"status": "OBSERVED", "prompt_ns": elapsed, "units": len(values), "drawn": now}
 

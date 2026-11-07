@@ -454,6 +454,14 @@ pub fn entry_for(
     } else {
         String::new()
     };
+    // The value the prompt draws: the part of the first line it reads to
+    // cut it to a user segment's cells (m6-P1), so the response it decodes
+    // carries at most 272 bytes a unit instead of 4 KB. The raw line stays
+    // whole for `match`. The prompt cuts command values with the same
+    // `CUSTOM_TEXT_CELLS`; if command segments ever get more cells than
+    // that, change this cap with them, or wider values are cut short here
+    // without any error.
+    let value = crate::field::Clean::read_prefix(&raw, crate::field::CUSTOM_TEXT_CELLS).into();
     Some(Entry {
         origin: o.origin,
         id,
@@ -463,7 +471,7 @@ pub fn entry_for(
         attempted_at: attempted_at.min(o.ended_at),
         completed_at: o.ended_at,
         status: if ok { Status::Ok } else { Status::Failed },
-        value: raw.clone(),
+        value,
         raw,
     })
 }
