@@ -547,3 +547,26 @@ def test_untraced_creation_keeps_the_bound_blocked():
     assert pm.certify(obs, proofs, error, no_diagnostic(), "m")["rss_upper_bytes"] is None
     host = quiet_host()
     assert pm.obligations(host, host, single_threaded_prompt())["untraced_creation"] == {"status": "open", "gaps": [pm.OPEN_UNTRACED]}
+
+
+# 이것을 실패시키는 것: hook이 부르는 프로그램을 보지 않는 것(형제가 없으면 `bingsu prompt`를 조용히 잼),
+# 트리에 bingsu-prompt가 없는데 다른 프로그램을 받는 것.
+def test_hook_front_follows_the_tree(tmp_path):
+    tree = tmp_path / "tree"
+    (tree / "crates/bingsu").mkdir(parents=True)
+    (tree / "Cargo.toml").write_text("")
+    binary = tree / "target/release/bingsu"
+    binary.parent.mkdir(parents=True)
+    dedicated = binary.with_name("bingsu-prompt")
+    call = lambda program: b"  { _bingsu_rec=$('" + os.fsencode(program) + b"' prompt --ctx 1 --record 'B1');\n"
+    assert pm.hook_front(binary, call(binary)) == str(binary)
+    with pytest.raises(ValueError):
+        pm.hook_front(binary, call(dedicated))
+    (tree / "crates/bingsu-prompt").mkdir()
+    (tree / "crates/bingsu-prompt/Cargo.toml").write_text("")
+    assert pm.hook_front(binary, call(dedicated)) == str(dedicated)
+    # zsh's init quotes the call inside one $'…' word.
+    assert pm.hook_front(binary, b"eval $'{ _bingsu_rec=$(\\'" + os.fsencode(dedicated) + b"\\' prompt --ctx 1'") == str(dedicated)
+    for wrong in (call(binary), b"", call(dedicated) * 2):
+        with pytest.raises(ValueError):
+            pm.hook_front(binary, wrong)
