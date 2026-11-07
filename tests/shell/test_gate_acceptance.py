@@ -166,6 +166,11 @@ M6_GATES = {
         "A selected version that is not installed, or a manager choice that is not known, is hidden, never run "
         "through a shim or proxy",
     ),
+    # M6 D3b: the prompt draws a builtin version only for the shell it was decided for.
+    "GATE-LANG-SHOW": (
+        "A builtin version is drawn in the prompt of the shell whose language variables decided it, and not in a "
+        "shell in the same folder whose variables differ",
+    ),
 }
 GATE_IDS = M3D_GATE_IDS + tuple(M4_GATES) + tuple(M6_GATES)
 
@@ -334,8 +339,8 @@ def test_gate_rows_exist_and_run_in_ci():
 
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
-    # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate and the 8 D3a language gates.
-    assert len(GATE_IDS) == 30
+    # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate, the 8 D3a language gates and D3b's display gate.
+    assert len(GATE_IDS) == 31
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     assert_clauses_accounted(table)

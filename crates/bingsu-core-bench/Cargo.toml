@@ -118,3 +118,9 @@ test = false
 name = "env_segment"
 harness = false
 test = false
+
+[[bench]]
+# M6 D3b: the prompt's builtin language versions from a full command response.
+name = "language"
+harness = false
+test = false

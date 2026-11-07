@@ -467,17 +467,17 @@ impl ReadPlan {
         };
     }
     /// Whether the command response is worth reading: the lines this width
-    /// selected draw a command segment, and this prompt has what a value
-    /// needs (its entry clock, build identity and environment frame).
+    /// selected draw a command or builtin language segment, and this prompt
+    /// has what a value needs (its entry clock, build identity and
+    /// environment frame).
     fn draws_commands(&self) -> bool {
         self.entry.is_some()
             && self.build_id.is_some()
             && self.environment.is_some()
-            && self
-                .observed
-                .selected
-                .as_ref()
-                .is_some_and(|s| (0..s.config.custom.len()).any(|i| drawn_command(&s.config, i)))
+            && self.observed.selected.as_ref().is_some_and(|s| {
+                (0..s.config.custom.len()).any(|i| drawn_command(&s.config, i))
+                    || drawn_languages(&s.config).next().is_some()
+            })
     }
     fn width(&self) -> u16 {
         self.parsed.as_ref().map_or(0, |e| e.width)
@@ -923,13 +923,47 @@ fn drawn_command(config: &FrontConfig, i: usize) -> bool {
     config.custom[i].kind == CustomKind::Command && config.draws_segment(BUILTIN.len() + i)
 }
 
+// The shift below takes a builtin index as a bit of a `u32` mask.
+const _: () = assert!(BUILTIN.len() <= 32);
+
+/// The builtin language segments the selected lines draw: each one's
+/// `field::BUILTIN` index and language.
+fn drawn_languages(
+    config: &FrontConfig,
+) -> impl Iterator<Item = (usize, &'static crate::command::builtin::Language)> + '_ {
+    use crate::collection::selection::LANGUAGE_SEGMENTS;
+    // The bit first: every prompt with an environment frame asks this, and
+    // most segments are not languages. Without it each of the other builtin
+    // segments costs a language lookup by name: about 100 more instructions
+    // per prompt (front_collection with a frame, aarch64: 206,871 to 206,973
+    // for absent, 224,714 to 224,789 for width_change). No test sees the
+    // difference; the instruction count does.
+    BUILTIN.iter().enumerate().filter_map(move |(seg, d)| {
+        if LANGUAGE_SEGMENTS & (1 << seg) == 0 || !config.draws_segment(seg) {
+            return None;
+        }
+        Some((seg, crate::command::builtin::language(d.id.as_bytes())?))
+    })
+}
+
+/// What the command response gives this prompt: each user segment's value in
+/// `custom` order (`None` for text segments and commands without one), and
+/// each drawn builtin language's version with its segment index.
+#[derive(Default)]
+struct CommandValues {
+    custom: Vec<Option<String>>,
+    languages: Vec<(usize, String)>,
+}
+
 /// The value of each user segment that is a command or an env segment, in
-/// `custom` order (`None` elsewhere). A command's is `command::display`
-/// against this prompt's binding, entry clock, environment frame body and
-/// display eligibility (`eligible`: the marker verdict that also makes the
-/// snapshot's units eligible). An env segment's is its variable in the same
-/// frame body, the shell's environment as the prompt received it: unset,
-/// empty, named twice or past the frame's cap (no frame) draws nothing.
+/// `custom` order (`None` elsewhere), and each drawn builtin language's
+/// version. A command's value and a language's version are
+/// `command::display` against this prompt's binding, entry clock,
+/// environment frame body and display eligibility (`eligible`: the marker
+/// verdict that also makes the snapshot's units eligible). An env segment's
+/// is its variable in the same frame body, the shell's environment as the
+/// prompt received it: unset, empty, named twice or past the frame's cap (no
+/// frame) draws nothing.
 fn custom_values(
     entry: Option<Clock>,
     build_id: Option<BuildId>,
@@ -937,24 +971,27 @@ fn custom_values(
     e: &Envelope,
     observed: &Observed,
     eligible: bool,
-) -> Vec<Option<String>> {
+) -> CommandValues {
     use crate::command::{display, plan::Environ};
     use crate::handoff::Origin;
     let Some(selected) = observed.selected.as_ref() else {
-        return Vec::new();
+        return CommandValues::default();
     };
     let custom = &selected.config.custom;
-    let mut out = vec![None; custom.len()];
+    let mut out = CommandValues {
+        custom: vec![None; custom.len()],
+        languages: Vec::new(),
+    };
     let Some(body) = environment else {
         return out;
     };
     // Parsed once, and only for a value that needs it: an env segment, or
-    // a command response below.
+    // the command response below (command values and builtin languages).
     let mut parsed = None;
     for (i, segment) in custom.iter().enumerate() {
         if let CustomKind::Env(name) = &segment.kind {
             let vars = parsed.get_or_insert_with(|| Environ::parse(body));
-            out[i] = crate::command::plan::env_segment_value(vars, name);
+            out.custom[i] = crate::command::plan::env_segment_value(vars, name);
         }
     }
     let (Some(response), Some(entry), Some(build_id)) =
@@ -997,7 +1034,12 @@ fn custom_values(
         else {
             continue;
         };
-        out[i] = display::value(&mut prompt, unit, Origin::Config).map(|v| v.into());
+        out.custom[i] = display::value(&mut prompt, unit, Origin::Config).map(|v| v.into());
+    }
+    for (seg, language) in drawn_languages(&selected.config) {
+        if let Some(v) = display::builtin_value(&prompt, language) {
+            out.languages.push((seg, v.into()));
+        }
     }
     out
 }
@@ -1098,7 +1140,12 @@ pub fn finish_with_catalog(
         &observed,
         eligible,
     );
-    let commands: Vec<Option<&str>> = commands.iter().map(|v| v.as_deref()).collect();
+    let languages: Vec<(usize, &str)> = commands
+        .languages
+        .iter()
+        .map(|(seg, v)| (*seg, v.as_str()))
+        .collect();
+    let commands: Vec<Option<&str>> = commands.custom.iter().map(|v| v.as_deref()).collect();
     if let Some(shell) = e.shell {
         super::render_selected_with_catalog(
             &e,
@@ -1113,6 +1160,7 @@ pub fn finish_with_catalog(
             observed.collection_binding.as_deref(),
             catalog,
             &commands,
+            &languages,
             &mut response.record,
         );
     } else {

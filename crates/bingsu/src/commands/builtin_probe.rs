@@ -11,12 +11,7 @@ use super::{
 };
 use bingsu_core::{
     collection::{language::Version, manager::Manager, manager::Selection},
-    command::{
-        path::Id,
-        plan::{self, Environ},
-        profile,
-        wire::Probe,
-    },
+    command::{builtin::Language, path::Id, plan::Environ, profile, wire::Probe},
     fs_trust::GroupOracle,
 };
 use std::{
@@ -25,92 +20,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// One builtin language: its id (the collector's query id and the
-/// response entry's), its probe profile, the command its version comes
-/// from and the manager bingsu resolves for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Language {
-    pub id: &'static str,
-    pub profile: u8,
-    pub word: &'static [u8],
-    pub manager: Option<Manager>,
-    /// The shell variables its answer depends on beyond the keep list
-    /// (`PATH`, `HOME`, ...): the environment digest of its entry.
-    pub variables: &'static [&'static [u8]],
-}
-
-/// Shell variables that name the folders of managers without a resolver
-/// (asdf, mise, volta, nodenv, goenv): they change whether the command is
-/// such a shim.
-const UNSUPPORTED: [&[u8]; 8] = [
-    b"ASDF_DATA_DIR",
-    b"ASDF_DIR",
-    b"MISE_DATA_DIR",
-    b"MISE_SHIMS_DIR",
-    b"XDG_DATA_HOME",
-    b"VOLTA_HOME",
-    b"NODENV_ROOT",
-    b"GOENV_ROOT",
-];
-
-pub(crate) const LANGUAGES: [Language; 4] = [
-    Language {
-        id: "node",
-        profile: profile::NODE,
-        word: b"node",
-        manager: None,
-        variables: &[],
-    },
-    Language {
-        id: "python",
-        profile: profile::PYTHON,
-        word: b"python3",
-        manager: Some(Manager::Pyenv),
-        variables: &[
-            b"PYENV_ROOT",
-            b"PYENV_VERSION",
-            b"PYENV_DIR",
-            b"PYENV_HOOK_PATH",
-            // macOS: it picks the developer tools' python3 (D3a review M4).
-            b"DEVELOPER_DIR",
-        ],
-    },
-    Language {
-        id: "rust",
-        profile: profile::RUST,
-        word: b"rustc",
-        manager: Some(Manager::Rustup),
-        variables: &[b"RUSTUP_HOME", b"CARGO_HOME", b"RUSTUP_TOOLCHAIN"],
-    },
-    Language {
-        id: "go",
-        profile: profile::GO,
-        word: b"go",
-        manager: None,
-        variables: &[],
-    },
-];
-
-impl Language {
-    /// Whether `executable` (canonical) is this language's command by its
-    /// file name: `node`, `python3` or `python3.<n>`, `rustc`, `go`.
-    pub(crate) fn runs(&self, executable: &Path) -> bool {
-        let Some(name) = executable.file_name().map(OsStr::as_bytes) else {
-            return false;
-        };
-        if self.profile == profile::PYTHON {
-            return name == b"python3"
-                || name
-                    .strip_prefix(b"python3.")
-                    .is_some_and(|v| !v.is_empty() && v.iter().all(u8::is_ascii_digit));
-        }
-        name == self.word
+/// Whether `executable` (canonical) is `language`'s command by its file
+/// name: `node`, `python3` or `python3.<n>`, `rustc`, `go`.
+pub(crate) fn runs(language: &Language, executable: &Path) -> bool {
+    let Some(name) = executable.file_name().map(OsStr::as_bytes) else {
+        return false;
+    };
+    if language.profile == profile::PYTHON {
+        return name == b"python3"
+            || name
+                .strip_prefix(b"python3.")
+                .is_some_and(|v| !v.is_empty() && v.iter().all(u8::is_ascii_digit));
     }
-}
-
-/// The language of a collector query id.
-pub(crate) fn language(id: &[u8]) -> Option<&'static Language> {
-    LANGUAGES.iter().find(|l| l.id.as_bytes() == id)
+    name == language.word
 }
 
 /// How a builtin value was decided: part of its policy digest, so a value
@@ -213,18 +135,7 @@ pub(crate) fn plan(
     groups: &mut dyn GroupOracle,
 ) -> Planned {
     let (selection, selected) = selection(version);
-    let environment = match c.vars {
-        Some(vars) => {
-            let names: Vec<Vec<u8>> = language
-                .variables
-                .iter()
-                .chain(UNSUPPORTED.iter())
-                .map(|n| n.to_vec())
-                .collect();
-            plan::env_digest(vars, &names)
-        }
-        None => [0; 32],
-    };
+    let environment = c.vars.map_or([0; 32], |vars| language.env_digest(vars));
     let hide = |why: &'static str| Planned {
         language,
         policy: profile::digest(language.profile, KIND_HIDDEN, &[why.as_bytes()]),
@@ -298,7 +209,7 @@ pub(crate) fn plan(
             // (security review S-M1).
             // Fails without it: plan_follows_the_rulings (a node link to
             // another program).
-            if !language.runs(&found.executable) {
+            if !runs(language, &found.executable) {
                 return hide("the command resolves to another program");
             }
             match developer_tool(
@@ -490,7 +401,7 @@ mod tests {
     }
 
     fn lang(id: &str) -> &'static Language {
-        language(id.as_bytes()).unwrap()
+        bingsu_core::command::builtin::language(id.as_bytes()).unwrap()
     }
 
     /// A home with a plain `node`, a `#!` `go`, rustup's proxy folder, a
@@ -629,10 +540,10 @@ mod tests {
             ("python3.", false),
             ("python", false),
         ] {
-            assert_eq!(py.runs(Path::new(name)), ok, "{name}");
+            assert_eq!(runs(py, Path::new(name)), ok, "{name}");
         }
-        assert!(lang("node").runs(Path::new("/a/node")));
-        assert!(!lang("node").runs(Path::new("/a/nodejs")));
+        assert!(runs(lang("node"), Path::new("/a/node")));
+        assert!(!runs(lang("node"), Path::new("/a/nodejs")));
         // A link named node to another program (security review S-M1).
         let other = at("other").display().to_string();
         let p = plan_with(&s, &other, &[], "node", &Version::None);
