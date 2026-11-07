@@ -31,6 +31,34 @@ class PromptIo(unittest.TestCase):
                     gate.check_repo_tree(errors)
                 self.assertEqual(not errors, valid, errors)
 
+    # 이것을 실패시키는 것: bingsu-prompt의 clippy 설정 비교·존재 검사나 build script 검사를 빼는 것.
+    def test_prompt_package_rules(self):
+        import os
+        import check_core_cfg as gate
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as temp:
+            root = pathlib.Path(temp)
+            for rel in ["crates/bingsu-core/Cargo.toml", "crates/bingsu/Cargo.toml", "crates/bingsu-prompt/Cargo.toml",
+                        "crates/bingsu/clippy.toml", "crates/bingsu-prompt/clippy.toml"]:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / rel, root / rel)
+            here = os.getcwd()
+            os.chdir(root)
+            try:
+                def errors():
+                    out = []
+                    gate.check_policy(out)
+                    return [e for e in out if "bingsu-prompt" in e]
+                self.assertEqual(errors(), [])
+                (root / "crates/bingsu-prompt/clippy.toml").write_text('msrv = "1.85"\n')
+                self.assertTrue(any("must equal" in e for e in errors()))
+                (root / "crates/bingsu-prompt/clippy.toml").unlink()
+                self.assertTrue(any("is missing" in e for e in errors()))
+                shutil.copyfile(ROOT / "crates/bingsu/clippy.toml", root / "crates/bingsu-prompt/clippy.toml")
+                (root / "crates/bingsu-prompt/build.rs").write_text("fn main() {}\n")
+                self.assertTrue(any("build script" in e for e in errors()))
+            finally:
+                os.chdir(here)
+
     # 이것을 실패시키는 것: prompt_io 호출 스캔 제거 또는 cfg 가지/별칭/매크로 인자 생략.
     def test_prompt_io_is_scanned_in_every_cfg_branch(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "target") as temp:
