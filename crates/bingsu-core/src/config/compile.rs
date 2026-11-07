@@ -75,11 +75,14 @@ pub enum ExecPolicy {
     },
     /// A user-defined language version: `interpreter`, its `version`
     /// arguments and the `detect_files` that mark the language's project
-    /// (`language_form` checks them). It does not run yet.
+    /// (`language_form` checks them), with the folder it runs in and the
+    /// variables it receives as a command's.
     Language {
         interpreter: Option<String>,
         version_argv: Vec<String>,
         detect_files: Vec<String>,
+        cwd: Option<String>,
+        env_allow: Vec<String>,
     },
 }
 
@@ -146,6 +149,9 @@ pub enum CustomKind {
     /// `kind = "env"`: the value of this variable in the prompt's own
     /// environment, cut like text; unset or empty draws nothing.
     Env(String),
+    /// `kind = "language"`: the unit's version from the command response,
+    /// as a command's value; a segment with no value draws nothing.
+    Language,
 }
 
 /// Per `field::BUILTIN` index: priority, required, shorten methods, when.
@@ -427,8 +433,8 @@ pub(crate) fn template_ids(text: &str) -> Vec<String> {
     out
 }
 
-/// `text` without custom references other than the drawn text segments
-/// `texts` (command and language segments are drawn from M6) or disabled built-ins:
+/// `text` without custom references other than the drawn user segments
+/// `texts`, and without disabled built-ins:
 /// each is cut out, and so is a group left without a reference (a
 /// group needs one to compile). A template that does not parse is kept as
 /// it is, so the compile reports it.
@@ -480,14 +486,6 @@ fn without_hidden(text: &str, off: &BTreeSet<&str>, texts: &[&str]) -> String {
     }
     out.push_str(&text[at..]);
     out
-}
-
-/// Whether `[segment."<id>"]` is declared.
-fn declared(r: &MTable, id: &str) -> bool {
-    matches!(
-        get(r, &["segment", id]).map(|n| &n.value),
-        Some(MValue::Table(_))
-    )
 }
 
 /// The index of a band name; a name `names` lacks gets `names.len()`, which
@@ -973,8 +971,8 @@ pub fn compile(
                 if options != StyleOptions::default() || lay.lines.iter().any(|l| l.written) {
                     notes.push(Diagnostic::new(codes::TEMPLATE_REPLACES_STYLE, where_));
                 }
-                // `custom/…` is drawn from M6 (N502 when declared, W408 when
-                // not): only that reference goes, the rest compiles.
+                // A `custom/…` reference that is not drawn (turned off, or
+                // undeclared, which W408 names) goes alone; the rest compiles.
                 without_hidden(t, &off, &texts)
             }
             _ => {
@@ -1021,26 +1019,6 @@ pub fn compile(
             }
         }
         variants.push(compiled);
-    }
-    for (id, refs) in drawn(r, &banded.names) {
-        // N502 is for a kind the prompt does not draw yet. A text or command
-        // segment missing from `texts` is turned off (`enabled = false`, or
-        // its keys came from a file that failed the safety check, which says
-        // so itself): it never starts showing after an upgrade.
-        if id.starts_with("custom/")
-            && declared(r, &id)
-            && !drawn_kind(r, &id)
-            && !texts.contains(&id.as_str())
-        {
-            let place = refs
-                .first()
-                .and_then(|r| r.origin)
-                .map_or(Place::Builtin, |o| Place::Source {
-                    id: o.source,
-                    span: o.span,
-                });
-            notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id));
-        }
     }
     let Bands {
         bands,
@@ -1144,15 +1122,7 @@ pub(crate) fn layout_verdict(
 }
 
 /// The user segment kinds a layout draws.
-const DRAWN_KINDS: [&str; 3] = ["text", "command", "env"];
-
-/// Whether segment `id` is declared with a kind the prompt draws.
-fn drawn_kind(r: &MTable, id: &str) -> bool {
-    matches!(
-        get(r, &["segment", id]).map(|n| &n.value),
-        Some(MValue::Table(t)) if s(t, &["kind"]).is_some_and(|k| DRAWN_KINDS.contains(&k))
-    )
-}
+const DRAWN_KINDS: [&str; 4] = ["text", "command", "env", "language"];
 
 /// Whether any `custom/…` segment is declared with a drawn kind.
 fn declares_custom(r: &MTable) -> bool {
@@ -1214,6 +1184,8 @@ fn custom_segments(
             id: e.key.clone(),
             kind: if kind == "command" {
                 CustomKind::Command
+            } else if kind == "language" {
+                CustomKind::Language
             } else if kind == "env" {
                 // Checked as a variable name (`check::env_name`) before compile.
                 CustomKind::Env(s(t, &["env"]).unwrap_or_default().into())
@@ -1283,12 +1255,58 @@ fn unsafe_exec_key(
 /// the facts they need).
 const PLACEHOLDER: &str = "{dir}";
 
+/// `env_allow` names that can be variable names and that a command may
+/// receive, and the warning for `cwd = "untrusted-current"`: the same for a
+/// command and a language segment.
+fn env_and_cwd_form(id: &str, t: &MTable, notes: &mut Vec<Diagnostic>) {
+    let item = |n: &MNode, span| Place::Source {
+        id: n.origin.source,
+        span,
+    };
+    if let Some(
+        n @ MNode {
+            value: MValue::Array(names),
+            ..
+        },
+    ) = t.get("env_allow")
+    {
+        for w in names {
+            if let Value::Str(v) = &w.value {
+                if v.is_empty() || v.contains(['=', '\0']) {
+                    notes.push(bad(
+                        item(n, w.span),
+                        "env_allow",
+                        &alloc::format!("\"{v}\""),
+                        "a variable name: not empty, without `=` or NUL",
+                    ));
+                } else if crate::command::grant::forbidden(v.as_bytes()) {
+                    notes.push(bad(
+                        item(n, w.span),
+                        "env_allow",
+                        &alloc::format!("\"{v}\""),
+                        "a name a command may receive: loader, language and shell startup settings never pass",
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(c) = t
+        .get("cwd")
+        .filter(|c| matches!(&c.value, MValue::Scalar(Value::Str(v)) if v == "untrusted-current"))
+    {
+        notes.push(Diagnostic::new(codes::CWD_UNTRUSTED_CURRENT, at(c)).arg("id", id));
+    }
+}
+
 /// A language segment's shape (D3c rulings): `detect_files`, one to
 /// `collection::language::NAMES_MAX` file names, each one path component
 /// the worker can look for (`collection::language::name_ok`), none given
 /// twice; `interpreter`, a word without NUL; `version`, words without NUL.
 /// Problems are errors in `notes`.
-fn language_form(seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) {
+fn language_form(id: &str, seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) {
+    // Fails without it: language_keys_are_checked (a forbidden env_allow
+    // name, the untrusted-current warning).
+    env_and_cwd_form(id, t, notes);
     use crate::collection::language::{NAMES_MAX, name_ok};
     let item = |n: &MNode, span| Place::Source {
         id: n.origin.source,
@@ -1452,39 +1470,7 @@ fn command_form(id: &str, seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) 
             }
         }
     }
-    if let Some(
-        n @ MNode {
-            value: MValue::Array(names),
-            ..
-        },
-    ) = t.get("env_allow")
-    {
-        for w in names {
-            if let Value::Str(v) = &w.value {
-                if v.is_empty() || v.contains(['=', '\0']) {
-                    notes.push(bad(
-                        item(n, w.span),
-                        "env_allow",
-                        &alloc::format!("\"{v}\""),
-                        "a variable name: not empty, without `=` or NUL",
-                    ));
-                } else if crate::command::grant::forbidden(v.as_bytes()) {
-                    notes.push(bad(
-                        item(n, w.span),
-                        "env_allow",
-                        &alloc::format!("\"{v}\""),
-                        "a name a command may receive: loader, language and shell startup settings never pass",
-                    ));
-                }
-            }
-        }
-    }
-    if let Some(c) = t
-        .get("cwd")
-        .filter(|c| matches!(&c.value, MValue::Scalar(Value::Str(v)) if v == "untrusted-current"))
-    {
-        notes.push(Diagnostic::new(codes::CWD_UNTRUSTED_CURRENT, at(c)).arg("id", id));
-    }
+    env_and_cwd_form(id, t, notes);
     shell.is_some() && !allowed
 }
 
@@ -1522,6 +1508,8 @@ fn exec_units(
                 interpreter: str_of("interpreter"),
                 version_argv: list("version"),
                 detect_files: list("detect_files"),
+                cwd: str_of("cwd"),
+                env_allow: list("env_allow"),
             },
             _ => continue,
         };
@@ -1532,7 +1520,7 @@ fn exec_units(
         // Only a command segment needs `command` or `shell`; a language
         // segment cannot hold them (E206).
         if matches!(&policy, ExecPolicy::Language { .. }) {
-            language_form(&e.node, t, notes);
+            language_form(&e.key, &e.node, t, notes);
         }
         let not_run = if matches!(&policy, ExecPolicy::Command { .. })
             && command_form(&e.key, &e.node, t, notes)
@@ -1829,7 +1817,7 @@ mod tests {
         ),
         (
             "segment.*.text",
-            "user segments are drawn from M6; N502 says so",
+            "a text segment shows only where a layout draws it",
         ),
         ("layout.transient", "planned for M4 and M5; N503 says so"),
     ];
@@ -2123,7 +2111,7 @@ mod tests {
     // 그리는(실행될 수 있는) 명령·언어 segment는 설정 하나에 32개까지다(계획 U-9d, 명령 응답의 항목 상한). 그리지
     // 않는 선언은 세지 않고, 좁은 폭 구간 하나에서만 그리거나 필드 참조로만 그리는 단위도 센다. 이것을 실패시키는
     // 것: 상한 검사를 지우는 것, 상한을 33 이상으로 두는 것, 그리지 않는 선언까지 세는 것, 좁은 폭에서만 그리는
-    // 단위를 빼는 것.
+    // 단위를 빼는 것, language 단위를 세지 않는 것.
     #[test]
     fn at_most_32_drawn_exec_units() {
         let declare = |from: usize, n: usize| {
@@ -2189,20 +2177,23 @@ mod tests {
             "{:?}",
             codes_of(&read(&off, &[]))
         );
-        // Language placeholders run nothing yet: 33 drawn count none.
-        let languages = (0..33)
-            .map(|i| {
-                alloc::format!(
-                    "[segment.\"custom/c{i:03}\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n"
-                )
-            })
-            .collect::<String>()
-            + &draw(33);
-        assert!(
-            read(&languages, &[]).snapshot.is_some(),
-            "{:?}",
-            codes_of(&read(&languages, &[]))
-        );
+        // A language unit runs its interpreter, so it counts like a command:
+        // 32 drawn languages compile, a 33rd is refused.
+        let languages = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    alloc::format!(
+                        "[segment.\"custom/c{i:03}\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n"
+                    )
+                })
+                .collect::<String>()
+                + &draw(n)
+        };
+        let ok = read(&languages(32), &[]);
+        let codes = codes_of(&ok);
+        let c = ok.snapshot.unwrap_or_else(|| panic!("{codes:?}"));
+        assert_eq!(drawn(&c), 32);
+        assert!(read(&languages(33), &[]).snapshot.is_none());
     }
 
     // C5: env segment는 실행 단위가 아니라 32개 상한에 세지 않는다. 실행 가능한 command 32개와 그리는 env 하나는
@@ -2264,7 +2255,7 @@ mod tests {
             ["kind", "command", "cwd", "env_allow", "timeout", "cache"]
         );
         let c = compiled(
-            "[segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\", \"deno.jsonc\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\n[layout.line1]\nleft = [\"custom/l\"]\n",
+            "[segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\", \"deno.jsonc\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\ncwd = \"neutral\"\nenv_allow = [\"DENO_DIR\"]\n[layout.line1]\nleft = [\"custom/l\"]\n",
         );
         assert_eq!(
             c.exec_units[0].policy,
@@ -2272,6 +2263,8 @@ mod tests {
                 interpreter: Some("deno".into()),
                 version_argv: vec!["--version".into()],
                 detect_files: vec!["deno.json".into(), "deno.jsonc".into()],
+                cwd: Some("neutral".into()),
+                env_allow: vec!["DENO_DIR".into()],
             }
         );
     }
@@ -2300,9 +2293,8 @@ mod tests {
             alloc::format!("detect_files = [{}]\n{good}", names(16)),
             "detect_files = [\"a\"]\ninterpreter = \"/opt/deno/bin/deno\"\n".into(),
         ];
-        // A drawn language segment carries N502 (drawn from a later version).
-        let only_later =
-            |r: &crate::config::report::ConfigReport| codes_of(r) == [codes::CUSTOM_DRAWN_LATER];
+        let only_later = |r: &crate::config::report::ConfigReport| codes_of(r).is_empty();
+
         for keys in ok {
             let r = read(&lang(&keys), &[]);
             assert!(only_later(&r), "{keys}: {:?}", codes_of(&r));
@@ -2322,6 +2314,8 @@ mod tests {
             "detect_files = [\"a\"]\ninterpreter = \"\"\n".into(),
             "detect_files = [\"a\"]\ninterpreter = \"de\\u0000no\"\n".into(),
             "detect_files = [\"a\"]\ninterpreter = \"deno\"\nversion = [\"--v\\u0000\"]\n".into(),
+            alloc::format!("detect_files = [\"a\"]\n{good}env_allow = [\"LD_PRELOAD\"]\n"),
+            alloc::format!("detect_files = [\"a\"]\n{good}env_allow = [\"A=B\"]\n"),
         ];
         for keys in bad {
             let r = read(&lang(&keys), &[]);
@@ -2332,6 +2326,15 @@ mod tests {
             );
             assert!(r.snapshot.is_none(), "{keys}");
         }
+        // cwd and env_allow as a command's (D3c-2): the current folder is warned.
+        let r = read(
+            &lang(&alloc::format!(
+                "detect_files = [\"a\"]\n{good}cwd = \"untrusted-current\"\nenv_allow = [\"DENO_DIR\"]\n"
+            )),
+            &[],
+        );
+        assert_eq!(codes_of(&r), [codes::CWD_UNTRUSTED_CURRENT]);
+        assert!(r.snapshot.is_some());
         // 255 bytes is one name still.
         let r = read(
             &lang(&alloc::format!(

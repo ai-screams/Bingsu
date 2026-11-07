@@ -116,6 +116,8 @@ mod cases {
             interpreter: Some("python".into()),
             version_argv: vec!["--version".into()],
             detect_files: vec!["pyproject.toml".into()],
+            cwd: Some("untrusted-current".into()),
+            env_allow: vec!["VIRTUAL_ENV".into()],
         });
         for x in [
             PaletteWarning::TextContrast { token: 1, milli: 2 },
@@ -220,6 +222,8 @@ mod cases {
                 interpreter: Some("a".repeat(MAX_BYTES)),
                 version_argv: vec![],
                 detect_files: vec![],
+                cwd: None,
+                env_allow: Vec::new(),
             },
             timeout_ms: None,
             cache_ms: None,
@@ -418,6 +422,67 @@ mod cases {
         assert_eq!(c.exec_units.len(), 1);
         assert_eq!(c.exec_units[0].not_run, None);
         c
+    }
+
+    fn language_config() -> CompiledConfig {
+        let c = crate::config::report::tests::read(
+            "[segment.\"custom/deno\"]\nkind='language'\ndetect_files=['deno.json']\n\
+             interpreter='/bin/deno'\n[layout.line2]\nleft=['custom/deno','char']\n",
+            &[],
+        )
+        .snapshot
+        .unwrap();
+        assert_eq!(c.exec_units[0].not_run, None);
+        c
+    }
+
+    fn language_policy(
+        c: &mut CompiledConfig,
+    ) -> (&mut Vec<String>, &mut Option<String>, &mut Vec<String>) {
+        match &mut c.exec_units[0].policy {
+            ExecPolicy::Language {
+                detect_files,
+                cwd,
+                env_allow,
+                ..
+            } => (detect_files, cwd, env_allow),
+            ExecPolicy::Command { .. } => unreachable!("a language unit"),
+        }
+    }
+
+    // 감지 파일이 없는 language 단위는 양쪽에서 거부한다. 그 단위의 항목 요약값은 grant 요약값뿐이라, 같은 id·argv의
+    // command 항목이 language 값으로 그려질 수 있기 때문이다. 이것을 실패시키는 것: check의 빈 감지 목록 거부를 지우는
+    // 것.
+    #[test]
+    fn a_language_unit_without_detect_files_is_rejected() {
+        let mut c = language_config();
+        assert!(decode_compiled(&encode_compiled(&c).unwrap()).is_ok());
+        language_policy(&mut c).0.clear();
+        rejected(&c);
+    }
+
+    // 적대적 스냅샷의 language cwd·env_allow: compile이 쓰지 않는 값은 decode되어도 실행되지 않는다. 모르는 cwd는
+    // 실행 계획이 없고, 넘길 수 없는 이름(`LD_PRELOAD`)은 대상 환경 검사가 단위 전체를 거부한다. 이것을 실패시키는
+    // 것: runnable이 모르는 cwd를 중립 폴더로 받는 것, 대상 환경 검사에서 금지 이름 거부를 지우는 것.
+    #[test]
+    fn a_crafted_language_cwd_or_variable_does_not_run() {
+        let decoded = |c: &CompiledConfig| decode_compiled(&encode_compiled(c).unwrap()).unwrap();
+        let ok = decoded(&language_config());
+        let r = crate::command::plan::runnable(&ok.exec_units[0]).unwrap();
+        assert!(crate::command::grant::target_environment_allowed(
+            b"",
+            &r.env_allow
+        ));
+        let mut c = language_config();
+        *language_policy(&mut c).1 = Some("/etc".into());
+        assert!(crate::command::plan::runnable(&decoded(&c).exec_units[0]).is_none());
+        let mut c = language_config();
+        *language_policy(&mut c).2 = vec!["LD_PRELOAD".into()];
+        let r = crate::command::plan::runnable(&decoded(&c).exec_units[0]).unwrap();
+        assert!(!crate::command::grant::target_environment_allowed(
+            b"",
+            &r.env_allow
+        ));
     }
 
     // 이것을 실패시키는 것: Unsafe 실행 키 출처가 있는 유닛을 실행 가능하게 받는 것.
@@ -740,6 +805,8 @@ mod cases {
                 interpreter: None,
                 version_argv: vec![],
                 detect_files: vec![],
+                cwd: None,
+                env_allow: Vec::new(),
             },
             timeout_ms: Some(9),
             cache_ms: None,
@@ -796,9 +863,13 @@ mod cases {
             id: "custom/e".into(),
             kind: CustomKind::Env("AWS_PROFILE".into()),
         });
+        round(CustomSegment {
+            id: "custom/l".into(),
+            kind: CustomKind::Language,
+        });
         let mut b = bytes(&command);
         assert_eq!(b.pop(), Some(1));
-        b.push(3);
+        b.push(4);
         assert_eq!(read::<CustomSegment>(&b), Err(Error::Shape));
     }
 

@@ -22,7 +22,7 @@ use bingsu_core::{
     snapshot::{FrontDecoder, Identity, READ_CHUNK, Snapshot, encode_metadata},
     snapshot_codec::{Error, HEAD, decode_compiled, encode_compiled},
     status::Status,
-    template::compile::compile,
+    template::compile::{compile, compile_with},
 };
 use bingsu_core_tests::snapshot_fixture as fixture;
 use proptest::prelude::*;
@@ -30,26 +30,37 @@ use proptest::prelude::*;
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-const TEMPLATES: [&str; 6] = [
+const TEMPLATES: [&str; 9] = [
     "{dir} {git} {char}",
     "{dir}{char}",
     "x {char}",
     "{@style:bold}{dir}{@end} {@fill} {git}",
     "{@group}[{git}]{@end}{dir} {char}",
     "a long fixed text that overflows a narrow width {dir} {char}",
+    // A user language that may run: drawn as a segment, as a field only,
+    // and beside git (the dir bit then comes from the language alone).
+    "{custom/deno} {char}",
+    "{custom/deno.value}{char}",
+    "{git} {custom/deno} {char}",
 ];
+
+/// The user language the templates above name, drawn by a trusted layout
+/// so its unit may run.
+const LANGUAGE: &str = "[segment.\"custom/deno\"]\nkind = \"language\"\n\
+    detect_files = [\"deno.json\"]\ninterpreter = \"/bin/deno\"\n\
+    [layout.line2]\nleft = [\"custom/deno\", \"char\"]\n";
 
 /// `bands` with variant `i + 1` drawn from `templates[i]`, the default from
 /// `default`. None when the bands do not order (the compiler would refuse).
 fn banded(bands: &[Band], default: usize, templates: &[usize]) -> Option<CompiledConfig> {
-    let mut c = fixture::compile("");
+    let mut c = fixture::compile(LANGUAGE);
     c.band_order = order_bands(bands).ok()?;
     c.bands = bands.to_vec();
     c.band_names = (0..bands.len()).map(|i| format!("b{i}")).collect();
     c.widths.clear();
     c.variants = core::iter::once(default)
         .chain(templates.iter().copied())
-        .map(|t| compile(TEMPLATES[t], BUILTIN).unwrap())
+        .map(|t| compile_with(TEMPLATES[t], BUILTIN, &["custom/deno"]).unwrap())
         .collect();
     Some(c)
 }
@@ -190,7 +201,8 @@ proptest! {
     }
 
     // 이것을 실패시키는 것: worker mask나 path query를 선택하지 않은 variant로 계산하는 것, FrontConfig의
-    // collect_mask·setup을 바꾸는 것, redraw의 0을 잃는 것.
+    // collect_mask·setup을 바꾸는 것, redraw의 0을 잃는 것, 앞단 decode가 사용자 segment 목록이나 실행 단위(그
+    // `not_run`)를 잃어 사용자 language의 dir 비트가 수집 요청과 달라지는 것.
     #[test]
     fn worker_mask_matches_full_decode(
         bands in prop::collection::vec(band(), 0..6),
@@ -302,7 +314,7 @@ fn one_band() -> (Vec<u8>, Vec<u8>) {
     c.widths.clear();
     c.variants = vec![compile("x", BUILTIN).unwrap(); 2];
     let b = encode_compiled(&c).unwrap();
-    assert_eq!(&b[..8], b"BNGCFG10");
+    assert_eq!(&b[..8], b"BNGCFG11");
     let s = Sections::of(&b);
     let x = variant(&[&X_LINE]);
     assert_eq!(

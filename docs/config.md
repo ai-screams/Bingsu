@@ -33,7 +33,7 @@ the keys from `bingsu config schema`.
 | `text` | A fixed text | `text` |
 | `command` | The first line a command prints | `command` or `shell` (with `unsafe_shell = true`), `cwd`, `env_allow`, `timeout`, `cache`, `match` |
 | `env` | The value of one variable of the shell's environment | `env` |
-| `language` | A language version for projects marked by a file | `detect_files`, `interpreter`, `version`, `timeout`, `cache` |
+| `language` | A language version for projects marked by a file | `detect_files`, `interpreter`, `version`, `cwd`, `env_allow`, `timeout`, `cache` |
 
 Every kind also takes `enabled = false`, which turns the segment off. A value is cut to 64 terminal cells, with an
 ellipsis, and control, bidirectional and invisible characters are removed before it is drawn. A segment with nothing
@@ -67,9 +67,31 @@ that shell text can run anything it says. Prefer `command`.
 
 ### `language`
 
-`detect_files` lists the file names that mark the language's project (1 to 16 names), looked for in the shell's
-folder and up to the repository root. `interpreter` and `version` give the command that prints the version.
-`config check` checks these keys and `--explain` shows them; the version command does not run yet.
+```toml
+[segment."custom/deno"]
+kind = "language"
+detect_files = ["deno.json", "deno.jsonc"]
+interpreter = "deno"
+version = ["--version"]
+```
+
+`detect_files` lists the file names that mark the language's project: 1 to 16 plain file names, none twice. They are
+looked for in the shell's folder and the folders above it, up to the repository root and at most 32 folders up.
+`interpreter` and `version` are the program that prints the version and its arguments.
+
+The segment runs its interpreter only where one of these files was found, and shows the first word of the first line
+that starts with a digit, after one leading `v`: `deno 2.1.4 (stable)` shows `2.1.4`, `v20.1.0` shows `20.1.0`. A line
+without such a word shows nothing.
+
+- `interpreter` is looked up as a command's first word: an absolute path (it may hold spaces), or a name without
+  spaces searched in the cleaned `PATH`. A relative path such as `./deno` never runs.
+- `cwd`, `env_allow`, `timeout` and `cache` work as for a command, with the same defaults.
+- The folder collection finds the files, so the version shows from the prompt after the round that found them. When
+  the files are gone, the segment hides from the next round on; with `cache` set, it keeps its last value until the
+  cache time ends.
+- With `cwd = "untrusted-current"`, an interpreter that is a version manager's shim (mise's links, for example) lets
+  the repository's files choose which version, and so which program, runs. A command carries the same risk, but a
+  language segment is where this setting is likely to be chosen, to show each project's version.
 
 The built-in language segments `node`, `python`, `rust` and `go` need no keys. They show a version when the folder
 holds a project of that language. When a version manager's selection can be read without running anything
@@ -89,11 +111,12 @@ layout is chosen. Naming it only in a theme's layout does not run the command or
 
 ## How commands run
 
-The refresh helper runs commands in the background after a prompt is drawn; the prompt never waits for a command.
-A value shows from the next prompt on.
+The refresh helper runs commands, and the version commands of language segments, in the background after a
+prompt is drawn; the prompt never waits for a command. A value shows from the next prompt on.
 
-- Each round runs at most 8 commands, those tried longest ago first; a config may draw at most 32 command
-  segments.
+- Each round runs at most 8 commands, those tried longest ago first. A config may draw at most 32 command and
+  language segments, counting those a layout from your own files draws at some width; past that, the config is
+  invalid. Declared segments no layout draws do not count.
 - A command gets a cleaned environment: `HOME`, `USER`, `LANG`, `LC_*`, `TERM`, `TZ`, a cleaned `PATH`, and the
   names in `env_allow`.
 - The cleaned `PATH` keeps only absolute folders that nobody but you and root can change, and leaves out the folders

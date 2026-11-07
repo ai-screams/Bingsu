@@ -417,3 +417,150 @@ def test_rustup_round_resolves_the_shell_folder(tmp_path, _native_boot_required)
     assert b"1.80.0" in command_response(session)
     assert session.log().count(RESOLVED) > seen, session.log()
     assert counted(proxy) == 0 and counted(rustc) == 0
+
+
+def deno(session, folder=None):
+    """A `deno` that counts its runs and prints a version line, in `folder`
+    (`bin` beside the shell's folder by default)."""
+    counter = session.base / "deno.runs"
+    path = (folder or session.base / "bin") / "deno"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(f"#!/bin/sh\necho x >> '{counter}'\necho 'deno 1.46.3 (stable, release)'\n")
+    path.chmod(0o755)
+    return path, counter
+
+
+UNRESOLVED = b"command round: a unit's executable was not found or failed the checks"
+
+
+def user_language(interpreter, extra=""):
+    """A user language segment and a layout that draws nothing else that
+    collects: no dir, no git, no builtin language."""
+    return ("[segment.\"custom/deno\"]\nkind='language'\ndetect_files=['deno.json']\n"
+            f"interpreter='{interpreter}'\nversion=['--version']\n{extra}"
+            "[layout.line1]\nleft=['custom/deno']\n[layout.line2]\nleft=['char']\n")
+
+
+def shown_after_a_round(session):
+    """The next prompt's bytes after one more settled round."""
+    session.prompt()
+    session.wait_quiet(timeout=8)
+    shown = session.prompt()
+    session.wait_quiet(timeout=8)
+    return shown
+
+
+# GATE-LANG-USER.1: 사용자 language segment만 그리는 레이아웃에서도 수집이 일어나, 감지 파일이 있는 폴더에서 interpreter를
+# 버전 인자로 실행하고 버전만 그린다. 감지 파일을 지우면 다음 회차부터 숨고, 더 실행하지 않으며, 숨긴 항목을 다시
+# 쓰지 않는다(cache 없음). 이것을
+# 실패시키는 것: worker mask에 사용자 language의 dir 비트를 더하지 않는 것(수집 요청이 없어 감지 안 됨), 감지 안 된
+# 언어에 실패 항목을 쓰지 않는 것(지운 뒤에도 보임), 실행할 단위가 없는 회차에 그 항목을 발행하지 않는 것, 이미 숨긴
+# 항목을 회차마다 다시 쓰는 것(응답 파일이 새로 설치됨), 응답 값을 버전으로 줄이지 않는 것.
+def test_user_language_only_layout_draws_its_version_where_its_files_are(tmp_path, _native_boot_required):
+    session = session_with(tmp_path)
+    interpreter, counter = deno(session)
+    (session.pwd / "deno.json").write_text("{}\n")
+    session.put(user_language(interpreter))
+    ready(session)
+    published_rounds(session)
+    assert runs(counter) >= 1
+    shown = session.prompt()
+    session.wait_quiet(timeout=8)
+    assert b"1.46.3" in shown and b"stable" not in shown, shown
+    (session.pwd / "deno.json").unlink()
+    assert b"1.46.3" not in shown_after_a_round(session)
+    before = runs(counter)
+    store = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
+    hidden = [(p, p.stat().st_ino, p.stat().st_mtime_ns) for p in store.rglob("collections-v1/*/store/command")]
+    assert hidden
+    rounds(session, 2)
+    assert runs(counter) == before, "a language ran where its files are gone"
+    again = [(p, p.stat().st_ino, p.stat().st_mtime_ns) for p in store.rglob("collections-v1/*/store/command")]
+    assert again == hidden, "a hidden language was published again"
+
+
+# GATE-LANG-USER.2: 감지 파일이 없는 폴더에서는 interpreter를 실행하지 않고 아무것도 그리지 않는다. 이것을 실패시키는
+# 것: helper의 감지 확인(gate_languages)을 지우는 것(파일 없이도 실행).
+def test_user_language_runs_nothing_where_its_files_are_not(tmp_path, _native_boot_required):
+    session = session_with(tmp_path)
+    interpreter, counter = deno(session)
+    session.put(user_language(interpreter))
+    ready(session)
+    rounds(session, 3)
+    assert runs(counter) == 0, "a language ran without its detect files"
+    assert b"1.46.3" not in session.prompt()
+    session.wait_quiet(timeout=8)
+
+
+# GATE-LANG-USER.3: interpreter의 조회는 command의 첫 단어와 같다. 상대 경로(`./deno`)는 셸 폴더에 실행 파일이 있어도
+# 실행하지 않는다. 공백이 든 bare 이름은 거부해, 그 이름 그대로의 실행 파일(`deno --version`)이 PATH에 있어도 실행하지
+# 않는다(음성 대조). 공백이 든 절대 경로(`<base>/my tools/deno`)는 그 파일 하나를 가리키므로 실행한다. 이름만 쓴 `deno`는
+# PATH에서 찾아 실행한다(양성 대조). 찾지
+# 못한 결과는 10초 실패 항목이라 그 안의 회차는 다시 찾지 않는다. 이것을 실패시키는 것: 상대 경로를 이름으로 바꿔
+# PATH에서 찾는 것, 이름의 공백 거부를 지우는 것(그 이름의 파일이 실행됨), 절대 경로에도 공백 거부를 거는 것(공백이 든
+# 경로가 실행되지 않음), interpreter를 공백으로 나눠 인자로 만드는
+# 것, 찾지 못한 항목을 감지 파일 없는 요약값으로 쓰는 것(적중하지 않아 회차마다 다시 찾음).
+@pytest.mark.parametrize("interpreter, runs_it", [("./deno", False), ("deno --version", False),
+                                                  ("{base}/my tools/deno", True), ("deno", True)],
+                         ids=["relative", "space", "absolute-space", "name"])
+def test_user_language_interpreter_is_looked_up_as_a_command(tmp_path, interpreter, runs_it,
+                                                               _native_boot_required):
+    session = session_with(tmp_path)
+    found, counter = deno(session)
+    deno(session, session.pwd)
+    deno(session, session.base / "my tools")
+    # The exact name a whitespace value would look up, as an executable.
+    spaced = found.parent / "deno --version"
+    spaced.write_text(found.read_text())
+    spaced.chmod(0o755)
+    session.env["PATH"] = f"{found.parent}:{session.env['PATH']}"
+    (session.pwd / "deno.json").write_text("{}\n")
+    interpreter = interpreter.format(base=session.base)
+    session.put(user_language(interpreter))
+    ready(session)
+    published_rounds(session)
+    assert (runs(counter) >= 1) == runs_it, (interpreter, runs(counter))
+    assert (b"1.46.3" in session.prompt()) == runs_it
+    session.wait_quiet(timeout=8)
+    if not runs_it:
+        # The failed lookup is a failure entry the next rounds hit for 10 s:
+        # they look nothing up again.
+        seen = session.log().count(UNRESOLVED)
+        assert seen >= 1, session.log()
+        rounds(session, 2)
+        assert session.log().count(UNRESOLVED) == seen, "a failed lookup was tried again inside 10 s"
+
+
+# GATE-LANG-USER.1-cache: cache를 둔 language는 그 기간 안의 회차에 다시 실행하지 않는다. 응답 항목은 감지 파일까지
+# 묶은 요약값을 쓰므로, helper의 적중 판정도 같은 요약값이어야 맞는다. 이것을 실패시키는 것: 적중 판정에 감지 파일을
+# 뺀 요약값을 쓰는 것(회차마다 다시 실행).
+def test_user_language_cache_hit_runs_nothing(tmp_path, _native_boot_required):
+    session = session_with(tmp_path)
+    interpreter, counter = deno(session)
+    (session.pwd / "deno.json").write_text("{}\n")
+    session.put(user_language(interpreter, "cache='30s'\n"))
+    ready(session)
+    published_rounds(session)
+    before = runs(counter)
+    assert before >= 1
+    rounds(session, 3)
+    assert runs(counter) == before, "a language inside its cache time ran again"
+    assert b"1.46.3" in session.prompt()
+    session.wait_quiet(timeout=8)
+
+
+# GATE-LANG-USER.1-git: git과 사용자 language segment를 함께 그려도 git 값이 실제 프롬프트에 보인다. 도우미 요청의
+# mask와 앞단이 스냅샷에서 decode한 설정으로 얻는 기대 binding이 같은 규칙에서 나오기 때문이다. 이것을 실패시키는
+# 것: 사용자 language의 dir 비트를 도우미 쪽에서만 더하는 것(수집 응답 전체가 거부되어 git 표시가 사라짐).
+def test_git_shows_beside_a_user_language(tmp_path, _native_boot_required):
+    session = BuiltinSession(tmp_path)
+    session.env["HOME"] = str(session.base)
+    repo = git_repo(session.base)
+    session.pwd = repo / "sub"
+    (session.pwd / "deno.json").write_text("{}\n")
+    interpreter, counter = deno(session, session.base / "tools")
+    session.put("[segment.\"custom/deno\"]\nkind='language'\ndetect_files=['deno.json']\n"
+                f"interpreter='{interpreter}'\nversion=['--version']\n"
+                "[layout.line1]\nleft=['git', 'custom/deno']\n[layout.line2]\nleft=['char']\n")
+    session.init()
+    session.await_text("main", timeout=8)

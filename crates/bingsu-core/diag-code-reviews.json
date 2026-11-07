@@ -16,5 +16,11 @@
     "after": "2cadb6636e9653b33434e59b2e7ad2555a0544081a040a9851e64a676bd83b48",
     "kind": "meaning",
     "reason": "W404 still means: a user segment that needs a trusted layout is left out because no line of a trusted layout draws it. It now also covers env segments, which show the user's environment and take the same layout verdict as command segments, so its text says the segment is not used (an env segment does not run) and its explanation names command and env segments. {id} and the fix keep their meaning. Its number, status and severity stay; no code is reused or deprecated."
+  },
+  {
+    "before": "2cadb6636e9653b33434e59b2e7ad2555a0544081a040a9851e64a676bd83b48",
+    "after": "dc73729b5f611de72093fe88975e9aeadb9228ef36ace3806483291327891bac",
+    "kind": "meaning",
+    "reason": "N502 is deprecated, not reused: it said a declared user segment of a kind the prompt does not draw yet would show after an upgrade. Language segments are now drawn, so every kind a segment can declare (text, command, env, language) is drawn and the condition can no longer arise; the compile step that emitted it is removed. Its number, severity and texts stay so an old report still reads. No other code changes, and no new code takes its place."
   }
 ]
