@@ -17,6 +17,18 @@ use alloc::vec::Vec;
 /// What `parse_duration_ms` accepts, as a JSON Schema pattern: 0–3600000
 /// ms or 0–3600 s, no leading zeros. The shared corpus test keeps the two
 /// equal.
+/// `Ty::EnvName`: what `env_name` accepts, for the JSON Schema.
+pub const ENV_NAME_PATTERN: &str = "^[A-Za-z_][A-Za-z0-9_]{0,63}$(?![\\s\\S])";
+
+/// Whether `s` is an environment variable name an `env` segment may show:
+/// a letter or `_`, then letters, digits and `_`, at most 64 bytes.
+pub fn env_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..=64).contains(&b.len())
+        && (b[0].is_ascii_alphabetic() || b[0] == b'_')
+        && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+}
+
 pub const DURATION_PATTERN: &str = "^((0|[1-9][0-9]{0,5}|[1-2][0-9]{6}|3[0-5][0-9]{5}|3600000)ms|(0|[1-9][0-9]{0,2}|[1-2][0-9]{3}|3[0-5][0-9]{2}|3600)s)$(?![\\s\\S])";
 
 /// `"200ms"` or `"2s"` in milliseconds, up to one hour. No leading zeros,
@@ -148,6 +160,14 @@ fn type_ok(ty: Ty, n: &MNode, path: &str, out: &mut Vec<Diagnostic>) {
                 ));
             }
         }
+        (Ty::EnvName, MValue::Scalar(Value::Str(s))) => {
+            if !env_name(s) {
+                out.push(bad(
+                    format!("\"{s}\""),
+                    String::from("a variable name: a letter or `_`, then letters, digits and `_`, at most 64 bytes"),
+                ));
+            }
+        }
         (Ty::Duration, MValue::Scalar(Value::Str(s))) => {
             if parse_duration_ms(s).is_none() {
                 out.push(bad(
@@ -209,7 +229,7 @@ fn type_ok(ty: Ty, n: &MNode, path: &str, out: &mut Vec<Diagnostic>) {
             }
             out.push(d)
         }
-        (Ty::Str | Ty::Text | Ty::Enum(_) | Ty::Duration | Ty::Color, _) => {
+        (Ty::Str | Ty::EnvName | Ty::Text | Ty::Enum(_) | Ty::Duration | Ty::Color, _) => {
             out.push(wrong("a string", kind))
         }
     }
@@ -366,6 +386,16 @@ fn segments(root: &MTable, out: &mut Vec<Diagnostic>) {
             };
             out.push(Diagnostic::new(code, place(&s.node)).arg("id", s.key.clone()));
             continue;
+        }
+        // An env segment shows one variable: without its name it shows
+        // nothing, which is a mistake, never a choice.
+        if kind == Some("env") && t.get("env").is_none() {
+            out.push(
+                Diagnostic::new(codes::BAD_VALUE, place(&s.node))
+                    .arg("key", format!("segment.\"{}\".env", s.key))
+                    .arg("found", "nothing")
+                    .arg("expected", "the name of the environment variable to show"),
+            );
         }
         if builtin && kind.is_some() {
             out.push(
@@ -577,6 +607,23 @@ pub(crate) mod tests {
             .iter()
             .map(|d| d.code)
             .collect()
+    }
+
+    // C5: env segment은 보일 변수 이름(`env`)이 있어야 하고, 이름은 `[A-Za-z_][A-Za-z0-9_]*` 64 B 이하다. 다른 kind는
+    // `env` 없이도 된다. 이것을 실패시키는 것: 이름 없는 env segment를 받는 것, kind 확인 없이 모든 user segment에
+    // `env`를 요구하는 것, 64 B 상한을 늘리거나 첫 글자 규칙을 지우는 것.
+    #[test]
+    fn env_segment_needs_a_variable_name() {
+        let seg = |body: &str| codes_of(&alloc::format!("[segment.\"custom/e\"]\n{body}"));
+        assert_eq!(seg("kind = \"env\"\n"), [codes::BAD_VALUE]);
+        assert_eq!(seg("kind = \"env\"\nenv = \"AWS_PROFILE\"\n"), []);
+        assert_eq!(seg("kind = \"text\"\ntext = \"x\"\n"), []);
+        let name = |n: &str| seg(&alloc::format!("kind = \"env\"\nenv = \"{n}\"\n"));
+        assert_eq!(name(&"A".repeat(64)), []);
+        assert_eq!(name(&"A".repeat(65)), [codes::BAD_VALUE]);
+        assert_eq!(name("_1"), []);
+        assert_eq!(name("1A"), [codes::BAD_VALUE]);
+        assert_eq!(name("A-B"), [codes::BAD_VALUE]);
     }
 
     // 스펙 2절 예시 파일 그대로. `layout.transient`는 M4·M5 키라 알림 N503 하나만 낸다.

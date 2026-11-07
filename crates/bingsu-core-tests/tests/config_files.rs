@@ -103,7 +103,7 @@ fn schemas_match_the_committed_files() {
 // 이것을 실패시키는 것: 닫힌 표·값 범위·메타 패턴을 빼거나 잘못된 JSON 타입으로 내보내는 것.
 #[test]
 fn schemas_follow_the_key_table() {
-    use bingsu_core::config::check::DURATION_PATTERN;
+    use bingsu_core::config::check::{DURATION_PATTERN, ENV_NAME_PATTERN};
     use bingsu_core::config::keys::{KEYS, Ty};
     use bingsu_core::config::schema::{META, REQUIRES_PATTERN};
     for which in [Which::Config, Which::Theme] {
@@ -133,6 +133,7 @@ fn schemas_follow_the_key_table() {
                 Ty::Text => assert_eq!(node["x-bingsu-type"], "text"),
                 Ty::Color => assert_eq!(node["x-bingsu-type"], "color"),
                 Ty::Duration => assert_eq!(node["x-bingsu-type"], "duration"),
+                Ty::EnvName => assert_eq!(node["x-bingsu-type"], "env-name"),
                 Ty::Segments => assert_eq!(node["items"]["x-bingsu-type"], "segment-id"),
                 _ => {}
             }
@@ -156,6 +157,10 @@ fn schemas_follow_the_key_table() {
                     assert_eq!(node["maximum"], max);
                 }
                 Ty::Str | Ty::Text | Ty::Color => assert_eq!(node["type"], "string"),
+                Ty::EnvName => {
+                    assert_eq!(node["type"], "string");
+                    assert_eq!(node["pattern"], ENV_NAME_PATTERN);
+                }
                 Ty::Duration => {
                     assert_eq!(node["type"], "string");
                     assert_eq!(node["pattern"], DURATION_PATTERN);
@@ -308,6 +313,23 @@ fn schema_corpora_match_engine_and_both_schemas() {
             !diagnostics.iter().any(|d| d.code == codes::BAD_VALUE),
             ok,
             "color checker {text:?}"
+        );
+    }
+    for (text, ok) in rows(include_str!(
+        "../../bingsu-core/schema/env-name-corpus.json"
+    )) {
+        assert_eq!(
+            bingsu_core::config::check::env_name(&text),
+            ok,
+            "env name {text:?}"
+        );
+        let diagnostics = check(&merged_json(
+            &json!({"segment":{"custom/e":{"kind":"env","env":text}}}),
+        ));
+        assert_eq!(
+            !diagnostics.iter().any(|d| d.code == codes::BAD_VALUE),
+            ok,
+            "env name checker {text:?}"
         );
     }
     for (text, ok) in rows(include_str!("../../bingsu-core/schema/text-corpus.json")) {

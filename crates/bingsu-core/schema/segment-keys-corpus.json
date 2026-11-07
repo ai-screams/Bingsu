@@ -602,7 +602,7 @@
     "segment": {
       "custom/a": {
         "kind": "env",
-        "var": "HOME"
+        "env": "HOME"
       }
     },
     "ok": true,
@@ -696,6 +696,18 @@
     "schemas": [
       "config",
       "theme"
+    ]
+  },
+  {
+    "segment": {
+      "custom/a": {
+        "kind": "env",
+        "env": "1X"
+      }
+    },
+    "ok": false,
+    "schemas": [
+      "config"
     ]
   }
 ]

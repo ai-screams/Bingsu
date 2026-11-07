@@ -50,7 +50,7 @@ def check(schemas, segment_cases):
         by_path = dict(nodes(root))
         # Engine types, rather than property-name guesses, identify every
         # duration/text/color/segments occurrence through the generated tag.
-        for kind in ("duration", "segment-id", "color", "text"):
+        for kind in ("duration", "segment-id", "color", "text", "env-name"):
             rows = corpus(kind)
             targets = []
             for path, node in by_path.items():
@@ -60,7 +60,9 @@ def check(schemas, segment_cases):
                     targets.append(((*path, "items"), node["items"]))
                 if node.get("propertyNames", {}).get("x-bingsu-type") == kind:
                     targets.append(((*path, "propertyNames"), node["propertyNames"]))
-            if not targets:
+            # The theme schema has no env segment: `segment.*.env` is an
+            # execution key.
+            if not targets and not (kind == "env-name" and name == "theme"):
                 bad.append(f"{name}: missing {kind} constraints")
             counts[f"{name}/{kind}"] = len(targets)
             for path, node in targets:

@@ -334,7 +334,7 @@ pub(crate) mod tests {
     #[test]
     fn custom_ids_in_a_template_drop_only_that_reference() {
         // `env` is drawn from C5; `text` and `command` are drawn now.
-        let decl = "[segment.\"custom/t\"]\nkind = \"env\"\nvar = \"T\"\n";
+        let decl = "[segment.\"custom/t\"]\nkind = \"language\"\n";
         let tpl = |t: &str| alloc::format!("[style]\ntemplate = \"{t}\"\n");
         let want = nodes_of(&read(&tpl("{dir} {@group}<{git}>{@end}{@nl}{char}"), &[]));
         let with = "{@group}[{custom/t}]{@end}{dir} {@group}<{git}{custom/t.x}>{@end}{@nl}{char}";
@@ -679,7 +679,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(d.via.len(), 2);
         let r = read(
-            "[segment.\"custom/t\"]\nkind='env'\nvar='T'\n[style]\ntemplate='{dir}{custom/t}'\n",
+            "[segment.\"custom/t\"]\nkind='language'\n[style]\ntemplate='{dir}{custom/t}'\n",
             &[],
         );
         let d = r
