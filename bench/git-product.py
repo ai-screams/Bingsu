@@ -52,14 +52,18 @@ CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 #   same values instead of commands; its difference from max is what the
 #   command feature itself adds (reading, decoding, deciding), apart from
 #   drawing 32 wide segments (U-23).
+# - prompt-env-segments: 32 env segments (C5) over the near-full frame of
+#   prompt-env64k, each variable about 1 KB of mixed text, all drawn (2,400
+#   columns). No command, no session, no response. A base without env
+#   segments draws none; a part is refused.
 SESSION = "0123456789abcdef0123456789abcdef"
 COMMAND_CASES = ("prompt-env64k", "prompt-env64k-commands", "prompt-commands-hit", "prompt-commands-max",
                  "prompt-commands-max-empty", "prompt-commands-redraw", "prompt-commands-max-empty-redraw",
-                 "prompt-text-max")
+                 "prompt-text-max", "prompt-env-segments")
 EMPTY_CASES = ("prompt-commands-max-empty", "prompt-commands-max-empty-redraw")
 REDRAW_CASES = ("prompt-commands-redraw", "prompt-commands-max-empty-redraw")
 # Cases without any command response for the whole run.
-NO_RESPONSE_CASES = EMPTY_CASES + ("prompt-text-max",)
+NO_RESPONSE_CASES = EMPTY_CASES + ("prompt-text-max", "prompt-env-segments")
 ALL_CASES = CASES + COMMAND_CASES
 STAGES = ("A", "PathFacts", "B", "C", "D")
 
@@ -414,6 +418,23 @@ def command_setup(case, directory):
         # `char`, as they draw besides their units, keeps the helper's round
         # the same light kind and the timing on the frame.
         return "icons = 'ascii'\n[layout.line1]\nleft = ['char']\n", pad, {}
+    if case == "prompt-env-segments":
+        # The first 32 pad variables become the shown values: each starts
+        # with its mark and keeps the pad's size, so the frame stays near full.
+        values = {}
+        for i in range(32):
+            data = (f"u{i:02}-" + "kube-\uD55C\uAE00-ctx/" * 80).encode()[:986]
+            while True:
+                try:
+                    data.decode()
+                    break
+                except UnicodeDecodeError:
+                    data = data[:-1]
+            pad[f"BINGSU_PAD_{i:02}"] = data.decode()
+            values[f"custom/e{i:02}"] = data
+        lines = "".join(f"[segment.\"custom/e{i:02}\"]\nkind = 'env'\nenv = 'BINGSU_PAD_{i:02}'\n" for i in range(32))
+        ids = ", ".join(f"'custom/e{i:02}'" for i in range(32))
+        return "icons = 'ascii'\n" + lines + f"[layout.line1]\nleft = [{ids}, 'char']\n", pad, values
     allow = [[]] * 32
     env = {}
     if case == "prompt-commands-hit":
@@ -516,7 +537,7 @@ def command_context(binary, directory, case):
     # The shell hooks pass a session value on every prompt; command units run
     # only with one. The empty case passes none: the helper still starts every
     # prompt, but runs no unit and publishes no command response.
-    empty = case in EMPTY_CASES
+    empty = case in EMPTY_CASES or case == "prompt-env-segments"
     if not empty:
         command = [*command, "--session", SESSION]
     if len(values) == 32:
@@ -525,6 +546,12 @@ def command_context(binary, directory, case):
         command[command.index("--width") + 1] = "2400"
     if not values:
         return command, env, values, None
+    if case == "prompt-env-segments":
+        result = M3B.run(command, env=env)
+        drawn = drawn_units(values, result.stdout)
+        if not M3B.normal_record(result) or any(directory.rglob("store/command")) or drawn not in (0, len(values)):
+            raise ValueError(f"{case}: a command response exists or the prompt draws {drawn} units")
+        return command, env, values, drawn
     if case == "prompt-text-max":
         result = M3B.run(command, env=env)
         drawn = drawn_units(values, result.stdout)

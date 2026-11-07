@@ -951,7 +951,7 @@ fn custom_values(
     let vars = Environ::parse(body);
     for (i, segment) in custom.iter().enumerate() {
         if let CustomKind::Env(name) = &segment.kind {
-            out[i] = env_value(&vars, name);
+            out[i] = crate::command::plan::env_segment_value(&vars, name);
         }
     }
     let (Some(response), Some(entry), Some(build_id)) =
@@ -996,15 +996,6 @@ fn custom_values(
         out[i] = display::value(&mut prompt, unit, Origin::Config).map(|v| v.into());
     }
     out
-}
-
-/// What an env segment draws for `name`: the part of its value the cut reads
-/// (`Clean::read_prefix`), invalid UTF-8 replaced; nothing when it is unset.
-/// An empty value draws nothing as empty text does.
-fn env_value(vars: &crate::command::plan::Environ<'_>, name: &str) -> Option<String> {
-    let value = vars.get(name.as_bytes())?;
-    let text = String::from_utf8_lossy(value);
-    Some(crate::field::Clean::read_prefix(&text, crate::field::CUSTOM_TEXT_CELLS).into())
 }
 
 /// Finish never observes the OS. COLORFGBG comes only from the display envelope,

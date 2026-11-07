@@ -11,6 +11,7 @@ use crate::{
     config::compile::{ExecPolicy, ExecUnit},
     handoff::{Cwd, Origin},
 };
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Config units spawned in one round (U-9d).
@@ -119,6 +120,16 @@ impl<'a> Environ<'a> {
             .ok()
             .map(|i| self.entries[i].1)
     }
+}
+
+/// What an env segment draws for variable `name` of this environment (C5):
+/// the part of its value the cut reads (`Clean::read_prefix`), invalid UTF-8
+/// replaced; nothing when it is unset or named twice (`Environ` drops both).
+/// An empty value draws nothing as empty text does.
+pub fn env_segment_value(vars: &Environ<'_>, name: &str) -> Option<String> {
+    let value = vars.get(name.as_bytes())?;
+    let text = String::from_utf8_lossy(value);
+    Some(crate::field::Clean::read_prefix(&text, crate::field::CUSTOM_TEXT_CELLS).into())
 }
 
 /// The original environment digest of a config unit (spec section 4
