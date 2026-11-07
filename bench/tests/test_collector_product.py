@@ -538,7 +538,7 @@ def test_intervals_follow_event_order_and_contain_their_boundaries(interval):
             product.validate_helper_spawn(damaged)
     example = (SOURCE.parents[1] / "crates/bingsu/examples/n7_front_cost.rs").read_text()
     timed = example.split('let bootstrap_enter = stamp();', 1)[1].split('let bootstrap_return = stamp();', 1)[0]
-    assert [line.strip() for line in timed.strip().splitlines()] == ["prompt_spawn::bootstrap(&exe, &raw, deadline);"]
+    assert [line.strip() for line in timed.strip().splitlines()] == ["prompt_spawn::bootstrap(Some(&exe), &raw, deadline);"]
 
 
 # 이것을 실패시키는 것: 정상 B1(ok:none)이 아닌 prompt 표본을 합계 행의 prompt_ns로 받는 것.
