@@ -21,10 +21,10 @@ def sample(extra='', verb='__collect-v1'):
 # 이것을 실패시키는 것: exec 선행 출력에서 부모 귀속 손실, watchdog를 프로세스로 집계, 실패 clone 집계.
 def test_role_children_creation_site_and_threads():
     trace = sample('11 clone3({}, 88) = -1 ENOSYS (Function not implemented)')
-    # 이것을 실패시키는 것: assert role_children(trace) == {'front': 1, 'helper': 1, 'collector': 0, 'command': 0} 조건을 제거하거나 반전하는 변이.
-    assert role_children(trace) == {'front': 1, 'helper': 1, 'collector': 0, 'command': 0}
-    # 이것을 실패시키는 것: assert first_index(trace, 'helper', lambda c: c.name == 'read') == 5 조건을 제거하거나 반전하는 변이.
-    assert first_index(trace, 'helper', lambda c: c.name == 'read') == 5
+    # 이것을 실패시키는 것: assert role_children(trace, 'cli') == {'front': 1, 'helper': 1, 'collector': 0, 'command': 0} 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace, 'cli') == {'front': 1, 'helper': 1, 'collector': 0, 'command': 0}
+    # 이것을 실패시키는 것: assert first_index(trace, 'helper', lambda c: c.name == 'read', 'cli') == 5 조건을 제거하거나 반전하는 변이.
+    assert first_index(trace, 'helper', lambda c: c.name == 'read', 'cli') == 5
 
 
 # 이것을 실패시키는 것: collector 자식·알 수 없는 명령 exec·helper 중복 생성 누락.
@@ -37,21 +37,21 @@ def test_role_children_negative_controls(extra, verb, want):
     trace = sample(extra, verb)
     # 이것을 실패시키는 것: if verb != 'wrong' 조건을 제거하거나 반전하는 변이.
     if verb != 'wrong':
-        # 이것을 실패시키는 것: assert role_children(trace) == want 조건을 제거하거나 반전하는 변이.
-        assert role_children(trace) == want
+        # 이것을 실패시키는 것: assert role_children(trace, 'cli') == want 조건을 제거하거나 반전하는 변이.
+        assert role_children(trace, 'cli') == want
     # 이것을 실패시키는 것: if verb == 'wrong' 조건을 제거하거나 반전하는 변이.
     if verb == 'wrong':
         with pytest.raises(ValueError):
-            role_children(trace)
+            role_children(trace, 'cli')
         with pytest.raises(ValueError):
-            first_index(trace, 'collector', lambda c: True)
+            first_index(trace, 'collector', lambda c: True, 'cli')
 
 
 # 이것을 실패시키는 것: 구조 오류·생성 부모가 없는 프로세스를 조용히 무시하는 것.
 @pytest.mark.parametrize('extra', ['garbage', '99 read(3, "x", 1) = 1'])
 def test_role_children_fail_closed(extra):
     with pytest.raises(ValueError):
-        role_children(sample(extra))
+        role_children(sample(extra), 'cli')
 
 
 # 이것을 실패시키는 것: clone·clone3·fork·vfork 중 한 플랫폼의 생성을 무시하거나 실패한 시도를 세는 것.
@@ -59,19 +59,19 @@ def test_role_children_fail_closed(extra):
 def test_each_spawn_primitive_has_exact_count_and_failed_control(primitive):
     trace = sample()
     trace[2].name = primitive
-    # 이것을 실패시키는 것: assert role_children(trace)['front'] == 1 조건을 제거하거나 반전하는 변이.
-    assert role_children(trace)['front'] == 1
+    # 이것을 실패시키는 것: assert role_children(trace, 'cli')['front'] == 1 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace, 'cli')['front'] == 1
     trace[2].ret = '-1 EAGAIN (Resource temporarily unavailable)'
     with pytest.raises(ValueError):
-        role_children(trace)
+        role_children(trace, 'cli')
 
 
 # 이것을 실패시키는 것: exit 뒤 재사용된 collector PID를 이전 수명에 합쳐 생성 수를 누락하는 것.
 def test_reused_pid_is_a_separate_creation():
     trace = sample('13 +++ exited with 0 +++\n11 vfork() = 13\n'
                    '13 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0')
-    # 이것을 실패시키는 것: assert role_children(trace)['helper'] == 2 조건을 제거하거나 반전하는 변이.
-    assert role_children(trace)['helper'] == 2
+    # 이것을 실패시키는 것: assert role_children(trace, 'cli')['helper'] == 2 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace, 'cli')['helper'] == 2
 
 
 # 이것을 실패시키는 것: CLONE_THREAD 자식을 exec해 no-worker collector 계수를 우회하는 변이.
@@ -82,7 +82,7 @@ def test_thread_exec_is_not_zero_collectors():
 11 clone(flags=CLONE_THREAD|CLONE_VM) = 12
 12 execve("/bin/bingsu-collect", ["/bin/bingsu-collect", "__collect-v1"], []) = 0''')
     with pytest.raises(ValueError, match='thread exec'):
-        role_children(source)
+        role_children(source, 'cli')
 
 
 # A later pinned exec must never erase a shell, including early vfork output.
@@ -99,7 +99,7 @@ def test_exec_relays_are_rejected_permanently(role, before_return):
         product = spawn
     lines.insert(product, shell)
     trace = parse('\n'.join(lines))
-    for check in (role_children, lambda t: first_index(t, role, lambda c: True)):
+    for check in (lambda t: role_children(t, 'cli'), lambda t: first_index(t, role, lambda c: True, 'cli')):
         with pytest.raises(ValueError, match='exec transition'):
             check(trace)
 
@@ -109,7 +109,7 @@ def test_repeated_product_exec_is_rejected(pid):
     trace = sample()
     call = next(c for c in trace if c.pid == pid and c.name == 'execve')
     with pytest.raises(ValueError, match='exec transition'):
-        role_children(sample(f'{pid} execve({call.args}) = 0'))
+        role_children(sample(f'{pid} execve({call.args}) = 0'), 'cli')
 
 
 def test_timing_evidence_starts_at_validated_exec():
@@ -118,7 +118,7 @@ def test_timing_evidence_starts_at_validated_exec():
 11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0
 10 vfork() = 11
 11 read(3</store/snapshot>, "new", 192) = 192''')
-    assert first_index(trace, 'helper', lambda c: c.name == 'read') == 4
+    assert first_index(trace, 'helper', lambda c: c.name == 'read', 'cli') == 4
 
 
 @pytest.mark.parametrize('pid', [10, 11, 13])
@@ -128,4 +128,50 @@ def test_timing_evidence_starts_at_validated_exec():
 ])
 def test_unexpected_successful_exec_in_any_product_role(pid, name, args):
     with pytest.raises(ValueError, match='exec transition'):
-        role_children(sample(f'{pid} {name}({args}) = 0'))
+        role_children(sample(f'{pid} {name}({args}) = 0'), 'cli')
+
+
+def dedicated(front_args, helper='/bin/bingsu'):
+    return parse(f'''10 execve("/bin/bingsu-prompt", ["/bin/bingsu-prompt", "prompt"{front_args}], []) = 0
+11 execve("{helper}", ["{helper}", "__refresh-v1"], []) = 0
+10 vfork() = 11
+''')
+
+
+# 이것을 실패시키는 것: helper를 front 실행 파일과만 비교하는 것, 값 자리의 helper 글을 플래그로 읽는 것,
+# 중복 helper 단어를 받는 것.
+@pytest.mark.parametrize('front_args,helper,ok', [
+    (', "--helper-exe=/bin/bingsu"', '/bin/bingsu', True),
+    (', "--helper-exe=/bin/bingsu"', '/elsewhere/bingsu', False),
+    (', "--host", "--helper-exe=/evil"', '/evil', False),
+    (', "--helper-exe=/bin/bingsu", "--helper-exe=/bin/bingsu"', '/bin/bingsu', False),
+    (', "--helper-exe=bingsu"', 'bingsu', False),
+    ('', '/bin/bingsu', False),
+])
+def test_dedicated_front_helper_is_the_hook_word(front_args, helper, ok):
+    trace = dedicated(front_args, helper)
+    if ok:
+        assert role_children(trace, 'dedicated') == {'front': 1, 'helper': 0, 'collector': 0, 'command': 0}
+    else:
+        with pytest.raises(ValueError):
+            role_children(trace, 'dedicated')
+
+
+# 이것을 실패시키는 것: bingsu-prompt가 helper 단어 없이 자기 자신을 `__refresh-v1`로 띄우는 것을 받는 것,
+# 같은 trace의 CLI 진입점(argv0 fallback)을 거부하는 것, entry를 파일 이름으로 정하는 것.
+def test_dedicated_entry_never_starts_itself():
+    self_spawn = parse('''10 execve("/bin/bingsu-prompt", ["/bin/bingsu-prompt", "prompt"], []) = 0
+11 execve("/bin/bingsu-prompt", ["/bin/bingsu-prompt", "__refresh-v1"], []) = 0
+10 vfork() = 11
+''')
+    with pytest.raises(ValueError):
+        role_children(self_spawn, 'dedicated')
+    assert role_children(self_spawn, 'cli') == {'front': 1, 'helper': 0, 'collector': 0, 'command': 0}
+    renamed = parse('''10 execve("/bin/bingsu", ["/bin/bingsu", "prompt"], []) = 0
+11 execve("/bin/bingsu", ["/bin/bingsu", "__refresh-v1"], []) = 0
+10 vfork() = 11
+''')
+    with pytest.raises(ValueError):
+        role_children(renamed, 'dedicated')
+    with pytest.raises(ValueError):
+        role_children(renamed, None)

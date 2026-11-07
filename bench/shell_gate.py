@@ -77,7 +77,13 @@ class Session:
         init = subprocess.run([str(exe), "init", "zsh"], env=env, capture_output=True, timeout=30)
         if init.returncode != 0 or not init.stdout:
             raise ValueError("init failed: " + init.stderr[-200:].decode(errors="replace"))
-        (root / "init.zsh").write_bytes(init.stdout)
+        # init writes the canonical path of a verified `bingsu-prompt` sibling
+        # into the hook, which the symlink swap below cannot reach; send that
+        # one call through the swapped link too ("drawn" in measure_case then
+        # shows the stand-in, never a real renderer, made the prompt).
+        sibling = os.fsencode(Path(binary).resolve().with_name("bingsu-prompt"))
+        script = init.stdout.replace(sibling, os.fsencode(exe)) if sibling in init.stdout else init.stdout
+        (root / "init.zsh").write_bytes(script)
         fake = root / "fake"
         fake.write_text(stand_in(case))
         fake.chmod(0o700)

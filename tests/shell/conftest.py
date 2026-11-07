@@ -6,7 +6,7 @@ import pytest
 
 # Re-export for existing shell tests; cross-suite consumers import shell_support.
 from shell_support import (
-    ROOT, FAKE, SHELL_CMD, COLD_INIT_NOTICE, Install, real_bin, real_collector,
+    ROOT, FAKE, SHELL_CMD, COLD_INIT_NOTICE, Install, real_bin, real_collector, real_prompt,
     trusted_env, run_shell_script, short_dir, minimal_record, status_bait_record, _SHORT_DIRS,
 )
 

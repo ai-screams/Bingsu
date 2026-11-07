@@ -28,10 +28,33 @@ impl CollectorProbeFd {
     }
 }
 
+/// A dedicated sibling of `bingsu` in the same folder: its file name and the
+/// role its build embeds. The markers say the files come from one build;
+/// they prove nothing about who made them. Permissions are the boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sibling {
+    name: &'static str,
+    role: u8,
+}
+impl Sibling {
+    pub const COLLECTOR: Self = Self {
+        name: "bingsu-collect",
+        role: bingsu_identity::COLLECTOR_ROLE,
+    };
+    pub const PROMPT: Self = Self {
+        name: "bingsu-prompt",
+        role: bingsu_identity::PROMPT_ROLE,
+    };
+    pub fn name(self) -> &'static str {
+        self.name
+    }
+}
+
 /// Held evidence for the canonical dedicated executable. This does not select
 /// a worker from PATH, nor authorize any configured command. C1 consumes it
 /// immediately before spawning the dedicated worker.
 pub struct PinnedCollector {
+    sibling: Sibling,
     path: std::path::PathBuf,
     chain: super::runtime_root::Chain,
     executable: File,
@@ -44,9 +67,19 @@ impl PinnedCollector {
         me: u32,
         groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
     ) -> Result<Self, StoreError> {
+        Self::verify_as(Sibling::COLLECTOR, exe, me, groups)
+    }
+    /// The same checks for any sibling: the file name, the folder chain, the
+    /// file's owner and mode, a local file system, this build and `sibling`'s role.
+    pub fn verify_as(
+        sibling: Sibling,
+        exe: &OsStr,
+        me: u32,
+        groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
+    ) -> Result<Self, StoreError> {
         use bingsu_core::fs_trust::{Verdict, entry_verdict};
         let path = std::path::Path::new(exe);
-        if path.file_name() != Some(OsStr::new("bingsu-collect")) {
+        if path.file_name() != Some(OsStr::new(sibling.name)) {
             return Err(StoreError::Unsafe);
         }
         let parent = path.parent().ok_or(StoreError::Unsafe)?;
@@ -57,7 +90,7 @@ impl PinnedCollector {
             }
         }
         let executable =
-            sys::open_data_at_nofollow(chain.last().as_fd(), OsStr::new("bingsu-collect"))?;
+            sys::open_data_at_nofollow(chain.last().as_fd(), OsStr::new(sibling.name))?;
         let facts = sys::fd_facts(executable.as_fd())?;
         if entry_verdict(&facts, me, false, groups) != Verdict::Safe {
             return Err(StoreError::Unsafe);
@@ -69,8 +102,9 @@ impl PinnedCollector {
         {
             return Err(StoreError::Unsafe);
         }
-        verify_build(&executable)?;
+        verify_build(&executable, sibling.role)?;
         let pin = Self {
+            sibling,
             path: path.to_path_buf(),
             chain,
             stamp: sys::file_stamp(&executable)?,
@@ -86,7 +120,8 @@ impl PinnedCollector {
         self.chain.revalidate()?;
         if sys::file_stamp(&self.executable)? != self.stamp
             || sys::fd_facts(self.executable.as_fd())? != self.facts
-            || sys::at_stamp(self.chain.last().as_fd(), OsStr::new("bingsu-collect"))? != self.stamp
+            || sys::at_stamp(self.chain.last().as_fd(), OsStr::new(self.sibling.name))?
+                != self.stamp
         {
             return Err(StoreError::Unsafe);
         }
@@ -96,7 +131,7 @@ impl PinnedCollector {
 fn executable_mode(mode: u32) -> bool {
     mode & 0o111 != 0 && mode & 0o6000 == 0
 }
-fn verify_build(file: &File) -> Result<(), StoreError> {
+fn verify_build(file: &File, role: u8) -> Result<(), StoreError> {
     use std::os::unix::fs::FileExt;
     let size = file.metadata()?.len();
     if size > 64 * 1024 * 1024 {
@@ -128,7 +163,7 @@ fn verify_build(file: &File) -> Result<(), StoreError> {
                 found += 1;
             }
             if window[..16] == std::hint::black_box(&super::ROLE_TAG)[..16] {
-                if window.get(16) != Some(&bingsu_identity::COLLECTOR_ROLE)
+                if window.get(16) != Some(&role)
                     || window.get(17..49) != Some(expected.0.as_slice())
                 {
                     return Err(StoreError::Unsafe);
@@ -240,11 +275,50 @@ mod tests {
     }
 
     fn collector_fixture() -> Vec<u8> {
+        sibling_fixture(bingsu_identity::COLLECTOR_ROLE)
+    }
+
+    fn sibling_fixture(role: u8) -> Vec<u8> {
         [
             bingsu_identity::manifest_tag().as_slice(),
-            &bingsu_identity::role_tag(bingsu_identity::COLLECTOR_ROLE),
+            &bingsu_identity::role_tag(role),
         ]
         .concat()
+    }
+
+    // 이것을 실패시키는 것: 형제마다 자기 이름·역할을 보지 않고 collector의 것을 쓰는 것.
+    #[test]
+    fn each_sibling_needs_its_own_name_and_role() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::current_dir()
+            .unwrap()
+            .join(format!("bingsu-sibling-role-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        let me = sys::current_uid();
+        let verify = |sibling: Sibling, name: &str, role: u8| {
+            let path = base.join(name);
+            std::fs::write(&path, sibling_fixture(role)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let ok =
+                PinnedCollector::verify_as(sibling, path.as_os_str(), me, &mut RefuseGroupWrite)
+                    .is_ok();
+            std::fs::remove_file(path).unwrap();
+            ok
+        };
+        let prompt = bingsu_identity::PROMPT_ROLE;
+        let collector = bingsu_identity::COLLECTOR_ROLE;
+        assert!(verify(Sibling::PROMPT, "bingsu-prompt", prompt));
+        assert!(!verify(Sibling::PROMPT, "bingsu-prompt", collector));
+        assert!(!verify(
+            Sibling::PROMPT,
+            "bingsu-prompt",
+            bingsu_identity::BINGSU_ROLE
+        ));
+        assert!(!verify(Sibling::PROMPT, "bingsu-collect", prompt));
+        assert!(!verify(Sibling::COLLECTOR, "bingsu-collect", prompt));
+        assert!(verify(Sibling::COLLECTOR, "bingsu-collect", collector));
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     // 이것을 실패시키는 것: 실행 파일에 runtime-root의 sticky 예외를 적용하는 것.
@@ -275,7 +349,9 @@ mod tests {
             let mut bad = valid.clone();
             bad[offset] ^= 1;
             std::fs::write(&path, bad).unwrap();
-            assert!(verify_build(&File::open(&path).unwrap()).is_err());
+            assert!(
+                verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_err()
+            );
         }
         for bad in [
             bingsu_identity::manifest_tag().to_vec(),
@@ -292,16 +368,22 @@ mod tests {
             valid[..96].to_vec(),
         ] {
             std::fs::write(&path, bad).unwrap();
-            assert!(verify_build(&File::open(&path).unwrap()).is_err());
+            assert!(
+                verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_err()
+            );
         }
         for prefix in [0, 65_480, 65_520, 65_535, 65_536] {
             let mut bytes = vec![0; prefix];
             bytes.extend(&valid);
             std::fs::write(&path, &bytes).unwrap();
-            assert!(verify_build(&File::open(&path).unwrap()).is_ok());
+            assert!(
+                verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_ok()
+            );
             bytes.extend(&valid);
             std::fs::write(&path, bytes).unwrap();
-            assert!(verify_build(&File::open(&path).unwrap()).is_err());
+            assert!(
+                verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_err()
+            );
         }
         std::fs::remove_file(path).unwrap();
     }

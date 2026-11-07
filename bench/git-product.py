@@ -97,7 +97,7 @@ def sources(source):
 def prepared(binary):
     binary = Path(binary).resolve()
     value = json.loads(manifest_path(binary).read_text())
-    for name, path in (("front", binary), ("collector", binary.with_name("bingsu-collect")),
+    for name, path in (("front", Path(value["front"])), ("cli", binary), ("collector", binary.with_name("bingsu-collect")),
                        ("fixture", Path(value["fixture"])), ("diagnostic", Path(value["diagnostic"]))):
         if M3B.digest(path) != value["hashes"][name]:
             raise ValueError("stale prepared " + name)
@@ -199,7 +199,9 @@ def prepare(binary):
         raise ValueError("release sibling pair required")
     directory = prepared_directory(binary, source)
     directory.mkdir(parents=True, exist_ok=True)
-    command = ["cargo", "build", "--locked", "-j", "2", "--release", "-p", "bingsu", "-p", "bingsu-collect", "--message-format=json"]
+    dedicated = M3B.dedicated_prompt(binary)
+    command = ["cargo", "build", "--locked", "-j", "2", "--release", "-p", "bingsu", "-p", "bingsu-collect",
+               *(["-p", "bingsu-prompt"] if dedicated else []), "--message-format=json"]
     triple = binary.parent.parent.name
     cross = triple.endswith(("-linux-musl", "-linux-gnu"))
     if cross:
@@ -270,15 +272,24 @@ def prepare(binary):
     identity = audit.build_id(binary, 2)
     if identity != audit.build_id(binary.with_name("bingsu-collect"), 1):
         raise ValueError("sibling build mismatch")
+    # The front is the binary the hook runs for the prompt: bingsu-prompt when
+    # the tree has it (missing, it fails here rather than measure the fallback).
+    front = binary.with_name("bingsu-prompt") if dedicated else binary
+    if dedicated and identity != audit.build_id(front, 3):
+        raise ValueError("prompt sibling build mismatch")
     sizes = {}
-    for name, path in (("front", binary), ("collector", binary.with_name("bingsu-collect"))):
+    for name, path in (("front", front), ("collector", binary.with_name("bingsu-collect")), ("cli", binary)):
         stripped = directory / (name + "-stripped")
         M3B.run(["strip", "-o", str(stripped), str(path)])
         sizes[name] = stripped.stat().st_size
-    sizes["combined"] = sum(sizes.values())
+    # combined: the prompt image and the collector (the size cap); installed:
+    # every file of the install (record only).
+    sizes["combined"] = sizes["front"] + sizes["collector"]
+    sizes["installed"] = sizes["combined"] + (sizes["cli"] if dedicated else 0)
     diagnostic = prepare_diagnostic(source, directory, binary, deps, cross, triple)
     value = {"diagnostic": str(diagnostic), "source": str(source), "profile": "release", "product_mask": 10, "fixture": str(fixture),
-             "hashes": {"front": M3B.digest(binary), "collector": M3B.digest(binary.with_name("bingsu-collect")), "fixture": M3B.digest(fixture), "diagnostic": M3B.digest(diagnostic)},
+             "front": str(front),
+             "hashes": {"front": M3B.digest(front), "cli": M3B.digest(binary), "collector": M3B.digest(binary.with_name("bingsu-collect")), "fixture": M3B.digest(fixture), "diagnostic": M3B.digest(diagnostic)},
              "source_hashes": sources(source), "sibling_build_id": identity.hex(), "stripped_bytes": sizes,
              "compiler": M3B.run(["rustc", "-vV"]).stdout.decode(),
              "probe_sources": {"stage_fixture": M3B.digest(stage_harness(source)), "reader_fixture": M3B.digest(ROOT / "bench/collector-product.py")}}
@@ -906,7 +917,7 @@ def measure_pair(base: str, candidate: str, rounds: int, *, cases=None, conditio
     (ROOT / "target").mkdir(exist_ok=True)
     result = {"schema": 1, "milestone": "M3c", "formal_B5_B7": False, "status": "OBSERVED", "rounds": rounds,
               "host": M3B.host(), "cold_definition": "first process; filesystem caches not flushed", "cases": {},
-              "variants": {name: {key: p[key] for key in ("hashes", "source_hashes", "sibling_build_id", "stripped_bytes", "compiler", "product_mask")} for name, p in preparations.items()},
+              "variants": {name: {key: p[key] for key in ("front", "hashes", "source_hashes", "sibling_build_id", "stripped_bytes", "compiler", "product_mask")} for name, p in preparations.items()},
               "common": {"I": {"status": "BLOCKED", "reason": "import dedicated Callgrind positive Ir and call-count artifacts; never inferred from latency"},
                          "S": {"status": "BLOCKED", "reason": "import per-role Linux strace -f -yy evidence; formula-only rows remain formula-only"},
                          "L": {"stage_durations": {"basis": "separate protected release diagnostic; see per-case raw stage_diagnostic, no substitution for shipped collection"},

@@ -28,7 +28,13 @@ keeps it that small (spec section 4 front end, F-01):
 5. no symlink under crates/bingsu/src, and crates/bingsu/Cargo.toml has no
    `autobins`, `autoexamples`, `autotests`, `autobenches`, `[lib]` or
    `[[bin]]` (the bin target itself is pinned by check_core_no_std.py);
-6. the trusted files hash to TCB_SHA256: on macOS and anywhere without
+6. the dedicated `bingsu-prompt` binary (crates/bingsu-prompt) compiles
+   the same prompt files through `#[path]`: core-cfg-check --prompt-main
+   holds its src/main.rs to one exact shape per platform; src holds that
+   file alone, with no symlink under the package; its manifest has the one
+   bin target with no test or bench build, the three dependencies and
+   nothing else (no build script, features or other targets);
+7. the trusted files hash to TCB_SHA256: on macOS and anywhere without
    seccomp the kernel does not hold the adapter to the table, so any change
    to these files changes a pinned value in the same pull request, making
    the change visible to maintainers.
@@ -52,17 +58,28 @@ ADAPTER = ROOT / "crates/bingsu/src/prompt.rs"
 SYSCALLS = ROOT / "crates/bingsu/prompt-syscalls.tsv"
 SANDBOX = ROOT / "crates/bingsu/src/sandbox.rs"
 MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
+PROMPT_PACKAGE = ROOT / "crates/bingsu-prompt"
+PROMPT_MANIFEST = {
+    "package": {"name": "bingsu-prompt", "version": "0.0.0",
+                "description": "The bingsu prompt alone: the prompt files of the bingsu crate, without its other commands",
+                "publish": False, "edition": {"workspace": True}, "rust-version": "1.88",
+                "license": {"workspace": True}, "repository": {"workspace": True}},
+    "lints": {"workspace": True},
+    "bin": [{"name": "bingsu-prompt", "path": "src/main.rs", "test": False, "bench": False}],
+    "dependencies": {"bingsu-core": {"path": "../bingsu-core"}, "bingsu-identity": {"path": "../bingsu-identity"}},
+    "target": {"cfg(unix)": {"dependencies": {"libc": "0.2"}}},
+}
 # K38: copying a new hash can self-approve a change; these pins are a change-detection
 # tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
     "crates/bingsu-identity/Cargo.toml": "1c6aeb48d7416df0d76252cf460c62af75c43da16cf834a227ac6cfef9ab336c",
-    "crates/bingsu-identity/build.rs": "4b91d1c9e8bbbe1453fbd3d5ec089525c725c0a33c468372ee6cdf23c2330aab",
-    "crates/bingsu-identity/src/lib.rs": "6af258f59e81c5bb33db541685b19c517bf10002a7ac56e4c7d05a7bddd2c925",
+    "crates/bingsu-identity/build.rs": "1d4f6851c6b09467c578ae1e00bde5078eec3146b9b592a244b24a3dcee9eb57",
+    "crates/bingsu-identity/src/lib.rs": "fd944c745ea76076f1c1c5f15ed0849df0045da526ab870459ce28880d48521d",
     "crates/bingsu/src/prompt_read.rs": "c84ea1f15b273825d48f7d4f15df9d3457c275b15070d4e9dc8950360eaf3484",
     "crates/bingsu-core/src/command/env_frame.rs": "237c6cdd21b42d45f247651a923f050122ee65a1ff8b54abaa16a695b9272db6",
-    "crates/bingsu/src/prompt_spawn.rs": "0c17af36372c03d371e23b2fb88b61ad39f660581b2c9895564810a07cacb9b6",
+    "crates/bingsu/src/prompt_spawn.rs": "be8921dbeda19a51addc5cbbd6ddf037a2a24f2fecf168024c7f1dd980971120",
     "crates/bingsu/src/prompt_io.rs": "31dc5ba3b067a86a6f3ca2b3e4c849013259ae5e3882b592115bac846cff4d2e",
-    "crates/bingsu/src/prompt.rs": "efc151f96c400a9fde5669511d6d8b124ad7628e51b295853a0e270d462006c9",
+    "crates/bingsu/src/prompt.rs": "79f5e5bf5c34c64211287c078701b43ceb9852eb3a64feb8dbc669dd7389776a",
     "crates/bingsu/src/main.rs": "012b20fb9bd130c577497c3dc8da4ccc19305c601d7aeaed35f6c7301f2e52b8",
     "crates/bingsu/src/relay.rs": "aac26af4519aaca3d43d0c1fb2c48332d3e6611a47276378e8a490687af2556e",
     "crates/bingsu-core/src/fs_trust.rs": "cc71c39796a8fbb553ab678ada14860caa14a5f57b09591b0669e9f654575df9",
@@ -73,6 +90,8 @@ TCB_SHA256 = {
     "crates/bingsu/src/sandbox.rs": "a8ef03197c75a326c365b3c2ac0ce0170df58b05b4d9af13c8d9e5064bcac929",
     "crates/bingsu/Cargo.toml": "1e56b43b80795d4042f862c4f563ca1121b1edd88ec401d0e16765a750b1cae8",
     "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
+    "crates/bingsu-prompt/src/main.rs": "94585d3f07affd25f2a0b407e7c33759dd8b56f4fc5dd33587d96dd199c838cd",
+    "crates/bingsu-prompt/Cargo.toml": "da03cbb0ffb87da704ba5b186308071b36e2ba072705346505ead5882bbacc61",
 }
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"
 
@@ -94,21 +113,40 @@ def check_product_fixture_isolation(binary=None):
     if len(targets) != 1 or targets[0][0] != "bingsu-core-tests" or targets[0][1]["kind"] != ["test"]:
         bad.append("collector fixture must be exactly one test target in bingsu-core-tests")
     for package in packages:
-        if package["name"] in {"bingsu", "bingsu-core", "bingsu-collect", "bingsu-identity", "bingsu-match"}:
+        if package["name"] in {"bingsu", "bingsu-prompt", "bingsu-core", "bingsu-collect", "bingsu-identity", "bingsu-match"}:
             if any(d["name"] == "bingsu-core-tests" for d in package["dependencies"]):
                 bad.append("product dependency reaches the collector fixture package")
-    if binary is not None:
-        data = pathlib.Path(binary).read_bytes()
-        for marker in (b"collector_builtin", b"collector_builtin_test_only_31"):
-            if marker in data:
-                bad.append("product binary contains a collector fixture symbol or string")
+    for path in binary or ():
+        data = pathlib.Path(path).read_bytes()
+        if any(marker in data for marker in (b"collector_builtin", b"collector_builtin_test_only_31")):
+            bad.append(f"product binary {path} contains a collector fixture symbol or string")
+    return bad
+
+
+def prompt_package_rules(package=PROMPT_PACKAGE):
+    """Rule 6 outside the checker: the files and manifest of bingsu-prompt."""
+    bad = []
+    if not package.is_dir():
+        return [f"{package.name}: package is missing"]
+    # 이것을 실패시키는 것: src에 다른 파일을 두거나 패키지 아래 symlink를 허용하는 것.
+    files = sorted(str(p.relative_to(package / "src")) for p in (package / "src").rglob("*"))
+    if files != ["main.rs"]:
+        bad.append(f"{package.name}/src: holds {files}, only main.rs is allowed")
+    links = sorted(str(p.relative_to(package)) for p in package.rglob("*") if p.is_symlink())
+    if links:
+        bad.append(f"symlinks under {package.name}: {links}")
+    # 이것을 실패시키는 것: 의존·대상·build script·feature를 더하거나 test/bench 빌드를 켜는 것.
+    manifest = tomllib.loads((package / "Cargo.toml").read_text())
+    if manifest != PROMPT_MANIFEST:
+        bad.append(f"{package.name}/Cargo.toml: differs from the pinned manifest")
     return bad
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checker", required=True, help="path to the core-cfg-check binary")
-    parser.add_argument("--product-binary", help="also audit the built product for fixture symbols and strings")
+    parser.add_argument("--product-binary", action="append",
+                        help="also audit a built product binary (bingsu, bingsu-prompt) for fixture symbols and strings")
     args = parser.parse_args()
     bad = check_product_fixture_isolation(args.product_binary)
     # All prompt entry TCB files are scanned by --binary below and must forbid the
@@ -122,7 +160,8 @@ def main():
     for argv in ([args.checker, "--identity", str(ROOT / "crates/bingsu-identity/src/lib.rs")],
                  [args.checker, "--adapter", str(SYSCALLS), str(ADAPTER)],
                  [args.checker, "--rules", str(SYSCALLS), str(SANDBOX)],
-                 [args.checker, "--binary", *sorted(str(p) for p in (ROOT / "crates/bingsu/src").rglob("*.rs"))]):
+                 [args.checker, "--binary", *sorted(str(p) for p in (ROOT / "crates/bingsu/src").rglob("*.rs"))],
+                 [args.checker, "--prompt-main", str(PROMPT_PACKAGE / "src/main.rs")]):
         out = subprocess.run(argv, capture_output=True, text=True)
         if out.returncode != 0:
             bad.append(f"core-cfg-check {argv[1]}: " + out.stderr.strip())
@@ -146,6 +185,7 @@ def main():
     keys = {"autobins", "autoexamples", "autotests", "autobenches", "autolib"} & set(manifest.get("package", {}))
     if keys or "bin" in manifest or "lib" in manifest:
         bad.append(f"crates/bingsu/Cargo.toml: target tables or auto-target keys {sorted(keys)} are not allowed")
+    bad += prompt_package_rules()
     for rel, want in TCB_SHA256.items():
         got = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
         if got != want:

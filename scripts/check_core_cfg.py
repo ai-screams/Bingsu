@@ -73,12 +73,13 @@ CORE = "crates/bingsu-core"
 ADAPTER = "crates/bingsu/src/prompt.rs"
 PROMPT_IO = "crates/bingsu/src/prompt_io.rs"
 BINARY = "crates/bingsu"
+PROMPT_BINARY = "crates/bingsu-prompt"
 SKIP = {"purity-canary", "target"}
 ALLOWED = {"src", "tests", "benches"}
 TARGET_TABLES = ("lib", "bin", "test", "bench", "example")
 AUTO_KEYS = ("autolib", "autobins", "autotests", "autobenches", "autoexamples")
 CLIPPY_CONFIGS = {"crates/bingsu-core/clippy.toml", "crates/bingsu/clippy.toml",
-                  "crates/bingsu-collect/clippy.toml"}
+                  "crates/bingsu-collect/clippy.toml", "crates/bingsu-prompt/clippy.toml"}
 REPO_SKIP = {"target", ".git"}
 
 
@@ -100,6 +101,13 @@ def check_repo_tree(errors):
                 with open(path, "rb") as config:
                     if tomllib.load(config) != {"msrv": "1.85"}:
                         errors.append("collector clippy config must only set msrv = 1.85")
+            elif path == "crates/bingsu-prompt/clippy.toml":
+                # The prompt files compile in both packages; clippy reads the
+                # config of the package it builds.
+                # 이것을 실패시키는 것: bingsu-prompt의 clippy 설정을 bingsu와 다르게 두는 것.
+                with open(path, "rb") as config, open("crates/bingsu/clippy.toml", "rb") as cli:
+                    if config.read() != cli.read():
+                        errors.append("crates/bingsu-prompt/clippy.toml must equal crates/bingsu/clippy.toml")
             elif name in ("rust-toolchain", "rust-toolchain.toml"):
                 errors.append(f"toolchain file not allowed: {path}")
             elif name == "cargo.toml" and os.path.isfile(path):
@@ -176,9 +184,13 @@ def check_policy(errors):
     for key in AUTO_KEYS:
         if key in manifest.get("package", {}):
             errors.append(f"{CORE}/Cargo.toml: package.{key} is not allowed")
-    binary = tomllib.loads(open(os.path.join(BINARY, "Cargo.toml")).read())
-    if [n for n in os.listdir(BINARY) if n.lower() == "build.rs"] or "build" in binary.get("package", {}):
-        errors.append(f"{BINARY}: build script is not allowed (it could link code that runs before main)")
+    # 이것을 실패시키는 것: 두 바이너리 중 하나의 build script 검사를 빼는 것.
+    for package in (BINARY, PROMPT_BINARY):
+        binary = tomllib.loads(open(os.path.join(package, "Cargo.toml")).read())
+        if [n for n in os.listdir(package) if n.lower() == "build.rs"] or "build" in binary.get("package", {}):
+            errors.append(f"{package}: build script is not allowed (it could link code that runs before main)")
+    if not os.path.isfile("crates/bingsu-prompt/clippy.toml"):
+        errors.append("crates/bingsu-prompt/clippy.toml is missing (the prompt files' forbidden calls)")
     check_repo_tree(errors)
 
 

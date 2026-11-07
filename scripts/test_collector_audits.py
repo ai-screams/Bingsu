@@ -85,7 +85,8 @@ def test_collector_dependency_allowlist_rejects_new_edges(monkeypatch):
 
 
 
-# 이것을 실패시키는 것: source·lock·collector 정책·feature·target·profile·flags 중 하나를 build-id에서 빼는 것.
+# 이것을 실패시키는 것: source·lock·collector 정책·feature·target·profile·flags 중 하나를 build-id에서 빼는 것,
+# bingsu-prompt의 manifest·entry 소스를 빼는 것.
 def test_sibling_build_manifest_is_exact(tmp_path):
     builder = tmp_path / "manifest-builder"
     subprocess.run(["rustc", "--edition=2024", str(ROOT / "crates/bingsu-identity/build.rs"),
@@ -94,7 +95,7 @@ def test_sibling_build_manifest_is_exact(tmp_path):
     root.mkdir()
     for name in ("Cargo.toml", "Cargo.lock"):
         (root / name).write_text("baseline\n")
-    for package in ("bingsu", "bingsu-core", "bingsu-collect", "bingsu-bench", "bingsu-identity"):
+    for package in ("bingsu", "bingsu-prompt", "bingsu-core", "bingsu-collect", "bingsu-bench", "bingsu-identity"):
         path = root / "crates" / package
         (path / "src").mkdir(parents=True)
         (path / "Cargo.toml").write_text("baseline\n")
@@ -114,6 +115,7 @@ def test_sibling_build_manifest_is_exact(tmp_path):
     baseline = identity()
     assert identity() == baseline
     for relative in ("Cargo.toml", "Cargo.lock", "crates/bingsu-collect/Cargo.toml", "crates/bingsu/src/lib.rs", "crates/bingsu-core/src/lib.rs",
+                     "crates/bingsu-prompt/Cargo.toml", "crates/bingsu-prompt/src/lib.rs",
                      "crates/bingsu-collect/src/lib.rs", "crates/bingsu-bench/src/lib.rs", "crates/bingsu-identity/src/lib.rs",
                      "crates/bingsu-identity/Cargo.toml", "crates/bingsu-identity/build.rs", *policies):
         file = root / relative
@@ -310,7 +312,7 @@ def test_c1_ci_requires_every_shipped_link_and_msrv():
         assert meta["if"][0] == "needs.detect.outputs.rust == 'true'"
         assert "continue-on-error" not in meta
         assert "toolchain: 1.88.0" in text
-        assert any(security.run_commands(step) == [["cargo", "build", "--locked", "-j", "2", "-p", "bingsu", "-p", "bingsu-collect"]]
+        assert any(security.run_commands(step) == [["cargo", "build", "--locked", "-j", "2", "-p", "bingsu", "-p", "bingsu-prompt", "-p", "bingsu-collect"]]
                    and "if" not in step and "continue-on-error" not in step for step in msrv)
 
     check(text)

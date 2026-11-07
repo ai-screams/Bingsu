@@ -1,0 +1,27 @@
+[package]
+name = "bingsu-prompt"
+version = "0.0.0"
+description = "The bingsu prompt alone: the prompt files of the bingsu crate, without its other commands"
+publish = false
+edition.workspace = true
+rust-version = "1.88"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# The shared files carry their tests inside the bingsu crate, where the
+# modules they use exist; this binary compiles none of them.
+[[bin]]
+name = "bingsu-prompt"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+bingsu-core = { path = "../bingsu-core" }
+bingsu-identity = { path = "../bingsu-identity" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

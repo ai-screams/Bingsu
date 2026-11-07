@@ -14,9 +14,16 @@ graph (a new crate, a new version, a path or git replacement under the same
 name, a feature turned on by another member) fails until PINS changes in
 the same pull request.
 
-The shipped `bingsu` package's non-test targets are pinned too (name, kind,
-crate types, source path, required features): one bin, src/main.rs, so a
-second bin or another entry file cannot replace the one the gates read.
+The shipped packages' non-test targets are pinned too (name, kind, crate
+types, source path, required features, whether a test build of it exists):
+`bingsu` has one bin, src/main.rs, so a second bin or another entry file
+cannot replace the one the gates read; `bingsu-prompt` has one bin with no
+test or bench build, so the test modules of the prompt files it includes
+are never compiled against it.
+
+`bingsu-prompt` is the prompt alone: its graph is core's, identity and libc.
+A dependency of the other commands (regular expressions, for example) that
+reaches it fails here.
 
 Also fails on a [patch] or [replace] table. The `#![no_std]` attribute
 itself is checked by core-cfg-check (parsed, so a commented-out copy does
@@ -79,15 +86,26 @@ BINGSU_GRAPH = {
         ("lib",),
     ),
 }
-PINS = {"bingsu-core": CORE_GRAPH, "bingsu": BINGSU_GRAPH}
+# The dedicated prompt binary: the same graph without the CLI.
+PROMPT_GRAPH = {
+    **CORE_GRAPH,
+    ("bingsu-prompt", "0.0.0", "crates/bingsu-prompt/Cargo.toml"): ((), ("bin",)),
+    ("bingsu-identity", "0.0.0", "crates/bingsu-identity/Cargo.toml"): ((), ("custom-build", "lib")),
+    ("libc", "0.2.191", CRATES_IO): (("default", "std"), ("custom-build", "lib")),
+}
+PINS = {"bingsu-core": CORE_GRAPH, "bingsu": BINGSU_GRAPH, "bingsu-prompt": PROMPT_GRAPH}
 # Build scripts read at these versions: they print cargo:rustc-cfg,
 # rustc-check-cfg, rustc-env and warnings, and no rustc-link-* line.
 # Identity's hash-pinned script writes only an identity constant to OUT_DIR;
 # it emits rerun directives, no linker/configuration/native-code directives.
 REVIEWED_BUILD = {("libm", "0.2.16"), ("libc", "0.2.191"), ("bingsu-identity", "0.0.0")}
 SKIP_KINDS = {"test", "bench", "example"}
-BINGSU_TARGETS = [{"name": "bingsu", "kind": ["bin"], "crate_types": ["bin"],
-                   "src_path": "crates/bingsu/src/main.rs", "required-features": []}]
+TARGETS = {
+    "bingsu": [{"name": "bingsu", "kind": ["bin"], "crate_types": ["bin"],
+                "src_path": "crates/bingsu/src/main.rs", "required-features": [], "test": True}],
+    "bingsu-prompt": [{"name": "bingsu-prompt", "kind": ["bin"], "crate_types": ["bin"],
+                       "src_path": "crates/bingsu-prompt/src/main.rs", "required-features": [], "test": False}],
+}
 
 
 def turned_on(pkg, features):
@@ -166,13 +184,13 @@ def judge(meta, root_manifest, root):
     pkgs = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     for p in pkgs.values():
-        if p["name"] == "bingsu" and p["source"] is None:
+        if p["name"] in TARGETS and p["source"] is None:
             got = [{"name": t["name"], "kind": t["kind"], "crate_types": t["crate_types"],
                     "src_path": str(pathlib.Path(t["src_path"]).relative_to(root)),
-                    "required-features": t.get("required-features", [])}
+                    "required-features": t.get("required-features", []), "test": t.get("test")}
                    for t in p["targets"] if not set(t["kind"]) & SKIP_KINDS]
-            if got != BINGSU_TARGETS:
-                bad.append(f"bingsu targets {got}, pinned {BINGSU_TARGETS}")
+            if got != TARGETS[p["name"]]:
+                bad.append(f"{p['name']} targets {got}, pinned {TARGETS[p['name']]}")
     for name, pins in PINS.items():
         roots = [i for i, p in pkgs.items() if p["name"] == name and p["source"] is None]
         if len(roots) != 1:
@@ -207,7 +225,7 @@ def main():
         print("core graph gate FAILED:\n  " + "\n  ".join(bad), file=sys.stderr)
         return 1
     print(f"core graph gate: ok ({len(CORE_GRAPH)} core packages and "
-          f"{len(BINGSU_GRAPH)} bingsu packages pinned, no [patch])")
+          f"{len(BINGSU_GRAPH)} bingsu and {len(PROMPT_GRAPH)} bingsu-prompt packages pinned, no [patch])")
     return 0
 
 
