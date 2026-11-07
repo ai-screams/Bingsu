@@ -103,6 +103,37 @@ def test_builtin_probe_runs_once_and_is_cached(tmp_path, _native_boot_required):
     assert counted(node) == 1, "a cached probe ran again"
 
 
+def explain(session):
+    """`config check --explain` run from the session's shell folder."""
+    env = dict(session.env, PWD=str(session.pwd))
+    r = subprocess.run([str(session._launcher), "config", "check", "--explain"], cwd=session.pwd, env=env,
+                       capture_output=True, timeout=20)
+    return r.stdout.decode()
+
+
+# E2 내장 절: config check --explain이 그리는 언어마다 회차가 지금 정할 것을 보인다. 저장된 폴더 사실이 없으면
+# 정하지 않았다고 쓰고, 회차 뒤에는 pyenv 빠른 경로의 버전과 node probe의 실행 파일을 보이며, 아무것도 실행하지
+# 않는다. 이것을 실패시키는 것: 내장 절을 붙이지 않는 것, 저장된 수집 응답을 읽지 않는 것(늘 정하지 않음),
+# explain이 probe를 실행하는 것.
+def test_explain_shows_what_a_round_would_decide(tmp_path, _native_boot_required):
+    session = session_with(tmp_path, "python", "node")
+    pyenv_fast(session)
+    node = install(session.base / "bin", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    session.init()
+    before = explain(session)
+    assert "builtin languages (--explain;" in before, before
+    assert "node  not decided: no folder facts" in before, before
+    ready(session)
+    published_rounds(session)
+    Path(f"{node}.runs").unlink(missing_ok=True)
+    after = explain(session)
+    assert "python  shows 3.12.1 without running anything" in after, after
+    runs = [line for line in after.splitlines() if line.startswith("node  runs ")]
+    assert len(runs) == 1 and runs[0].endswith("/bin/node --version"), after
+    assert counted(node) == 0, "explain ran the probe"
+
+
 # 프로브의 첫 줄에서 버전만 값으로 남긴다. 버전이 없는 줄은 값 없는 실패 항목이고 원본 줄도 남기지 않는다. 이것을
 # 실패시키는 것: probe_entry의 버전 추출을 지우는 것(첫 줄이 그대로 값이 됨).
 def test_builtin_probe_publishes_only_a_version(tmp_path, _native_boot_required):

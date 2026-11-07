@@ -62,6 +62,8 @@ mod evidence;
 #[allow(dead_code, reason = "C2 connects the resolver")]
 pub(crate) mod exec_path;
 #[cfg(unix)]
+mod explain_builtin;
+#[cfg(unix)]
 mod git_global;
 #[cfg(unix)]
 mod group_policy;

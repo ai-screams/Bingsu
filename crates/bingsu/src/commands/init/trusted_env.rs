@@ -74,6 +74,25 @@ impl TrustedEnv {
         )
     }
 
+    /// The whole environment as a frame body (`NAME=VALUE\0` each), and the
+    /// shell's `PWD`: `config check --explain` decides the builtin languages
+    /// as a prompt of the shell the user runs it from would (E2 builtin
+    /// ruling Q3).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the user's own command decides as their shell's prompt would"
+    )]
+    pub fn shell() -> (Vec<u8>, Option<OsString>) {
+        let mut body = Vec::new();
+        for (k, v) in std::env::vars_os() {
+            body.extend_from_slice(k.as_bytes());
+            body.push(b'=');
+            body.extend_from_slice(v.as_bytes());
+            body.push(0);
+        }
+        (body, std::env::var_os("PWD"))
+    }
+
     /// The roots variable the init script exported (see `pinned`).
     #[expect(
         clippy::disallowed_methods,

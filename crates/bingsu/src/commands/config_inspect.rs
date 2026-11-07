@@ -575,6 +575,36 @@ fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> S
     out
 }
 
+/// The builtin language section of `--explain` (`explain_builtin`), from
+/// the roots init pinned (else the current ones), this process's
+/// environment and the shell's folder.
+fn builtin_section(i: &Inspection, user: &User, env: &TrustedEnv) -> String {
+    use super::explain_builtin as b;
+    let Some(c) = &i.report.snapshot else {
+        return String::new();
+    };
+    // The pinned roots when init set them (asked only then: without a pin
+    // `pinned_roots` says so on stderr), else the current ones.
+    let pinned = TrustedEnv::pinned_roots()
+        .is_some()
+        .then(|| ctx::pinned_roots(user).ok().flatten())
+        .flatten();
+    let roots = pinned.unwrap_or_else(|| roots::resolve(env, &user.pw.home, &user.pw.name));
+    let (environment, pwd) = TrustedEnv::shell();
+    let Some(cwd) = b::shell_folder(pwd.as_deref()) else {
+        return String::new();
+    };
+    b::section(
+        c,
+        &roots,
+        &environment,
+        &cwd,
+        crate::prompt_io::observe_clock().ok(),
+        user.me,
+        &mut SystemGroups::new(&user.pw.name),
+    )
+}
+
 /// What `run_with` adds to the reading: nothing (`config path`), the
 /// executor's lookups and W411 (`config check`), and the execution section
 /// (`config check --explain`).
@@ -612,6 +642,7 @@ fn run_with(
             // Fails without it: explain_shows_not_run_reason.
             if extra == Extra::Explain {
                 text.push_str(&render_explain(&i, &found));
+                text.push_str(&builtin_section(&i, &user, &env));
             }
             if !ctx::print(&text) {
                 return ctx::code(EXIT_FAILED);
