@@ -584,7 +584,9 @@ fn builtin_section(i: &Inspection, user: &User, env: &TrustedEnv) -> String {
     let Some(c) = &i.report.snapshot else {
         return String::new();
     };
-    // Fails without it: explain_writes_nothing (no language drawn).
+    // With the roots now read only, no test fails without this return (the
+    // output and the files are the same); it stays so a layout without a
+    // builtin language reads nothing more and waits on no stalled mount.
     if b::drawn(c).is_empty() {
         return String::new();
     }
