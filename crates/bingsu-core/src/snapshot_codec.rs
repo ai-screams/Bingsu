@@ -1,4 +1,4 @@
-//! BNGCFG09: bounded CompiledConfig codec with an explicit fact schema version.
+//! BNGCFG10: bounded CompiledConfig codec with an explicit fact schema version.
 //!
 //! HEAD, COMMON, INDEX (one entry per variant), the variants, the band names.
 //! The snapshot header checksum covers HEAD, COMMON and INDEX; each variant and
@@ -49,11 +49,11 @@ const MAX_ALLOC: usize = 64 * 1024 * 1024;
 pub const HEAD: usize = 20;
 /// Offset, length and CRC of one variant, then four reserved zero bytes.
 const ENTRY: usize = 16;
-const MAGIC: &[u8; 8] = b"BNGCFG09";
-const VERSION: u16 = 9;
+const MAGIC: &[u8; 8] = b"BNGCFG10";
+const VERSION: u16 = 10;
 /// CRC of one variant or of the name block.
 pub fn section_sum(section: &[u8]) -> [u8; 4] {
-    crate::snapshot::crc32c(&[b"bingsu-compiled-v9\0", section])
+    crate::snapshot::crc32c(&[b"bingsu-compiled-v10\0", section])
 }
 struct Reader<'a> {
     rest: &'a [u8],
