@@ -1176,7 +1176,9 @@ fn dedicated_entry_takes_time_only_as_its_first_statement() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/bingsu/src/prompt.rs"),
     )
-    .unwrap();
+    .unwrap()
+    // Windows checkouts are CRLF; the shapes below are written with LF.
+    .replace("\r\n", "\n");
     let (ok, err) = run_adapter(&source);
     assert!(ok, "{err}");
     let first = "    let deadline = crate::prompt_io::entry_deadline();\n    let args: Vec<OsString> = std::env::args_os().skip(1).collect();";

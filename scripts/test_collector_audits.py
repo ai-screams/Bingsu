@@ -312,7 +312,7 @@ def test_c1_ci_requires_every_shipped_link_and_msrv():
         assert meta["if"][0] == "needs.detect.outputs.rust == 'true'"
         assert "continue-on-error" not in meta
         assert "toolchain: 1.88.0" in text
-        assert any(security.run_commands(step) == [["cargo", "build", "--locked", "-j", "2", "-p", "bingsu", "-p", "bingsu-collect"]]
+        assert any(security.run_commands(step) == [["cargo", "build", "--locked", "-j", "2", "-p", "bingsu", "-p", "bingsu-prompt", "-p", "bingsu-collect"]]
                    and "if" not in step and "continue-on-error" not in step for step in msrv)
 
     check(text)
