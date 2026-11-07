@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from conftest import SHELL_CMD, real_bin, run_shell_script, trusted_env
-from shell_support import plain_script, rewrapped_script
+from shell_support import plain_script, prompt_program, rewrapped_script, swap_prompt_program
 
 SHELLS = os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split()
 
@@ -27,10 +27,11 @@ def test_prompt_time_global_locations_stay_pinned(shell, names, later, tmp_path)
     # hooks still run the pinned binary and render a degraded prompt normally.
     probe = tmp_path / "probe"
     words = tmp_path / "words"
+    program = os.fsdecode(prompt_program(plain_script(shell, init.stdout)))
     probe.write_text("#!/bin/sh\n" + f"printf '%s\\0' \"$@\" > {shlex.quote(str(words))}\n"
-                     + f"exec {shlex.quote(str(binary))} \"$@\"\n")
+                     + f"exec {shlex.quote(program)} \"$@\"\n")
     probe.chmod(0o700)
-    script = plain_script(shell, init.stdout).replace(os.fsencode(binary), os.fsencode(probe))
+    script = swap_prompt_program(plain_script(shell, init.stdout), probe)
     assert os.fsencode(probe) in script
     # Exercise the built-in prompt without snapshot/config trust prerequisites.
     # Only init-pinned roots are omitted; the real embedded hook, observed
@@ -87,12 +88,13 @@ def test_invalid_global_location_pins_unknown_and_renders(shell, names, value, r
     # so an empty record says whether the binary exited 0 without output
     # (a deadline exit), failed to start, or died by a signal.
     binary_rc, binary_err = tmp_path / "binary.rc", tmp_path / "binary.stderr"
+    program = os.fsdecode(prompt_program(plain_script(shell, result.stdout)))
     probe.write_text("#!/bin/sh\n" + f"printf '%s\\0' \"$@\" > {shlex.quote(str(words))}\n"
-                     + f"{shlex.quote(str(binary))} \"$@\" 2> {shlex.quote(str(binary_err))}\n"
+                     + f"{shlex.quote(program)} \"$@\" 2> {shlex.quote(str(binary_err))}\n"
                      + f"rc=$?\nprintf '%s' \"$rc\" > {shlex.quote(str(binary_rc))}\n"
                      + f"cat {shlex.quote(str(binary_err))} >&2\nexit \"$rc\"\n")
     probe.chmod(0o700)
-    script = plain_script(shell, result.stdout).replace(os.fsencode(binary), os.fsencode(probe))
+    script = swap_prompt_program(plain_script(shell, result.stdout), probe)
     # Same built-in render fixture as above: sandbox config trust is independent
     # of the real init, hook, pin, envelope and prompt-render path exercised here.
     script = re.sub(rb"'--(?:runtime-root|runtime-groups|config-root|config-root-written|state-root|log-root|collector-exe)=[^']*'", b"", script)
@@ -131,7 +133,7 @@ def test_empty_global_locations_stay_pinned(shell, value, tmp_path):
     words = tmp_path / "words"
     probe.write_text("#!/bin/sh\n" + f"printf '%s\\0' \"$@\" > {shlex.quote(str(words))}\n")
     probe.chmod(0o700)
-    script = plain_script(shell, init.stdout).replace(os.fsencode(binary), os.fsencode(probe))
+    script = swap_prompt_program(plain_script(shell, init.stdout), probe)
     env.update(HOME="/hostile/home", XDG_CONFIG_HOME="/hostile/xdg")
     result = run_shell_script(shell, rewrapped_script(shell, init.stdout, script) + b"\n_bingsu_call --width 80\n", env, tmp_path)
     assert result.returncode == 0, result.stderr

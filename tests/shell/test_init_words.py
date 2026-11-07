@@ -13,7 +13,7 @@ import tempfile
 
 import pytest
 
-from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env, real_bin, real_collector
+from conftest import ROOT, Install, minimal_record, run_shell_script, trusted_env, real_bin, real_collector, real_prompt
 from shell_support import plain_script
 
 # The golden runner's reader rendering (T-A7 below compares against it).
@@ -32,7 +32,7 @@ HOOK_WORDS = (
     b"--ctx", b"--record", b"--width", b"--shell", b"--pwd", b"--colorterm", b"--colorfgbg",
     b"--log-level=", b"--host", b"--venv", b"--ssh=", b"--session", b"--seq",
     b"--runtime-root=", b"--runtime-groups=", b"--config-root=",
-    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=", b"--git-global-home=", b"--git-global-xdg=", b"--collector-exe=",
+    b"--config-root-written=", b"--state-root=", b"--log-root=", b"--home=", b"--git-global-home=", b"--git-global-xdg=", b"--collector-exe=", b"--helper-exe=",
 )
 
 
@@ -96,6 +96,9 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
         collector = inst.dir / "bingsu-collect"
         shutil.copyfile(real_collector(), collector)
         collector.chmod(0o700)
+        inst.prompt.unlink()
+        shutil.copyfile(real_prompt(), inst.prompt)
+        inst.prompt.chmod(0o700)
         env = trusted_env(base, tag=case)
         env["HOME"] = str(base / ("home " + case))
         pathlib.Path(env["HOME"]).mkdir(parents=True)
@@ -121,6 +124,9 @@ def test_words_arrive_intact(tmp_path, shells, idx, case):
             words[word] = value
         assert set(words) == set(HOOK_WORDS), (shell, argv)
         assert words[b"--collector-exe="] == os.fsencode(collector.resolve()), (shell, argv)
+        # The prompt ran through the verified sibling and names the pinned bingsu as its helper.
+        assert inst.dedicated, (shell, script)
+        assert words[b"--helper-exe="] == os.fsencode(inst.exe), (shell, argv)
         assert words[b"--ctx"] == b"1", (shell, argv)
         assert words[b"--record"] == b"B1", (shell, argv)
         assert words[b"--width"] == b"80", (shell, argv)
@@ -178,6 +184,59 @@ def test_collector_pin_requires_safe_install_and_collector_role(case, tmp_path):
         if case == "bingsu-copy":
             refused = subprocess.run([str(collector), "__collect-v1"], capture_output=True)
             assert refused.returncode == 2, refused
+
+
+# 이것을 실패시키는 것: 형제 bingsu-prompt의 역할·빌드·링크·권한 검사를 빼는 것, 형제가 없거나 맞지 않을 때
+# `bingsu prompt`로 돌아가지 않는 것, init 뒤에 바뀐 형제를 다음 init이 다시 보지 않는 것.
+@pytest.mark.parametrize("case", ["real", "missing", "bingsu-copy", "collector-copy", "other-build", "symlink",
+                                  "writable", "replaced-after-init"])
+def test_prompt_sibling_needs_its_role_and_build(case, tmp_path):
+    with tempfile.TemporaryDirectory(prefix="prompt-pin-", dir=tmp_path) as folder:
+        base = pathlib.Path(folder)
+        inst = Install(base)
+        inst.exe.unlink()
+        shutil.copyfile(real_bin(), inst.exe)
+        inst.exe.chmod(0o700)
+        inst.prompt.unlink()
+        shutil.copyfile(real_prompt(), inst.prompt)
+        inst.prompt.chmod(0o700)
+        if case == "missing":
+            inst.prompt.unlink()
+        elif case == "bingsu-copy":
+            shutil.copyfile(real_bin(), inst.prompt)
+        elif case == "collector-copy":
+            shutil.copyfile(real_collector(), inst.prompt)
+        elif case == "other-build":
+            data = bytearray(inst.prompt.read_bytes())
+            marker = b"BNGSIBLING-ID02\0"
+            assert data.count(marker) == 1
+            data[data.index(marker) + 16] ^= 1
+            inst.prompt.write_bytes(bytes(data))
+        elif case == "symlink":
+            other = base / "other"
+            other.mkdir()
+            inst.prompt.rename(other / inst.prompt.name)
+            inst.prompt.symlink_to(other / inst.prompt.name)
+        elif case == "writable":
+            inst.prompt.chmod(0o702)
+
+        def init():
+            out = subprocess.run([str(inst.exe), "init", "bash"], env=trusted_env(base), capture_output=True)
+            assert out.returncode == 0, out
+            return out.stdout
+
+        script = init()
+        dedicated = os.fsencode(inst.prompt.resolve()) + b"' prompt --ctx "
+        cli = os.fsencode(inst.exe) + b"' prompt --ctx "
+        assert (dedicated in script) == (case in ("real", "replaced-after-init")), script
+        assert (cli in script) == (case not in ("real", "replaced-after-init")), script
+        assert script.count(b"'--helper-exe=" + os.fsencode(inst.exe) + b"'") == 1, script
+        if case == "replaced-after-init":
+            # The hook keeps the path it was given; the next init checks the file again.
+            shutil.copyfile(real_bin(), inst.prompt)
+            assert dedicated in script
+            again = init()
+            assert dedicated not in again and cli in again, again
 
 
 def test_init_twice_redefines_runtime_root(tmp_path, shells):

@@ -24,6 +24,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -480,6 +481,24 @@ def enclosing_repository(path: Path) -> str | None:
     return next((str(p) for p in Path(path).parents if (p / ".git").exists()), None)
 
 
+def hook_front(binary: Path, script: bytes) -> str:
+    """The program the hook init printed runs for the prompt, checked against
+    the tree that built `binary` (collector-product.front_program): with the
+    bingsu-prompt package the hook must call that sibling, never the slower
+    `bingsu prompt` fallback this would otherwise measure without a word."""
+    spec = importlib.util.spec_from_file_location("d5_collector_product", ROOT / "bench/collector-product.py")
+    product = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(product)
+    binary = Path(binary)
+    want = binary.resolve().with_name("bingsu-prompt") if product.dedicated_prompt(binary) else binary
+    # Each shell quotes the program as one word ending right before " prompt --ctx".
+    calls = re.findall(rb"([^'\\ ]+)\\?' prompt --ctx ", script)
+    # 이것을 실패시키는 것: hook이 다른 프로그램(형제가 없을 때의 `bingsu prompt`)을 불러도 재는 것.
+    if calls != [os.fsencode(want)]:
+        raise ValueError(f"the hook runs {calls} for the prompt, not {want}")
+    return str(want)
+
+
 def prepare_prompt(binary: Path, case: str, shell: str, directory: Path) -> dict:
     """An isolated install of the real hook for one case. The hook pins the
     passwd home; the XDG roots are private folders next to the case."""
@@ -505,13 +524,14 @@ def prepare_prompt(binary: Path, case: str, shell: str, directory: Path) -> dict
     if init.returncode != 0 or not init.stdout:
         raise ValueError(f"init {shell} failed: {init.stderr.decode(errors='replace')[:500]}")
     (directory / ("init." + shell)).write_bytes(init.stdout)
+    front = hook_front(binary, init.stdout)
     program, flags, body = HOOK[shell]
     script = directory / ("prompt." + shell)
     script.write_text(body.format(init=directory / ("init." + shell), repo=repo, start=START, end=END))
     resolved = shutil.which(program, path=env["PATH"])
     if resolved is None:
         raise ValueError(f"{shell} is not installed")
-    return {"command": [resolved, *flags, str(script)], "env": env, "repo": str(repo)}
+    return {"command": [resolved, *flags, str(script)], "env": env, "repo": str(repo), "front": front}
 
 
 def record_problem(returncode: int, stderr: bytes) -> str | None:
@@ -560,7 +580,7 @@ def observe_prompt_memory(binary: str, case: str, *, shell: str = "bash", tools:
         # cgroup, which takes privileges this measurer does not have.
         diagnostic = Diagnostic(cgroup_peak_bytes=None, footprint_bytes={})
         memory = certify(obs, proofs, error, diagnostic, method)
-        evidence = {"case": case, "shell": shell, "counter_error_bytes": error,
+        evidence = {"case": case, "shell": shell, "front": prepared["front"], "counter_error_bytes": error,
                     "container_cgroup_peak_bytes": after["cgroup_peak_bytes"],
                     "candidate_upper_bytes": candidate_upper_bytes(obs["per_process_peak"], error),
                     "rows": obs["rows"], "problems": obs["problems"], "obligations": proofs,

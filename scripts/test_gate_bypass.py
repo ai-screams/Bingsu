@@ -107,5 +107,13 @@ class BypassGates(unittest.TestCase):
                              "core-cfg-check --adapter")
 
 
+    # 이것을 실패시키는 것: bingsu-prompt main 모양 고정을 지우거나 항목·속성·경로·본문 하나를 덜 보는 것.
+    def test_prompt_main_after_hash_renewal(self):
+        for fixture in sorted((FIXTURES / "prompt-main").iterdir()):
+            with self.subTest(fixture=fixture.name):
+                self.replace_tcb("crates/bingsu-prompt/src/main.rs", f"prompt-main/{fixture.name}")
+                self.assert_rejected(self.run_gate("check_cli_prompt_forbid.py"),
+                                     "core-cfg-check --prompt-main")
+
 if __name__ == "__main__":
     unittest.main()

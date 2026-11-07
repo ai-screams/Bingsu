@@ -258,6 +258,25 @@ def normal_record(result):
             and result.stdout.endswith(b"ok:none\x1e") and result.stdout.count(b"\x1f") == 13)
 
 
+def dedicated_prompt(binary):
+    """Whether the tree that built `binary` has the `bingsu-prompt` package:
+    then its hooks must call that binary, never the `bingsu prompt` fallback."""
+    for folder in Path(binary).resolve().parents:
+        if (folder / "Cargo.toml").is_file() and (folder / "crates/bingsu").is_dir():
+            return (folder / "crates/bingsu-prompt/Cargo.toml").is_file()
+    raise ValueError(f"no source tree above {binary}")
+
+
+def front_program(binary, program):
+    """The program a hook made by `binary` runs for the prompt, checked
+    against the tree: a missing `bingsu-prompt` never measures the fallback."""
+    want = Path(binary).resolve().with_name("bingsu-prompt") if dedicated_prompt(binary) else Path(binary)
+    # 이것을 실패시키는 것: 형제 bingsu-prompt가 빠진 빌드에서 fallback(`bingsu prompt`)을 조용히 재는 것.
+    if program is None or Path(program) != want:
+        raise ValueError(f"the hook runs {program} for the prompt, not {want}")
+    return program
+
+
 def prompt_context(binary, directory, config_text="icons = 'ascii'\n", extra_env=None):
     """Prime the default product snapshot outside the measured interval. A
     caller may give its own config text and more shell environment."""
@@ -275,19 +294,23 @@ def prompt_context(binary, directory, config_text="icons = 'ascii'\n", extra_env
                    b"the built-in look and takes your settings when they are ready\n")
     if init.stderr.replace(cold_notice, b""):
         raise ValueError("normal product init refused its pinned roots: " + init.stderr.decode(errors="replace"))
-    roots = []
+    roots, program = [], None
     for line in init.stdout.decode().splitlines():
         if "--runtime-root=" in line and "--config-root=" in line:
             lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
             lexer.whitespace_split = True
-            roots = [word for word in lexer
+            words = list(lexer)
+            # The hook's own prompt program: `bingsu-prompt` beside the binary, or the binary itself.
+            program = words[words.index("prompt") - 1]
+            roots = [word for word in words
                      if word.startswith(("--runtime-root=", "--runtime-groups=", "--config-root=", "--config-root-written=",
-                                         "--state-root=", "--log-root=", "--home=", "--collector-exe="))
+                                         "--state-root=", "--log-root=", "--home=", "--collector-exe=", "--helper-exe="))
                      or word == "--config-root-shape-only"]
             break
     if not roots:
         raise ValueError("normal product init did not pin roots")
-    command = [str(binary), "prompt", "--ctx", "1", "--record", "B1", "--shell", "bash", "--width", "80",
+    front_program(binary, program)
+    command = [program, "prompt", "--ctx", "1", "--record", "B1", "--shell", "bash", "--width", "80",
                "--pwd", str(directory), "--log-level=off", *roots]
     for _ in range(16):
         result = run(command, env=env)
@@ -949,6 +972,13 @@ def prepare(binary):
         run(["strip", "-o", stripped, original])
         sizes[name] = stripped.stat().st_size
     sizes["combined"] = sum(sizes.values())
+    # Record only: with bingsu-prompt in the tree, the prompt's own image and
+    # the whole install (bingsu, bingsu-prompt and the collector).
+    if dedicated_prompt(binary):
+        stripped = directory / "prompt-stripped"
+        run(["strip", "-o", stripped, binary.with_name("bingsu-prompt")])
+        sizes["prompt"] = stripped.stat().st_size
+        sizes["installed"] = sizes["combined"] + sizes["prompt"]
     stub_build = ["cargo", "build", "-j", "2", "-p", "bingsu-bench", "--bin", "m1-collect-stub"]
     if profile == "release":
         stub_build.append("--release")

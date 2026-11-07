@@ -183,7 +183,7 @@ fn helper_spawn(exe: std::ffi::OsString, words: Vec<std::ffi::OsString>) {
     let deadline = prompt_io::entry_deadline();
     let args_ready = stamp();
     let bootstrap_enter = stamp();
-    prompt_spawn::bootstrap(&exe, &raw, deadline);
+    prompt_spawn::bootstrap(Some(&exe), &raw, deadline);
     let bootstrap_return = stamp();
     let spawned = children();
     // bootstrap set SIGCHLD to SA_NOCLDWAIT: wait blocks until every child has

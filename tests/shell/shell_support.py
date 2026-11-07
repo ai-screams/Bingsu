@@ -15,6 +15,10 @@ def real_bin():
     return pathlib.Path(os.environ.get("BINGSU_BIN", ROOT / "target/debug/bingsu")).resolve()
 
 
+def real_prompt():
+    return pathlib.Path(os.environ.get("BINGSU_PROMPT_BIN", real_bin().with_name("bingsu-prompt"))).resolve()
+
+
 def real_collector():
     return pathlib.Path(os.environ.get("BINGSU_COLLECTOR_BIN", real_bin().with_name("bingsu-collect"))).resolve()
 
@@ -36,21 +40,47 @@ def rewrapped_script(shell, script, text):
     return script.split(b"eval $'", 1)[0] + b"eval $'" + word + b"'\n}\n"
 
 
+def prompt_program(script: bytes) -> bytes:
+    """The program the hook of plain_script() runs for the prompt: init's
+    verified `bingsu-prompt` sibling, or `bingsu` when it has none."""
+    found = re.findall(rb"'([^']+)' prompt --ctx ", script)
+    assert len(found) == 1, found
+    return found[0]
+
+
+def swap_prompt_program(script: bytes, program) -> bytes:
+    """plain_script() text whose prompt call runs `program` instead."""
+    old = b"'" + prompt_program(script) + b"' prompt --ctx "
+    return script.replace(old, b"'" + os.fsencode(program) + b"' prompt --ctx ")
+
+
 COLD_INIT_NOTICE = (b"bingsu: reading your settings did not finish in time; the prompt starts with "
                     b"the built-in look and takes your settings when they are ready\n")
 
 
 class Install:
-    """A folder holding `bingsu` as a symlink. init runs through the symlink
-    (so the symlink path is pinned); use_fake() then swaps the target."""
+    """A folder holding `bingsu` and `bingsu-prompt` as symlinks. init runs
+    through the `bingsu` symlink (so that path is pinned); use_fake() then
+    swaps both targets.
+
+    init writes the canonical path of the verified `bingsu-prompt` sibling
+    into the hook, which a symlink swap cannot reach; init() rewrites that one
+    word to this folder's `bingsu-prompt` link (the generated call is otherwise
+    unchanged), so a stand-in sees every prompt call."""
 
     def __init__(self, base: pathlib.Path, name: str = "bin"):
         self.dir = base / name
         self.dir.mkdir(parents=True)
         self.exe = self.dir / "bingsu"
+        self.prompt = self.dir / "bingsu-prompt"
         os.symlink(real_bin(), self.exe)
+        os.symlink(real_prompt(), self.prompt)
+        self.dedicated = None
 
-    def init(self, shell, env):
+    def init(self, shell, env, entry=None):
+        """`entry="cli"` makes the hook call `bingsu prompt` (the fallback
+        entry, its `--helper-exe=` word unchanged) where init chose
+        `bingsu-prompt`; a test whose trace formulas count the CLI front uses it."""
         r = subprocess.run([str(self.exe), "init", shell], env=env, capture_output=True)
         # A warning here (an executable another user can change, a root that
         # could not be pinned) means the test runs in an arrangement it was
@@ -60,12 +90,37 @@ class Install:
         # 이것을 실패시키는 것: 다른 경고를 이 예외에 넣는 것(그 줄만 지운 뒤 비어 있어야 한다).
         rest = r.stderr.replace(COLD_INIT_NOTICE, b"")
         assert r.returncode == 0 and rest == b"", r.stderr
-        return r.stdout
+        script = self.route_prompt(r.stdout)
+        if entry == "cli" and self.dedicated:
+            assert script.count(os.fsencode(self.prompt)) == 1, script
+            script = script.replace(os.fsencode(self.prompt), os.fsencode(self.exe))
+            self.dedicated = False
+        return script
+
+    def route_prompt(self, script: bytes) -> bytes:
+        """Point the hook's prompt call at this folder's `bingsu-prompt` link.
+        init picks the sibling of the resolved `bingsu`; a folder whose
+        `bingsu` is a copy without a sibling keeps the `bingsu prompt` call."""
+        # Only the prompt call names bingsu-prompt (the folders of these tests do not).
+        self.dedicated = b"bingsu-prompt" in script
+        sibling = os.fsencode(pathlib.Path(os.path.realpath(self.exe)).with_name("bingsu-prompt"))
+        if not self.dedicated or os.fsencode(self.prompt) == sibling:
+            return script
+        # A plain path is written once, as the program of the prompt call.
+        assert script.count(sibling) == 1, script
+        return script.replace(sibling, os.fsencode(self.prompt))
+
+    def front(self):
+        """The program the hook of the last init() runs for the prompt."""
+        assert self.dedicated is not None, "init() first"
+        return self.prompt if self.dedicated else self.exe
 
     def use_fake(self, record: bytes, script=FAKE):
         (self.dir / "record.bin").write_bytes(record)
-        self.exe.unlink()
-        os.symlink(script, self.exe)
+        for link in (self.exe, self.prompt):
+            if link.is_symlink() or link.exists():
+                link.unlink()
+                os.symlink(script, link)
 
     def calls(self):
         log = self.dir / "argv.log"
@@ -149,7 +204,7 @@ def _role(pid: str):
         return "collector"
     if name == "bingsu" and argv[1:2] == [b"__refresh-v1"]:
         return "helper"
-    if name == "bingsu" and argv[1:2] == [b"prompt"]:
+    if name in ("bingsu", "bingsu-prompt") and argv[1:2] == [b"prompt"]:
         return "front"
     return None
 

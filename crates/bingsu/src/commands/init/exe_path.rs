@@ -1,5 +1,6 @@
 //! Fixed executable path policy (spec section 5 "connection", decision 2;
 //! spec section 2 safety row and decision 6 review for group write).
+use crate::commands::collector::Sibling;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -89,12 +90,30 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// Resolve only the running installation. The sibling is opened without
 /// following links through the retained canonical folder descriptor chain.
 pub fn collector_sibling(exe: &Path, me: u32, groups: &mut dyn GroupOracle) -> Option<PathBuf> {
+    sibling(Sibling::COLLECTOR, exe, me, groups)
+}
+
+/// `sibling` beside the running installation, verified as the collector is
+/// (name, folders, owner and mode, this build, its role). The path is checked
+/// now, at init; a later prompt runs whatever file is there then, so an
+/// upgrade needs a new init (README).
+pub fn sibling(
+    kind: Sibling,
+    exe: &Path,
+    me: u32,
+    groups: &mut dyn GroupOracle,
+) -> Option<PathBuf> {
     // H2's descriptor walk retains the invocation's link/name bindings too.
     // Its config-specific ownership verdict is not the executable policy.
     let resolved = crate::commands::source_path::Resolved::open(exe, me, groups).ok()?;
-    let sibling = resolved.canonical.parent()?.join("bingsu-collect");
-    let pin = crate::commands::collector::PinnedCollector::verify(sibling.as_os_str(), me, groups)
-        .ok()?;
+    let sibling = resolved.canonical.parent()?.join(kind.name());
+    let pin = crate::commands::collector::PinnedCollector::verify_as(
+        kind,
+        sibling.as_os_str(),
+        me,
+        groups,
+    )
+    .ok()?;
     resolved.revalidate_bindings().ok()?;
     Some(PathBuf::from(pin.executable().ok()?))
 }

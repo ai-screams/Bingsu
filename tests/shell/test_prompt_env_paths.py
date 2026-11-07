@@ -869,7 +869,7 @@ COMMAND_RESPONSE_MAX = 471_082
 
 def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,
                                collectors=None, repository_roots=None, repository_evidence=(), platform=None,
-                               front_deadline=False, headers=RESPONSE_HEADERS):
+                               front_deadline=False, headers=RESPONSE_HEADERS, entry="cli", helper_exe=None):
     """`collectors` is the exact count a live capture arranged; stored traces
     leave it None and may hold at most one. With `repository_roots`, a
     collector's calls after its request are audited by assert_repository_trace
@@ -879,8 +879,12 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
     admits that platform's exact libc start-up primitives (STARTUP_PRIMITIVES,
     musl's O_CLOEXEC fcntl); stored traces leave it None. `front_deadline`
     judges a front that SIGALRM ended before its filter (deadline_shape):
-    no filter and no record, every front call held to the pre-filter rules."""
+    no filter and no record, every front call held to the pre-filter rules.
+    `entry` is the prompt entry the trace ran: "cli" (`bingsu prompt`, its
+    own helper; stored traces) or "dedicated" (`bingsu-prompt`, whose helper
+    is the hook's `--helper-exe=` path, `helper_exe`)."""
     from fsbudget.attribute import assert_repository_trace, collector_attribute
+    helper = trace_helper(exe, entry, helper_exe)
     collector_exe = collector_exe or os.path.join(os.path.dirname(exe), "bingsu-collect")
     _, scoped = tree(lines, exe)
     # E4: a default screen in a Git repository starts at most one collector.
@@ -891,7 +895,7 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
         assert len(roots) == collectors, ("collector count", len(roots), collectors)
     assert len(roots) <= 1, ("extra collector", len(roots))
     window = bool(roots) and repository_roots is not None
-    roles = collector_attribute(scoped, {"front": exe, "helper": exe,
+    roles = collector_attribute(scoped, {"front": exe, "helper": helper,
                                 "collector": collector_exe, "collectors": len(roots), "platform": platform},
                                 repository_window=window)
     assert not roles.errors, roles.errors
@@ -903,7 +907,18 @@ def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collecto
     _assert_prompt_trace_budget(lines, exe, pinned, collector_limit=1, global_inputs=global_inputs,
                                 collector_exe=collector_exe, check_collection=True,
                                 audited_collector=int(roots[0]) if window else None, platform=platform,
-                                front_deadline=front_deadline, headers=headers)
+                                front_deadline=front_deadline, headers=headers, entry=entry, helper_exe=helper)
+
+
+def trace_helper(front, entry, helper_exe):
+    """The helper a traced front may start: itself for the cli entry; for the
+    dedicated entry only the hook's `--helper-exe=` path, never itself (it
+    starts no helper without that word)."""
+    # 이것을 실패시키는 것: 전용 front가 helper 경로 없이 자기 자신을 helper로 띄우는 trace를 받는 것.
+    if entry == "cli":
+        return front
+    assert entry == "dedicated" and helper_exe and helper_exe != front, ("dedicated helper", entry, front, helper_exe)
+    return helper_exe
 
 
 def assert_historical_prompt_trace_budget(lines, exe, pinned):
@@ -913,7 +928,8 @@ def assert_historical_prompt_trace_budget(lines, exe, pinned):
 
 def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inputs=(),
                                 collector_exe=None, check_collection=False, audited_collector=None, platform=None,
-                                front_deadline=False, headers=RESPONSE_HEADERS):
+                                front_deadline=False, headers=RESPONSE_HEADERS, entry="cli", helper_exe=None):
+    helper_exe = trace_helper(exe, entry, helper_exe)
     pids, scoped = tree(lines, exe)
     assert pids, "bingsu was not executed"
     trace = parse_trace("\n".join(scoped))
@@ -987,12 +1003,12 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     execs = [c for c in helper if c.name in {"execve", "execveat"}]
     refresh = [c for c in execs if c.pid == helper_pid]
     # 이것을 실패시키는 것: 고정 exe/argv[1]/빈 환경 계약을 깨거나 helper를 재-exec하는 것.
-    assert len(refresh) == 1 and fixed_exec(refresh[0], exe, "__refresh-v1"), refresh
+    assert len(refresh) == 1 and fixed_exec(refresh[0], helper_exe, "__refresh-v1"), refresh
     # With CLONE_VFORK, exec has released the parent, but strace can print
     # the child's execve *resumed* line after the parent's prctl. Compare
     # entry lines, not the parser's completion order, across these two PIDs.
     exec_entry = next(i for i, line in enumerate(scoped)
-                      if line.split()[0] == str(helper_pid) and is_root(line, exe))
+                      if line.split()[0] == str(helper_pid) and is_root(line, helper_exe))
     filter_entry = next((i for i, line in enumerate(scoped)
                          if line.split()[0] == str(root) and "PR_SET_SECCOMP" in line), len(scoped))
     assert exec_entry < filter_entry, refresh
@@ -1013,7 +1029,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     # Exactly the pinned collector executable/verb, no additional argv and an
     # empty environment. Only archived captures use the old in-binary stub.
     collectors = [c for c in execs if c.pid != helper_pid]
-    collector_path = collector_exe or exe
+    collector_path = collector_exe or helper_exe
     collector_verb = "__collect-v1" if collector_exe else "__collect-legacy-v1"
     assert len(collectors) <= collector_limit and all(fixed_exec(c, collector_path, collector_verb) for c in collectors), collectors
     mains = {helper_pid} | {c.pid for c in collectors}
@@ -1035,7 +1051,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     assert set(map(int, pids)) == {root, helper_pid, *children}, ("unbudgeted child", pids)
     created = set()
     global_held = {}
-    exe_walks = {pid: HelperExecutableWalk(exe) for pid in owners}
+    exe_walks = {pid: HelperExecutableWalk(helper_exe) for pid in owners}
     collector_walk = HelperCollectorExecutable(collector_exe) if collector_exe else None
     for c in helper:
         if c.name == "restart_syscall":
@@ -1131,7 +1147,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
             # 이것을 실패시키는 것: exe를 걷기 뿌리에서 빼는 것(컨테이너에서 bin 조상 stat이 거부된다).
             # Link targets learned earlier need the same no-follow ancestor
             # traversal and metadata checks to verify the executable binding.
-            walk_roots = [*pinned, exe, *exe_walk.roots]
+            walk_roots = [*pinned, helper_exe, *exe_walk.roots]
             if collector_owner:
                 walk_roots.append(collector_exe)
             walk = helper_walk_step(c, path, walk_roots)
@@ -1145,7 +1161,7 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
                 assert exe_walk.file_op(c, path), ("helper executable path", c, path)
                 continue
             assert (system or detached or walk or nss_root or creation or chain_stat or ancestor_stat
-                    or allowed(path, c.args, exe, pinned, allow_walk=False)), ("helper path", c, path)
+                    or allowed(path, c.args, helper_exe, pinned, allow_walk=False)), ("helper path", c, path)
         exe_walk.observe(c)
         if collector_owner:
             collector_walk.observe(c)
@@ -1232,7 +1248,8 @@ def allowlist_capture(base, case):
     return SimpleNamespace(
         lines=trace.read_text(errors="replace").splitlines(), trace=trace,
         # execve names the pinned path (the symlink); its target never shows.
-        exe=str(inst.exe), collector_exe=collector_exe, global_inputs=global_inputs,
+        exe=str(inst.front()), entry="dedicated" if inst.dedicated else "cli", helper_exe=str(inst.exe),
+        collector_exe=collector_exe, global_inputs=global_inputs,
         global_present=global_present, collectors=int(case != "no-collection"),
         pinned=[os.path.realpath(trusted[k] + sub) for k, sub in
                 (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
@@ -1252,6 +1269,8 @@ def judge_allowlist(cap, shape=None):
     count and both coverage checks. Every path, call and audit rule stays."""
     assert_prompt_trace_budget(cap.lines, cap.exe, cap.pinned, global_inputs=cap.global_inputs,
                                collector_exe=cap.collector_exe,
+                               # Stored captures predate bingsu-prompt: the cli entry.
+                               entry=getattr(cap, "entry", "cli"), helper_exe=getattr(cap, "helper_exe", None),
                                collectors=None if shape == "front-alarm" else cap.collectors,
                                repository_roots=cap.roots,
                                repository_evidence=() if shape else cap.evidence,
@@ -1362,14 +1381,18 @@ TABLE_SYSCALLS = {r[0] for r in _ROWS if r[0] != "-"}
 # 정상 프롬프트에서 호출이 EPERM으로 거부되는 것.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 @pytest.mark.parametrize("pwd", ["/srv/p", "/" + "a/" * 32767])
-def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd):
+@pytest.mark.parametrize("entry", ["bingsu", "bingsu-prompt"])
+def test_calls_after_the_filter_are_in_the_table(tmp_path, pwd, entry):
     """Every call the prompt makes after its seccomp filter is installed
     (strace -e trace=all, from the PR_SET_SECCOMP line on) is a row of the
     table, and none is refused: the table is complete for this libc and
     allocator. LD_PRELOAD in the environment (an allocator under test) is
     passed through."""
     assert shutil.which("strace"), "Linux syscall gate must execute strace"
-    exe = str(Install(tmp_path).exe)
+    # Both entries compile the same filter; each binary links its own libc
+    # and allocator code, so each is traced.
+    install = Install(tmp_path)
+    exe = str(install.exe if entry == "bingsu" else install.prompt)
     trace = tmp_path / "trace"
     args = [exe, "prompt", "--ctx", "1", "--record", "B1", "--width", "100", "--runtime-root=1:2:/r",
             "--shell", "bash", "--pwd", pwd, "--status", "1"]
@@ -1735,18 +1758,20 @@ def test_pinned_prompt_argv_from_real_init(tmp_path):
     env["XDG_CONFIG_HOME"] += " ' quoted\nconfig"
     script = inst.init("bash", env)
     (tmp_path / "init.bash").write_bytes(script)
-    argv = pinned_prompt_argv(script, inst.exe, tmp_path, 7, env, tmp_path)
-    assert argv[:8] == [str(inst.exe), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
+    argv = pinned_prompt_argv(script, inst.front(), tmp_path, 7, env, tmp_path)
+    assert inst.dedicated
+    assert argv[:8] == [str(inst.prompt), "prompt", "--ctx", "1", "--record", "B1", "--width", "80"]
     assert argv[argv.index("--pwd") + 1] == str(tmp_path)
     assert argv[argv.index("--seq") + 1] == "8"
     assert re.fullmatch(r"[0-9a-f]{32}", argv[argv.index("--session") + 1])
     for flag, word in pinned_roots(env).items():
         assert [os.fsencode(a) for a in argv if os.fsencode(a).startswith(flag)] == [word]
     assert "--collector-exe=" + init_collector_exe(script) in argv
+    assert "--helper-exe=" + str(inst.exe) in argv
     # Extra flag-bearing lines (such as init's exported command roots) cannot
     # select a different invocation or make extraction ambiguous.
     extra = b"\n# --runtime-root=decoy --config-root=decoy\n"
-    assert pinned_prompt_argv(script + extra * 3, inst.exe, tmp_path, 7, env, tmp_path) == argv
+    assert pinned_prompt_argv(script + extra * 3, inst.front(), tmp_path, 7, env, tmp_path) == argv
     # Compare every word with the same hook calling the existing fake binary.
     inst.use_fake(minimal_record())
     path = tmp_path / "actual-prompt.bash"
@@ -1764,7 +1789,7 @@ class HelperStageFixture:
     the stage formula does not include, so the fixture refuses one.
     """
 
-    def __init__(self, stage, *, template=None, config="plain"):
+    def __init__(self, stage, *, template=None, config="plain", entry="cli"):
         import tempfile
         root = real_bin().parent.parent
         self.base = Path(tempfile.mkdtemp(prefix="helper-stage-", dir=root)).resolve()
@@ -1782,7 +1807,10 @@ class HelperStageFixture:
         self.put("collect" if stage == "collect" else stage if command else config, template=template)
         if command:
             self.env["PATH"] = COMMAND_PATH
-        self.script = self.inst.init("bash", self.env)
+        # The helper-stage formulas count the `bingsu prompt` front; the helper
+        # is the same process under either entry. child_capture traces the
+        # `bingsu-prompt` front ("dedicated").
+        self.script = self.inst.init("bash", self.env, entry=entry)
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
         self.pwd = self.base
@@ -2486,7 +2514,9 @@ def front_capture(request, tmp_path_factory):
     lock = None
     try:
         config = {'selected-band': 'bands', 'env-segment': 'env_segment'}.get(case, 'plain')
-        fixture = HelperStageFixture('unchanged', config=config)
+        # The shipped front: bingsu-prompt. The fallback entry's calls after
+        # the filter are held to the table by test_calls_after_the_filter_are_in_the_table.
+        fixture = HelperStageFixture('unchanged', config=config, entry="dedicated")
         lock = (fixture.store / 'snapshot.lock').open('rb')
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = bytearray((fixture.store / 'snapshot').read_bytes())
@@ -2533,7 +2563,9 @@ def front_capture(request, tmp_path_factory):
         (artifacts / 'stderr').write_bytes(result.stderr)
         pinned = [os.path.realpath(Path(fixture.env[key]) / 'bingsu')
                   for key in ('XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME')]
-        yield trace.read_text().splitlines(), str(fixture.inst.exe), pinned, fixture.store, attempts, evidence
+        lines = trace.read_text().splitlines()
+        assert_dedicated_front(lines, fixture.inst)
+        yield lines, str(fixture.inst.front()), pinned, fixture.store, attempts, evidence
     except BaseException as error:
         evidence['failure'] = str(error)
         raise
@@ -2599,7 +2631,7 @@ def child_capture(tmp_path):
         # Reuse A2's real hook, advancing session sequence and untraced warm-up.
         # A cold admission under strace may defer before it can spawn a worker.
         fixture = HelperStageFixture("unchanged" if template == "{char}" else "collect",
-                                     template=template)
+                                     template=template, entry="dedicated")
         try:
             return capture_prompt(fixture, base, invalid, timestamps, redraw)
         finally:
@@ -2628,7 +2660,7 @@ def child_capture(tmp_path):
         # Expand A2's exact hook without tracing bash or running a prompt.
         # A2 increments fixture.seq before setting the hook's pre-call counter;
         # use that same next counter so capture cannot replay the last warm-up.
-        argv = pinned_prompt_argv(fixture.script, fixture.inst.exe, fixture.pwd,
+        argv = pinned_prompt_argv(fixture.script, fixture.inst.front(), fixture.pwd,
                                   fixture.seq + 1, fixture.env, base)
         assert "--collector-exe=" + fixture.collector in argv, argv
         if redraw:
@@ -2636,7 +2668,8 @@ def child_capture(tmp_path):
         # What a full trace judgment needs after the fixture is gone.
         env, repo = fixture.env, os.path.realpath(fixture.pwd)
         (base / "context.json").write_text(json.dumps({
-            "exe": str(fixture.inst.exe), "collector_exe": fixture.collector,
+            "exe": str(fixture.inst.front()), "entry": "dedicated" if fixture.inst.dedicated else "cli",
+            "helper_exe": str(fixture.inst.exe), "collector_exe": fixture.collector,
             "pinned": [os.path.realpath(env[k] + sub) for k, sub in
                        (("XDG_RUNTIME_DIR", "/bingsu"), ("XDG_CONFIG_HOME", "/bingsu"),
                         ("XDG_STATE_HOME", "/bingsu"), ("XDG_STATE_HOME", "/bingsu/log"))],
@@ -2654,6 +2687,8 @@ def child_capture(tmp_path):
         trace = parse_trace(strip_trace_times(text) if timestamps else text)
         # 이것을 실패시키는 것: assert not trace.errors, (trace.errors, evidence) 조건을 제거하거나 반전하는 변이.
         assert not trace.errors, (trace.errors, evidence)
+        # The entry the hook ran, for the helper rule of the role attribution.
+        trace.entry = "dedicated" if fixture.inst.dedicated else "cli"
         return trace, fixture.store, result.stdout
     return capture
 
@@ -2662,7 +2697,7 @@ def child_capture(tmp_path):
 def test_live_child_count_is_bounded_per_role(child_capture):
     from fsbudget.attribute import role_children
     trace, _, _ = child_capture()
-    children = role_children(trace)
+    children = role_children(trace, entry_of(trace))
     # 이것을 실패시키는 것: assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children 조건을 제거하거나 반전하는 변이.
     assert children == {"front": 1, "helper": 1, "collector": 0, "command": 0}, children
 
@@ -2679,12 +2714,12 @@ def test_redraw_spawns_no_process_and_reads_no_config_source(child_capture, tmp_
         return [c for c in trace if c.name not in {"execve", "execveat"} and root in named(c)]
 
     trace, _, record = child_capture(name="prompt")
-    assert role_children(trace)["front"] == 1
+    assert role_children(trace, entry_of(trace))["front"] == 1
     # 양성 대조: 같은 검사가 일반 프롬프트 도우미의 설정 원본 읽기를 본다.
     assert config_calls("prompt", trace)
     trace, _, record = child_capture(name="redraw", redraw=True)
     assert record.startswith(b"B1\x1f") and record.endswith(b"\x1e")
-    assert role_children(trace) == {"front": 0, "helper": 0, "collector": 0, "command": 0}
+    assert role_children(trace, entry_of(trace)) == {"front": 0, "helper": 0, "collector": 0, "command": 0}
     assert len({c.pid for c in trace}) == 1, "a redraw is one process"
     assert not config_calls("redraw", trace)
     # 이것을 실패시키는 것: 도우미를 띄우지 않는 redraw에서도 환경 파이프를 만드는 것.
@@ -2758,8 +2793,8 @@ def test_redraw_renders_new_width_from_same_values(tmp_path):
 def test_live_no_worker_segment_spawns_zero_collectors(child_capture):
     from fsbudget.attribute import role_children
     trace, _, _ = child_capture("{char}")
-    # 이것을 실패시키는 것: assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0} 조건을 제거하거나 반전하는 변이.
-    assert role_children(trace) == {"front": 1, "helper": 0, "collector": 0, "command": 0}
+    # 이것을 실패시키는 것: assert role_children(trace, entry_of(trace)) == {"front": 1, "helper": 0, "collector": 0, "command": 0} 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace, entry_of(trace)) == {"front": 1, "helper": 0, "collector": 0, "command": 0}
 
 
 # Under strace the front can pass its 50 ms deadline and exit 0 without a
@@ -2871,6 +2906,8 @@ def judge_marker_trace(cap, shape=None):
     c = cap.context
     # 이것을 실패시키는 것: 버리는 마감 시도의 경로·syscall 금지 판정을 건너뛰는 것.
     assert_prompt_trace_budget(cap.untimed, c["exe"], c["pinned"], global_inputs=tuple(c["global_inputs"]),
+                               # Stored contexts predate bingsu-prompt: the cli entry.
+                               entry=c.get("entry", "cli"), helper_exe=c.get("helper_exe"),
                                collector_exe=c["collector_exe"], collectors=None,
                                repository_roots=c["roots"], repository_evidence=(),
                                # 이것을 실패시키는 것: 비지 않은 stdout에서 필터·기록 쓰기를 면제하는 것.
@@ -2886,7 +2923,7 @@ def judge_marker_attempt(cap, shape=None, trace_judge=judge_marker_trace):
     deadline cannot stop its spawn)."""
     from fsbudget.attribute import role_children
     trace_judge(cap, shape)
-    children = role_children(cap.trace)
+    children = role_children(cap.trace, entry_of(cap.trace))
     # 이것을 실패시키는 것: 마감 시도에서 역할 상한(helper 둘, collector·명령 자식)을 넘기는 것.
     assert children["front"] <= 1 and children["helper"] <= 1, children
     assert children["collector"] == children["command"] == 0, children
@@ -2928,23 +2965,30 @@ def test_live_collector_count_ignores_marker_validity(child_capture, tmp_path):
 def test_live_collector_spawns_after_helper_header_and_marker_reads(child_capture):
     from fsbudget.attribute import first_index, role_children
     trace, store, _ = child_capture()
-    # 이것을 실패시키는 것: assert role_children(trace)["helper"] == 1 조건을 제거하거나 반전하는 변이.
-    assert role_children(trace)["helper"] == 1
+    # 이것을 실패시키는 것: assert role_children(trace, entry_of(trace))["helper"] == 1 조건을 제거하거나 반전하는 변이.
+    assert role_children(trace, entry_of(trace))["helper"] == 1
     assert_child_timing(trace, store)
+
+
+def entry_of(trace):
+    """The prompt entry a trace ran ("cli" or "dedicated"), which the capture
+    records on it from the program the hook called; stored traces of the CLI
+    entry carry none."""
+    return getattr(trace, "entry", "cli")
 
 
 def assert_child_timing(trace, store):
     from fsbudget.attribute import first_index
-    helper_exec = first_index(trace, "helper", lambda c: c.name == "execve" and c.ret == "0")
+    helper_exec = first_index(trace, "helper", lambda c: c.name == "execve" and c.ret == "0", entry_of(trace))
     main = trace[helper_exec].pid
     spawn = first_index(trace, "helper", lambda c: c.pid == main and c.name in SPAWNS
-                        and "CLONE_THREAD" not in c.args and re.fullmatch(r"[1-9][0-9]*", c.ret))
+                        and "CLONE_THREAD" not in c.args and re.fullmatch(r"[1-9][0-9]*", c.ret), entry_of(trace))
     # The helper verifies its freshly staged marker by same-fd readback before
     # admission. This is distinct from the front reading the published marker.
     for name, size in (("snapshot", 192), (".marker.stage", 208)):
         read = first_index(trace, "helper", lambda c: c.pid == main and c.name == "read"
                            and args_of(c)[0].endswith("<" + str(store / name) + ">")
-                           and c.ret.isdigit() and int(c.ret) >= size)
+                           and c.ret.isdigit() and int(c.ret) >= size, entry_of(trace))
         # 이것을 실패시키는 것: 머리·표식 읽기를 collector 생성 뒤로 옮기는 것.
         assert read < spawn, (name, read, spawn)
 
@@ -2986,7 +3030,7 @@ def test_stored_child_timing_control():
     passing = parse_trace((fixtures / 'b1-child-timing-passing.strace').read_text())
     moved = parse_trace((fixtures / 'b1-child-timing-before-reads.strace').read_text())
     expected = {"front": 1, "helper": 1, "collector": 0, "command": 0}
-    assert role_children(passing) == role_children(moved) == expected
+    assert role_children(passing, entry_of(passing)) == role_children(moved, entry_of(moved)) == expected
     assert_child_timing(passing, Path('/store'))
     with pytest.raises(AssertionError, match='snapshot'):
         assert_child_timing(moved, Path('/store'))
@@ -3483,6 +3527,13 @@ def test_target_links_count_same_folder_hops(tmp_path):
 COMMAND_FRONT_SHAPES = ("no_response", "unread", "unread_narrow", "read")
 
 
+def assert_dedicated_front(lines, inst):
+    """The traced prompt is the shipped `bingsu-prompt` front, which init chose."""
+    # 이것을 실패시키는 것: front 축 gate가 fallback(`bingsu prompt`) front를 재는 것.
+    fronts = [line for line in lines if re.search(r'execve\("[^"]+", \["[^"]+", "prompt"', line) and line.rstrip().endswith("= 0")]
+    assert inst.dedicated and fronts and all(f'execve("{inst.prompt}"' in line for line in fronts), fronts
+
+
 def front_calls(lines, exe):
     """The prompt process's calls of a traced prompt and its filter boundary."""
     from fsbudget.strace_parse import Trace
@@ -3509,7 +3560,7 @@ def test_live_front_command_response_shapes(shape, tmp_path):
     require_release_helper(real_bin())
     stage = {"no_response": "collect", "unread": "command_hit", "unread_narrow": "command_hit",
              "read": "command_hit"}[shape]
-    fixture = HelperStageFixture(stage)
+    fixture = HelperStageFixture(stage, entry="dedicated")
     try:
         if shape in ("unread", "unread_narrow"):
             # The unit stays declared and its response stays; the screen at
@@ -3521,7 +3572,8 @@ def test_live_front_command_response_shapes(shape, tmp_path):
         fixture.prompt(trace)
         wait_helpers(fixture.base)
         lines = trace.read_text(errors="replace").splitlines()
-        front, boundary = front_calls(lines, str(fixture.inst.exe))
+        assert_dedicated_front(lines, fixture.inst)
+        front, boundary = front_calls(lines, str(fixture.inst.front()))
         pinned = [os.path.realpath(Path(fixture.env[key]) / "bingsu")
                   for key in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME")]
         cwd = os.fsencode(str(fixture.pwd))

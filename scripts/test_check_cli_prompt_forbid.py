@@ -19,30 +19,67 @@ import check_cli_prompt_forbid as gate
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+class PromptPackage(unittest.TestCase):
+    """Rule 6 on a copy of crates/bingsu-prompt, one change per case."""
+
+    def copy(self, temp):
+        import shutil
+        package = pathlib.Path(temp) / "bingsu-prompt"
+        shutil.copytree(ROOT / "crates/bingsu-prompt", package, symlinks=True)
+        return package
+
+    # 이것을 실패시키는 것: 패키지 파일·manifest 규칙 하나를 빼는 것.
+    def test_each_change_is_refused(self):
+        self.assertEqual(gate.prompt_package_rules(), [])
+        manifest = (ROOT / "crates/bingsu-prompt/Cargo.toml").read_text()
+        cases = {
+            "extra source": lambda p: (p / "src/other.rs").write_text("pub fn f() {}\n"),
+            "nested source": lambda p: ((p / "src/bin").mkdir(), (p / "src/bin/x.rs").write_text("fn main() {}\n")),
+            "symlink": lambda p: (p / "link").symlink_to(ROOT / "crates/bingsu/src/main.rs"),
+            "dependency": lambda p: (p / "Cargo.toml").write_text(manifest + 'regex = "1"\n'),
+            "test build": lambda p: (p / "Cargo.toml").write_text(manifest.replace("test = false", "test = true")),
+            "build script": lambda p: (p / "Cargo.toml").write_text(manifest.replace('rust-version = "1.88"', 'rust-version = "1.88"\nbuild = "build.rs"')),
+            "features": lambda p: (p / "Cargo.toml").write_text(manifest + "\n[features]\nx = []\n"),
+        }
+        for name, change in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as temp:
+                package = self.copy(temp)
+                self.assertEqual(gate.prompt_package_rules(package), [])
+                change(package)
+                self.assertNotEqual(gate.prompt_package_rules(package), [], name)
+
+
 class ProductFixtureIsolation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         build = subprocess.run(
-            ["cargo", "build", "--quiet", "-p", "bingsu", "--message-format=json"],
+            ["cargo", "build", "--quiet", "-p", "bingsu", "-p", "bingsu-prompt", "--message-format=json"],
             cwd=ROOT, capture_output=True, text=True, check=True,
         )
-        paths = [d["executable"] for d in map(json.loads, build.stdout.splitlines())
-                 if d.get("reason") == "compiler-artifact" and d["target"]["name"] == "bingsu"
-                 and d.get("executable")]
-        if len(paths) != 1:
-            raise AssertionError(f"expected one built bingsu executable, got {paths}")
-        cls.binary = pathlib.Path(paths[0])
+        cls.binaries = {}
+        for d in map(json.loads, build.stdout.splitlines()):
+            if d.get("reason") == "compiler-artifact" and d.get("executable") \
+                    and d["target"]["name"] in ("bingsu", "bingsu-prompt"):
+                cls.binaries.setdefault(d["target"]["name"], []).append(pathlib.Path(d["executable"]))
+        if sorted(cls.binaries) != ["bingsu", "bingsu-prompt"] or any(len(v) != 1 for v in cls.binaries.values()):
+            raise AssertionError(f"expected one built bingsu and bingsu-prompt executable, got {cls.binaries}")
+        cls.binaries = {name: paths[0] for name, paths in cls.binaries.items()}
 
-    # 이것을 실패시키는 것: 시험 target·의존 진입점 또는 fixture 문자열을 제품에 포함하는 것.
+    # 이것을 실패시키는 것: 시험 target·의존 진입점 또는 fixture 문자열을 제품에 포함하는 것,
+    # 두 제품 바이너리 중 하나를 검사하지 않는 것.
     def test_product_fixture_is_unreachable(self):
-        self.assertEqual(gate.check_product_fixture_isolation(self.binary), [])
+        both = list(self.binaries.values())
+        self.assertEqual(gate.check_product_fixture_isolation(both), [])
         with tempfile.TemporaryDirectory() as temp:
             altered = pathlib.Path(temp) / "product-with-fixture"
-            for marker in (b"collector_builtin", b"collector_builtin_test_only_31"):
-                with self.subTest(marker=marker):
-                    altered.write_bytes(self.binary.read_bytes() + marker)
-                    self.assertIn("product binary contains a collector fixture symbol or string",
-                                  gate.check_product_fixture_isolation(altered))
+            for name, clean in self.binaries.items():
+                for marker in (b"collector_builtin", b"collector_builtin_test_only_31"):
+                    with self.subTest(binary=name, marker=marker):
+                        altered.write_bytes(clean.read_bytes() + marker)
+                        others = [p for p in both if p != clean]
+                        self.assertEqual(
+                            gate.check_product_fixture_isolation([*others, altered]),
+                            [f"product binary {altered} contains a collector fixture symbol or string"])
 
     # 이것을 실패시키는 것: 시험 target의 수·소유 package·종류 또는 제품 의존 진입점 검사를 빼는 것.
     def test_fixture_build_gate_rejects_product_entry(self):

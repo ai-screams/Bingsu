@@ -84,7 +84,7 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Static musl binary: the runner's glibc is newer than the images'.
-      - run: cargo build -p bingsu -p bingsu-collect --target x86_64-unknown-linux-musl
+      - run: cargo build -p bingsu -p bingsu-prompt -p bingsu-collect --target x86_64-unknown-linux-musl
       # K60 must round-trip through the minimum shells without Cargo in
       # their images. Check the root on the host, but embed the /w mount.
       - name: Generate shape-only init fixture
@@ -147,7 +147,7 @@ jobs:
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
             -e CI=true -e BINGSU_SHAPE_ONLY_FIXTURE \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \
-            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
+            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-prompt target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
               exec python3 -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp=/root/pytest \
                 --ignore tests/shell/test_collector_no_spawn_macos.py \
                 --ignore tests/shell/test_collector_security.py \
@@ -196,7 +196,7 @@ jobs:
           docker run --rm --security-opt apparmor=unconfined -v "$PWD:/w" -w /w \
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e LC_ALL=C.UTF-8 \
-            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
+            "bingsu-${{ matrix.image }}" sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/debug/bingsu target/x86_64-unknown-linux-musl/debug/bingsu-prompt target/x86_64-unknown-linux-musl/debug/bingsu-collect /usr/local/bin/ &&
               exec python3 -m pytest tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty -q -rs -p no:cacheprovider --basetemp=/root/pytest'
 
   # M6 C3: the command cgroup layer in two cells. The default container
@@ -231,7 +231,7 @@ jobs:
       - name: Build the cell binaries
         run: |
           set -o pipefail
-          cargo build --release -p bingsu -p bingsu-collect --target x86_64-unknown-linux-musl
+          cargo build --release -p bingsu -p bingsu-prompt -p bingsu-collect --target x86_64-unknown-linux-musl
           cargo test -p bingsu --bin bingsu --target x86_64-unknown-linux-musl --no-run --message-format=json | jq -r 'select(.profile.test == true and .executable != null) | .executable' > "$RUNNER_TEMP/cell-bin"
       - run: tests/shell/containers/check-digests.sh
       - run: docker build -f tests/shell/containers/cgroup-d13.Dockerfile -t bingsu-cgroup-d13 tests/shell/containers
@@ -270,7 +270,7 @@ jobs:
         if: success() || failure()
         run: |
           set -o pipefail
-          docker run --rm ${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }} -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/w" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-collect /usr/local/bin/ && exec python3 -m pytest tests/shell/test_command_cgroup.py -q -rA -p no:cacheprovider --basetemp=/root/pytest' | tee "$RUNNER_TEMP/cell-py.txt"
+          docker run --rm ${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }} -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/w" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-prompt target/x86_64-unknown-linux-musl/release/bingsu-collect /usr/local/bin/ && exec python3 -m pytest tests/shell/test_command_cgroup.py -q -rA -p no:cacheprovider --basetemp=/root/pytest' | tee "$RUNNER_TEMP/cell-py.txt"
           grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_best_effort_group_kill_under_the_filter' "$RUNNER_TEMP/cell-py.txt"
       # GATE-FS-HELPER.1 command stages, x86_64 musl release: the privileged cell
       # takes the atomic path (its fixture requires the session's cgroup parent),
@@ -280,7 +280,7 @@ jobs:
         if: success() || failure()
         run: |
           set -o pipefail
-          docker run --rm ${{ matrix.opts }} --cap-add SYS_PTRACE -e BINGSU_CGROUP_CELL=${{ matrix.cell }} -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/w" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-collect /usr/local/bin/ && exec python3 -m pytest tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula -k command -q -rA -p no:cacheprovider --basetemp=/root/pytest-helper' | tee "$RUNNER_TEMP/cell-helper.txt"
+          docker run --rm ${{ matrix.opts }} --cap-add SYS_PTRACE -e BINGSU_CGROUP_CELL=${{ matrix.cell }} -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/w" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-prompt target/x86_64-unknown-linux-musl/release/bingsu-collect /usr/local/bin/ && exec python3 -m pytest tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula -k command -q -rA -p no:cacheprovider --basetemp=/root/pytest-helper' | tee "$RUNNER_TEMP/cell-helper.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[command_miss]' "$RUNNER_TEMP/cell-helper.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[command_hit]' "$RUNNER_TEMP/cell-helper.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[command_not_run]' "$RUNNER_TEMP/cell-helper.txt"
@@ -350,7 +350,7 @@ jobs:
       - name: Build
         run: |
           # version-stub: the builtin probe tests' language command (D3a).
-          args=(-p bingsu -p bingsu-collect -p bingsu-bench --bin bingsu --bin bingsu-collect --bin version-stub)
+          args=(-p bingsu -p bingsu-prompt -p bingsu-collect -p bingsu-bench --bin bingsu --bin bingsu-prompt --bin bingsu-collect --bin version-stub)
           dir=target
           if [ "$PROFILE" = release ]; then args+=(--release); fi
           if [ "$LIBC" = musl ]; then musl="$(uname -m)-unknown-linux-musl"; args+=(--target "$musl"); dir="target/$musl"; fi
@@ -375,7 +375,7 @@ jobs:
       - name: Calls after the filter are in the table
         run: |
           "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_prompt_env_paths.py -k after_the_filter -q -rs -p no:cacheprovider | tee "$RUNNER_TEMP/pytest.out"
-          grep -q '2 passed' "$RUNNER_TEMP/pytest.out"
+          grep -q '4 passed' "$RUNNER_TEMP/pytest.out"
       # 이것을 실패시키는 것: 게이트 행 표의 검사를 빼거나 그 skip을 통과로 세는 것.
       - name: Gate acceptance rows map every clause to a CI-asserted test
         run: |
@@ -658,7 +658,7 @@ jobs:
           target="$arch-unknown-linux-$LIBC"
           rustup target add "$target"
           if [ "$LIBC" = musl ]; then sudo apt-get update -q; sudo apt-get install -y musl-tools; fi
-          cargo build -p bingsu -p bingsu-collect --release --target "$target"
+          cargo build -p bingsu -p bingsu-prompt -p bingsu-collect --release --target "$target"
           echo "BINGSU_BIN=$PWD/target/$target/release/bingsu" >> "$GITHUB_ENV"
       - name: Prepare tracing and Python
         run: |
@@ -720,7 +720,7 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
           echo "BINGSU_PY=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
-      - run: cargo build -p bingsu -p bingsu-collect -p bingsu-bench --bin bingsu --bin bingsu-collect --bin version-stub
+      - run: cargo build -p bingsu -p bingsu-prompt -p bingsu-collect -p bingsu-bench --bin bingsu --bin bingsu-prompt --bin bingsu-collect --bin version-stub
       - name: Generate shape-only init fixture
         run: |
           cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --test cli_prompt --no-run
@@ -860,7 +860,7 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
           echo "BINGSU_PY=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
-      - run: cargo build -p bingsu -p bingsu-collect -p bingsu-bench --bin bingsu --bin bingsu-collect --bin version-stub
+      - run: cargo build -p bingsu -p bingsu-prompt -p bingsu-collect -p bingsu-bench --bin bingsu --bin bingsu-prompt --bin bingsu-collect --bin version-stub
       - name: Generate shape-only init fixture
         run: |
           cargo test -j 2 -p bingsu --bin bingsu --test collection_reader --test cli_prompt --no-run

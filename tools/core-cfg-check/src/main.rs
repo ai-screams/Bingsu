@@ -115,6 +115,7 @@ use syn::visit::Visit;
 
 mod adapter;
 mod function_items;
+mod prompt_main;
 mod rules;
 
 struct Finding {
@@ -1250,6 +1251,25 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         };
         let findings = check_identity(&source);
+        for f in &findings {
+            eprintln!("{path}:{}: {}", f.line, f.reason);
+        }
+        return if findings.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+    if args.first().is_some_and(|a| a == "--prompt-main") {
+        let [_, path] = args.as_slice() else {
+            eprintln!("usage: core-cfg-check --prompt-main FILE.rs");
+            return ExitCode::FAILURE;
+        };
+        let Ok(source) = std::fs::read_to_string(path) else {
+            eprintln!("{path}: unreadable");
+            return ExitCode::FAILURE;
+        };
+        let findings = prompt_main::check_prompt_main(&source);
         for f in &findings {
             eprintln!("{path}:{}: {}", f.line, f.reason);
         }

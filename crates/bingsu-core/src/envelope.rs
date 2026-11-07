@@ -81,6 +81,10 @@ pub struct Envelope {
     pub git_global_xdg: Option<Vec<u8>>,
     /// Canonical dedicated sibling pinned by init; never read from environment.
     pub collector_exe: Option<Vec<u8>>,
+    /// `--helper-exe=<path>`: the refresh helper the dedicated prompt binary
+    /// starts. Init writes the path it pins for `bingsu` into the hook; no
+    /// one checks the file at run time (the same trust as argv0 today).
+    pub helper_exe: Option<Vec<u8>>,
     pub runtime_groups: Vec<crate::fs_trust::GroupPin>,
     pub log_level: LogLevel,
     pub host: Option<Vec<u8>>,
@@ -235,6 +239,9 @@ fn root_slot<'e, 'a>(
     }
     if let Some(v) = a.strip_prefix(b"--collector-exe=") {
         return Some((&mut e.collector_exe, v));
+    }
+    if let Some(v) = a.strip_prefix(crate::root_arg::HELPER_EXE_PREFIX) {
+        return Some((&mut e.helper_exe, v));
     }
     if let Some(v) = a.strip_prefix(HOME_PREFIX) {
         return Some((&mut e.home, v));
@@ -766,6 +773,34 @@ mod tests {
                 parse_strs(&a),
                 Err(EnvelopeError::NoSupportedRecordVersion),
                 "{flag}"
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: `--helper-exe=`를 모르는 플래그로 거부하는 것(새 hook 전체가 bad-args),
+    // 중복이나 상대 경로를 받는 것, 값 자리의 글을 필드로 읽는 것.
+    #[test]
+    fn helper_exe_field() {
+        assert_eq!(
+            with(&["--helper-exe=/opt/bingsu"])
+                .unwrap()
+                .helper_exe
+                .as_deref(),
+            Some(b"/opt/bingsu".as_slice())
+        );
+        assert_eq!(with(&[]).unwrap().helper_exe, None);
+        assert_eq!(
+            with(&["--host", "--helper-exe=/evil"]).unwrap().helper_exe,
+            None
+        );
+        for bad in [
+            &["--helper-exe=/a", "--helper-exe=/a"][..],
+            &["--helper-exe=relative"],
+            &["--helper-exe="],
+        ] {
+            assert!(
+                matches!(with(bad), Err(EnvelopeError::BadArgs(_))),
+                "{bad:?}"
             );
         }
     }
