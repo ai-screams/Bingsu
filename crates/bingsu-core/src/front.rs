@@ -204,9 +204,10 @@ fn render_selected_with_catalog<L: LayoutView>(
         collected.facts.truncate(BUILTIN.len());
         for (i, t) in custom.iter().enumerate() {
             // A command segment's value comes from the command response
-            // (`command::display`, cut to the same cells as text); without
-            // one it has no value, so the renderer drops it with its
-            // separators like any absent segment.
+            // (`command::display`) and an env segment's from the prompt's
+            // environment frame, both in `commands` and cut to the same cells
+            // as text; without one it has no value, so the renderer drops it
+            // with its separators like any absent segment.
             let Some(text) =
                 crate::layout_view::custom_text(t).or_else(|| commands.get(i).copied().flatten())
             else {

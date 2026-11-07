@@ -262,8 +262,8 @@ pub const CODES: &[CodeInfo] = &[
     ),
     stable(
         NOT_RUN_UNTRUSTED_LAYOUT,
-        "segment `{id}` does not run",
-        "only a layout from a trusted file turns on a command segment",
+        "segment `{id}` is not used",
+        "only a layout from a trusted file turns on a command or env segment",
         "add the segment to a layout line in your own config",
     ),
     stable(

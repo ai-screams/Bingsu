@@ -496,6 +496,10 @@ impl Wire for CustomSegment {
                 text.put(o);
             }
             CustomKind::Command => 1u8.put(o),
+            CustomKind::Env(name) => {
+                2u8.put(o);
+                name.put(o);
+            }
         }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
@@ -504,6 +508,7 @@ impl Wire for CustomSegment {
             kind: match u8::get(r)? {
                 0 => CustomKind::Text(Wire::get(r)?),
                 1 => CustomKind::Command,
+                2 => CustomKind::Env(Wire::get(r)?),
                 _ => return Err(Error::Shape),
             },
         })
@@ -1527,6 +1532,7 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
                             || text.len() > usize::from(crate::field::CUSTOM_TEXT_CELLS) * 4
                     }
                     CustomKind::Command => false,
+                    CustomKind::Env(name) => !crate::config::check::env_name(name),
                 }
         })
     {

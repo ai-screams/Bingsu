@@ -923,11 +923,14 @@ fn drawn_command(config: &FrontConfig, i: usize) -> bool {
     config.custom[i].kind == CustomKind::Command && config.draws_segment(BUILTIN.len() + i)
 }
 
-/// The value of each user segment that is a command, in `custom` order
-/// (`None` elsewhere): `command::display` against this prompt's binding,
-/// entry clock, environment frame body and display eligibility (`eligible`: the
-/// marker verdict that also makes the snapshot's units eligible).
-fn command_values(
+/// The value of each user segment that is a command or an env segment, in
+/// `custom` order (`None` elsewhere). A command's is `command::display`
+/// against this prompt's binding, entry clock, environment frame body and
+/// display eligibility (`eligible`: the marker verdict that also makes the
+/// snapshot's units eligible). An env segment's is its variable in the same
+/// frame body, the shell's environment as the prompt received it: unset,
+/// empty, named twice or past the frame's cap (no frame) draws nothing.
+fn custom_values(
     entry: Option<Clock>,
     build_id: Option<BuildId>,
     environment: Option<&[u8]>,
@@ -942,8 +945,17 @@ fn command_values(
     };
     let custom = &selected.config.custom;
     let mut out = vec![None; custom.len()];
-    let (Some(response), Some(entry), Some(build_id), Some(body)) =
-        (observed.commands.as_deref(), entry, build_id, environment)
+    let Some(body) = environment else {
+        return out;
+    };
+    let vars = Environ::parse(body);
+    for (i, segment) in custom.iter().enumerate() {
+        if let CustomKind::Env(name) = &segment.kind {
+            out[i] = env_value(&vars, name);
+        }
+    }
+    let (Some(response), Some(entry), Some(build_id)) =
+        (observed.commands.as_deref(), entry, build_id)
     else {
         return out;
     };
@@ -966,7 +978,6 @@ fn command_values(
         state,
         cwd,
     };
-    let vars = Environ::parse(body);
     let Some(mut prompt) = display::Prompt::new(response, &expected, entry, &vars, eligible) else {
         return out;
     };
@@ -985,6 +996,15 @@ fn command_values(
         out[i] = display::value(&mut prompt, unit, Origin::Config).map(|v| v.into());
     }
     out
+}
+
+/// What an env segment draws for `name`: the part of its value the cut reads
+/// (`Clean::read_prefix`), invalid UTF-8 replaced; nothing when it is unset.
+/// An empty value draws nothing as empty text does.
+fn env_value(vars: &crate::command::plan::Environ<'_>, name: &str) -> Option<String> {
+    let value = vars.get(name.as_bytes())?;
+    let text = String::from_utf8_lossy(value);
+    Some(crate::field::Clean::read_prefix(&text, crate::field::CUSTOM_TEXT_CELLS).into())
 }
 
 /// Finish never observes the OS. COLORFGBG comes only from the display envelope,
@@ -1072,7 +1092,7 @@ pub fn finish_with_catalog(
             }
         }
     }
-    let commands = command_values(
+    let commands = custom_values(
         plan.entry,
         plan.build_id,
         // A frame kept by `with_environment` has a checked body after its header.

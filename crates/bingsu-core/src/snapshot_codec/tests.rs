@@ -779,8 +779,8 @@ mod cases {
         }
     }
 
-    // 사용자 세그먼트는 종류 태그(0 text, 1 command)로 왕복하고, 그 밖의 태그는 거부한다. 이것을 실패시키는 것: 0과
-    // 1 밖의 태그를 command로 읽는 것, command에 text 바이트를 붙이거나 읽는 것.
+    // 사용자 세그먼트는 종류 태그(0 text, 1 command, 2 env)로 왕복하고, 그 밖의 태그는 거부한다. 이것을 실패시키는
+    // 것: 0–2 밖의 태그를 받아들이는 것, command에 text 바이트를 붙이거나 읽는 것, env의 이름을 빠뜨리는 것.
     #[test]
     fn user_segment_kinds_round_trip_and_unknown_tags_fail() {
         round(CustomSegment {
@@ -792,9 +792,13 @@ mod cases {
             kind: CustomKind::Command,
         };
         round(command.clone());
+        round(CustomSegment {
+            id: "custom/e".into(),
+            kind: CustomKind::Env("AWS_PROFILE".into()),
+        });
         let mut b = bytes(&command);
         assert_eq!(b.pop(), Some(1));
-        b.push(2);
+        b.push(3);
         assert_eq!(read::<CustomSegment>(&b), Err(Error::Shape));
     }
 
@@ -827,6 +831,18 @@ mod cases {
         ] {
             rejected(&bad);
         }
+        // An env segment's name is a variable name on both sides. 이것을 실패시키는 것: env 이름 검사 삭제.
+        let mut named = config();
+        named.custom = alloc::vec![CustomSegment {
+            id: "custom/e".into(),
+            kind: CustomKind::Env("AWS_PROFILE".into()),
+        }];
+        assert_eq!(
+            decode_compiled(&encode_compiled(&named).unwrap()).unwrap(),
+            named
+        );
+        named.custom[0].kind = CustomKind::Env("1X".into());
+        rejected(&named);
         let many: Vec<(String, &str)> = (0..=crate::config::compile::MAX_CUSTOM_TEXT)
             .map(|i| (alloc::format!("custom/t{i:04}"), "x"))
             .collect();

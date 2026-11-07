@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 pub fn custom_text(segment: &CustomSegment) -> Option<&str> {
     match &segment.kind {
         CustomKind::Text(text) => Some(text),
-        CustomKind::Command => None,
+        CustomKind::Command | CustomKind::Env(_) => None,
     }
 }
 

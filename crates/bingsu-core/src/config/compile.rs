@@ -143,6 +143,9 @@ pub enum CustomKind {
     /// `kind = "command"`: the unit's value from the command response; a
     /// segment with no value draws nothing.
     Command,
+    /// `kind = "env"`: the value of this variable in the prompt's own
+    /// environment, cut like text; unset or empty draws nothing.
+    Env(String),
 }
 
 /// Per `field::BUILTIN` index: priority, required, shorten methods, when.
@@ -854,10 +857,43 @@ pub fn compile(
         int(r, &["width", "emoji"]).unwrap_or(2) as u8,
     )
     .unwrap_or(WidthProfile::DEFAULT);
-    // Without a declared text or command segment nothing is looked up, so
-    // the usual config compiles exactly as it did before user segments.
+    let shown_bands = selectable(&banded.order, &banded.bands);
+    // What a trusted layout can draw is judged on the trusted merge alone: a
+    // shape-only source may re-order or resize bands, but must not make a band
+    // reachable that the trusted sources never reach. A trusted merge whose
+    // bands fail to order approves nothing.
+    let approved_bands = bands_of(trusted).map_or_else(
+        |_| BTreeSet::new(),
+        |t| {
+            let full = &banded.names;
+            crate::bands::selection_table(&t.order, &t.bands)
+                .into_iter()
+                .filter_map(|(_, _, b)| match b {
+                    None => Some(None),
+                    Some(i) => full
+                        .iter()
+                        .position(|n| *n == t.names[i])
+                        .map(|j| Some(j as u16)),
+                })
+                .collect()
+        },
+    );
+    let reach = Reach {
+        approved: approved_bands,
+        shown: shown_bands,
+    };
+    // Without a declared user segment of a drawn kind nothing is looked up,
+    // so the usual config compiles exactly as it did before user segments.
     let custom = if declares_custom(r) {
-        custom_segments(r, &drawn(r, &banded.names), profile, &mut notes)?
+        custom_segments(
+            r,
+            &drawn(r, &banded.names),
+            &drawn(&trusted.root, &banded.names),
+            banded.names.len(),
+            &reach,
+            profile,
+            &mut notes,
+        )?
     } else {
         Vec::new()
     };
@@ -1006,27 +1042,6 @@ pub fn compile(
             notes.push(Diagnostic::new(codes::CUSTOM_DRAWN_LATER, place).arg("id", id));
         }
     }
-    let shown_bands = selectable(&banded.order, &banded.bands);
-    // What a trusted layout can draw is judged on the trusted merge alone: a
-    // shape-only source may re-order or resize bands, but must not make a band
-    // reachable that the trusted sources never reach. A trusted merge whose
-    // bands fail to order approves nothing.
-    let approved_bands = bands_of(trusted).map_or_else(
-        |_| BTreeSet::new(),
-        |t| {
-            let full = &banded.names;
-            crate::bands::selection_table(&t.order, &t.bands)
-                .into_iter()
-                .filter_map(|(_, _, b)| match b {
-                    None => Some(None),
-                    Some(i) => full
-                        .iter()
-                        .position(|n| *n == t.names[i])
-                        .map(|j| Some(j as u16)),
-                })
-                .collect()
-        },
-    );
     let Bands {
         bands,
         names: band_names,
@@ -1064,16 +1079,7 @@ pub fn compile(
             }
         }
     }
-    let exec_units = exec_units(
-        r,
-        &trusted.root,
-        &band_names,
-        &Reach {
-            approved: approved_bands,
-            shown: shown_bands,
-        },
-        &mut notes,
-    )?;
+    let exec_units = exec_units(r, &trusted.root, &band_names, &reach, &mut notes)?;
     let icons = IconSet::parse(s(r, &["icons"]).unwrap_or(default_str("icons")))
         .unwrap_or(IconSet::Unicode);
     let duration_min_ms = optional_duration(s(r, &["segment", "duration", "min"]))
@@ -1138,7 +1144,7 @@ pub(crate) fn layout_verdict(
 }
 
 /// The user segment kinds a layout draws.
-const DRAWN_KINDS: [&str; 2] = ["text", "command"];
+const DRAWN_KINDS: [&str; 3] = ["text", "command", "env"];
 
 /// Whether segment `id` is declared with a kind the prompt draws.
 fn drawn_kind(r: &MTable, id: &str) -> bool {
@@ -1157,14 +1163,21 @@ fn declares_custom(r: &MTable) -> bool {
     })
 }
 
-/// The `kind = "text"` and `kind = "command"` segments some layout draws,
+/// The `kind = "text"`, `"command"` and `"env"` segments some layout draws,
 /// sorted by id. A segment turned off (`enabled = false`, or from a file
 /// that failed the safety check) is not drawn; a missing `text` shows
 /// nothing. A command segment carries no value here: the prompt fills it
-/// from the command response, and draws nothing without one.
+/// from the command response, and draws nothing without one. An env segment
+/// carries the name of its variable, which the prompt reads from its own
+/// environment; like a command it shows only where a trusted layout draws
+/// it (`layout_verdict`, `trusted` the references of the trusted merge), so
+/// a repository's config cannot put the user's variables on screen.
 fn custom_segments(
     r: &MTable,
     drawn: &BTreeMap<String, Vec<LayoutRef>>,
+    trusted: &BTreeMap<String, Vec<LayoutRef>>,
+    band_count: usize,
+    reach: &Reach,
     profile: WidthProfile,
     notes: &mut Vec<Diagnostic>,
 ) -> Result<Vec<CustomSegment>, Vec<Diagnostic>> {
@@ -1186,10 +1199,24 @@ fn custom_segments(
         {
             continue;
         }
+        if kind == "env" {
+            let approved_by = trusted.get(&e.key).map_or(&[][..], |v| v.as_slice());
+            let shown_at = drawn.get(&e.key).map_or(&[][..], |v| v.as_slice());
+            if layout_verdict(approved_by, shown_at, band_count, reach).is_some() {
+                notes.push(
+                    Diagnostic::new(codes::NOT_RUN_UNTRUSTED_LAYOUT, at(&e.node))
+                        .arg("id", e.key.clone()),
+                );
+                continue;
+            }
+        }
         out.push(CustomSegment {
             id: e.key.clone(),
             kind: if kind == "command" {
                 CustomKind::Command
+            } else if kind == "env" {
+                // Checked as a variable name (`check::env_name`) before compile.
+                CustomKind::Env(s(t, &["env"]).unwrap_or_default().into())
             } else {
                 // Cut here, to the cells the field shows, so the stored text
                 // is what the front draws and always fits the codec's byte
@@ -1213,7 +1240,7 @@ fn custom_segments(
             place_of(r, &["segment"]),
             "segment",
             &alloc::format!("{}", out.len()),
-            "at most 256 drawn text and command segments",
+            "at most 256 drawn text, command and env segments",
         )]);
     }
     Ok(out)

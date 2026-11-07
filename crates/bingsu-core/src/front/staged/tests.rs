@@ -1245,6 +1245,90 @@ mod cases {
             .any(|op| matches!(op, Operation::OpenCollection(CollectionCopy::Command)))
     }
 
+    const ENV_SEG: &str = "[segment.\"custom/aws\"]\nkind='env'\nenv='AWS_PROFILE'\n[layout.line2]\nleft=['custom/aws','char']";
+    fn with_env(text: &str, entries: &[&[u8]]) -> Harness {
+        let mut h = Harness::new();
+        let s = snapshot(text);
+        h.current = Some(s.encode(1, 0).unwrap());
+        h.marker = Some(marker(&s).encode().to_vec());
+        h.environment = Some(crate::command::env_frame::encode(entries.iter().copied()).unwrap());
+        h
+    }
+
+    // C5: env segment는 이 프롬프트의 환경 frame에서 선언한 이름의 값을 그린다. 진입 시계·build id·명령 응답 없이도
+    // 그린다. 이것을 실패시키는 것: env 값 읽기를 빼는 것, 명령 응답이 있을 때만 env 값을 채우는 것, 이름 대신 다른
+    // 변수를 읽는 것.
+    #[test]
+    fn test_env_segment_shows_value_when_set() {
+        let mut h = with_env(ENV_SEG, &[b"AWS_PROFILE=dev-acct\0", b"OTHER=zzother\0"]);
+        let r = h.run(&args(), Mode::Dark);
+        assert_eq!(r.status, Status::OK_NONE);
+        assert!(record(&r).contains("dev-acct"), "{}", record(&r));
+        assert!(!record(&r).contains("zzother"));
+        assert!(!reads_commands(&h));
+    }
+
+    // 선언하지 않은 이름은 읽지 않는다: 템플릿이 선언 없는 `custom/secret`을 참조해도(W408로 빠짐) 그 이름의 값은
+    // 그려지지 않는다. 빈 값, 없는 이름, 두 번 나온 이름, frame 없음(64 KiB 초과)도 그리지 않는다. 이것을 실패시키는
+    // 것: 선언 필터를 지우고 참조 id로 환경을 찾는 것, 빈 값을 그리는 것.
+    #[test]
+    fn test_undeclared_name_never_read() {
+        let text = "[segment.\"custom/aws\"]\nkind='env'\nenv='AWS_PROFILE'\n[style]\ntemplate='{custom/aws}{custom/secret}{char}'";
+        let mut h = with_env(
+            text,
+            &[
+                b"SECRET=zzsecret\0",
+                b"secret=zzlower\0",
+                b"AWS_PROFILE=dev-acct\0",
+            ],
+        );
+        let out = record(&h.run(&args(), Mode::Dark));
+        assert!(
+            out.contains("dev-acct") && !out.contains("zzsecret") && !out.contains("zzlower"),
+            "{out}"
+        );
+        for entries in [
+            &[b"AWS_PROFILE=\0".as_slice()][..],
+            &[b"OTHER=1\0".as_slice()][..],
+            &[
+                b"AWS_PROFILE=zzone\0".as_slice(),
+                b"AWS_PROFILE=zztwo\0".as_slice(),
+            ][..],
+        ] {
+            let mut h = with_env(ENV_SEG, entries);
+            let out = record(&h.run(&args(), Mode::Dark));
+            assert!(!out.contains("custom") && !out.contains("zz"), "{out}");
+        }
+        let mut h = with_env(ENV_SEG, &[b"AWS_PROFILE=dev-acct\0"]);
+        h.environment = None;
+        assert!(!record(&h.run(&args(), Mode::Dark)).contains("dev-acct"));
+    }
+
+    // env 값은 text와 같은 칸 수로 잘리고 정제된다. 잘못된 UTF-8은 대체 문자로 바뀌고 제어 문자는 빠진다. 이것을
+    // 실패시키는 것: env 값을 자르지 않는 것, 정제 없이 그리는 것.
+    #[test]
+    fn an_env_value_is_cut_and_sanitized() {
+        let long = alloc::format!("AWS_PROFILE={}\0", "Q".repeat(5000));
+        let mut h = with_env(ENV_SEG, &[long.as_bytes()]);
+        let counts: Vec<usize> = record(&h.run(&args(), Mode::Dark))
+            .split('\x1f')
+            .map(|f| f.matches('Q').count())
+            .collect();
+        assert!(counts.iter().any(|&n| n > 0), "{counts:?}");
+        assert!(
+            counts
+                .iter()
+                .all(|&n| n <= usize::from(crate::field::CUSTOM_TEXT_CELLS)),
+            "{counts:?}"
+        );
+        let mut h = with_env(ENV_SEG, &[b"AWS_PROFILE=a\x1b[31mb\xffc\0"]);
+        let out = record(&h.run(&args(), Mode::Dark));
+        assert!(
+            out.contains("a[31mb\u{FFFD}c") && !out.contains("\x1b[31mb"),
+            "{out:?}"
+        );
+    }
+
     // 양성 대조: 스냅샷이 그리는 command 세그먼트는 이 프롬프트의 응답 값을 그린다. 이것을 실패시키는 것: 명령 응답
     // 읽기를 빼는 것, finish가 값을 render에 넘기지 않는 것.
     #[test]
