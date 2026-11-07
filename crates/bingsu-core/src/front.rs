@@ -321,6 +321,43 @@ pub fn spawns_helper(argv: &[&[u8]]) -> bool {
     true
 }
 
+/// The program that runs `bingsu prompt`: the `bingsu` CLI (its `prompt`
+/// command, which old hooks and an install without `bingsu-prompt` call) or
+/// the dedicated `bingsu-prompt` binary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entry {
+    Cli,
+    Dedicated,
+}
+
+/// The refresh helper the prompt starts. The hook's one `--helper-exe=` word
+/// in flag position names it (init writes the path it pins for `bingsu`;
+/// nothing checks that file at run time, as with argv0). Without that word
+/// the CLI starts itself (argv0) and the dedicated binary starts nothing:
+/// argv0 of `bingsu-prompt` is not a helper, and a renamed file says nothing
+/// about which binary runs. Two such words or a value that is not an
+/// absolute path start nothing, with no fallback. The walk is
+/// `envelope::parse`'s, so a value word cannot pass for the flag.
+pub fn helper_exe<'a>(argv: &[&'a [u8]], entry: Entry, argv0: &'a [u8]) -> Option<&'a [u8]> {
+    let mut named = None;
+    let mut i = 0;
+    while let Some(a) = argv.get(i) {
+        if let Some(v) = a.strip_prefix(envelope::HELPER_EXE_PREFIX) {
+            // 이것을 실패시키는 것: 두 번째 단어를 무시하거나 상대 경로를 받는 것.
+            if named.is_some() || crate::root_arg::parse_abs_path(v).is_err() {
+                return None;
+            }
+            named = Some(v);
+        }
+        i += if envelope::is_value_flag(a) { 2 } else { 1 };
+    }
+    match (named, entry) {
+        (Some(exe), _) => Some(exe),
+        (None, Entry::Cli) => Some(argv0),
+        (None, Entry::Dedicated) => None,
+    }
+}
+
 /// What the connected adapter does next: write `record` and exit. The helper
 /// already starts before the filter; no response grants process creation.
 /// `staged::Response` additionally carries the snapshot's execution eligibility.
@@ -439,6 +476,47 @@ mod tests {
         assert!(spawns_helper(&[b"--pwd", b"--redraw", b"--ctx", b"1"]));
         assert!(!spawns_helper(&[b"--unknown", b"--redraw"]));
         assert!(spawns_helper(&[b"--redraw=1", b"--no-redraw"]));
+    }
+
+    // 이것을 실패시키는 것: 값 자리의 단어를 플래그로 보거나, 전용 진입점에서 argv0로
+    // 돌아가거나, 중복·잘못된 값에서 argv0로 돌아가는 것.
+    #[test]
+    fn helper_exe_is_one_fixed_word_per_entry() {
+        let argv0: &[u8] = b"/bin/bingsu";
+        let named: &[&[u8]] = &[b"--ctx", b"1", b"--helper-exe=/opt/bingsu"];
+        for entry in [Entry::Cli, Entry::Dedicated] {
+            assert_eq!(
+                helper_exe(named, entry, argv0),
+                Some(b"/opt/bingsu".as_slice())
+            );
+        }
+        let plain: &[&[u8]] = &[b"--ctx", b"1"];
+        assert_eq!(helper_exe(plain, Entry::Cli, argv0), Some(argv0));
+        assert_eq!(helper_exe(plain, Entry::Dedicated, argv0), None);
+        // A display value that looks like the flag stays a value.
+        let hidden: &[&[u8]] = &[
+            b"--host",
+            b"--helper-exe=/evil",
+            b"--pwd",
+            b"--helper-exe=/evil",
+        ];
+        assert_eq!(helper_exe(hidden, Entry::Cli, argv0), Some(argv0));
+        assert_eq!(helper_exe(hidden, Entry::Dedicated, argv0), None);
+        let mut both = named.to_vec();
+        both.extend(hidden);
+        assert_eq!(
+            helper_exe(&both, Entry::Dedicated, argv0),
+            Some(b"/opt/bingsu".as_slice())
+        );
+        for bad in [
+            &[b"--helper-exe=/a".as_slice(), b"--helper-exe=/a"][..],
+            &[b"--helper-exe=relative"],
+            &[b"--helper-exe="],
+        ] {
+            for entry in [Entry::Cli, Entry::Dedicated] {
+                assert_eq!(helper_exe(bad, entry, argv0), None, "{bad:?}");
+            }
+        }
     }
 
     fn b(a: &[&'static str]) -> Vec<&'static [u8]> {
