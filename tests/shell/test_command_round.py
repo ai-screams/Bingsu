@@ -838,8 +838,10 @@ def test_match_picks_the_published_value(tmp_path, _native_boot_required):
 # 발행하지 않는 것.
 # `beside`: another unit without a cache runs every round, so the re-matched entry goes out with that round's
 # results instead of alone.
+# `removed`: the edit drops `match`, and the whole first line comes back without running.
+@pytest.mark.parametrize("removed", [False, True])
 @pytest.mark.parametrize("beside", [False, True])
-def test_match_only_change_reapplies_without_exec(tmp_path, _native_boot_required, beside):
+def test_match_only_change_reapplies_without_exec(tmp_path, _native_boot_required, beside, removed):
     session = CommandSession(tmp_path)
     counter = session.base / "runs"
     run = ["/bin/sh", "-c", f"echo x >> {counter}; echo a/b/kube-ctx"]
@@ -847,7 +849,7 @@ def test_match_only_change_reapplies_without_exec(tmp_path, _native_boot_require
              if beside else "")
 
     def config_with(match):
-        text = other + config(run, f"cache='3600s'\nmatch='{match}'\n")
+        text = other + config(run, "cache='3600s'\n" + (f"match='{match}'\n" if match else ""))
         return text.replace("left=['custom/probe','char']", "left=['custom/other','custom/probe','char']") if beside else text
     session.put(config_with("(a/[a-z]+)"))
     session.level = "info"
@@ -857,16 +859,17 @@ def test_match_only_change_reapplies_without_exec(tmp_path, _native_boot_require
     record = session.prompt()
     session.wait_quiet(timeout=8)
     assert b"a/b" in record and b"kube-ctx" not in record, record
-    session.put(config_with("([^/]+)$"))
+    session.put(config_with(None if removed else "([^/]+)$"))
+    want = b"a/b/kube-ctx" if removed else b"kube-ctx"
     # The prompt right after the edit still reads the old snapshot, whose
     # pattern the old value matches; the helper publishes the new snapshot
     # and the re-matched value in the same round.
     for _ in range(6):
         record = session.prompt()
         session.wait_quiet(timeout=8)
-        if b"kube-ctx" in record:
+        if want in record:
             break
-    assert b"kube-ctx" in record and b"a/b" not in record, record
+    assert want in record and (removed or b"a/b" not in record), record
     assert runs(counter) == before, "changing match alone ran the command again"
     assert (b"values matched again under a changed match" in session.log()) != beside
 

@@ -14,6 +14,12 @@
 /// patterns (`([^/]+)$`, `(?P<value>[0-9]+\.[0-9]+\.[0-9]+)`, `\w{10}`)
 /// fit with room to spare.
 pub const SIZE_LIMIT: usize = 256 * 1024;
+/// Capture groups one pattern may have. The Pike VM keeps two tables of
+/// one slot pair per group for every state, so groups multiply the memory
+/// the size limit allows: 1,500 groups under 256 KiB would take about
+/// 200 MiB on a 4 KB line. The value is one group (`value` or the first),
+/// so a few more than that is plenty.
+pub const MAX_GROUPS: usize = 16;
 // No `dfa_size_limit`: the lazy DFA is a perf engine this build leaves out
 // (C4c ruling Q6), so its cap would change nothing and no test could tell.
 
@@ -40,12 +46,20 @@ enum Group {
 pub struct Error(pub String);
 
 impl Matcher {
-    /// Compiles `pattern` under `SIZE_LIMIT`.
+    /// Compiles `pattern` under `SIZE_LIMIT` with at most `MAX_GROUPS`
+    /// capture groups.
     pub fn new(pattern: &str) -> Result<Self, Error> {
         let regex = regex::RegexBuilder::new(pattern)
             .size_limit(SIZE_LIMIT)
             .build()
             .map_err(|e| Error(e.to_string()))?;
+        // `captures_len` counts the whole match as group 0.
+        if regex.captures_len() > MAX_GROUPS + 1 {
+            return Err(Error(format!(
+                "{} capture groups exceed the limit of {MAX_GROUPS}",
+                regex.captures_len() - 1
+            )));
+        }
         let group = if regex.capture_names().any(|n| n == Some("value")) {
             Group::Named
         } else if regex.captures_len() > 1 {
@@ -117,5 +131,17 @@ mod tests {
             assert!(e.0.contains("size limit"), "{big}: {}", e.0);
         }
         assert!(Matcher::new("(unclosed").is_err());
+    }
+
+    // 캡처 그룹 상한: 그룹마다 Pike VM이 상태별 슬롯 표를 두 벌 두므로, 크기 상한 안에 드는 `(a)` 1,500개 패턴이
+    // 4 KB 줄에서 helper 메모리를 넘길 수 있다(약 200 MiB). 16개는 받고 17개부터 거부한다. 이것을 실패시키는 것:
+    // 그룹 수 검사를 지우는 것(1,500개를 받음), 상한을 17 이상으로 두는 것, 그룹 0까지 세어 16개를 거부하는 것.
+    #[test]
+    fn capture_groups_are_capped() {
+        assert!(Matcher::new(&"(a)".repeat(16)).is_ok());
+        let e = Matcher::new(&"(a)".repeat(17)).unwrap_err();
+        assert!(e.0.contains("capture groups"), "{}", e.0);
+        assert!(Matcher::new(&"(a)".repeat(1500)).is_err());
+        assert!(Matcher::new(&format!("(?P<value>a){}", "(b)".repeat(15))).is_ok());
     }
 }

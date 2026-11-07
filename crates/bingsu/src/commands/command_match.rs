@@ -52,13 +52,18 @@ pub(crate) fn check(report: &mut ConfigReport) {
 }
 
 /// `e` bound to `pattern`: its pattern digest, and for a success the value
-/// `pattern` picks from the raw line, cut to what the prompt reads. Without
-/// a pattern the value stays the raw line's prefix. A pattern that does not
-/// compile (a unit `check` kept running cannot have one) publishes no value.
+/// `pattern` picks from the raw line, or without a pattern the raw line
+/// itself, cut to what the prompt reads. So an entry matched under a pattern
+/// the config then drops goes back to the whole line. A pattern that does
+/// not compile (a unit `check` kept running cannot have one) publishes no
+/// value.
 pub(crate) fn bind(mut e: Entry, pattern: Option<&str>) -> Entry {
     e.pattern = pattern_digest(pattern);
-    if let (Some(p), Status::Ok) = (pattern, e.status) {
-        let picked = bingsu_match::Matcher::new(p).map_or("", |m| m.value(&e.raw));
+    if e.status == Status::Ok {
+        let picked = match pattern {
+            Some(p) => bingsu_match::Matcher::new(p).map_or("", |m| m.value(&e.raw)),
+            None => e.raw.as_str(),
+        };
         e.value =
             bingsu_core::field::Clean::read_prefix(picked, bingsu_core::field::CUSTOM_TEXT_CELLS)
                 .into();
@@ -128,7 +133,8 @@ mod tests {
     // 단위까지 끄는 것, 이미 다른 이유로 꺼진 단위의 이유를 덮는 것.
     #[test]
     fn test_match_over_limit_disables_segment_only() {
-        for bad in [r"\w{50}", "(unclosed"] {
+        let many = "(a)".repeat(1500);
+        for bad in [r"\w{50}", "(unclosed", many.as_str()] {
             let mut r = report_of(&two(r"([^/]+)$", bad));
             check(&mut r);
             let units = &r.snapshot.as_ref().unwrap().exec_units;
@@ -194,7 +200,8 @@ mod tests {
 
     // `match`만 바뀐 성공 항목은 저장한 원문에 새 패턴을 다시 맞추고 완료 시각을 1 ns만 옮긴다(발행 병합이 더 새로운
     // 완료만 받으므로). 같은 패턴이거나 실패 항목은 다시 맞추지 않는다. 이것을 실패시키는 것: 같은 패턴에도 다시
-    // 맞추는 것(회차마다 발행), 완료 시각을 옮기지 않는 것(병합이 버림), 실패 항목에 값을 만드는 것.
+    // 맞추는 것(회차마다 발행), 완료 시각을 옮기지 않는 것(병합이 버림), 실패 항목에 값을 만드는 것, `match`를 지운
+    // 항목에 옛 추출값을 남기는 것(요약값 0으로 옛 값이 그려짐).
     #[test]
     fn test_match_only_change_reapplies_without_exec() {
         let old = bind(entry("a/b/kube-ctx", Status::Ok), Some("(.*)"));
@@ -203,6 +210,16 @@ mod tests {
         assert_eq!(new.completed_at, old.completed_at + 1);
         assert_eq!(new.pattern, pattern_digest(Some("([^/]+)$")));
         assert_eq!(reapplied(&old, Some("(.*)")), None);
+        // Dropping `match` goes back to the whole line, also after a pattern
+        // that matched nothing (its value was empty, hidden).
+        let back = reapplied(&new, None).unwrap();
+        assert_eq!(
+            (back.value.as_str(), back.pattern),
+            ("a/b/kube-ctx", [0; 32])
+        );
+        let missed = bind(entry("a/b/kube-ctx", Status::Ok), Some("zzz"));
+        assert_eq!(missed.value, "");
+        assert_eq!(reapplied(&missed, None).unwrap().value, "a/b/kube-ctx");
         assert!(reapplied(&bind(entry("x", Status::Failed), None), Some("(x)")).is_none());
     }
 }
