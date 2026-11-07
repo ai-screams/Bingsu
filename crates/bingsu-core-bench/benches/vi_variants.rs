@@ -164,29 +164,31 @@ fn vi_call(
 #[bench::zsh(args = [&["char"]], setup = render_case)]
 fn vi_variants_zsh(
     (case, mut values): (RenderCase, Vec<Option<Value>>),
-) -> (RenderCase, ViVariants) {
+) -> (RenderCase, Vec<Option<Value>>, ViVariants) {
     let r = vi_call(
         black_box(&case),
         black_box(&mut values),
         black_box(Shell::Zsh),
         black_box(80),
     );
-    (case, r)
+    (case, values, r)
 }
 
 // The same prompt without `char`: nothing to change, so no second layout.
+// Its input is returned too: dropped here, the one-per-built-in input would
+// be most of what this short path counts.
 #[library_benchmark]
 #[bench::zsh(args = [&["dir"]], setup = render_case)]
 fn vi_variants_no_char(
     (case, mut values): (RenderCase, Vec<Option<Value>>),
-) -> (RenderCase, ViVariants) {
+) -> (RenderCase, Vec<Option<Value>>, ViVariants) {
     let r = vi_call(
         black_box(&case),
         black_box(&mut values),
         black_box(Shell::Zsh),
         black_box(80),
     );
-    (case, r)
+    (case, values, r)
 }
 
 library_benchmark_group!(
