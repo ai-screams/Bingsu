@@ -39,10 +39,12 @@ static ROLE_TAG: [u8; 49] = bingsu_identity::role_tag(bingsu_identity::PROMPT_RO
 
 #[cfg(unix)]
 fn main() {
+    std::hint::black_box(&ROLE_TAG);
     let _ = prompt::dispatch(sandbox::enter);
 }
 
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
+    std::hint::black_box(&ROLE_TAG);
     std::process::ExitCode::from(2)
 }

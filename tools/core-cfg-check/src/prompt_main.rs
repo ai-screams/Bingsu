@@ -7,11 +7,12 @@
 //!     `prompt::dedicated(sandbox::enter)`;
 //!   - other Unix (macOS): the four prompt files and an empty sandbox, as the
 //!     `bingsu` binary has;
-//!   - elsewhere (Windows): no prompt file, and `main` exits 2;
-//! plus the prompt's role marker, which init's sibling check reads. Another
-//! item (an allocator, a constructor, a `mod` naming another file), another
-//! attribute (a `cfg` that hides a branch, an `export_name`), another path or
-//! body fails, whatever the TCB hash pin says.
+//!   - elsewhere (Windows): no prompt file, and `main` exits 2.
+//!
+//! Both `main`s name the prompt's role marker, which init's sibling check
+//! reads. Another item (an allocator, a constructor, a `mod` naming another
+//! file), another attribute (a `cfg` that hides a branch, an `export_name`),
+//! another path or body fails, whatever the TCB hash pin says.
 
 use crate::Finding;
 
@@ -47,10 +48,12 @@ mod sandbox {
 static ROLE_TAG: [u8; 49] = bingsu_identity::role_tag(bingsu_identity::PROMPT_ROLE);
 #[cfg(unix)]
 fn main() {
+    std::hint::black_box(&ROLE_TAG);
     prompt::dedicated(sandbox::enter)
 }
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
+    std::hint::black_box(&ROLE_TAG);
     std::process::ExitCode::from(2)
 }
 "#;

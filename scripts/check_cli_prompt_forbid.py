@@ -90,7 +90,7 @@ TCB_SHA256 = {
     "crates/bingsu/src/sandbox.rs": "a8ef03197c75a326c365b3c2ac0ce0170df58b05b4d9af13c8d9e5064bcac929",
     "crates/bingsu/Cargo.toml": "8f0481d83e662b0792242456355a7b3127b0e1646548eb177a3facae8e62193a",
     "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
-    "crates/bingsu-prompt/src/main.rs": "de8a254547b88ecd41bdd799574b01ca12516ba0620c43f35761d82e0a61de35",
+    "crates/bingsu-prompt/src/main.rs": "94585d3f07affd25f2a0b407e7c33759dd8b56f4fc5dd33587d96dd199c838cd",
     "crates/bingsu-prompt/Cargo.toml": "da03cbb0ffb87da704ba5b186308071b36e2ba072705346505ead5882bbacc61",
 }
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"
@@ -118,9 +118,8 @@ def check_product_fixture_isolation(binary=None):
                 bad.append("product dependency reaches the collector fixture package")
     for path in binary or ():
         data = pathlib.Path(path).read_bytes()
-        for marker in (b"collector_builtin", b"collector_builtin_test_only_31"):
-            if marker in data:
-                bad.append(f"product binary {path} contains a collector fixture symbol or string")
+        if any(marker in data for marker in (b"collector_builtin", b"collector_builtin_test_only_31")):
+            bad.append(f"product binary {path} contains a collector fixture symbol or string")
     return bad
 
 

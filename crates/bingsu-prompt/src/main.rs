@@ -33,16 +33,20 @@ mod sandbox {
 }
 
 // test_prompt_binary.py finds exactly one role marker, the prompt's, in the
-// built file; init's sibling check needs it.
+// built file; init's sibling check needs it. `#[used]` alone does not keep it
+// through the linker's section GC, so `main` names it, as the other two
+// binaries do.
 #[used]
 static ROLE_TAG: [u8; 49] = bingsu_identity::role_tag(bingsu_identity::PROMPT_ROLE);
 
 #[cfg(unix)]
 fn main() {
+    std::hint::black_box(&ROLE_TAG);
     prompt::dedicated(sandbox::enter)
 }
 
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
+    std::hint::black_box(&ROLE_TAG);
     std::process::ExitCode::from(2)
 }
