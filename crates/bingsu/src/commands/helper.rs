@@ -767,6 +767,8 @@ mod query_tests {
                 interpreter: Some("deno".into()),
                 version_argv: vec!["--version".into()],
                 detect_files: vec!["deno.json".into()],
+                cwd: None,
+                env_allow: Vec::new(),
             },
             timeout_ms: None,
             cache_ms: None,

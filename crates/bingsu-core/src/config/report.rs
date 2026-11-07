@@ -333,20 +333,19 @@ pub(crate) mod tests {
     // 빈 그룹을 남기는 것(그룹은 참조가 있어야 컴파일된다), 다른 참조가 있는 그룹까지 지우는 것.
     #[test]
     fn custom_ids_in_a_template_drop_only_that_reference() {
-        // `language` is not drawn yet; `text`, `command` and `env` are.
-        let decl = "[segment.\"custom/t\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n";
+        // Every declared kind is drawn now (N502 has no kind left to name),
+        // so only an undeclared reference is dropped.
         let tpl = |t: &str| alloc::format!("[style]\ntemplate = \"{t}\"\n");
         let want = nodes_of(&read(&tpl("{dir} {@group}<{git}>{@end}{@nl}{char}"), &[]));
         let with = "{@group}[{custom/t}]{@end}{dir} {@group}<{git}{custom/t.x}>{@end}{@nl}{char}";
-        for (head, code) in [
-            (decl, codes::CUSTOM_DRAWN_LATER),
-            ("", codes::CUSTOM_UNDECLARED),
-        ] {
-            let r = read(&(alloc::string::String::from(head) + &tpl(with)), &[]);
-            assert_eq!(nodes_of(&r), want, "{head}");
-            assert!(codes_of(&r).contains(&code), "{head}: {:?}", codes_of(&r));
-            assert_eq!(r.order.len(), 2);
-        }
+        let r = read(&tpl(with), &[]);
+        assert_eq!(nodes_of(&r), want);
+        assert!(
+            codes_of(&r).contains(&codes::CUSTOM_UNDECLARED),
+            "{:?}",
+            codes_of(&r)
+        );
+        assert_eq!(r.order.len(), 2);
         // A theme template that names an undeclared one keeps the theme.
         let r = read("extends = [\"shape-t\"]\n", &[("shape-t", &tpl(with))]);
         assert_eq!(nodes_of(&r), want);
@@ -678,14 +677,11 @@ pub(crate) mod tests {
             .find(|d| d.code == codes::WRONG_TYPE)
             .unwrap();
         assert_eq!(d.via.len(), 2);
-        let r = read(
-            "[segment.\"custom/t\"]\nkind='language'\ndetect_files=['deno.json']\ninterpreter='deno'\n[style]\ntemplate='{dir}{custom/t}'\n",
-            &[],
-        );
+        let r = read("[style]\ntemplate='{dir}{custom/t}'\n", &[]);
         let d = r
             .diagnostics
             .iter()
-            .find(|d| d.code == codes::CUSTOM_DRAWN_LATER)
+            .find(|d| d.code == codes::CUSTOM_UNDECLARED)
             .unwrap();
         assert!(matches!(
             d.at,

@@ -918,9 +918,13 @@ fn trust_status(refusal: Refusal) -> Status {
         }
     }
 }
-/// Whether user segment `i` is a command the selected lines draw.
+/// Whether user segment `i` is a command or language the selected lines
+/// draw: both take their value from the command response.
 fn drawn_command(config: &FrontConfig, i: usize) -> bool {
-    config.custom[i].kind == CustomKind::Command && config.draws_segment(BUILTIN.len() + i)
+    matches!(
+        config.custom[i].kind,
+        CustomKind::Command | CustomKind::Language
+    ) && config.draws_segment(BUILTIN.len() + i)
 }
 
 // The shift below takes a builtin index as a bit of a `u32` mask.
@@ -1023,7 +1027,7 @@ fn custom_values(
         return out;
     };
     for (i, segment) in custom.iter().enumerate() {
-        if segment.kind != CustomKind::Command {
+        if !matches!(segment.kind, CustomKind::Command | CustomKind::Language) {
             continue;
         }
         let Some(unit) = selected

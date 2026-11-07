@@ -116,6 +116,8 @@ mod cases {
             interpreter: Some("python".into()),
             version_argv: vec!["--version".into()],
             detect_files: vec!["pyproject.toml".into()],
+            cwd: Some("untrusted-current".into()),
+            env_allow: vec!["VIRTUAL_ENV".into()],
         });
         for x in [
             PaletteWarning::TextContrast { token: 1, milli: 2 },
@@ -220,6 +222,8 @@ mod cases {
                 interpreter: Some("a".repeat(MAX_BYTES)),
                 version_argv: vec![],
                 detect_files: vec![],
+                cwd: None,
+                env_allow: Vec::new(),
             },
             timeout_ms: None,
             cache_ms: None,
@@ -740,6 +744,8 @@ mod cases {
                 interpreter: None,
                 version_argv: vec![],
                 detect_files: vec![],
+                cwd: None,
+                env_allow: Vec::new(),
             },
             timeout_ms: Some(9),
             cache_ms: None,
@@ -796,9 +802,13 @@ mod cases {
             id: "custom/e".into(),
             kind: CustomKind::Env("AWS_PROFILE".into()),
         });
+        round(CustomSegment {
+            id: "custom/l".into(),
+            kind: CustomKind::Language,
+        });
         let mut b = bytes(&command);
         assert_eq!(b.pop(), Some(1));
-        b.push(3);
+        b.push(4);
         assert_eq!(read::<CustomSegment>(&b), Err(Error::Shape));
     }
 

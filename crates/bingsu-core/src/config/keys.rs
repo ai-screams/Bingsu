@@ -500,7 +500,7 @@ pub const KEYS: &[KeyDef] = &[
         "실행할 폴더: 비어 있는 개인 폴더, 또는 현재 폴더(경고).",
     )
     .exec()
-    .kinds(CMD)
+    .kinds(CMD_LANG)
     .example("\"neutral\""),
     key(
         "segment.*.detect_files",
@@ -539,7 +539,7 @@ pub const KEYS: &[KeyDef] = &[
         "명령에 넘길 환경 변수.",
     )
     .exec()
-    .kinds(CMD)
+    .kinds(CMD_LANG)
     .example("[\"KUBECONFIG\"]"),
     key(
         "segment.*.interpreter",

@@ -254,7 +254,7 @@ fn fact_schema_mismatch_recompiles_with_unchanged_source_and_build() {
     for (version, generation) in [(1u16, 2), (3, 3)] {
         let mut bytes = f.bytes("snapshot");
         let end = bytes.len() - f.snap().metadata.len();
-        assert_eq!(&bytes[192..204], b"BNGCFG10\x0a\0\x02\0");
+        assert_eq!(&bytes[192..204], b"BNGCFG11\x0b\0\x02\0");
         let front = bingsu_core::snapshot_codec::front_len(&bytes[192..end], end - 192).unwrap();
         bytes[202..204].copy_from_slice(&version.to_le_bytes());
         let crc = snapshot::crc32c(&[

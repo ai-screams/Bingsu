@@ -374,6 +374,8 @@ fn user_queries_leave_out_bad_names() {
             interpreter: None,
             version_argv: vec![],
             detect_files: files.iter().map(|f| f.to_string()).collect(),
+            cwd: None,
+            env_allow: Vec::new(),
         },
         timeout_ms: None,
         cache_ms: None,

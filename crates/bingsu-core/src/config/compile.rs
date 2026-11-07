@@ -75,11 +75,14 @@ pub enum ExecPolicy {
     },
     /// A user-defined language version: `interpreter`, its `version`
     /// arguments and the `detect_files` that mark the language's project
-    /// (`language_form` checks them). It does not run yet.
+    /// (`language_form` checks them), with the folder it runs in and the
+    /// variables it receives as a command's.
     Language {
         interpreter: Option<String>,
         version_argv: Vec<String>,
         detect_files: Vec<String>,
+        cwd: Option<String>,
+        env_allow: Vec<String>,
     },
 }
 
@@ -146,6 +149,9 @@ pub enum CustomKind {
     /// `kind = "env"`: the value of this variable in the prompt's own
     /// environment, cut like text; unset or empty draws nothing.
     Env(String),
+    /// `kind = "language"`: the unit's version from the command response,
+    /// as a command's value; a segment with no value draws nothing.
+    Language,
 }
 
 /// Per `field::BUILTIN` index: priority, required, shorten methods, when.
@@ -1144,7 +1150,7 @@ pub(crate) fn layout_verdict(
 }
 
 /// The user segment kinds a layout draws.
-const DRAWN_KINDS: [&str; 3] = ["text", "command", "env"];
+const DRAWN_KINDS: [&str; 4] = ["text", "command", "env", "language"];
 
 /// Whether segment `id` is declared with a kind the prompt draws.
 fn drawn_kind(r: &MTable, id: &str) -> bool {
@@ -1214,6 +1220,8 @@ fn custom_segments(
             id: e.key.clone(),
             kind: if kind == "command" {
                 CustomKind::Command
+            } else if kind == "language" {
+                CustomKind::Language
             } else if kind == "env" {
                 // Checked as a variable name (`check::env_name`) before compile.
                 CustomKind::Env(s(t, &["env"]).unwrap_or_default().into())
@@ -1283,12 +1291,58 @@ fn unsafe_exec_key(
 /// the facts they need).
 const PLACEHOLDER: &str = "{dir}";
 
+/// `env_allow` names that can be variable names and that a command may
+/// receive, and the warning for `cwd = "untrusted-current"`: the same for a
+/// command and a language segment.
+fn env_and_cwd_form(id: &str, t: &MTable, notes: &mut Vec<Diagnostic>) {
+    let item = |n: &MNode, span| Place::Source {
+        id: n.origin.source,
+        span,
+    };
+    if let Some(
+        n @ MNode {
+            value: MValue::Array(names),
+            ..
+        },
+    ) = t.get("env_allow")
+    {
+        for w in names {
+            if let Value::Str(v) = &w.value {
+                if v.is_empty() || v.contains(['=', '\0']) {
+                    notes.push(bad(
+                        item(n, w.span),
+                        "env_allow",
+                        &alloc::format!("\"{v}\""),
+                        "a variable name: not empty, without `=` or NUL",
+                    ));
+                } else if crate::command::grant::forbidden(v.as_bytes()) {
+                    notes.push(bad(
+                        item(n, w.span),
+                        "env_allow",
+                        &alloc::format!("\"{v}\""),
+                        "a name a command may receive: loader, language and shell startup settings never pass",
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(c) = t
+        .get("cwd")
+        .filter(|c| matches!(&c.value, MValue::Scalar(Value::Str(v)) if v == "untrusted-current"))
+    {
+        notes.push(Diagnostic::new(codes::CWD_UNTRUSTED_CURRENT, at(c)).arg("id", id));
+    }
+}
+
 /// A language segment's shape (D3c rulings): `detect_files`, one to
 /// `collection::language::NAMES_MAX` file names, each one path component
 /// the worker can look for (`collection::language::name_ok`), none given
 /// twice; `interpreter`, a word without NUL; `version`, words without NUL.
 /// Problems are errors in `notes`.
-fn language_form(seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) {
+fn language_form(id: &str, seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) {
+    // Fails without it: language_keys_are_checked (a forbidden env_allow
+    // name, the untrusted-current warning).
+    env_and_cwd_form(id, t, notes);
     use crate::collection::language::{NAMES_MAX, name_ok};
     let item = |n: &MNode, span| Place::Source {
         id: n.origin.source,
@@ -1452,39 +1506,7 @@ fn command_form(id: &str, seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) 
             }
         }
     }
-    if let Some(
-        n @ MNode {
-            value: MValue::Array(names),
-            ..
-        },
-    ) = t.get("env_allow")
-    {
-        for w in names {
-            if let Value::Str(v) = &w.value {
-                if v.is_empty() || v.contains(['=', '\0']) {
-                    notes.push(bad(
-                        item(n, w.span),
-                        "env_allow",
-                        &alloc::format!("\"{v}\""),
-                        "a variable name: not empty, without `=` or NUL",
-                    ));
-                } else if crate::command::grant::forbidden(v.as_bytes()) {
-                    notes.push(bad(
-                        item(n, w.span),
-                        "env_allow",
-                        &alloc::format!("\"{v}\""),
-                        "a name a command may receive: loader, language and shell startup settings never pass",
-                    ));
-                }
-            }
-        }
-    }
-    if let Some(c) = t
-        .get("cwd")
-        .filter(|c| matches!(&c.value, MValue::Scalar(Value::Str(v)) if v == "untrusted-current"))
-    {
-        notes.push(Diagnostic::new(codes::CWD_UNTRUSTED_CURRENT, at(c)).arg("id", id));
-    }
+    env_and_cwd_form(id, t, notes);
     shell.is_some() && !allowed
 }
 
@@ -1522,6 +1544,8 @@ fn exec_units(
                 interpreter: str_of("interpreter"),
                 version_argv: list("version"),
                 detect_files: list("detect_files"),
+                cwd: str_of("cwd"),
+                env_allow: list("env_allow"),
             },
             _ => continue,
         };
@@ -1532,7 +1556,7 @@ fn exec_units(
         // Only a command segment needs `command` or `shell`; a language
         // segment cannot hold them (E206).
         if matches!(&policy, ExecPolicy::Language { .. }) {
-            language_form(&e.node, t, notes);
+            language_form(&e.key, &e.node, t, notes);
         }
         let not_run = if matches!(&policy, ExecPolicy::Command { .. })
             && command_form(&e.key, &e.node, t, notes)
@@ -2264,7 +2288,7 @@ mod tests {
             ["kind", "command", "cwd", "env_allow", "timeout", "cache"]
         );
         let c = compiled(
-            "[segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\", \"deno.jsonc\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\n[layout.line1]\nleft = [\"custom/l\"]\n",
+            "[segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\", \"deno.jsonc\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\ncwd = \"neutral\"\nenv_allow = [\"DENO_DIR\"]\n[layout.line1]\nleft = [\"custom/l\"]\n",
         );
         assert_eq!(
             c.exec_units[0].policy,
@@ -2272,6 +2296,8 @@ mod tests {
                 interpreter: Some("deno".into()),
                 version_argv: vec!["--version".into()],
                 detect_files: vec!["deno.json".into(), "deno.jsonc".into()],
+                cwd: Some("neutral".into()),
+                env_allow: vec!["DENO_DIR".into()],
             }
         );
     }
@@ -2300,9 +2326,8 @@ mod tests {
             alloc::format!("detect_files = [{}]\n{good}", names(16)),
             "detect_files = [\"a\"]\ninterpreter = \"/opt/deno/bin/deno\"\n".into(),
         ];
-        // A drawn language segment carries N502 (drawn from a later version).
-        let only_later =
-            |r: &crate::config::report::ConfigReport| codes_of(r) == [codes::CUSTOM_DRAWN_LATER];
+        let only_later = |r: &crate::config::report::ConfigReport| codes_of(r).is_empty();
+
         for keys in ok {
             let r = read(&lang(&keys), &[]);
             assert!(only_later(&r), "{keys}: {:?}", codes_of(&r));
@@ -2322,6 +2347,8 @@ mod tests {
             "detect_files = [\"a\"]\ninterpreter = \"\"\n".into(),
             "detect_files = [\"a\"]\ninterpreter = \"de\\u0000no\"\n".into(),
             "detect_files = [\"a\"]\ninterpreter = \"deno\"\nversion = [\"--v\\u0000\"]\n".into(),
+            alloc::format!("detect_files = [\"a\"]\n{good}env_allow = [\"LD_PRELOAD\"]\n"),
+            alloc::format!("detect_files = [\"a\"]\n{good}env_allow = [\"A=B\"]\n"),
         ];
         for keys in bad {
             let r = read(&lang(&keys), &[]);
@@ -2332,6 +2359,15 @@ mod tests {
             );
             assert!(r.snapshot.is_none(), "{keys}");
         }
+        // cwd and env_allow as a command's (D3c-2): the current folder is warned.
+        let r = read(
+            &lang(&alloc::format!(
+                "detect_files = [\"a\"]\n{good}cwd = \"untrusted-current\"\nenv_allow = [\"DENO_DIR\"]\n"
+            )),
+            &[],
+        );
+        assert_eq!(codes_of(&r), [codes::CWD_UNTRUSTED_CURRENT]);
+        assert!(r.snapshot.is_some());
         // 255 bytes is one name still.
         let r = read(
             &lang(&alloc::format!(
