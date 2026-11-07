@@ -1558,10 +1558,9 @@ fn exec_units(
         } else {
             None
         };
-        // `match` is a command key (keys.rs); a language segment cannot hold it.
-        let pattern = matches!(&policy, ExecPolicy::Command { .. })
-            .then(|| str_of("match"))
-            .flatten();
+        // `match` is a command key (keys.rs): a language segment that writes
+        // it fails the check (E206) before it compiles.
+        let pattern = str_of("match");
         out.push(ExecUnit {
             id: e.key.clone(),
             policy,
