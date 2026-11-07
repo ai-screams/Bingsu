@@ -537,3 +537,20 @@ def test_user_language_cache_hit_runs_nothing(tmp_path, _native_boot_required):
     assert runs(counter) == before, "a language inside its cache time ran again"
     assert b"1.46.3" in session.prompt()
     session.wait_quiet(timeout=8)
+
+
+# GATE-LANG-USER.1-git: git과 사용자 language segment를 함께 그려도 git 값이 실제 프롬프트에 보인다. 도우미 요청의
+# mask와 앞단이 스냅샷에서 decode한 설정으로 얻는 기대 binding이 같은 규칙에서 나오기 때문이다. 이것을 실패시키는
+# 것: 사용자 language의 dir 비트를 도우미 쪽에서만 더하는 것(수집 응답 전체가 거부되어 git 표시가 사라짐).
+def test_git_shows_beside_a_user_language(tmp_path, _native_boot_required):
+    session = BuiltinSession(tmp_path)
+    session.env["HOME"] = str(session.base)
+    repo = git_repo(session.base)
+    session.pwd = repo / "sub"
+    (session.pwd / "deno.json").write_text("{}\n")
+    interpreter, counter = deno(session, session.base / "tools")
+    session.put("[segment.\"custom/deno\"]\nkind='language'\ndetect_files=['deno.json']\n"
+                f"interpreter='{interpreter}'\nversion=['--version']\n"
+                "[layout.line1]\nleft=['git', 'custom/deno']\n[layout.line2]\nleft=['char']\n")
+    session.init()
+    session.await_text("main", timeout=8)

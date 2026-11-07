@@ -218,9 +218,9 @@ M3D_SUPPLEMENTARY.update({f"GATE-FS-FRONT.1-command_{shape}": "M6" for shape in 
 # 이것을 실패시키는 것: env segment 행을 지워 앞단이 환경 값을 그릴 때의 호출을 고정하지 않는 것(C5).
 M3D_SUPPLEMENTARY["GATE-FS-FRONT.1-env_segment"] = "M6"
 # 이것을 실패시키는 것: 공백 이름 행이나 PATH 이름 양성 대조 행을 지우고 상대 경로 행 하나로 GATE-LANG-USER.3을 닫는 것,
-# cache 행을 지우고 cache 없는 행 하나로 GATE-LANG-USER.1을 닫는 것.
+# cache 행이나 git 행을 지우고 cache 없는 행 하나로 GATE-LANG-USER.1을 닫는 것.
 M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-name": "M6",
-                          "GATE-LANG-USER.1-cache": "M6"})
+                          "GATE-LANG-USER.1-cache": "M6", "GATE-LANG-USER.1-git": "M6"})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
