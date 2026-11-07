@@ -96,6 +96,7 @@ name = "bingsu-core-tests"
 version = "0.0.0"
 dependencies = [
  "bingsu-core",
+ "bingsu-match",
  "proptest",
  "serde_json",
 ]
