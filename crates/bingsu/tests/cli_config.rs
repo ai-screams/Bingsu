@@ -635,7 +635,7 @@ fn explain_shows_shell_relative_and_language_units() {
     let e = Env::new("cli_config", "explain-kinds");
     e.put_config(
         "config.toml",
-        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
+        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
     );
     let (_, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
     let section = |id: &str| {
@@ -660,9 +660,22 @@ fn explain_shows_shell_relative_and_language_units() {
             .any(|l| l.trim_start().starts_with("executable") && l.contains("refused")),
         "{rel}"
     );
+    let lang = section("custom/lang");
     assert!(
-        section("custom/lang").starts_with("custom/lang  language"),
+        lang.starts_with("custom/lang  language, not run yet:"),
         "{stdout}"
+    );
+    assert!(
+        lang.lines()
+            .any(|l| l.split_whitespace().take(2).eq(["detect", "deno.json"])),
+        "{lang}"
+    );
+    assert!(
+        lang.lines().any(|l| l
+            .split_whitespace()
+            .take(3)
+            .eq(["version", "deno", "--version"])),
+        "{lang}"
     );
 }
 

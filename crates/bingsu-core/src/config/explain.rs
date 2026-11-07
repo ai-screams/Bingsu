@@ -127,7 +127,31 @@ pub fn units(c: &CompiledConfig) -> Vec<UnitView> {
                     });
                     "command"
                 }
-                ExecPolicy::Language { .. } => "language",
+                ExecPolicy::Language {
+                    interpreter,
+                    version_argv,
+                    detect_files,
+                } => {
+                    // Fails without it: explain_shows_shell_relative_and_language_units.
+                    rows.push(Row {
+                        key: "detect",
+                        value: detect_files.join(" "),
+                        from: from("detect_files"),
+                    });
+                    let mut version = interpreter.clone().unwrap_or_default();
+                    for a in version_argv {
+                        version.push(' ');
+                        version.push_str(a);
+                    }
+                    rows.push(Row {
+                        key: "version",
+                        value: version,
+                        from: from("interpreter"),
+                    });
+                    rows.push(limit("timeout", u.timeout_ms, from("timeout")));
+                    rows.push(limit("cache", u.cache_ms, from("cache")));
+                    "language"
+                }
             };
             UnitView {
                 id: u.id.clone(),

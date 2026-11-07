@@ -149,6 +149,8 @@ in the hooks retain their original bytes. Displayed paths with removed control c
 ## Current limits
 
 - The default prompt remains two lines at narrow widths, including in fish; segments move or disappear as width permits.
+- A user-defined language segment (`kind = "language"`) takes `detect_files` (1 to 16 file names), `interpreter`
+  and `version`; `config check` checks them and `--explain` shows them, but the version command does not run yet.
 - If a shape-only source fails checking or compilation during config inspection, it and its descendants are dropped
   and the already loaded data is merged, checked and compiled again; the remaining files are not read again.
 - Local config value edits preserve bytes outside the changed value, including comments, order and other quotes.
