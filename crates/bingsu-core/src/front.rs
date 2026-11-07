@@ -194,6 +194,10 @@ fn render_selected_with_catalog<L: LayoutView>(
     // field's cells. Without one the segment has no value and is dropped
     // with its separators.
     for &(seg, version) in languages {
+        // The index and the `version` field come from the same const tables
+        // as `languages` (field::BUILTIN, command::builtin), so no test can
+        // reach these `else` arms; they skip the segment rather than panic
+        // in the prompt.
         let (Some(decl), Some(slot)) = (BUILTIN.get(seg), collected.values.get_mut(seg)) else {
             continue;
         };

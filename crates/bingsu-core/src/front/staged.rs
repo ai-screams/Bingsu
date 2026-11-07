@@ -932,8 +932,12 @@ fn drawn_languages(
     config: &FrontConfig,
 ) -> impl Iterator<Item = (usize, &'static crate::command::builtin::Language)> + '_ {
     use crate::collection::selection::LANGUAGE_SEGMENTS;
-    // The bit first: every prompt asks this, and most segments are not
-    // languages.
+    // The bit first: every prompt with an environment frame asks this, and
+    // most segments are not languages. Without it each of the other builtin
+    // segments costs a language lookup by name: about 100 more instructions
+    // per prompt (front_collection with a frame, aarch64: 206,871 to 206,973
+    // for absent, 224,714 to 224,789 for width_change). No test sees the
+    // difference; the instruction count does.
     BUILTIN.iter().enumerate().filter_map(move |(seg, d)| {
         if LANGUAGE_SEGMENTS & (1 << seg) == 0 || !config.draws_segment(seg) {
             return None;
