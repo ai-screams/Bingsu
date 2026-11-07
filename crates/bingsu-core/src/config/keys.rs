@@ -561,6 +561,16 @@ pub const KEYS: &[KeyDef] = &[
     .example("\"command\"")
     .exec(),
     key(
+        "segment.*.match",
+        Ty::Str,
+        Advanced,
+        "A regular expression that picks the value from the first output line.",
+        "출력 첫 줄에서 값을 고르는 정규식.",
+    )
+    .exec()
+    .kinds(CMD)
+    .example("\"([^/]+)$\""),
+    key(
         "segment.*.shell",
         Ty::Str,
         Expert,
@@ -715,6 +725,15 @@ fn matches(pattern: &str, path: &[&str]) -> bool {
     if path
         .first()
         .is_some_and(|first| !pattern.starts_with(first))
+    {
+        return false;
+    }
+    // The same for the last name: rows under `segment.*` share the first
+    // name, so a key of a user segment would otherwise walk every one of
+    // them. A row ending in `*` can match any last name.
+    if path
+        .last()
+        .is_some_and(|last| !pattern.ends_with(last) && !pattern.ends_with('*'))
     {
         return false;
     }

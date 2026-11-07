@@ -817,6 +817,86 @@ def test_command_only_rounds_reclaim_the_store_budget(tmp_path, _native_boot_req
         assert bound, f"no command response for the folder of round {i}"
 
 
+# C4c: 도우미가 `match`로 고른 값을 발행하고 앞단은 그 값을 그린다. 이것을 실패시키는 것: 도우미가 결과 항목에
+# 패턴을 적용하지 않는 것(원문을 그림), 패턴 요약값을 붙이지 않는 것(앞단이 숨김).
+def test_match_picks_the_published_value(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    session.put(config(["/bin/sh", "-c", "echo go version go1.23.1 darwin/arm64"],
+                       "cache='3600s'\nmatch='go([0-9.]+)'\n"))
+    session.level = "info"
+    ready(session)
+    published_rounds(session)
+    record = session.prompt()
+    session.wait_quiet(timeout=8)
+    assert b"1.23.1" in record and b"darwin" not in record, record
+
+
+# `match`만 바꾸면 명령을 다시 실행하지 않고, 저장한 원문 첫 줄에 새 패턴을 맞춰 발행한다(U-9c). 바꾼 뒤 옛
+# 패턴의 값을 숨기는 것은 앞단 단위 시험(display a_patterned_unit_shows_only_entries_matched_with_its_pattern)이 맡는다.
+# 이것을 실패시키는 것: prepare에서 다시 맞추기를 지우는 것(새 값이 캐시 기간 동안
+# 나오지 않음), 패턴 변경을 캐시 빗나감으로 보는 것(다시 실행), 아무것도 실행하지 않는 회차에서 다시 맞춘 항목을
+# 발행하지 않는 것.
+# `beside`: another unit without a cache runs every round, so the re-matched entry goes out with that round's
+# results instead of alone.
+# `removed`: the edit drops `match`, and the whole first line comes back without running.
+@pytest.mark.parametrize("removed", [False, True])
+@pytest.mark.parametrize("beside", [False, True])
+def test_match_only_change_reapplies_without_exec(tmp_path, _native_boot_required, beside, removed):
+    session = CommandSession(tmp_path)
+    counter = session.base / "runs"
+    run = ["/bin/sh", "-c", f"echo x >> {counter}; echo a/b/kube-ctx"]
+    other = ("[segment.\"custom/other\"]\nkind='command'\ncommand=['/bin/sh', '-c', 'echo other-value']\n"
+             if beside else "")
+
+    def config_with(match):
+        text = other + config(run, "cache='3600s'\n" + (f"match='{match}'\n" if match else ""))
+        return text.replace("left=['custom/probe','char']", "left=['custom/other','custom/probe','char']") if beside else text
+    session.put(config_with("(a/[a-z]+)"))
+    session.level = "info"
+    ready(session)
+    published_rounds(session)
+    before = runs(counter)
+    record = session.prompt()
+    session.wait_quiet(timeout=8)
+    assert b"a/b" in record and b"kube-ctx" not in record, record
+    session.put(config_with(None if removed else "([^/]+)$"))
+    want = b"a/b/kube-ctx" if removed else b"kube-ctx"
+    # The prompt right after the edit still reads the old snapshot, whose
+    # pattern the old value matches; the helper publishes the new snapshot
+    # and the re-matched value in the same round.
+    for _ in range(6):
+        record = session.prompt()
+        session.wait_quiet(timeout=8)
+        if want in record:
+            break
+    assert want in record and (removed or b"a/b" not in record), record
+    assert runs(counter) == before, "changing match alone ran the command again"
+    assert (b"values matched again under a changed match" in session.log()) != beside
+
+
+# 문법 오류나 크기 상한을 넘는 `match`는 config check가 E203으로 알리고, 그 단위만 실행하지 않으며 다른 단위는
+# 그린다. 이것을 실패시키는 것: config check나 스냅샷 발행에서 match 검사를 부르지 않는 것(그 단위가 돌거나
+# 오류가 없음), 다른 단위까지 끄는 것.
+def test_match_size_limit_rejected_at_compile(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    counter = session.base / "runs"
+    bad = ("[segment.\"custom/bad\"]\nkind='command'\n"
+           f"command=['/bin/sh', '-c', 'echo x >> {counter}; echo bad-value']\nmatch='\\w{{50}}'\n")
+    session.put(bad + config(["/bin/sh", "-c", "echo good-value"], "cache='3600s'\n")
+                .replace("left=['custom/probe','char']", "left=['custom/bad','custom/probe','char']"))
+    session.level = "info"
+    ready(session)
+    published_rounds(session)
+    record = session.prompt()
+    session.wait_quiet(timeout=8)
+    assert b"good-value" in record and b"bad-value" not in record, record
+    assert runs(counter) == 0, "the unit with a match over the limit ran"
+    r = subprocess.run([str(session._launcher), "config", "check"], cwd=session.base, env=session.env,
+                       capture_output=True, timeout=20)
+    out = r.stdout + r.stderr
+    assert b"E203" in out and b"custom/bad" in out and b"size limit" in out, out
+
+
 # tests/command-acceptance.tsv의 행마다 실제 시험이 있다(넘긴 행은 "-"와 넘긴 Task). 이것을 실패시키는
 # 것: 표의 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것.
 def test_command_table_names_real_tests():
