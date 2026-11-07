@@ -68,22 +68,22 @@ pub enum Name<'a> {
     /// An absolute path: resolved as given.
     Absolute(&'a [u8]),
     /// Empty, ".", "..", a relative path with a '/' (it would name a file
-    /// relative to the working folder), or a word with ASCII whitespace: a
-    /// value such as `deno --version` reads as a command line, and running a
-    /// file of that exact name would not be what it says.
+    /// relative to the working folder), or a bare name with ASCII
+    /// whitespace: a value such as `deno --version` reads as a command line,
+    /// and running a file of that exact name from `PATH` would not be what it
+    /// says. An absolute path keeps its spaces: it names one file exactly
+    /// (`/Applications/Visual Studio Code.app/…`).
     Refused,
 }
 
 pub fn name(word: &[u8]) -> Name<'_> {
-    // Fails without it: names, and
-    // test_user_language_interpreter_is_looked_up_as_a_command[space].
-    if word.iter().any(|b| b.is_ascii_whitespace()) {
-        return Name::Refused;
-    }
     match word {
         [b'/', ..] => Name::Absolute(word),
         [] | b"." | b".." => Name::Refused,
         w if w.contains(&b'/') => Name::Refused,
+        // Fails without it: names, and
+        // test_user_language_interpreter_is_looked_up_as_a_command[space].
+        w if w.iter().any(|b| b.is_ascii_whitespace()) => Name::Refused,
         w => Name::Search(w),
     }
 }
@@ -333,11 +333,14 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: name에서 '/'가 든 상대 경로 거부를 지우는 것, "."·".."·빈 이름 거부를 지우는 것,
-    // 공백 거부를 지우는 것(이름에서든 절대 경로에서든), 공백만 보고 탭·줄바꿈을 놓치는 것.
+    // 이름의 공백 거부를 지우는 것, 공백만 보고 탭·줄바꿈을 놓치는 것, 절대 경로에도 공백 거부를 거는 것(macOS의
+    // `/Applications/Visual Studio Code.app/…` 같은 경로가 막힘).
     #[test]
     fn names() {
         assert_eq!(name(b"kubectl"), Name::Search(b"kubectl"));
         assert_eq!(name(b"/usr/bin/go"), Name::Absolute(b"/usr/bin/go"));
+        let spaced = b"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
+        assert_eq!(name(spaced), Name::Absolute(spaced));
         for w in [
             &b""[..],
             b".",
@@ -345,7 +348,6 @@ mod tests {
             b"./x",
             b"bin/x",
             b"deno --version",
-            b"/opt/my tools/deno",
             b"de\tno",
             b"deno\n",
         ] {

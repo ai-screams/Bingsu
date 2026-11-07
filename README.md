@@ -156,7 +156,8 @@ in the hooks retain their original bytes. Displayed paths with removed control c
 - A user-defined language segment (`kind = "language"`) runs its `interpreter` with its `version` arguments only where
   one of its `detect_files` is in the shell's folder or a folder above it (up to the repository root, at most 32 up), and shows the
   first version-like word of the first line printed. The interpreter is looked up like a command's first word: an
-  absolute path, or a name searched in `PATH`, without whitespace; a relative path such as `./deno` never runs.
+  absolute path (spaces allowed), or a name without whitespace searched in `PATH`; a relative path such as `./deno`
+  never runs.
   With `cwd = "untrusted-current"`, an interpreter that is a version manager's shim (mise's links to its binary, for example) lets
   the repository's files choose which version, and so which binary, runs. Commands carry the same risk, but a language
   segment is the place this setting gets chosen to show each project's version. The files are found by the
