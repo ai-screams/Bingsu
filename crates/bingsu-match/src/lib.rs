@@ -160,6 +160,28 @@ mod tests {
         assert!(Matcher::new("(unclosed").is_err());
     }
 
+    // 패턴 길이는 바이트로 센다: `é` 128개(256 B)는 받고 129개(258 B, 129자)는 거부한다. 이것을 실패시키는 것:
+    // 문자 수로 세는 것(129자를 받음).
+    #[test]
+    fn the_pattern_limit_counts_bytes() {
+        assert!(Matcher::new(&"\u{e9}".repeat(128)).is_ok());
+        let e = Matcher::new(&"\u{e9}".repeat(129)).unwrap_err();
+        assert!(e.0.contains("pattern limit"), "{}", e.0);
+    }
+
+    // 먼저 찾은 뒤 그 시작에서 캡처할 때도 줄 전체를 문맥으로 둔다: `(^b)|(?P<value>b)`는 "xb"에서 `^`가 1에서 맞지
+    // 않으므로 value 그룹 "b", `\B(?P<value>b)`는 "ab"에서 1이 경계가 아니므로 "b"다. 첫 매치가 우선이고, 빈 매치는
+    // 빈 값이다. 이것을 실패시키는 것: 찾은 조각(`&line[start..]`)에 캡처를 돌리는 것(두 경우 모두 빈 값), 첫 매치
+    // 대신 나중 매치를 쓰는 것, 빈 매치를 맞지 않음으로 건너뛰는 것.
+    #[test]
+    fn captures_see_the_whole_line_from_the_match_start() {
+        assert_eq!(value(r"(^b)|(?P<value>b)", "xb"), "b");
+        assert_eq!(value(r"\B(?P<value>b)", "ab"), "b");
+        assert_eq!(value(r"(x+)", "ax xx"), "x");
+        assert_eq!(value(r"(x*)y", "aay"), "");
+        assert_eq!(value(r"(x*)", "abx"), "");
+    }
+
     // 캡처 그룹 상한: 그룹마다 Pike VM이 상태별 슬롯 표를 두 벌 두므로, 크기 상한 안에 드는 `(a)` 1,500개 패턴이
     // 4 KB 줄에서 helper 메모리를 넘길 수 있다(약 200 MiB). 16개는 받고 17개부터 거부한다. 이것을 실패시키는 것:
     // 그룹 수 검사를 지우는 것(1,500개를 받음), 상한을 17 이상으로 두는 것, 그룹 0까지 세어 16개를 거부하는 것.

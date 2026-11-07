@@ -316,4 +316,25 @@ mod tests {
         let old = bind(entry("a/b/c", Status::Ok), Some("(.*)"));
         assert_eq!(budget.reapplied(&old, Some("([^/]+)$")), None);
     }
+
+    // 다시 맞추기에 쓴 시간도 같은 예산에 쌓인다: 캐시된 "a/b"를 새 패턴으로 다시 맞추는 데 125 ms, 다른 결과에
+    // 125 ms를 쓰면 다음 패턴 성공은 실패로 발행된다. prepare가 만든 예산은 Publish로 옮겨져 결과 매칭에 이어진다
+    // (같은 값을 옮김, 새로 만들지 않음). 이것을 실패시키는 것: 다시 맞추기를 `timed`로 감싸지 않는 것.
+    #[test]
+    fn re_matching_spends_the_same_budget() {
+        let tick = std::cell::Cell::new(0u64);
+        let base = std::time::Instant::now();
+        let clock = move || {
+            tick.set(tick.get() + 1);
+            base + std::time::Duration::from_millis(125 * (tick.get() / 2))
+        };
+        let budget = Budget::with_clock(Box::new(clock));
+        let cached = bind(entry("a/b", Status::Ok), Some("(.*)"));
+        let again = budget.reapplied(&cached, Some("([^/]+)$")).unwrap();
+        assert_eq!(again.value, "b");
+        let other = budget.bind(entry("go version go1.2", Status::Ok), Some("go([0-9.]+)"));
+        assert_eq!(other.status, Status::Ok);
+        let late = budget.bind(entry("go version go1.3", Status::Ok), Some("go([0-9.]+)"));
+        assert_eq!(late.status, Status::Failed);
+    }
 }
