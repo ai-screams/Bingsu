@@ -452,6 +452,12 @@ jobs:
       # 이것을 실패시키는 것: 출하 collector의 spawn/import 또는 앞단 gix 심벌 유입.
       - name: Product imports and matching deployment pair
         run: python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu --unstripped-dir target/release/symbol-audit --strip
+      # 이것을 실패시키는 것: 두 제품 바이너리 중 하나라도 collector 시험 fixture를 담는 것.
+      - name: Product binaries hold no collector fixture
+        run: |
+          cargo build -j 2 -p core-cfg-check
+          python3 scripts/check_cli_prompt_forbid.py --checker target/debug/core-cfg-check \
+            --product-binary target/release/bingsu --product-binary target/release/bingsu-prompt
       - name: Prepare Python audit tests
         run: |
           python3 -m venv "$RUNNER_TEMP/collector-tests"
@@ -789,6 +795,18 @@ jobs:
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
           BINGSU_REQUIRE_NONROOT_TESTS: "1"
+      # Without the prompt files (no Unix), bingsu-prompt only exits 2, silently.
+      # 이것을 실패시키는 것: Windows의 bingsu-prompt가 prompt를 받아 돌거나 무언가 출력하는 것.
+      - name: bingsu-prompt exits 2 on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build -j 2 -p bingsu-prompt
+          set +e
+          out=$(target/debug/bingsu-prompt.exe prompt --ctx 1 --record B1 2>&1)
+          rc=$?
+          set -e
+          test "$rc" -eq 2 && test -z "$out" || { echo "::error::bingsu-prompt.exe prompt: exit $rc, output '$out'"; exit 1; }
       # 이것을 실패시키는 것: 오버플로 검사가 꺼지는 release에서 코어와 색인 범위 시험을 돌리지 않는 것.
       - name: Core tests without overflow checks (release)
         if: runner.os == 'Linux'
