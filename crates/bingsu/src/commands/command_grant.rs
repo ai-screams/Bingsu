@@ -1032,7 +1032,7 @@ impl Round {
         // Nothing to search for: no PATH walk, no folder read (D3a security
         // review S-M3).
         if !searches(!self.runnable.is_empty(), builtins) {
-            // Fails without it: test_language_value_goes_with_its_files.
+            // Fails without it: test_user_language_only_layout_draws_its_version_where_its_files_are.
             if !self.decided.is_empty() {
                 self.publish_results(&mut report, &[]);
             }
@@ -1270,7 +1270,7 @@ impl Round {
     fn undetected_entry(&self, id: &str, now: u64) -> Option<response::Entry> {
         let policy = undetected(id);
         let current = self.current.as_ref()?.entry(Origin::Config, id)?;
-        // Fails without it: a_language_without_its_files_is_hidden_once.
+        // Fails without it: test_user_language_only_layout_draws_its_version_where_its_files_are.
         if current.policy == policy {
             return None;
         }

@@ -171,6 +171,15 @@ M6_GATES = {
         "A builtin version is drawn in the prompt of the shell whose language variables decided it, and not in a "
         "shell in the same folder whose variables differ",
     ),
+    # M6 D3c-2: user-defined language segments run their interpreter where their files are.
+    "GATE-LANG-USER": (
+        "A user language segment runs its interpreter with its version arguments where its detect files are "
+        "found and draws only the version, even in a layout that draws nothing else; once the files are gone it "
+        "is hidden from the next round on and its hidden entry is not written again",
+        "Where its detect files are not found the interpreter never runs and nothing is drawn",
+        "The interpreter is looked up as a command's first word: a relative path never runs and a value with a "
+        "space is one name, never split into arguments",
+    ),
 }
 GATE_IDS = M3D_GATE_IDS + tuple(M4_GATES) + tuple(M6_GATES)
 
@@ -208,6 +217,8 @@ M3D_SUPPLEMENTARY.update({"GATE-LANG-RUST.1-profile": "M6", "GATE-LANG-NODE.1-ve
 M3D_SUPPLEMENTARY.update({f"GATE-FS-FRONT.1-command_{shape}": "M6" for shape in ("no_response", "unread", "unread_narrow", "read")})
 # 이것을 실패시키는 것: env segment 행을 지워 앞단이 환경 값을 그릴 때의 호출을 고정하지 않는 것(C5).
 M3D_SUPPLEMENTARY["GATE-FS-FRONT.1-env_segment"] = "M6"
+# 이것을 실패시키는 것: 공백 이름 행이나 PATH 이름 양성 대조 행을 지우고 상대 경로 행 하나로 GATE-LANG-USER.3을 닫는 것.
+M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-name": "M6"})
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
@@ -339,8 +350,9 @@ def test_gate_rows_exist_and_run_in_ci():
 
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
-    # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate, the 8 D3a language gates and D3b's display gate.
-    assert len(GATE_IDS) == 31
+    # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate, the 8 D3a language gates, D3b's display gate
+    # and D3c-2's user language gate.
+    assert len(GATE_IDS) == 32
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     assert_clauses_accounted(table)
