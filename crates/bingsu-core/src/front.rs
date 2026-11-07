@@ -109,6 +109,7 @@ pub fn render_selected_with_values<L: LayoutView>(
         collection.map(|r| &r.binding),
         &crate::collection::selection::PRODUCT,
         commands,
+        &[],
         out,
     );
 }
@@ -127,6 +128,7 @@ fn render_selected_with_catalog<L: LayoutView>(
     expected: Option<&crate::collection::wire::Binding>,
     catalog: &crate::collection::selection::Catalog<'_>,
     commands: &[Option<&str>],
+    languages: &[(usize, &str)],
     out: &mut Vec<u8>,
 ) {
     let default;
@@ -186,6 +188,26 @@ fn render_selected_with_catalog<L: LayoutView>(
         if let Some(Some(git)) = collected.values.get_mut(3) {
             *git = shell_values::format_git(git, options.icons, options.profile);
         }
+    }
+    // A builtin language's version, from the command response
+    // (`command::display::builtin_value`): its `version` field, cut to the
+    // field's cells. Without one the segment has no value and is dropped
+    // with its separators.
+    for &(seg, version) in languages {
+        let (Some(decl), Some(slot)) = (BUILTIN.get(seg), collected.values.get_mut(seg)) else {
+            continue;
+        };
+        let Some(crate::field::FieldType::Text { max_cells }) =
+            decl.field_index("version").map(|i| decl.fields[i].ty)
+        else {
+            continue;
+        };
+        let f = crate::field::Field::text(version.as_bytes(), max_cells, options.profile);
+        let shown = match &f.value {
+            crate::field::FieldValue::Text(c) => c.as_str().as_bytes().to_vec(),
+            _ => Vec::new(),
+        };
+        *slot = Some(crate::field::Value::new(&shown, alloc::vec![f]));
     }
     // User text segments follow the built-ins: their declaration and value
     // are made here, from the snapshot alone. With none (the usual case)

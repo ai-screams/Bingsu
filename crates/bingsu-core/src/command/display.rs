@@ -15,9 +15,20 @@
 //!   display (the security review's C4b condition). A builtin probe has no
 //!   such condition (D3 ruling Q3).
 //!
+//! A builtin language's version (`builtin_value`, D3b rulings Q1–Q3) needs
+//! the same binding, clock, completion and success, and this shell's
+//! environment digest over the language's variables
+//! (`builtin::Language::env_digest`), so a shell whose `PATH`, `HOME` or
+//! manager variables differ does not see another shell's version in the same
+//! folder. Its policy digest is not checked here: it binds facts only the
+//! helper sees (the executable's identity, the toolchain, the selection
+//! file), and the response is the helper's own file under the runtime root.
+//! The value must also be a version name (`collection::language::version_ok`).
+//!
 //! The value is sanitized text (`response` refuses anything else); the
 //! renderer cuts it to the segment's cells.
 use super::{
+    builtin::Language,
     plan::{self, Environ},
     response::{Binding, Response, Status},
     wire::policy_digest,
@@ -86,6 +97,17 @@ pub fn value<'r>(prompt: &mut Prompt<'r>, unit: &ExecUnit, origin: Origin) -> Op
         && entry.completed_at < prompt.entry.now
         && entry.policy == policy
         && entry.environment == prompt.env_digest(&runnable.env_allow))
+    .then_some(entry.value.as_str())
+}
+
+/// The version `language` shows, or `None`.
+pub fn builtin_value<'r>(prompt: &Prompt<'r>, language: &Language) -> Option<&'r str> {
+    let entry = prompt.response.entry(Origin::Builtin, language.id)?;
+    (entry.status == Status::Ok
+        && entry.pattern == [0; 32]
+        && entry.completed_at < prompt.entry.now
+        && entry.environment == language.env_digest(prompt.vars)
+        && crate::collection::language::version_ok(entry.value.as_bytes()))
     .then_some(entry.value.as_str())
 }
 

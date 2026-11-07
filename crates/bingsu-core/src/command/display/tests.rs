@@ -295,4 +295,65 @@ mod cases {
             None
         );
     }
+
+    const PY_ENV: &[u8] = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/u\0";
+
+    /// The entry the helper publishes for `python` decided in `environ`.
+    fn python_entry(environ: &[u8]) -> Entry {
+        let python = crate::command::builtin::language(b"python").unwrap();
+        Entry {
+            origin: Origin::Builtin,
+            id: "python".into(),
+            policy: [4; 32],
+            environment: python.env_digest(&Environ::parse(environ)),
+            pattern: [0; 32],
+            attempted_at: 5,
+            completed_at: 10,
+            status: Status::Ok,
+            value: "3.12.1".into(),
+            raw: "3.12.1".into(),
+        }
+    }
+    fn version(r: &Response, environ: &[u8], now: u64, eligible: bool) -> Option<String> {
+        let expected = binding();
+        let vars = Environ::parse(environ);
+        let prompt = Prompt::new(r, &expected, clock(now), &vars, eligible)?;
+        let python = crate::command::builtin::language(b"python").unwrap();
+        builtin_value(&prompt, python).map(String::from)
+    }
+
+    // D3b Q1–Q3: 내장 언어 값은 응답 묶음·시계·완료 시각·성공·패턴 없음과, 이 셸의 그 언어 변수 환경 요약값이
+    // 맞을 때만 그리고, 값은 버전 이름이어야 한다. 표식 자격과 정책 요약값은 보지 않는다. 이것을 실패시키는 것:
+    // 환경 요약값 비교를 지우는 것(PYENV_VERSION이 다른 셸에 값이 샘), 상태·패턴·완료 시각·버전 문법 검사를 하나씩
+    // 지우는 것, origin을 가리지 않는 것(같은 id의 설정 항목을 그림), 표식 자격을 거는 것.
+    #[test]
+    fn a_builtin_version_needs_this_shells_language_environment() {
+        let r = response(python_entry(PY_ENV));
+        assert_eq!(version(&r, PY_ENV, 11, true).as_deref(), Some("3.12.1"));
+        assert_eq!(version(&r, PY_ENV, 11, false).as_deref(), Some("3.12.1"));
+        // Another shell in the same folder: another PYENV_VERSION, another HOME,
+        // a manager folder variable it sets.
+        let other = b"PATH=/usr/bin\0PYENV_VERSION=3.11.0\0HOME=/home/u\0";
+        assert_eq!(version(&r, other, 11, true), None);
+        let home = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/v\0";
+        assert_eq!(version(&r, home, 11, true), None);
+        let asdf = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/u\0ASDF_DIR=/a\0";
+        assert_eq!(version(&r, asdf, 11, true), None);
+        // A variable no language reads does not hide it.
+        let unrelated = b"PATH=/usr/bin\0PYENV_VERSION=3.12.1\0HOME=/home/u\0EDITOR=vi\0";
+        assert_eq!(version(&r, unrelated, 11, true).as_deref(), Some("3.12.1"));
+        assert_eq!(version(&r, PY_ENV, 10, true), None);
+        let mut e = python_entry(PY_ENV);
+        e.status = Status::Failed;
+        assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+        let mut e = python_entry(PY_ENV);
+        e.pattern = [1; 32];
+        assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+        let mut e = python_entry(PY_ENV);
+        e.value = "3.12 beta".into();
+        assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+        let mut e = python_entry(PY_ENV);
+        e.origin = Origin::Config;
+        assert_eq!(version(&response(e), PY_ENV, 11, true), None);
+    }
 }
