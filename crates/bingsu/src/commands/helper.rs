@@ -690,13 +690,13 @@ pub(super) fn detach() -> Result<(), ()> {
 fn drawn_builtins(
     config: &bingsu_core::config::compile::CompiledConfig,
     e: &bingsu_core::envelope::Envelope,
-) -> Vec<&'static super::builtin_probe::Language> {
+) -> Vec<&'static bingsu_core::command::builtin::Language> {
     if e.redraw {
         return Vec::new();
     }
     collection::builtin_languages(collection::selection::builtin_mask(config, e.width))
         .iter()
-        .filter_map(|q| super::builtin_probe::language(&q.id))
+        .filter_map(|q| bingsu_core::command::builtin::language(&q.id))
         .collect()
 }
 

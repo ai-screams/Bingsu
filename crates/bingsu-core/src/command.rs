@@ -1,6 +1,7 @@
 //! Command execution contract: helper to supervisor frames, the approval
 //! decision the supervisor makes before each relay spawn, and the run
 //! deadline formulas. Types and pure decisions only; nothing here runs.
+pub mod builtin;
 pub mod cgroup;
 pub mod deadline;
 pub mod display;
