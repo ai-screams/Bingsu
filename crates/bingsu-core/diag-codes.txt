@@ -37,5 +37,5 @@ W409 stable
 W410 stable
 W411 stable
 N501 stable
-N502 stable
+N502 deprecated 0.0.0
 N503 stable

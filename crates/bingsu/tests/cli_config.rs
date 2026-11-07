@@ -679,7 +679,8 @@ fn explain_names_why_a_script_is_refused() {
     }
 }
 
-// 셸 단위는 /bin/sh를, 상대 이름(`./tool`)은 찾지 않고 거부로, 언어 단위는 그 종류로 보인다. 이것을 실패시키는 것:
+// 셸 단위는 /bin/sh를, 상대 이름(`./tool`)은 찾지 않고 거부로, 언어 단위는 그 종류와 interpreter의 실행 파일로
+// 보인다. 이것을 실패시키는 것:
 // 셸 단위의 첫 단어를 argv에서 찾는 것(실행 파일 줄이 없음), 거부된 이름을 "찾지 못함"으로 보이는 것, 언어 단위를
 // command로 보이는 것.
 #[test]
@@ -687,7 +688,7 @@ fn explain_shows_shell_relative_and_language_units() {
     let e = Env::new("cli_config", "explain-kinds");
     e.put_config(
         "config.toml",
-        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\nversion = [\"--version\"]\ntimeout = \"123ms\"\ncache = \"7s\"\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
+        "[segment.\"custom/sh\"]\nkind = \"command\"\nshell = \"echo hi\"\nunsafe_shell = true\n[segment.\"custom/rel\"]\nkind = \"command\"\ncommand = [\"./tool\"]\n[segment.\"custom/lang\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"/bin/echo\"\nversion = [\"--version\"]\ntimeout = \"123ms\"\ncache = \"7s\"\n[layout.line1]\nleft = [\"dir\", \"custom/sh\", \"custom/rel\", \"custom/lang\"]\n",
     );
     let (_, stdout, _) = out(&e.run(&["config", "check", "--explain"]));
     let section = |id: &str| {
@@ -714,8 +715,15 @@ fn explain_shows_shell_relative_and_language_units() {
     );
     let lang = section("custom/lang");
     assert!(
-        lang.starts_with("custom/lang  language, not run yet:"),
+        lang.starts_with("custom/lang  language, runs where its detect files are found"),
         "{stdout}"
+    );
+    let echo = std::fs::canonicalize("/bin/echo").unwrap();
+    assert!(
+        lang.lines()
+            .any(|l| l.trim_start().starts_with("executable")
+                && l.trim_end().ends_with(echo.to_str().unwrap())),
+        "{lang}"
     );
     assert!(
         lang.lines()
@@ -723,8 +731,10 @@ fn explain_shows_shell_relative_and_language_units() {
         "{lang}"
     );
     assert!(
-        lang.lines()
-            .any(|l| l.split_whitespace().take(2).eq(["interpreter", "deno"])),
+        lang.lines().any(|l| l
+            .split_whitespace()
+            .take(2)
+            .eq(["interpreter", "/bin/echo"])),
         "{lang}"
     );
     assert!(

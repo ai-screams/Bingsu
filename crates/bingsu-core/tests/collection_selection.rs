@@ -561,6 +561,63 @@ fn helper_handoff_reserializes_oversized_width() {
     assert!(words.iter().all(|w| w.len() < oversized.len()));
 }
 
+// 실행될 수 있는 사용자 language segment를 그려도 dir 폴더 사실을 묻는다. 그래서 사용자 language만 그리는 레이아웃도
+// 수집 요청이 생기고, 감지 파일을 찾는다. 도우미와 앞단은 같은 함수로 mask를 얻는다. redraw는 아무것도 묻지 않는다.
+// 이것을 실패시키는 것: 사용자 language에 dir 비트를 더하지 않는 것, 그리지 않는 줄의 language에도 더하는 것,
+// command segment에도 더하는 것, 실행되지 않는 단위(`not_run`)에도 더하는 것, 필드 참조만으로 그리는 language를
+// 놓치는 것.
+#[test]
+fn a_drawn_user_language_asks_for_the_folder_facts() {
+    use bingsu_core::config::compile::NotRun;
+    const LANG: &str = "[segment.\"custom/l\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"/bin/deno\"\n";
+    const CMD: &str = "[segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"/bin/true\"]\n";
+    for (text, expected) in [
+        (
+            format!("{LANG}[layout.line1]\nleft = [\"custom/l\", \"char\"]\n"),
+            2,
+        ),
+        (
+            format!("{LANG}[style]\ntemplate = '{{custom/l.value}}{{char}}'\n"),
+            2,
+        ),
+        (
+            format!("{LANG}[layout.line1]\nleft = [\"git\", \"custom/l\", \"char\"]\n"),
+            10,
+        ),
+        (format!("{LANG}[layout.line1]\nleft = [\"char\"]\n"), 0),
+        (
+            format!("{CMD}[layout.line1]\nleft = [\"custom/k\", \"char\"]\n"),
+            0,
+        ),
+    ] {
+        let c = config(&text);
+        assert_eq!(selection::worker_mask(&c, 80, false), expected, "{text}");
+        assert_eq!(selection::worker_mask(&c, 80, true), 0, "{text}");
+    }
+    // Drawn only in the narrow band: asked at its width, not at another.
+    let band = config(&format!(
+        "{LANG}[style]\ntemplate = '{{char}}'\n[layout.when.narrow]\nmax_cols = 60\n[layout.when.narrow.style]\ntemplate = '{{custom/l}}{{char}}'\n"
+    ));
+    assert_eq!(selection::worker_mask(&band, 50, false), 2);
+    assert_eq!(selection::worker_mask(&band, 120, false), 0);
+    // A command drawn at this width, the language only in the other band.
+    let mixed = config(&format!(
+        "{LANG}{CMD}[style]\ntemplate = '{{custom/k}}{{char}}'\n[layout.when.narrow]\nmax_cols = 60\n[layout.when.narrow.style]\ntemplate = '{{custom/l}}{{char}}'\n"
+    ));
+    assert_eq!(selection::worker_mask(&mixed, 120, false), 0);
+    assert_eq!(selection::worker_mask(&mixed, 50, false), 2);
+    // A unit that does not run asks nothing.
+    let mut off = config(&format!(
+        "{LANG}[layout.line1]\nleft = [\"custom/l\", \"char\"]\n"
+    ));
+    off.exec_units
+        .iter_mut()
+        .find(|u| u.id == "custom/l")
+        .unwrap()
+        .not_run = Some(NotRun::NotInTrustedLayout);
+    assert_eq!(selection::worker_mask(&off, 80, false), 0);
+}
+
 // 내장 언어 segment를 그리면 dir 폴더 사실을 함께 묻는다. 도우미 요청과 앞단의 기대 binding이 같은 함수로 이 mask를
 // 얻으므로 둘이 어긋나지 않는다(D3a 리뷰 H1, M2). redraw는 아무것도 묻지 않는다. 이것을 실패시키는 것: 언어
 // segment에 dir 비트를 더하지 않는 것, 언어가 없어도 더하는 것, 언어 비트 표에서 한 언어를 빠뜨리는 것.

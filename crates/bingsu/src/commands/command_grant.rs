@@ -142,6 +142,9 @@ pub(crate) struct Round {
     probes: Vec<Planned>,
     /// Builtin entries decided without running anything (shown or hidden).
     decided: Vec<response::Entry>,
+    /// The user-defined language units that may run, cache hits included:
+    /// each runs only where its marker files were found (D3c-2).
+    language_units: Vec<String>,
     /// Why builtin languages were hidden, for the helper's log.
     pub hidden: Vec<&'static str>,
     /// The session lock; the supervisor holds its own copy. Dropped last:
@@ -270,6 +273,8 @@ impl Scripts {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Languages {
     answers: Vec<(Vec<u8>, bingsu_core::collection::language::Version)>,
+    /// Whether each answered language's marker files were found.
+    found: Vec<(Vec<u8>, bool)>,
     /// What the folder facts say of the repository (D3a review H1).
     root: Root,
 }
@@ -311,12 +316,24 @@ impl Languages {
                 Some((q.id.clone(), l.version.clone()))
             })
             .collect();
+        let found = c
+            .languages
+            .iter()
+            .filter_map(|l| {
+                let q = c.language_queries.get(usize::from(l.index))?;
+                Some((q.id.clone(), l.marker.is_some()))
+            })
+            .collect();
         let root = c
             .updates
             .iter()
             .find_map(|u| u.facts.as_ref())
             .map_or(Root::Unknown, Root::of);
-        Self { answers, root }
+        Self {
+            answers,
+            found,
+            root,
+        }
     }
 
     /// Whether the builtin languages may be decided this round: the
@@ -335,13 +352,28 @@ impl Languages {
             }
     }
 
+    /// Whether a user-defined language's marker files were found this
+    /// round (D3c-2 ruling Q3): `None` when the collection did not answer
+    /// it or its folder facts do not settle the repository the round
+    /// searches with (`ready`), so the language is not decided either way.
+    pub(crate) fn detected(&self, id: &[u8], repo: Option<u16>) -> Option<bool> {
+        if !self.ready(repo) {
+            return None;
+        }
+        self.found.iter().find(|(a, _)| a == id).map(|(_, f)| *f)
+    }
+
     /// Answers and a root as a collection would give them (tests).
     #[cfg(test)]
     pub(crate) fn of(
         answers: Vec<(Vec<u8>, bingsu_core::collection::language::Version)>,
         root: Root,
     ) -> Self {
-        Self { answers, root }
+        Self {
+            answers,
+            found: Vec::new(),
+            root,
+        }
     }
 
     /// What the folder facts say of the repository.
@@ -415,6 +447,19 @@ fn session_reclaim(
 /// spawns the supervisor. Only the runtime root is touched here, before the
 /// marker; the units are resolved in `Round::grant`, after it.
 pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
+    let language_units: Vec<String> = i
+        .config
+        .exec_units
+        .iter()
+        .filter(|u| {
+            matches!(
+                u.policy,
+                bingsu_core::config::compile::ExecPolicy::Language { .. }
+            )
+        })
+        .filter(|u| plan::runnable(u).is_some())
+        .map(|u| u.id.clone())
+        .collect();
     let runnable: Vec<_> = i
         .config
         .exec_units
@@ -452,7 +497,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             let Some(vars) = &vars else { return true };
             let env = plan::env_digest(vars, &r.env_allow);
             environments.push((id.to_string(), env));
-            let policy = policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
+            let policy = plan::entry_digest(r);
             let cache_ns = cache_ms.unwrap_or(0).saturating_mul(1_000_000);
             let hit = current
                 .as_ref()
@@ -606,6 +651,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         current,
         probes: Vec::new(),
         decided: Vec::new(),
+        language_units,
         hidden: Vec::new(),
         _lock: lock,
     })
@@ -971,9 +1017,25 @@ impl Round {
         self.grant.permit = permit;
         let mut report = Report::default();
         let builtins = !self.builtins.is_empty() && languages.ready(repo);
+        // A user-defined language runs only where this round found its
+        // marker files; where the files are gone, its shown value is
+        // replaced by a hidden one (D3c-2 rulings Q2, Q3).
+        let (skip, hide) = gate_languages(&self.language_units, languages, repo);
+        self.runnable.retain(|(id, _)| !skip.contains(id));
+        if let Ok(now) = now_ns() {
+            for id in &hide {
+                if let Some(e) = self.undetected_entry(id, now) {
+                    self.decided.push(e);
+                }
+            }
+        }
         // Nothing to search for: no PATH walk, no folder read (D3a security
         // review S-M3).
         if !searches(!self.runnable.is_empty(), builtins) {
+            // Fails without it: test_user_language_only_layout_draws_its_version_where_its_files_are.
+            if !self.decided.is_empty() {
+                self.publish_results(&mut report, &[]);
+            }
             report.notes = self.abandon();
             return report;
         }
@@ -1200,6 +1262,33 @@ impl Round {
         }
     }
 
+    /// The hidden entry of language unit `id` whose marker files this round
+    /// did not find, when the response still holds another entry for it;
+    /// `None` when it holds none or already this one (written only when it
+    /// changes). Its policy digest is no unit's, so once the files are back
+    /// the unit runs at once.
+    fn undetected_entry(&self, id: &str, now: u64) -> Option<response::Entry> {
+        let policy = undetected(id);
+        let current = self.current.as_ref()?.entry(Origin::Config, id)?;
+        // Fails without it: test_user_language_only_layout_draws_its_version_where_its_files_are.
+        if current.policy == policy {
+            return None;
+        }
+        let env = self.publish.environments.iter().find(|(u, _)| u == id)?.1;
+        Some(response::Entry {
+            origin: Origin::Config,
+            id: id.to_owned(),
+            policy,
+            environment: env,
+            pattern: [0; 32],
+            attempted_at: now,
+            completed_at: now,
+            status: response::Status::Failed,
+            value: String::new(),
+            raw: String::new(),
+        })
+    }
+
     /// A failed entry for unit `id`, attempted and ended at `now`: the
     /// failure cache keeps it 10 s, then it is the unit tried longest ago.
     fn unresolved_entry(&self, id: &str, now: u64) -> Option<response::Entry> {
@@ -1213,8 +1302,7 @@ impl Round {
             ended_at: now,
             stdout: Vec::new(),
         };
-        let policy = policy_digest(&r.policy, r.cwd, r.timeout, &r.env_allow);
-        response::entry_for(id.to_owned(), policy, env, now, &failed)
+        response::entry_for(id.to_owned(), plan::entry_digest(r), env, now, &failed)
     }
 
     /// The response entries of this round's config results (builtin probes
@@ -1236,7 +1324,20 @@ impl Round {
                     .iter()
                     .find(|(id, _)| *id == unit.id)?
                     .1;
-                response::entry_for(unit.id.clone(), unit.digest, env, self.publish.clock.now, o)
+                // The entry's digest: the grant's, and a language unit's
+                // `detect_files` too (`plan::entry_digest`).
+                let policy = self
+                    .runnable
+                    .iter()
+                    .find(|(id, _)| *id == unit.id)
+                    .map_or(unit.digest, |(_, r)| plan::entry_digest(r));
+                let e =
+                    response::entry_for(unit.id.clone(), policy, env, self.publish.clock.now, o)?;
+                Some(if self.language_units.contains(&unit.id) {
+                    language_entry(e)
+                } else {
+                    e
+                })
             })
             .chain(probes)
             .collect()
@@ -1307,6 +1408,55 @@ fn searches(config_units: bool, builtins: bool) -> bool {
     config_units || builtins
 }
 
+/// The language units this round does not run (`skip`: their marker files
+/// were not found, or the collection did not settle it) and, of those, the
+/// ones whose files it looked for and did not find (`hide`).
+fn gate_languages(
+    units: &[String],
+    languages: &Languages,
+    repo: Option<u16>,
+) -> (Vec<String>, Vec<String>) {
+    let mut skip = Vec::new();
+    let mut hide = Vec::new();
+    for id in units {
+        match languages.detected(id.as_bytes(), repo) {
+            Some(true) => {}
+            Some(false) => {
+                skip.push(id.clone());
+                hide.push(id.clone());
+            }
+            None => skip.push(id.clone()),
+        }
+    }
+    (skip, hide)
+}
+
+/// A language unit's entry: the version word of the first line it printed
+/// (D3c-2 ruling Q1, `profile::any_version`); a line with none is a failed
+/// entry with no value.
+fn language_entry(mut e: response::Entry) -> response::Entry {
+    if e.status == response::Status::Ok {
+        // Fails without it: a_language_entry_keeps_only_its_version.
+        match bingsu_core::command::profile::any_version(&e.raw) {
+            Some(v) => e.value = v.to_owned(),
+            None => {
+                e.status = response::Status::Failed;
+                e.value.clear();
+                e.raw.clear();
+            }
+        }
+    }
+    e
+}
+
+/// The policy digest of a language unit hidden because its marker files
+/// were not found: no running unit has it.
+fn undetected(id: &str) -> [u8; 32] {
+    bingsu_core::collection::cwd_hash::sha256(
+        &[b"bingsu-language-undetected\0".as_slice(), id.as_bytes()].concat(),
+    )
+}
+
 /// A builtin entry decided without running anything, at `now`.
 fn decided(p: &Planned, now: u64, status: response::Status, value: String) -> response::Entry {
     response::Entry {
@@ -1353,6 +1503,7 @@ mod tests {
                 cwd: Cwd::Neutral,
                 timeout: plan::TIMEOUT_DEFAULT,
                 env_allow: env_allow.iter().map(|n| n.as_bytes().to_vec()).collect(),
+                detect: Vec::new(),
             },
         )
     }
@@ -1379,11 +1530,72 @@ mod tests {
     // 수집 답과 같은 저장소의 폴더 사실이 있을 때만 내장 언어를 정하고(D3a 리뷰 H1), 할 일이 없는 회차는 PATH를
     // 걷지 않는다(보안 리뷰 S-M3). 이것을 실패시키는 것: 폴더 사실 없이 내장 언어를 정하는 것(셸 폴더가 저장소를
     // 대신함), 다른 저장소의 사실을 받는 것, 답 없는 회차를 정하는 것, 할 일이 없어도 탐색하는 것.
+    // D3c-2 Q3: 사용자 정의 language는 이 회차가 그 표시 파일을 찾았을 때만 돈다. 찾지 못한 것은 건너뛰고 숨김
+    // 항목 대상이며, 답이 없거나 뿌리가 미확정이면 건너뛰기만 한다(숨기지도 않음). 이것을 실패시키는 것: 찾지 못한
+    // 단위를 실행 목록에 남기는 것, 답 없는 단위를 숨김으로 보내는 것, 뿌리 미확정에서 정하는 것.
+    // 사용자 정의 language 항목은 출력 첫 줄의 버전 단어만 값으로 남기고, 버전 단어가 없으면 값 없는 실패
+    // 항목이다. 실패 항목은 그대로 둔다. 이것을 실패시키는 것: 첫 줄을 그대로 값으로 쓰는 것, 버전이 없는 줄을
+    // 성공으로 남기는 것.
+    #[test]
+    fn a_language_entry_keeps_only_its_version() {
+        let entry = |status, raw: &str| response::Entry {
+            origin: Origin::Config,
+            id: "custom/deno".into(),
+            policy: [1; 32],
+            environment: [2; 32],
+            pattern: [0; 32],
+            attempted_at: 1,
+            completed_at: 2,
+            status,
+            value: raw.into(),
+            raw: raw.into(),
+        };
+        let e = language_entry(entry(response::Status::Ok, "deno 2.1.4 (stable)"));
+        assert_eq!(
+            (e.status, e.value.as_str()),
+            (response::Status::Ok, "2.1.4")
+        );
+        let e = language_entry(entry(response::Status::Ok, "no version here"));
+        assert_eq!(
+            (e.status, e.value.as_str(), e.raw.as_str()),
+            (response::Status::Failed, "", "")
+        );
+        let e = language_entry(entry(response::Status::Failed, ""));
+        assert_eq!(e.status, response::Status::Failed);
+    }
+
+    #[test]
+    fn a_language_runs_only_where_its_files_were_found() {
+        use bingsu_core::collection::language::Version;
+        let units = [
+            "custom/a".to_string(),
+            "custom/b".to_string(),
+            "custom/c".to_string(),
+        ];
+        let answered = |root| Languages {
+            answers: vec![
+                (b"custom/a".to_vec(), Version::None),
+                (b"custom/b".to_vec(), Version::None),
+            ],
+            found: vec![(b"custom/a".to_vec(), true), (b"custom/b".to_vec(), false)],
+            root,
+        };
+        let (skip, hide) = gate_languages(&units, &answered(Root::Outside), None);
+        assert_eq!(skip, ["custom/b", "custom/c"]);
+        assert_eq!(hide, ["custom/b"]);
+        let (skip, hide) = gate_languages(&units, &answered(Root::Unknown), None);
+        assert_eq!(skip, ["custom/a", "custom/b", "custom/c"]);
+        assert!(hide.is_empty());
+        let (skip, _) = gate_languages(&units, &answered(Root::Repo(2)), Some(3));
+        assert_eq!(skip.len(), 3);
+    }
+
     #[test]
     fn a_round_with_nothing_to_decide_searches_nothing() {
         use bingsu_core::collection::language::Version;
         let answered = |root| Languages {
             answers: vec![(b"node".to_vec(), Version::None)],
+            found: Vec::new(),
             root,
         };
         assert!(answered(Root::Outside).ready(None));
@@ -1394,6 +1606,7 @@ mod tests {
         assert!(
             !Languages {
                 answers: Vec::new(),
+                found: Vec::new(),
                 root: Root::Outside
             }
             .ready(None)
@@ -1650,6 +1863,7 @@ mod tests {
                 cwd: Cwd::Neutral,
                 timeout: plan::TIMEOUT_DEFAULT,
                 env_allow: Vec::new(),
+                detect: Vec::new(),
             },
         );
         let run = |cwd: &Path| {

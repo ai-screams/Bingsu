@@ -328,25 +328,24 @@ pub(crate) mod tests {
         c.variants[0].iter().map(|l| l.nodes().to_vec()).collect()
     }
 
-    // 템플릿 안의 `custom/…`는 그 참조만 빠진다: 선언된 것은 N502, 선언 안 된 것은 W408. 참조가 그것뿐인 그룹도 빠진다.
+    // 템플릿 안의 그리지 않는 `custom/…`는 그 참조만 빠진다(선언 안 된 것은 W408). 참조가 그것뿐인 그룹도 빠진다.
     // 이것을 실패시키는 것: 템플릿의 참조를 선언 검사에서 빼는 것, 참조를 지우지 않고 컴파일해 설정을 거부하는 것,
     // 빈 그룹을 남기는 것(그룹은 참조가 있어야 컴파일된다), 다른 참조가 있는 그룹까지 지우는 것.
     #[test]
     fn custom_ids_in_a_template_drop_only_that_reference() {
-        // `language` is not drawn yet; `text`, `command` and `env` are.
-        let decl = "[segment.\"custom/t\"]\nkind = \"language\"\ndetect_files = [\"deno.json\"]\ninterpreter = \"deno\"\n";
+        // Every declared kind is drawn, so here only an undeclared reference
+        // is dropped.
         let tpl = |t: &str| alloc::format!("[style]\ntemplate = \"{t}\"\n");
         let want = nodes_of(&read(&tpl("{dir} {@group}<{git}>{@end}{@nl}{char}"), &[]));
         let with = "{@group}[{custom/t}]{@end}{dir} {@group}<{git}{custom/t.x}>{@end}{@nl}{char}";
-        for (head, code) in [
-            (decl, codes::CUSTOM_DRAWN_LATER),
-            ("", codes::CUSTOM_UNDECLARED),
-        ] {
-            let r = read(&(alloc::string::String::from(head) + &tpl(with)), &[]);
-            assert_eq!(nodes_of(&r), want, "{head}");
-            assert!(codes_of(&r).contains(&code), "{head}: {:?}", codes_of(&r));
-            assert_eq!(r.order.len(), 2);
-        }
+        let r = read(&tpl(with), &[]);
+        assert_eq!(nodes_of(&r), want);
+        assert!(
+            codes_of(&r).contains(&codes::CUSTOM_UNDECLARED),
+            "{:?}",
+            codes_of(&r)
+        );
+        assert_eq!(r.order.len(), 2);
         // A theme template that names an undeclared one keeps the theme.
         let r = read("extends = [\"shape-t\"]\n", &[("shape-t", &tpl(with))]);
         assert_eq!(nodes_of(&r), want);
@@ -678,14 +677,11 @@ pub(crate) mod tests {
             .find(|d| d.code == codes::WRONG_TYPE)
             .unwrap();
         assert_eq!(d.via.len(), 2);
-        let r = read(
-            "[segment.\"custom/t\"]\nkind='language'\ndetect_files=['deno.json']\ninterpreter='deno'\n[style]\ntemplate='{dir}{custom/t}'\n",
-            &[],
-        );
+        let r = read("[style]\ntemplate='{dir}{custom/t}'\n", &[]);
         let d = r
             .diagnostics
             .iter()
-            .find(|d| d.code == codes::CUSTOM_DRAWN_LATER)
+            .find(|d| d.code == codes::CUSTOM_UNDECLARED)
             .unwrap();
         assert!(matches!(
             d.at,
@@ -700,7 +696,7 @@ pub(crate) mod tests {
     // C5: env segment는 명령과 같은 판정(layout_verdict)을 거쳐, 신뢰 레이아웃이 그릴 때만 그린다. 저장소 설정(모양
     // 전용)의 레이아웃만 참조하면 사용자 환경 값을 끌어내지 못한다. 이것을 실패시키는 것: env에 판정을 부르지 않는
     // 것(모양 전용 참조가 값을 그림), 판정 결과를 뒤집는 것(신뢰 참조가 안 그림), 모양 전용 파일이 꺼진 줄을 켜서
-    // 그리게 두는 것, env를 그리는 kind 목록에서 빼는 것(N502).
+    // 그리게 두는 것, env를 그리는 kind 목록에서 빼는 것.
     #[test]
     fn env_segments_show_only_from_a_trusted_layout() {
         const ENV: &str = "[segment.\"custom/e\"]\nkind = \"env\"\nenv = \"AWS_PROFILE\"\n";
@@ -720,11 +716,6 @@ pub(crate) mod tests {
             &[("shape-t", "")],
         );
         assert_eq!(custom(&r), [aws]);
-        assert!(
-            !codes_of(&r).contains(&codes::CUSTOM_DRAWN_LATER),
-            "{:?}",
-            codes_of(&r)
-        );
         for shape in [
             "[layout.line1]\nleft = [\"dir\", \"custom/e\"]\n",
             "[style]\ntemplate = '{dir}{custom/e}'\n",

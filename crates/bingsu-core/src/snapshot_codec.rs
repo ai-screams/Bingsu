@@ -1,4 +1,4 @@
-//! BNGCFG10: bounded CompiledConfig codec with an explicit fact schema version.
+//! BNGCFG11: bounded CompiledConfig codec with an explicit fact schema version.
 //!
 //! HEAD, COMMON, INDEX (one entry per variant), the variants, the band names.
 //! The snapshot header checksum covers HEAD, COMMON and INDEX; each variant and
@@ -49,11 +49,11 @@ const MAX_ALLOC: usize = 64 * 1024 * 1024;
 pub const HEAD: usize = 20;
 /// Offset, length and CRC of one variant, then four reserved zero bytes.
 const ENTRY: usize = 16;
-const MAGIC: &[u8; 8] = b"BNGCFG10";
-const VERSION: u16 = 10;
+const MAGIC: &[u8; 8] = b"BNGCFG11";
+const VERSION: u16 = 11;
 /// CRC of one variant or of the name block.
 pub fn section_sum(section: &[u8]) -> [u8; 4] {
-    crate::snapshot::crc32c(&[b"bingsu-compiled-v10\0", section])
+    crate::snapshot::crc32c(&[b"bingsu-compiled-v11\0", section])
 }
 struct Reader<'a> {
     rest: &'a [u8],
@@ -500,6 +500,7 @@ impl Wire for CustomSegment {
                 2u8.put(o);
                 name.put(o);
             }
+            CustomKind::Language => 3u8.put(o),
         }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
@@ -509,6 +510,7 @@ impl Wire for CustomSegment {
                 0 => CustomKind::Text(Wire::get(r)?),
                 1 => CustomKind::Command,
                 2 => CustomKind::Env(Wire::get(r)?),
+                3 => CustomKind::Language,
                 _ => return Err(Error::Shape),
             },
         })
@@ -835,11 +837,15 @@ impl Wire for ExecPolicy {
                 interpreter,
                 version_argv,
                 detect_files,
+                cwd,
+                env_allow,
             } => {
                 1u8.put(o);
                 interpreter.put(o);
                 version_argv.put(o);
-                detect_files.put(o)
+                detect_files.put(o);
+                cwd.put(o);
+                env_allow.put(o)
             }
         }
     }
@@ -856,6 +862,8 @@ impl Wire for ExecPolicy {
                 interpreter: Wire::get(r)?,
                 version_argv: Wire::get(r)?,
                 detect_files: Wire::get(r)?,
+                cwd: Wire::get(r)?,
+                env_allow: Wire::get(r)?,
             },
             _ => return Err(Error::Tag),
         })
@@ -1531,7 +1539,7 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
                         !text.chars().all(|c| !crate::sanitize::is_removed(c))
                             || text.len() > usize::from(crate::field::CUSTOM_TEXT_CELLS) * 4
                     }
-                    CustomKind::Command => false,
+                    CustomKind::Command | CustomKind::Language => false,
                     CustomKind::Env(name) => !crate::config::check::env_name(name),
                 }
         })
@@ -1587,6 +1595,14 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
         }
         if matches!(&u.not_run, Some(NotRun::UnsafeFile { key })
             if !u.origins.iter().any(|(k, _)| k == key))
+        {
+            return Err(Error::Shape);
+        }
+        // The compiler writes 1 to 16 detect files. Without any, a language
+        // entry's digest would be the grant's alone (`plan::entry_digest`),
+        // the one a command with the same id and argv has, so its value
+        // could stand for the language's.
+        if matches!(&u.policy, ExecPolicy::Language { detect_files, .. } if detect_files.is_empty())
         {
             return Err(Error::Shape);
         }

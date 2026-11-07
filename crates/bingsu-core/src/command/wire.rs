@@ -40,7 +40,9 @@ pub enum Policy {
 impl Policy {
     /// The grant form of a compiled unit's policy. A `shell` without
     /// `unsafe_shell = true`, a unit that sets both `command` and `shell`, an
-    /// empty argv and a language unit have none, so the helper cannot put them in a grant.
+    /// empty argv and a language unit without `interpreter` have none, so the
+    /// helper cannot put them in a grant. A language unit runs as the argv
+    /// `interpreter` then its `version` arguments (D3c-2).
     pub fn from_config(p: &ExecPolicy) -> Option<Self> {
         match p {
             ExecPolicy::Command {
@@ -55,6 +57,17 @@ impl Policy {
                 ..
             } if argv.is_empty() => Some(Self::UnsafeShell {
                 script: script.as_bytes().to_vec(),
+            }),
+            // Fails without it: a_language_unit_runs_its_interpreter_and_version.
+            ExecPolicy::Language {
+                interpreter: Some(i),
+                version_argv,
+                ..
+            } if !i.is_empty() => Some(Self::Argv {
+                argv: core::iter::once(i)
+                    .chain(version_argv)
+                    .map(|w| w.as_bytes().to_vec())
+                    .collect(),
             }),
             _ => None,
         }
