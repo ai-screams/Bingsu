@@ -342,31 +342,104 @@ mod tests {
 
     fn child(name: &str, want: &[u8]) {
         let me = std::env::current_exe().expect("test binary");
-        let out = std::process::Command::new(me)
-            .args([
-                "--ignored",
-                "--exact",
-                &format!("prompt::tests::{name}"),
-                "--test-threads=1",
-                "--nocapture",
-                "-q",
-            ])
-            .output()
-            .expect("child");
-        assert_eq!(out.status.code(), Some(0), "{name}");
-        assert!(
-            out.stderr.is_empty(),
-            "{name}: {:?}",
-            String::from_utf8_lossy(&out.stderr)
+        child_with(name, want, || {
+            std::process::Command::new(&me)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    &format!("prompt::tests::{name}"),
+                    "--test-threads=1",
+                    "--nocapture",
+                    "-q",
+                ])
+                .output()
+                .expect("child")
+        })
+    }
+
+    /// Tries of a child that ended at the prompt deadline.
+    const DEADLINE_TRIES: usize = 5;
+
+    /// What a child prints when it reaches the real 50 ms prompt deadline
+    /// before its record (`run_prompt` exits 0 and writes nothing): only
+    /// libtest's header. A loaded machine, not a failure of the path, so
+    /// `child_with` runs that child again.
+    fn deadline_exit(out: &std::process::Output) -> bool {
+        out.status.code() == Some(0) && out.stderr.is_empty() && out.stdout == b"\nrunning 1 test\n"
+    }
+
+    /// `run` once, or up to `DEADLINE_TRIES` times while it ends at the
+    /// deadline; any other result is judged at once.
+    fn child_with(name: &str, want: &[u8], mut run: impl FnMut() -> std::process::Output) {
+        for _ in 0..DEADLINE_TRIES {
+            let out = run();
+            if deadline_exit(&out) {
+                continue;
+            }
+            assert_eq!(out.status.code(), Some(0), "{name}");
+            assert!(
+                out.stderr.is_empty(),
+                "{name}: {:?}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // --nocapture: a panic message would reach the real stderr. libtest
+            // prints its header before the child runs; the record is the last
+            // thing written before _exit.
+            assert!(
+                out.stdout.ends_with(want),
+                "{name}: {:?}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            return;
+        }
+        panic!("{name}: ended at the prompt deadline {DEADLINE_TRIES} times");
+    }
+
+    // 마감 종료 모양(rc 0, 머리말만)만 다시 돌리고, 다른 결과는 바로 판정한다. 다섯 번 모두 마감 종료면 실패다.
+    // 이것을 실패시키는 것: 재시도를 지우는 것(마감 종료 한 번에 실패), 재시도 조건을 넓혀 다른 실패(다른
+    // record, stderr 출력, 0이 아닌 종료)도 다시 돌리는 것, 횟수 상한을 지우는 것.
+    #[test]
+    fn only_a_deadline_exit_runs_the_child_again() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32, stdout: &[u8], stderr: &[u8]| std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        };
+        let header: &[u8] = b"\nrunning 1 test\n";
+        let record = [header, b"<rendered>"].concat();
+        let runs = |results: Vec<std::process::Output>| {
+            let mut results = results.into_iter();
+            let mut tries = 0;
+            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                child_with("c", b"<rendered>", || {
+                    tries += 1;
+                    results.next().expect("no more results")
+                })
+            }))
+            .is_ok();
+            (ok, tries)
+        };
+        assert_eq!(
+            runs(vec![
+                out(0, header, b""),
+                out(0, header, b""),
+                out(0, &record, b"")
+            ]),
+            (true, 3)
         );
-        // --nocapture: a panic message would reach the real stderr. libtest
-        // prints its header before the child runs; the record is the last
-        // thing written before _exit.
-        assert!(
-            out.stdout.ends_with(want),
-            "{name}: {:?}",
-            String::from_utf8_lossy(&out.stdout)
+        assert_eq!(
+            runs(vec![out(0, header, b""); DEADLINE_TRIES]),
+            (false, DEADLINE_TRIES)
         );
+        for other in [
+            out(0, &[header, b"<other>"].concat(), b""),
+            out(0, header, b"panicked"),
+            out(1, header, b""),
+            out(0, b"", b""),
+        ] {
+            assert_eq!(runs(vec![other, out(0, &record, b"")]), (false, 1));
+        }
     }
 
     // 이것을 실패시키는 것: 조용한 panic hook을 지우는 것(기본 hook이 stderr에 씀), 패닉 뒤 0이 아닌 종료,
