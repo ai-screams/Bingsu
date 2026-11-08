@@ -77,6 +77,9 @@ pub const LANGUAGES: [Language; 4] = [
     },
 ];
 
+/// Kept names a built-in language's digest leaves out (F1-b ruling).
+pub const BUILTIN_DIGEST_SKIP: [&[u8]; 2] = [b"TERM", b"TZ"];
+
 /// The language of a query or entry id.
 pub fn language(id: &[u8]) -> Option<&'static Language> {
     LANGUAGES.iter().find(|l| l.id.as_bytes() == id)
@@ -84,7 +87,10 @@ pub fn language(id: &[u8]) -> Option<&'static Language> {
 
 impl Language {
     /// The environment digest of this language's entry: `plan::env_digest`
-    /// over its own variables and `UNSUPPORTED`.
+    /// over its own variables and `UNSUPPORTED`, without `TERM` or `TZ`:
+    /// the probe gets the fixed environment of `profile::environment`, which
+    /// holds neither, and a version does not depend on the terminal or the
+    /// time zone (F1-b ruling), so shells that differ only there share it.
     pub fn env_digest(&self, vars: &Environ<'_>) -> [u8; 32] {
         let names: Vec<Vec<u8>> = self
             .variables
@@ -92,13 +98,32 @@ impl Language {
             .chain(UNSUPPORTED.iter())
             .map(|n| n.to_vec())
             .collect();
-        plan::env_digest(vars, &names)
+        plan::digest_without(vars, &names, &BUILTIN_DIGEST_SKIP)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 내장 언어 요약값은 TERM·TZ를 보지 않고(값을 함께 씀), 다른 남기기 이름(PATH)과 언어 변수는 본다. 이것을
+    // 실패시키는 것: TERM이나 TZ를 다시 요약하는 것(터미널·시간대가 다른 셸이 서로의 버전을 숨김), 건너뛰는
+    // 목록이 PATH나 언어 변수까지 빼는 것.
+    #[test]
+    fn builtin_digest_leaves_out_term_and_tz_only() {
+        let python = language(b"python").unwrap();
+        let d = |frame: &[u8]| python.env_digest(&Environ::parse(frame));
+        let base = d(b"HOME=/h\0PATH=/bin\0PYENV_VERSION=3.12\0");
+        assert_eq!(
+            base,
+            d(b"HOME=/h\0PATH=/bin\0PYENV_VERSION=3.12\0TERM=tmux\0TZ=Asia/Seoul\0")
+        );
+        assert_ne!(base, d(b"HOME=/h\0PATH=/usr/bin\0PYENV_VERSION=3.12\0"));
+        assert_ne!(base, d(b"HOME=/h\0PATH=/bin\0PYENV_VERSION=3.13\0"));
+        // A config unit keeps TZ in its digest.
+        let unit = |frame: &[u8]| plan::env_digest(&Environ::parse(frame), &[]);
+        assert_ne!(unit(b"TZ=UTC\0"), unit(b"TZ=Asia/Seoul\0"));
+    }
 
     // 언어 표는 수집 질의 표(collection::language::BUILTIN)와 내장 segment 표(field::BUILTIN)와 같은 id를 쓰고,
     // segment마다 version 칸이 있다. 프로필 id는 서로 다르다. 이것을 실패시키는 것: 한 표에서만 id를 바꾸는 것,

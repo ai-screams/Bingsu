@@ -1009,6 +1009,25 @@ def test_round_without_units_starts_no_supervisor(tmp_path, _native_boot_require
     assert list(root.glob("command-*.lock")) == [] and not session.neutral().exists()
 
 
+# TERM만 다른 두 셸(같은 폴더)은 helper가 발행한 같은 명령 값을 둘 다 그린다: TERM은 명령에 넘기지만 요약값에는
+# 넣지 않는다(F1-b). `env_allow`에 TERM을 쓴 단위는 다시 세어 다른 TERM 셸에는 그리지 않는다. 이것을 실패시키는
+# 것: 요약값에 TERM을 다시 넣는 것(다른 터미널의 값을 숨김), env_allow에 쓴 TERM까지 빼는 것.
+@pytest.mark.parametrize("listed", [False, True])
+def test_command_value_is_shared_across_terminals(tmp_path, _native_boot_required, listed):
+    session = CommandSession(tmp_path)
+    allow = "env_allow=['TERM']\n" if listed else ""
+    session.put(config(["/bin/sh", "-c", "echo shown-value"], "cache='30s'\n" + allow))
+    session.env["TERM"] = "xterm-256color"
+    session.level = "info"
+    ready(session)
+    published(session, b"shown-value")
+    assert b"shown-value" in session.prompt()
+    session.wait_quiet(timeout=8)
+    session.env["TERM"] = "tmux-256color"
+    assert (b"shown-value" in session.prompt()) != listed
+    session.wait_quiet(timeout=8)
+
+
 # 앞단이 이 셸의 명령 응답 값을 그린다(C4b). 다른 KUBECONFIG 셸에는 그 값을 그리지 않는다. 이것을 실패시키는 것:
 # 앞단의 command 응답 읽기나 값 채우기를 빼는 것(값이 안 보임), 환경 요약값 비교를 빼는 것(다른 셸에도 보임).
 def test_command_value_is_drawn_for_its_own_shell(tmp_path, _native_boot_required):
