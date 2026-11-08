@@ -3563,6 +3563,25 @@ def test_prompt_execs_survive_a_split_exec_line():
     assert prompt_execs(whole) == [("/b/bingsu", "/b/bingsu")]
 
 
+# 이것을 실패시키는 것: init이 형제를 고르지 않은 설치, prompt exec이 없는 trace, bingsu-prompt와 fallback(`bingsu
+# prompt`) exec이 섞인 trace 중 하나를 받는 것.
+def test_dedicated_front_check_refuses_each_other_shape():
+    from types import SimpleNamespace
+    dedicated = SimpleNamespace(dedicated=True, prompt=Path("/b/bingsu-prompt"))
+    front = '10 execve("/b/bingsu-prompt", ["/b/bingsu-prompt", "prompt"], 0x1) = 0'
+    fallback = '20 execve("/b/bingsu", ["/b/bingsu", "prompt"], 0x1) = 0'
+    assert_dedicated_front([front], dedicated)
+    for inst, lines in [
+        (SimpleNamespace(dedicated=False, prompt=Path("/b/bingsu-prompt")), [front]),
+        (dedicated, []),
+        (dedicated, ['13 execve("/b/bingsu", ["/b/bingsu", "__refresh-v1"], 0x2) = 0']),
+        (dedicated, [front, fallback]),
+        (dedicated, [fallback]),
+    ]:
+        with pytest.raises(AssertionError):
+            assert_dedicated_front(lines, inst)
+
+
 def front_calls(lines, exe):
     """The prompt process's calls of a traced prompt and its filter boundary."""
     from fsbudget.strace_parse import Trace
