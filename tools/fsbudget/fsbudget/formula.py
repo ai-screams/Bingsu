@@ -119,12 +119,12 @@ COMMAND_STAGES = ("command_not_run", "command_hit", "command_miss")
 BUILTIN_STAGES = ("builtin_probe", "builtin_fast")
 # The product's bounds on the builtin axes (each pinned to its source by
 # test_builtin_axis_caps_match_the_product): version_manager::BIN_LINKS_MAX,
-# the entries of version_manager::unsupported, exec_path::DEPTH_MAX (the
-# folders one walk holds), and env_frame::FRAME_MAX over the shortest PATH
-# entry ("/" and its ":").
+# the entries of version_manager::unsupported, exec_path::DEPTH_MAX less one
+# (the folders one walk holds, "/" among them: the names below it), and
+# env_frame::FRAME_MAX over the shortest PATH entry ("/" and its ":").
 BUILTIN_BIN_LINKS_MAX = 4
 BUILTIN_SHIM_HOMES_MAX = 8
-BUILTIN_WALK_DEPTH_MAX = 256
+BUILTIN_WALK_NAMES_MAX = 256 - 1
 BUILTIN_PATH_FOLDERS_MAX = 65_536 // 2
 # Linux read(2)/write(2) transfer at most MAX_RW_COUNT bytes per call. Outside
 # collection metering the release helper reads and writes each store file in
@@ -589,7 +589,7 @@ def _check_plan(p: HelperPlan) -> None:
             or p.command_bytes < 64 or not 0 < p.cgroup_procs_bytes < 4096
             or min(p.shell_names, p.path_folders, p.target_names) < 1 or p.path_names < p.path_folders
             or p.path_folders > BUILTIN_PATH_FOLDERS_MAX
-            or p.path_names > p.path_folders * BUILTIN_WALK_DEPTH_MAX or p.target_names > BUILTIN_WALK_DEPTH_MAX
+            or p.path_names > p.path_folders * BUILTIN_WALK_NAMES_MAX or p.target_names > BUILTIN_WALK_NAMES_MAX
             or p.manager_homes > BUILTIN_SHIM_HOMES_MAX or p.bin_links > BUILTIN_BIN_LINKS_MAX
             or p.target_links
             or (builtin[0] == "builtin_probe") != (p.manager_homes > 0)

@@ -2144,13 +2144,17 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
         # 이것을 실패시키는 것: 내장 단계의 감독 호출을 정확 비교에서 빼는 것, fast 감독을 단위 회차 식으로 보는 것,
         # 마감 회차의 판정을 종료 코드로 정하는 것, 응답 없는 정상 종료를 받는 것.
         assert status in (0, 75), ("unexpected collector exit", status)
-        errors, published = check_builtin(roles, helper_builtin_expected(plan), stage,
-                                          deadline=helper_builtin_expected(plan, deadline=True), evidence=evidence)
+        errors, published, installed = check_builtin(
+            roles, helper_builtin_expected(plan), stage, deadline=helper_builtin_expected(plan, deadline=True),
+            evidence=evidence)
         if status == 0 and not published:
             errors.append("builtin: the collector answered but no response was published")
-        spawns = roles.counts.get("supervisor", {}).get("spawn", 0)
-        # A probe round that ran nothing (no answer) leaves its supervisor idle.
-        idle = stage == "builtin_fast" or spawns == 0
+        # The probe stage's fixture runs its probe once: a round that had an
+        # answer or installed a result spawned one relay. Only a probe round
+        # without either (a deadline with nothing verified) leaves the
+        # supervisor idle, as the fast stage always does.
+        # 이것을 실패시키는 것: 측정한 생성 수로 idle을 고르는 것(발행한 probe 회차가 relay 없이 통과).
+        idle = stage == "builtin_fast" or not (published or installed)
         supervisor = {"supervisor": supervisor_expected(0 if idle else 1, atomic=plan.cgroup_parent, arch=plan.arch,
                                                         libc=plan.libc, idle=idle)}
         evidence.update(supervisor_counts=roles.counts.get("supervisor", {}), supervisor_expected=supervisor["supervisor"],

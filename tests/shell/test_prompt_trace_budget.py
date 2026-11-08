@@ -3669,6 +3669,11 @@ def helper_pid(lines):
     ("builtin_fast", "deadline-unpublished"), ("builtin_probe", "deadline-unpublished-extra-prefix"),
     ("builtin_probe", "deadline-unpublished-extra-tail"), ("builtin_probe", "deadline-staged-not-renamed"),
     ("builtin_probe", "answered-unpublished"), ("builtin_probe", "deadline-unpublished-supervisor-clock"),
+    ("builtin_probe", "stage-check-eio"), ("builtin_fast", "stage-check-eio"),
+    # Without an install (fast never installs) the deadline bounds alone apply.
+    ("builtin_fast", "deadline-unpublished-extra-prefix"), ("builtin_fast", "deadline-unpublished-extra-tail"),
+    ("builtin_fast", "deadline-staged-not-renamed"),
+    ("builtin_probe", "deadline-installed-missing-stat"), ("builtin_probe", "published-probe-idle"),
     ("builtin_probe", "breaker-fails-no-gc"), ("builtin_fast", "breaker-fails-no-gc"),
     ("builtin_probe", "install-fails-no-gc"),
     ("builtin_fast", "extra-bin-link"), ("builtin_fast", "fast-installs"), ("builtin_fast", "idle-supervisor-fd6"),
@@ -3715,6 +3720,31 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
         gc_at = next(i for i in range(at, len(lines))
                      if lines[i].split()[0] == helper and '"/proc/sys/kernel/random/boot_id"' in lines[i])
         lines = lines[:gc_at] + [l for l in lines[gc_at:] if l.split()[0] != helper or "+++ " in l]
+    elif damage == "stage-check-eio":
+        # The staged response's last identity check failed, the rename kept:
+        # not a publication (check_collect's rules).
+        at = next(i for i, l in enumerate(lines)
+                  if re.search(r'renameat\(\d+<[^>]*>, "\.response\.stage", \d+<[^>]*>, "response"', l))
+        pid = lines[at].split()[0]
+        lines = joined(lines, pid)
+        rename = next(i for i, l in enumerate(lines) if l.split()[0] == pid
+                      and re.search(r'renameat\(\d+<[^>]*>, "\.response\.stage", \d+<[^>]*>, "response"', l))
+        check = max(i for i in range(rename) if lines[i].split()[0] == pid and '".response.stage"' in lines[i]
+                    and "newfstatat(" in lines[i])
+        lines[check] = re.sub(r" = 0$", " = -1 EIO (Input/output error)", lines[check])
+        assert lines[check].endswith("EIO (Input/output error)"), lines[check]
+    elif damage == "published-probe-idle":
+        # The probe never ran: the supervisor ends idle and no relay exists.
+        relay = next(l.split()[0] for l in lines if '"__exec-v2"' in l and "execve(" in l)
+        spawned = {relay}
+        for l in lines:
+            m = re.match(r"(\d+) +(?:clone|clone3|vfork|fork)\(.*\) = (\d+)$", l)
+            if m and m[1] in spawned:
+                spawned.add(m[2])
+        lines = joined(lines, supervisor)
+        lock = find(supervisor, r"fcntl\(5<[^>]*\.lock>, F_SETFD, FD_CLOEXEC")
+        lines = [l for i, l in enumerate(lines) if l.split()[0] not in spawned
+                 and not (l.split()[0] == supervisor and i > lock and "+++ " not in l)]
     elif damage == "deadline-staged-not-renamed":
         # A deadline whose supervisor staged a response and failed to
         # install it: past the deadline's clock-only bound.
@@ -3730,11 +3760,13 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
         lines[at] = lines[at].replace("exited with 0", "exited with 75")
     elif damage in ("collector-deadline", "deadline-without-decision", "deadline-unpublished",
                     "deadline-unpublished-extra-prefix", "deadline-unpublished-extra-tail",
-                    "answered-unpublished", "deadline-unpublished-supervisor-clock"):
+                    "answered-unpublished", "deadline-unpublished-supervisor-clock",
+                    "deadline-installed-missing-stat"):
         if damage == "deadline-without-decision":
             # A deadline that still published: the round decided and is judged in full.
             del lines[find(helper, r'statx\(AT_FDCWD</>, "/fx/home-t/\.volta/bin"')]
-        if damage.startswith("deadline-unpublished") or damage == "answered-unpublished":
+        if (damage.startswith("deadline-unpublished") or damage in ("answered-unpublished",
+                                                                     "deadline-installed-missing-stat")):
             # Nothing verified: the collection supervisor observes its clock
             # and stores nothing (its store calls after the clock removed).
             at = next(i for i, l in enumerate(lines)
@@ -3744,12 +3776,19 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
             lines = lines[:clock + 1] + [l for l in joined(lines[clock + 1:], pid)
                                          if l.split()[0] != pid or not re.search(r"/(?:store|collections-v1)[/>]", l)]
         if damage == "deadline-unpublished-extra-prefix":
-            at = find(helper, r'"command-[0-9a-f]+\.lock", .*\) = 0$')
+            lines = joined(lines, helper)
+            at = find(helper, r'newfstatat\(\d+<[^>]*>, "command-[0-9a-f]+\.lock", .*\) = 0$')
             lines.insert(at, lines[at])
         if damage == "deadline-unpublished-extra-tail":
-            # A second unit rmdir: past the full round's bound.
-            at = find(helper, r"unlinkat\(.*AT_REMOVEDIR\) = 0$")
+            # A second unit rmdir (probe) or session listing read (fast): past
+            # the full round's bound.
+            at = (find(helper, r"unlinkat\(.*AT_REMOVEDIR\) = 0$") if stage == "builtin_probe" else
+                  find(helper, r"getdents64\(\d+</sys/fs/cgroup/bingsu-cmd-[0-9a-f]+>, .* = 0$"))
             lines.insert(at, lines[at])
+        if damage == "deadline-installed-missing-stat":
+            # No answer, but the probe's result installed: a decision, judged
+            # exactly (GC slack must not cover a missing stat).
+            del lines[find(helper, r'statx\(AT_FDCWD</>, "/fx/home-t/\.volta/bin"')]
         if damage == "deadline-unpublished-supervisor-clock":
             # The command supervisor is judged exactly even without an answer:
             # its lock marked close-on-exec twice.
@@ -3791,7 +3830,7 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
     ("builtin_probe", {"path_names": 1}), ("builtin_probe", {"target_links": 1}), ("builtin_probe", {"manager_homes": 0}),
     ("builtin_fast", {"bin_links": 0}), ("builtin_fast", {"manager_homes": 6}), ("builtin_probe", {"bin_links": 1}),
     ("builtin_probe", {"path_folders": 32_769, "path_names": 32_769}),
-    ("builtin_probe", {"path_names": 2 * 256 + 1}), ("builtin_probe", {"target_names": 257}),
+    ("builtin_probe", {"path_names": 2 * 255 + 1}), ("builtin_probe", {"target_names": 256}),
     ("builtin_probe", {"manager_homes": 9}), ("builtin_fast", {"bin_links": 5}),
     ("builtin_probe", {"stages": ("unchanged", "builtin_probe")}),
     ("builtin_probe", {"stages": ("publish", "collect", "builtin_probe")}),
@@ -3813,7 +3852,7 @@ def test_builtin_axis_caps_are_inclusive():
     from fsbudget.formula import helper_builtin_expected
     _, _, probe = helper_stage_case("builtin_probe")
     _, _, fast = helper_stage_case("builtin_fast")
-    helper_builtin_expected(replace(probe, path_folders=32_768, path_names=32_768 * 256, target_names=256,
+    helper_builtin_expected(replace(probe, path_folders=32_768, path_names=32_768 * 255, target_names=255,
                                     manager_homes=8))
     helper_builtin_expected(replace(fast, bin_links=4))
 
@@ -3828,7 +3867,7 @@ def test_builtin_axis_caps_match_the_product():
     walk = (ROOT / "crates/bingsu/src/commands/exec_path.rs").read_text().replace("\r\n", "\n")
     frame = (ROOT / "crates/bingsu-core/src/command/env_frame.rs").read_text().replace("\r\n", "\n")
     assert re.search(r"pub\(crate\) const BIN_LINKS_MAX: usize = (\d+);", manager)[1] == str(formula.BUILTIN_BIN_LINKS_MAX)
-    assert re.search(r"\nconst DEPTH_MAX: usize = (\d+);", walk)[1] == str(formula.BUILTIN_WALK_DEPTH_MAX)
+    assert int(re.search(r"\nconst DEPTH_MAX: usize = (\d+);", walk)[1]) - 1 == formula.BUILTIN_WALK_NAMES_MAX
     assert int(re.search(r"pub const FRAME_MAX: usize = ([\d_]+);", frame)[1].replace("_", "")) // 2 == \
         formula.BUILTIN_PATH_FOLDERS_MAX
     body = re.search(r"fn unsupported\(vars: &Environ<'_>\) -> Vec<PathBuf> \{.*?\n    \[\n(.*?)\n    \]\n", manager, re.S)[1]
