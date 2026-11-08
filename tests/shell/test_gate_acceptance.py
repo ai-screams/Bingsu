@@ -129,6 +129,15 @@ M6_GATES = {
         "A round that draws no builtin language and whose every unit hits the cache starts no supervisor and runs "
         "nothing",
     ),
+    # M6 F1: what a command round leaves behind (plan "decisive gates"; C2, C3).
+    "GATE-CMD-REAP": (
+        "A round removes the cgroups it made, and a session's next reclaim takes the units it left only once their "
+        "supervisor is reaped",
+        "A nested cgroup, a descendant that left with setsid and the units of a supervisor killed with SIGKILL are "
+        "all removed by the same session's next reclaim",
+        "A reclaim never touches the units of a live supervisor",
+        "Once the helper is killed every target ends within 1 s, also while its results are held back",
+    ),
     # M6 F1: the descriptors and environment a command round hands down (plan
     # "decisive gates"; B1, B3, C2, C3 R2).
     "GATE-CMD-FDS": (
@@ -228,7 +237,12 @@ M3D_SUPPLEMENTARY["GATE-FS-FRONT.1-env_segment"] = "M6"
 # 이것을 실패시키는 것: 공백 이름·공백 절대 경로 행이나 PATH 이름 양성 대조 행을 지우고 상대 경로 행 하나로 GATE-LANG-USER.3을 닫는 것,
 # cache 행이나 git 행을 지우고 cache 없는 행 하나로 GATE-LANG-USER.1을 닫는 것.
 # 이것을 실패시키는 것: 원자 경로·fd 2 없는 중계 행을 지우고 주 행 하나로 GATE-CMD-FDS.1·.2를 닫는 것.
-M3D_SUPPLEMENTARY.update({"GATE-CMD-FDS.1-atomic": "M6", "GATE-CMD-FDS.2-no_fd2": "M6"})
+M3D_SUPPLEMENTARY.update({"GATE-CMD-FDS.1-atomic": "M6", "GATE-CMD-FDS.2-no_fd2": "M6",
+                          "GATE-CMD-FDS.2-clone3": "M6"})
+# 이것을 실패시키는 것: 중첩 cgroup·setsid 자손·감독 회수 순서·역압 행을 지우고 주 행 하나로 REAP 절을 닫는 것.
+M3D_SUPPLEMENTARY.update({"GATE-CMD-REAP.1-reaped_first": "M6", "GATE-CMD-REAP.2-nested": "M6",
+                          "GATE-CMD-REAP.2-setsid": "M6", "GATE-CMD-REAP.4-backpressure": "M6",
+                          "GATE-CMD-REAP.4-backpressure_macos": "M6"})
 M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-absolute_space": "M6",
                           "GATE-LANG-USER.3-name": "M6",
                           "GATE-LANG-USER.1-cache": "M6", "GATE-LANG-USER.1-git": "M6"})
@@ -406,8 +420,8 @@ def test_gate_rows_exist_and_run_in_ci():
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
     # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate, the 8 D3a language gates, D3b's display gate,
-    # D3c-2's user language gate and F1's descriptor gate.
-    assert len(GATE_IDS) == 33
+    # D3c-2's user language gate and F1's reap and descriptor gates.
+    assert len(GATE_IDS) == 34
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     assert_clauses_accounted(table)
@@ -1566,3 +1580,73 @@ def test_pty_ignored_files_exist():
     text = text.replace(" --ignore tests/shell/test_gate_acceptance.py ", f" --ignore {missing} ")
     with pytest.raises(AssertionError, match="no such file"):
         assert_pty_split(text, ignored=PTY_IGNORED - {"tests/shell/test_gate_acceptance.py"} | {missing})
+
+
+# cgroup cell 증거(GATE-CMD-REAP·FDS의 cell 행)는 PR에서 도는 command-cgroup job에서, 정확한 꼴(`docker run …
+# /cell --include-ignored --exact … | tee` 또는 `sh -c 'install … && exec python3 -m pytest …' | tee`)과 그 뒤의
+# `grep -Fx` 단언으로만 받는다. 이것을 실패시키는 것: grep 단언을 지우는 것, pull_request 트리거를 지우는 것,
+# job 조건을 바꾸는 것, --include-ignored를 빼는 것, tee 대상을 바꾸는 것, pytest에 -k를 붙이는 것, cell
+# 실행 파일을 다른 target에서 만드는 것, cell 조건(`matrix.cell == …`)을 cell job 밖 step에서 받는 것.
+CELL_RUST_GREP = ("          grep -Fx 'test commands::command_supervisor::tests::test_nested_cgroup_removed_postorder"
+                  " ... ok' \"$RUNNER_TEMP/cell-rust.txt\"\n")
+CELL_PY_GREP = ("          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_reclaim_after_supervisor_sigkill'"
+                " \"$RUNNER_TEMP/cell-py.txt\"\n")
+
+
+@pytest.mark.parametrize("damage", ["rust-grep", "py-grep", "no-pull-request", "job-if", "no-include-ignored",
+                                    "other-tee", "py-filter", "cell-from-other-target", "cell-if-elsewhere"])
+def test_cell_evidence_rejects_bypasses(damage):
+    table = (ROOT / TABLE).read_text()
+    texts = workflows()
+    assert_gate_table(table, texts)
+    shell = texts["shell.yml"]
+    cell_rust = "bingsu-cgroup-d13 /cell --include-ignored --exact --test-threads=1"
+    cell_py = "&& exec python3 -m pytest tests/shell/test_command_cgroup.py -q"
+    for piece in (CELL_RUST_GREP, CELL_PY_GREP, cell_rust, cell_py, '| tee "$RUNNER_TEMP/cell-rust.txt"'):
+        assert shell.count(piece) == 1, piece
+    if damage == "rust-grep":
+        shell = shell.replace(CELL_RUST_GREP, "")
+    elif damage == "py-grep":
+        shell = shell.replace(CELL_PY_GREP, "")
+    elif damage == "no-pull-request":
+        shell = shell.replace("\n  pull_request:\n", "\n", 1)
+    elif damage == "job-if":
+        block = "  command-cgroup:\n    name: Command cgroup cell (${{ matrix.cell }})\n    needs: detect\n    if: needs.detect.outputs.rust == 'true'\n"
+        assert shell.count(block) == 1
+        shell = shell.replace(block, block.replace("needs.detect.outputs.rust == 'true'", "github.event_name == 'push'"))
+    elif damage == "no-include-ignored":
+        shell = shell.replace(cell_rust, cell_rust.replace(" --include-ignored", ""))
+    elif damage == "other-tee":
+        shell = shell.replace('| tee "$RUNNER_TEMP/cell-rust.txt"', '| tee "$RUNNER_TEMP/cell-rust2.txt"')
+    elif damage == "py-filter":
+        shell = shell.replace(cell_py, cell_py.replace(" -q", " -k sigkill -q"))
+    elif damage == "cell-if-elsewhere":
+        # A cell condition outside the cell job never holds: that step never runs.
+        rounds = "      - name: Command rounds run through the supervisor (release)\n        if: matrix.profile == 'release'\n"
+        assert shell.count(rounds) == 1
+        shell = shell.replace(rounds, rounds.replace("matrix.profile == 'release'", "matrix.cell == 'priv'"))
+    else:
+        build = "cargo test -p bingsu --bin bingsu --target x86_64-unknown-linux-musl --no-run"
+        assert shell.count(build) == 1
+        shell = shell.replace(build, "cargo test -p bingsu --lib --target x86_64-unknown-linux-musl --no-run")
+    texts["shell.yml"] = shell
+    with pytest.raises(AssertionError):
+        assert_gate_table(table, texts)
+
+
+# cell 행의 시험은 cell 표시(`#[ignore = "runs in the cgroup cells …"]`)가 있는 ignored 시험이어야 한다. 이것을
+# 실패시키는 것: 다른 이유로 ignored인 시험(timing 등)을 cell 증거로 받는 것.
+def test_cell_rows_need_the_cell_ignore():
+    table = (ROOT / TABLE).read_text()
+    path = "crates/bingsu/src/commands/command_supervisor.rs"
+    source = (ROOT / path).read_text()
+    mark = '#[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]\n    fn test_nested_cgroup_removed_postorder'
+    assert source.count(mark) == 1
+    swapped = source.replace(mark, '#[ignore = "timing: elsewhere"]\n    fn test_nested_cgroup_removed_postorder')
+    row = [line for line in table.splitlines(True) if line.startswith("GATE-CMD-REAP.2-nested\t")]
+    assert len(row) == 1
+    one = table.splitlines(True)[0] + row[0]
+    assert_acceptance_table(one, workflows(), required_ids=frozenset(), required_gates=frozenset(GATE_IDS))
+    with pytest.raises(AssertionError):
+        assert_acceptance_table(one, workflows(), required_ids=frozenset(), required_gates=frozenset(GATE_IDS),
+                                read=lambda name: swapped if name == path else (ROOT / name).read_text())

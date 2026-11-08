@@ -502,7 +502,57 @@ SHELL_EVIDENCE_JOBS = {
                      "- os: ubuntu-24.04-arm", "libc: gnu", "profile: release",
                      "- os: ubuntu-24.04-arm", "libc: musl", "profile: release"],
     "shell-macos": None,
+    # The command cgroup cells (M6 C3): their tests run in a container, from
+    # the exact forms CELL_RUST and CELL_PYTEST read (F1).
+    "command-cgroup": ["fail-fast: false", "matrix:", "include:", "- cell: plain", 'opts: ""',
+                       "- cell: priv", "opts: --privileged --cgroupns=private"],
 }
+CELL_JOB = ("shell.yml", "command-cgroup")
+CELL_IMAGE = "bingsu-cgroup-d13"
+# Step conditions a cell evidence step may carry: it runs after an earlier
+# failure too, or in the privileged cell alone.
+CELL_IFS = {"success() || failure()", "matrix.cell == 'priv'"}
+CELL_IGNORE = 'ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"'
+
+
+def cell_rust_names(run):
+    """The exact test names a cell's Rust run selects, or None when `run` is
+    not exactly `docker run … bingsu-cgroup-d13 /cell --include-ignored
+    --exact --test-threads=1 <names> | tee <log>`."""
+    # 이것을 실패시키는 것: 다른 image·실행 파일, --include-ignored나 --exact 없이, tee 없이 도는 run을 받는 것.
+    if run[:2] != ["docker", "run"] or CELL_IMAGE not in run or "|" not in run:
+        return None
+    at, bar = run.index(CELL_IMAGE), run.index("|")
+    head = run[at + 1:at + 5]
+    if head != ["/cell", "--include-ignored", "--exact", "--test-threads=1"] or run[bar:bar + 2] != ["|", "tee"] \
+            or len(run) != bar + 3:
+        return None
+    return run[at + 5:bar]
+
+
+def cell_pytest_selection(run):
+    """What a cell's pytest run selects, or None when `run` is not exactly
+    `docker run … bingsu-cgroup-d13 sh -c 'install … && exec python3 -m pytest
+    <selection>' | tee <log>`."""
+    if run[:2] != ["docker", "run"] or CELL_IMAGE not in run or "|" not in run:
+        return None
+    at, bar = run.index(CELL_IMAGE), run.index("|")
+    if run[at + 1:at + 3] != ["sh", "-c"] or bar != at + 4 or run[bar:bar + 2] != ["|", "tee"] or len(run) != bar + 3:
+        return None
+    inner = shlex.split(run[at + 3])
+    if inner[:1] != ["install"] or "&&" not in inner:
+        return None
+    tail = inner[inner.index("&&") + 1:]
+    if tail[:4] != ["exec", "python3", "-m", "pytest"]:
+        return None
+    return tail[4:]
+
+
+def cell_built_from_bin(run_step, steps):
+    # The `/cell` binary is the bingsu bin's test executable built in the same job.
+    return any(c[:2] == ["cargo", "test"] and "--no-run" in c and ["-p", "bingsu"] in [c[i:i + 2] for i in range(len(c))]
+               and ["--bin", "bingsu"] in [c[i:i + 2] for i in range(len(c))]
+               for step in steps if step["_job"] == CELL_JOB for c in run_commands(step))
 
 
 def shell_test_evidence(text):
@@ -511,6 +561,10 @@ def shell_test_evidence(text):
     evidence = []
     for job, matrix in SHELL_EVIDENCE_JOBS.items():
         meta, steps = workflow_job(text, job)
+        if ("shell.yml", job) == CELL_JOB:
+            # Cell evidence counts only from a job that runs on pull requests.
+            # 이것을 실패시키는 것: workflow의 pull_request 트리거를 지우는 것(cell 증거가 PR에서 돌지 않음).
+            assert re.search(r"^on:\n(?:(?:    .*|  [a-z_]+:.*|\s*)\n)*?  pull_request:", text, re.M), "cell job not on pull_request"
         assert "continue-on-error" not in meta, job
         assert meta["if"][0] == "needs.detect.outputs.rust == 'true'", job
         strategy = meta.get("strategy", ("", []))[1]
@@ -652,7 +706,8 @@ def acceptance_pair_allowed(row, step, run_step, run):
     def condition_allowed(entry):
         value = entry.get("if")
         return value in (None, required_if) or (
-            PROFILE_IF.fullmatch(value or "") is not None and run_step.get("_cells") is not None)
+            PROFILE_IF.fullmatch(value or "") is not None and run_step.get("_cells") is not None) or (
+            value in CELL_IFS and entry["_job"] == CELL_JOB)
     if not all(condition_allowed(entry) for entry in (step, run_step)):
         return None
     for entry in (step, run_step):
@@ -868,11 +923,17 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                 # The corresponding pytest must produce this asserted log in
                 # the same matrix job, and actually select the file/directory.
                 for run_step, run in commands:
-                    if (run_step["_job"] != step["_job"] or run[1:3] != ["-m", "pytest"] or
+                    cell = cell_pytest_selection(run) if run_step["_job"] == CELL_JOB else None
+                    if cell is not None and run_step["_job"] == step["_job"] and run[-1:] == log:
+                        if any(token in {"-k", "-m"} or token.startswith(("--ignore", "--deselect")) for token in cell):
+                            continue
+                        selected = cell
+                    elif (run_step["_job"] != step["_job"] or run[1:3] != ["-m", "pytest"] or
                             run[0] not in ACCEPTANCE_PYTHONS[run_step["_job"][0]] or
                             "tee" not in run or run[run.index("tee") + 1:] != log):
                         continue
-                    selected = run[run.index("pytest") + 1:run.index("|")]
+                    else:
+                        selected = run[run.index("pytest") + 1:run.index("|")]
                     assert not any(token in {"-k", "-m"} or token.startswith(("--ignore", "--deselect")) for token in selected), (row["id"], "pytest selection filter")
                     platforms = acceptance_pair_allowed(row, step, run_step, run)
                     if platforms is None:
@@ -900,9 +961,11 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                 ["macos"] if row["platform"] == "macOS" else ["linux", "macos"])
             assert_cfgs_hold(row, attributes, platforms)
             ignored = any(re.match(r"\s*ignore\b", attr) for attr in attributes)
+            # A cgroup cell test runs only in the cell job, ignored elsewhere.
+            in_cell = ignored and target == "bin:bingsu" and [a.strip() for a in attributes].count(CELL_IGNORE) == 1
             # The pre-existing privileged root fixture is deliberately isolated.
             # No other acceptance row may become ignored, in either order.
-            assert not ignored or (target is None and (row["id"], path, base) == (
+            assert not ignored or in_cell or (target is None and (row["id"], path, base) == (
                 "SEC-ROOT", "crates/bingsu-collect/src/limits.rs", "root_cannot_restore_limits_or_capabilities"
             )), (row["id"], "ignored test")
             crate = path.split("/")[1]
@@ -959,7 +1022,12 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                         if (cells := release_cells(step, run_step)) is None:
                             continue
                         rust_hits.append(cells)
-                    if ignored:
+                    if in_cell:
+                        # Only the exact cell form, naming this test, from the bin's test executable.
+                        names = cell_rust_names(run) if run_step["_job"] == CELL_JOB else None
+                        if names is None or module + base not in names or not cell_built_from_bin(run_step, steps):
+                            continue
+                    elif ignored:
                         if not ("sudo" == run[0] and "$bin" in run and "--exact" in run and
                                 module + base in run and "--ignored" in run):
                             continue
