@@ -1876,7 +1876,7 @@ class HelperStageFixture:
             self.env["PATH"] = COMMAND_PATH
         self.tools = None
         if builtin:
-            self.tools = tools_outside_repository(Path.home())
+            self.tools = folder_outside_repository(Path.home(), "bingsu-builtin-tools-")
             # The language's folder first; the shell itself comes from /usr/bin.
             if stage == "builtin_probe":
                 self.env["PATH"] = f"{self.tools / 'bin'}:{COMMAND_PATH}"
@@ -1891,8 +1891,16 @@ class HelperStageFixture:
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
         self.pwd = self.base
+        self.shell_root = None
         if stage == "collect" or builtin:
-            self.pwd = self.base / "repo"
+            # The collector's discovery walks the shell's folder from "/" within
+            # its 5 ms stage budget (budget::A_MS), five traced calls a level:
+            # next to the build output it is eight names deep on a CI runner,
+            # under a shallow folder of the home folder four, as in the local
+            # containers. Only collect and builtin stages: command stages scan
+            # the shell's folder too and keep the one they were measured with.
+            self.shell_root = folder_outside_repository(Path.home(), "bingsu-stage-shell-")
+            self.pwd = self.shell_root / "repo"
             self.pwd.mkdir()
             subprocess.run(["git", "init", "-q", str(self.pwd)], check=True, env={"PATH": os.environ["PATH"]})
             (self.pwd / "a").write_text("x")
@@ -2020,13 +2028,14 @@ class HelperStageFixture:
             arch=platform.machine(), **self.collection, **self.command)
 
 
-def tools_outside_repository(parent):
-    """A new folder for a builtin stage's language tools, under `parent` and
-    outside every git repository. The round leaves PATH folders inside the
-    shell's repository, or any folder above it holding `.git`, out of its
-    lookup (C2 ruling J9): a fixture base next to the build output sits in
-    the source checkout, as on a CI runner. Its folders must stay trusted
-    too: no ancestor writable by group or others."""
+def folder_outside_repository(parent, prefix):
+    """A new folder under `parent`, outside every git repository and with no
+    ancestor writable by group or others. A builtin stage's language tools
+    live there: the round leaves PATH folders inside the shell's repository,
+    or any folder above it holding `.git`, out of its lookup (C2 ruling J9),
+    and a fixture base next to the build output sits in the source checkout,
+    as on a CI runner. The collect and builtin stages' shell folder too, to
+    keep the collector's discovery shallow."""
     import tempfile
     parent = Path(parent).resolve()
     # 이것을 실패시키는 것: 도구 폴더를 fixture 기반(저장소 checkout 안)에 두는 것(CI 러너에서 PATH가 비고 내장
@@ -2034,29 +2043,38 @@ def tools_outside_repository(parent):
     for folder in [parent, *parent.parents]:
         assert not os.path.lexists(folder / ".git"), ("a tools folder inside a git repository", folder)
         assert not os.stat(folder).st_mode & 0o022, ("group/other-writable ancestor of the tools", folder)
-    tools = Path(tempfile.mkdtemp(prefix="bingsu-builtin-tools-", dir=parent))
-    tools.chmod(0o755)
-    return tools
+    folder = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    folder.chmod(0o755)
+    return folder
 
 
-def test_tools_outside_repository_refuses_a_checkout(tmp_path):
+def remove_fixture(fixture):
+    """The fixture's base and the folders it made outside it."""
+    shutil.rmtree(fixture.base, ignore_errors=True)
+    # Test doubles of the fixture carry neither.
+    for extra in (getattr(fixture, "tools", None), getattr(fixture, "shell_root", None)):
+        if extra:
+            shutil.rmtree(extra, ignore_errors=True)
+
+
+def test_folder_outside_repository_refuses_a_checkout(tmp_path):
     base = tmp_path / "checkout"
     base.mkdir(mode=0o755)
     for folder in (tmp_path, *tmp_path.parents):
         if os.stat(folder).st_mode & 0o022:
             pytest.skip(f"a group/other-writable ancestor here: {folder}")
-    tools = tools_outside_repository(base)
-    assert tools.parent == base.resolve() and tools.is_dir()
+    tools = folder_outside_repository(base, "t-")
+    assert tools.parent == base.resolve() and tools.is_dir() and tools.name.startswith("t-")
     # A .git in an ancestor, not only in the parent itself.
     (base / ".git").mkdir()
     sub = base / "sub"
     sub.mkdir(mode=0o755)
     with pytest.raises(AssertionError, match="inside a git repository"):
-        tools_outside_repository(sub)
+        folder_outside_repository(sub, "t-")
     (base / ".git").rmdir()
     base.chmod(0o775)
     with pytest.raises(AssertionError, match="writable"):
-        tools_outside_repository(base)
+        folder_outside_repository(base, "t-")
 
 
 def builtin_install(folder, name):
@@ -2289,10 +2307,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
             print(f"helper stage evidence: {artifacts}")
             if fixture is not None:
                 wait_helpers(fixture.base)
-                shutil.rmtree(fixture.base, ignore_errors=True)
-                # Test doubles of the fixture carry no tools folder.
-                if getattr(fixture, "tools", None):
-                    shutil.rmtree(fixture.tools, ignore_errors=True)
+                remove_fixture(fixture)
     pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {helper_stage_evidence / stage}")
 
 
@@ -2457,7 +2472,7 @@ def test_live_helper_stops_config_io_past_an_axis_cap(axis, tmp_path):
         assert not later, ("config source calls after the cap", later[:5])
     finally:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # Fixture metadata, pinned independently from the product source.
@@ -2799,7 +2814,7 @@ def front_capture(request, tmp_path_factory):
             lock.close()
         if fixture is not None:
             wait_helpers(fixture.base)
-            shutil.rmtree(fixture.base, ignore_errors=True)
+            remove_fixture(fixture)
 
 
 # 이것을 실패시키는 것: TrustMetadata 길이 추가, last-good 뒤 현재 사본 재읽기, 사본별 머리/prefix 읽기 생략.
@@ -2861,6 +2876,7 @@ def child_capture(tmp_path):
         finally:
             wait_helpers(fixture.base)
             shutil.rmtree(fixture.base)
+            remove_fixture(fixture)
 
     def capture_prompt(fixture, base, invalid, timestamps, redraw):
         marker = fixture.store / "marker"
@@ -3349,7 +3365,7 @@ def shell_fd_capture(stage, tmp_path):
         spawn, = [c for c in trace if c.pid == shell and c.name in SPAWNS and c.ret.split(" ")[0] == str(recorder)]
     except BaseException:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
         raise
     finally:
         pipes.close()
@@ -3429,7 +3445,7 @@ def test_helper_fds_after_env(tmp_path):
         assert on_env[-1].index < first_open, ("fd 4 is read before the helper opens anything", on_env)
     finally:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # 이것을 실패시키는 것: 잠금의 adddup2 대상을 5에서 4로 바꾸는 것, collector 복사본을 F_DUPFD(CLOEXEC 없이)로
@@ -3458,7 +3474,7 @@ def test_live_collector_holds_only_fixed_fds(tmp_path):
         assert response[1:] == request[1:] == lock[1:] == (False, "spawn-action"), collector
     finally:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 def env_prompt(tmp_path, env):
@@ -3478,7 +3494,7 @@ def env_prompt(tmp_path, env):
         return trace, fixture, exec_pid(trace, exe, "prompt"), exec_pid(trace, exe, "__refresh-v1")
     except BaseException:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
         raise
 
 
@@ -3519,7 +3535,7 @@ def test_ld_preload_not_loaded_into_helper(tmp_path):
         assert direct.returncode != 0
         assert sorted(p.name.rsplit("-", 1)[0] for p in canaries.iterdir()) == ["__refresh-v1", "prompt"]
     finally:
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # 이것을 실패시키는 것: 도우미가 환경의 XDG_RUNTIME_DIR로 위치를 정하는 것(그 폴더를 연다).
@@ -3539,7 +3555,7 @@ def test_helper_ignores_xdg_runtime_dir_from_env(tmp_path):
         named = [c for c in trace if str(repo) in c.args and c not in reads and c not in writes]
         assert named == [], named
     finally:
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # 이것을 실패시키는 것: 앞단 프레임의 상한 검사를 지우는 것(70 KB 프레임을 쓰고 일부만 들어간다).
@@ -3555,7 +3571,7 @@ def test_oversize_env_block_means_no_env(tmp_path):
         reads = helper_env_reads(trace, helper, inode)
         assert [c.ret for c in reads] == ["0"], reads
     finally:
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # How long after the shell exits its pipes must reach EOF. The helper lives
@@ -3878,4 +3894,4 @@ def test_live_front_command_response_shapes(shape, tmp_path):
                                                    body), counts
     finally:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
