@@ -1654,6 +1654,63 @@ def target_links(path):
     return hops
 
 
+# A collect fixture's untraced warm-up: at most this many prompts.
+COLLECT_WARMUP_MAX = 10
+
+
+def warm_until(prompt, ready, *, least, most):
+    """Run `prompt` `least` times, then on until `ready()` holds, at most
+    `most` times in all; returns how many ran. Past `most` the caller's own
+    assertion on the state fails."""
+    # 이것을 실패시키는 것: least 전에 멈추는 것, ready를 보지 않고 멈추는 것, most를 넘어 도는 것.
+    ran = 0
+    while ran < most:
+        prompt()
+        ran += 1
+        if ran >= least and ready():
+            break
+    return ran
+
+
+def collect_files(store, runtime):
+    """The collection stores and session breakers a collect warm-up leaves."""
+    return (list((store / "collections-v1").glob("*/store")),
+            list((runtime / "collection-control-v1/sessions").glob("*/breaker")))
+
+
+def collect_ready(store, runtime):
+    """A collect warm-up is done when it left a store and a breaker."""
+    stores, breakers = collect_files(store, runtime)
+    return bool(stores) and bool(breakers)
+
+
+# 이것을 실패시키는 것: 저장소나 breaker 하나만 있어도 데우기가 끝났다고 보는 것.
+def test_collect_warm_needs_both_store_and_breaker(tmp_path):
+    store, runtime = tmp_path / "store", tmp_path / "runtime"
+    ready = lambda: collect_ready(store, runtime)
+    assert not ready()
+    (store / "collections-v1/a/store").mkdir(parents=True)
+    assert not ready()
+    (runtime / "collection-control-v1/sessions/s").mkdir(parents=True)
+    (runtime / "collection-control-v1/sessions/s/breaker").write_bytes(b"")
+    assert ready()
+    (store / "collections-v1/a/store").rmdir()
+    assert not ready()
+
+
+# 이것을 실패시키는 것: warm_until이 least 전에 멈추거나, ready를 보지 않거나, most를 넘는 것.
+def test_warm_until_waits_for_ready_within_bounds():
+    def run(ready_at, least, most):
+        calls = []
+        ran = warm_until(lambda: calls.append(1), lambda: len(calls) >= ready_at, least=least, most=most)
+        assert ran == len(calls)
+        return ran
+    assert run(ready_at=1, least=3, most=10) == 3       # ready at once: still the least
+    assert run(ready_at=5, least=3, most=10) == 5       # waits past the least for ready
+    assert run(ready_at=99, least=3, most=10) == 10     # never ready: stops at most
+    assert run(ready_at=1, least=1, most=1) == 1
+
+
 def context_store(runtime, config, state):
     path = Path(runtime) / "bingsu" / "contexts-v2" / "config"
     for index, value in enumerate((os.fsencode(config), os.fsencode(state))):
@@ -1819,21 +1876,28 @@ class HelperStageFixture:
             self.pwd.mkdir()
             subprocess.run(["git", "init", "-q", str(self.pwd)], check=True, env={"PATH": os.environ["PATH"]})
             (self.pwd / "a").write_text("x")
-        # The first prompts publish and, for collect, admit and store a response
-        # untraced: under strace a cold admission can exceed its 20 ms budget.
-        # Command stages: the first round publishes the snapshot, the second
-        # leaves the unit's response (and the session cgroup parent).
-        for _ in range(3 if stage == "collect" else 2 if command else 1):
-            self.prompt()
-            wait_helpers(self.base)
         self.store = context_store(self.env["XDG_RUNTIME_DIR"], os.path.realpath(self.config),
                                    os.path.realpath(Path(self.env["XDG_STATE_HOME"]) / "bingsu"))
+        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"
+
+        def prompt_and_wait():
+            self.prompt()
+            wait_helpers(self.base)
+        # The first prompts publish and, for collect, admit and store a response
+        # untraced: under strace a cold admission can exceed its 20 ms budget,
+        # and on a slow runner so can an untraced one, so collect goes on past
+        # its three prompts until the store and the breaker are there.
+        # Command stages: the first round publishes the snapshot, the second
+        # leaves the unit's response (and the session cgroup parent).
+        if stage == "collect":
+            warm = warm_until(prompt_and_wait, lambda: collect_ready(self.store, runtime), least=3, most=COLLECT_WARMUP_MAX)
+            print(f"collect warm-up prompts: {warm}")
+        else:
+            warm_until(prompt_and_wait, lambda: True, least=2 if command else 1, most=2 if command else 1)
         assert (self.store / "snapshot").is_file(), "warm-up did not publish"
         self.collection = {}
         if stage == "collect":
-            stores = list((self.store / "collections-v1").glob("*/store"))
-            runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"
-            breakers = list((runtime / "collection-control-v1/sessions").glob("*/breaker"))
+            stores, breakers = collect_files(self.store, runtime)
             assert len(stores) == len(breakers) == 1, ("one store and breaker after warm-up", stores, breakers)
             sizes = warm_collection_previous(stores[0], self.prompt, lambda: wait_helpers(self.base))
             self.collection = {"catalog_bytes": (runtime / ".collections.catalog").stat().st_size,

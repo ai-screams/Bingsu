@@ -33,3 +33,18 @@ def test_wait_quiet_requires_helper_exit(tmp_path, monkeypatch):
         finally:
             out, err = child.communicate(timeout=3)
         assert child.returncode == 0, (out, err)
+
+
+# 이것을 실패시키는 것: await_text가 마감 꼴(상태 0, 빈 stdout·stderr)을 재시도하지 않는 것,
+# 상태가 0이 아니거나 stderr가 있는 빈 결과까지 재시도하는 것.
+@pytest.mark.parametrize("bad", [(1, b"", b""), (0, b"", b"error\n")], ids=["status", "stderr"])
+def test_await_text_retries_only_the_deadline_shape(tmp_path, bad):
+    session = snapshot_support.SnapshotSession(tmp_path)
+    good = subprocess.CompletedProcess([], 0, b"B1\x1fTEXT\x1e", b"")
+    deadline = subprocess.CompletedProcess([], 0, b"", b"")
+    results = iter([deadline, deadline, good])
+    session.run = lambda *args, timeout=5: next(results)
+    assert session.await_text("TEXT") == good.stdout
+    results = iter([subprocess.CompletedProcess([], *bad), good])
+    with pytest.raises(AssertionError):
+        session.await_text("TEXT")
