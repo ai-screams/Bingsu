@@ -3571,3 +3571,47 @@ def test_dedicated_front_starts_only_the_named_helper():
     with pytest.raises(AssertionError):
         run(dedicated, PROMPT_EXE, ROOTS, collector_limit=1, entry="cli", helper_exe=EXE)
     run(valid_trace(), EXE, ROOTS, collector_limit=1, entry="cli")
+
+
+STAGE_EXPECTATIONS = HELPER_STAGE_TRACES.parent / "helper-stage-expectations.json"
+EXPECTATION_CELLS = [("x86_64", "gnu"), ("aarch64", "gnu"), ("x86_64", "musl"), ("aarch64", "musl")]
+
+
+def stage_expectations():
+    """Every existing stage formula on the saved plans, on each of the four
+    platforms, as JSON text: the helper's stage, collect and command parts
+    and the supervisor's, for 1, 2 and 12 spawns on each path."""
+    import json
+    from dataclasses import replace
+    from fsbudget.formula import (helper_collect_expected, helper_command_expected, helper_stage_expected,
+                                  supervisor_expected)
+    out = {}
+    for stage in json.loads(HELPER_STAGE_TRACES.read_text()):
+        _, _, plan = helper_stage_case(stage)
+        for arch, libc in EXPECTATION_CELLS:
+            # musl reads no nsswitch.conf; its fclose seeks passwd once.
+            cell = replace(plan, arch=arch, libc=libc, **({"nsswitch_reads": 0, "passwd_seeks": 1} if libc == "musl"
+                                                         else {"nsswitch_reads": plan.nsswitch_reads or 2,
+                                                               "passwd_seeks": 0}))
+            key = f"{stage}/{arch}-{libc}"
+            if stage == "collect":
+                out[key] = {"collect": helper_collect_expected(cell),
+                            "deadline": helper_collect_expected(cell, deadline=True)}
+            elif stage == "command_miss":
+                out[key] = {"command": helper_command_expected(cell)}
+            else:
+                out[key] = {"stage": helper_stage_expected(cell)}
+    for arch, libc in EXPECTATION_CELLS:
+        for atomic in (True, False):
+            for n in (1, 2, 12):
+                out[f"supervisor/{arch}-{libc}/{'atomic' if atomic else 'best-effort'}/{n}"] = supervisor_expected(
+                    n, atomic=atomic, arch=arch, libc=libc)
+    return json.dumps(out, indent=1, sort_keys=True) + "\n"
+
+
+# 새 단계(내장 회차)를 더하는 동안 기존 단계의 식이 한 글자도 바뀌지 않았음을 고정한다. 다시 만들 때는
+# `python -c 'import test_prompt_trace_budget as t; print(t.stage_expectations(), end="")' > <이 파일>`로 쓰고
+# diff를 검토한다. 이것을 실패시키는 것: 공유 원시 연산(clock, dup, fd_listing, neutral 등)의 계수 하나를 바꾸는 것,
+# 기존 단계의 함수에 항 하나를 더하는 것.
+def test_existing_stage_formulas_are_unchanged():
+    assert stage_expectations() == STAGE_EXPECTATIONS.read_text()
