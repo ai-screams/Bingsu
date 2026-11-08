@@ -113,6 +113,9 @@ layout is chosen. Naming it only in a theme's layout does not run the command or
 
 The refresh helper runs commands, and the version commands of language segments, in the background after a
 prompt is drawn; the prompt never waits for a command. A value shows from the next prompt on.
+The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt` beside it. Keep `bingsu`,
+`bingsu-prompt` and `bingsu-collect` in one folder and run init again after replacing them (see
+[Installing and refreshing shell hooks](../README.md#installing-and-refreshing-shell-hooks)).
 
 - Each round runs at most 8 commands, those tried longest ago first. A config may draw at most 32 command and
   language segments, counting those a layout from your own files draws at some width; past that, the config is
