@@ -133,12 +133,13 @@ M6_GATES = {
     # C3, C4 moved the session parent, its listing and the unit rmdir to the
     # helper's formula).
     "GATE-CMD-FSBUDGET": (
-        "In a command round the supervisor's calls by kind equal the formula exactly: its start, and per spawn the "
-        "clock, the relay's /dev/null and folder, and on the atomic path the unit cgroup, its cgroup.kill open and "
-        "the kill; the best-effort path has no cgroup term and puts the relay in its own process group. The relay "
-        "and the target are counted only",
-        "The formula's coefficients hold for 1 to 12 spawns a round, and the supervisor's own call shapes have "
-        "their own kinds, never the helper's",
+        "In a command round the supervisor's calls by kind equal the formula exactly: its start with the "
+        "platform's startup term, and per spawn the clock, the relay's /dev/null and folder, and on the atomic "
+        "path the unit cgroup, its cgroup.kill open and the kill; the best-effort path has no cgroup term and puts "
+        "the relay in its own process group. Its loader exemption ends at its first counted call. The relay and "
+        "the target are counted only",
+        "The formula's coefficients hold for 1 to 12 spawns a round on each of the four platforms, and a supervisor "
+        "call keeps its kind only on the supervisor's own paths, access modes and descriptors",
     ),
     # M6 F1: what a command round leaves behind (plan "decisive gates"; C2, C3).
     "GATE-CMD-REAP": (
@@ -254,8 +255,9 @@ M3D_SUPPLEMENTARY.update({"GATE-CMD-FDS.1-atomic": "M6", "GATE-CMD-FDS.2-no_fd2"
 M3D_SUPPLEMENTARY.update({"GATE-CMD-REAP.1-reaped_first": "M6", "GATE-CMD-REAP.2-nested": "M6",
                           "GATE-CMD-REAP.2-setsid": "M6", "GATE-CMD-REAP.4-backpressure": "M6",
                           "GATE-CMD-REAP.4-backpressure_macos": "M6"})
-# 이것을 실패시키는 것: 감독 어휘 행을 지우고 계수 행 하나로 GATE-CMD-FSBUDGET.2를 닫는 것.
-M3D_SUPPLEMENTARY["GATE-CMD-FSBUDGET.2-vocabulary"] = "M6"
+# 이것을 실패시키는 것: 플랫폼 행 하나로 다른 플랫폼의 계수 칸을 닫는 것.
+M3D_SUPPLEMENTARY.update({f"GATE-CMD-FSBUDGET.2-{c}": "M6" for c in (
+    "vocabulary", "vocabulary_role", "aarch64_gnu", "x86_64_musl", "aarch64_musl")})
 M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-absolute_space": "M6",
                           "GATE-LANG-USER.3-name": "M6",
                           "GATE-LANG-USER.1-cache": "M6", "GATE-LANG-USER.1-git": "M6"})

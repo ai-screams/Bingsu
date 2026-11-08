@@ -1998,7 +1998,7 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
         # target are counted only.
         # 이것을 실패시키는 것: 감독 식에서 시계·생성·cgroup 항 하나를 빼거나 더하는 것, 원자 경로와 최선 노력
         # 경로를 바꿔 세는 것, 감독 호출을 정확 비교에서 빼는 것.
-        supervisor = {"supervisor": supervisor_expected(1, atomic=plan.cgroup_parent)}
+        supervisor = {"supervisor": supervisor_expected(1, atomic=plan.cgroup_parent, arch=plan.arch, libc=plan.libc)}
         evidence.update(supervisor_counts=roles.counts.get("supervisor", {}), supervisor_expected=supervisor["supervisor"],
                         relay_counts=roles.counts.get("relay", {}))
         errors += check({"supervisor": roles.counts.get("supervisor", {})}, supervisor, "exact", ["supervisor"])

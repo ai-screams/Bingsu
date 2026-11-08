@@ -810,28 +810,55 @@ def test_target_prologue_ends_at_a_spawn_and_passes_to_its_child(first):
 
 
 # 감독 어휘(helper_vocabulary): 최선 노력 relay의 setpgid(0, 0)는 pgroup, 시작의 fd 6 F_SETFD가 EBADF여도
-# fd_flags, 단위 cgroup의 mkdirat은 mkdir이다. 같은 모양이라도 다른 인자는 그대로 unknown-fs로 남는다. 이것을
-# 실패시키는 것: 감독에 helper 어휘만 쓰는 것(pgroup·EBADF가 unknown-fs), setpgid 인자 검사를 지우는 것, EBADF 칸을
-# fd 6 밖으로 넓히는 것, 감독 어휘를 helper 역할에도 쓰는 것.
+# fd_flags, 단위 cgroup의 mkdirat은 mkdir이다. 경로·접근 방식·fd를 확인해 종류를 붙이고, 같은 호출이라도 다른 경로나
+# 쓰기 열기는 unknown-fs다. 이것을 실패시키는 것: 감독에 helper 어휘만 쓰는 것(pgroup·EBADF가 unknown-fs, 다른
+# 경로가 받아들여짐), setpgid 인자 검사를 지우는 것, EBADF 칸을 fd 6 밖으로 넓히는 것, 열기의 쓰기 방식·쓰기의 대상·
+# 읽기의 대상·mkdirat의 부모 확인을 지우는 것, 감독 어휘를 helper 역할에도 쓰는 것.
+SUP_CG = "/sys/fs/cgroup/bingsu-cmd-6bcb"
+SUP_UNIT = SUP_CG + "/u00ad"
+SUPERVISOR_SHAPES = [
+    ('1 setpgid(0, 0) = 0', "pgroup"),
+    ('1 setpgid(5, 0) = 0', "unknown-fs"),
+    ('1 fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)', "fd_flags"),
+    ('1 fcntl(7, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)', "unknown-fs"),
+    ('1 fcntl(5</run/u/bingsu/command-0a1f.lock>, F_SETFD, FD_CLOEXEC) = 0', "fd_flags"),
+    ('1 fcntl(5</run/u/bingsu/other.lock>, F_SETFD, FD_CLOEXEC) = 0', "unknown-fs"),
+    (f'1 mkdirat(6<{SUP_CG}>, "u00ad", 0755) = 0', "mkdir"),
+    ('1 mkdirat(6</tmp/x>, "u00ad", 0755) = 0', "unknown-fs"),
+    ('1 openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 7</proc/sys/kernel/random/boot_id>', "openat"),
+    ('1 openat(AT_FDCWD</>, "/fx/forbidden", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 7</fx/forbidden>', "unknown-fs"),
+    ('1 openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 14</dev/null>', "openat"),
+    ('1 openat(AT_FDCWD</>, "/dev/null", O_WRONLY|O_CLOEXEC) = 14</dev/null>', "unknown-fs"),
+    (f'1 openat(7<{SUP_UNIT}>, "cgroup.kill", O_WRONLY|O_NOFOLLOW|O_CLOEXEC) = 8<{SUP_UNIT}/cgroup.kill>', "openat"),
+    (f'1 openat(7<{SUP_UNIT}>, "cgroup.procs", O_WRONLY|O_NOFOLLOW|O_CLOEXEC) = 8<{SUP_UNIT}/cgroup.procs>', "unknown-fs"),
+    (f'1 openat(6<{SUP_CG}>, "u00ad", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 7<{SUP_UNIT}>', "openat"),
+    (f'1 write(8<{SUP_UNIT}/cgroup.kill>, "1", 1) = 1', "write"),
+    (f'1 write(8<{SUP_UNIT}/cgroup.procs>, "1", 1) = 1', "unknown-fs"),
+    ('1 read(7</proc/sys/kernel/random/boot_id>, "", 1) = 0', "read"),
+    ('1 read(7</fx/forbidden>, "", 1) = 0', "unknown-fs"),
+    ('1 chdir("/") = 0', "cwd"),
+    ('1 chdir("/tmp") = 0', "unknown-fs"),
+    ('1 lseek(3</proc/1/maps>, 0, SEEK_CUR) = 2906', "seek"),
+    ('1 lseek(9</etc/passwd>, 2822, SEEK_SET) = 2822', "unknown-fs"),
+]
+
+
 def test_supervisor_vocabulary():
-    from fsbudget.attribute import collector_attribute
-    from fsbudget.classify import helper_kind, supervisor_kind
+    from fsbudget.classify import supervisor_kind
     from fsbudget.strace_parse import parse
-    calls = list(parse("\n".join([
-        '1 setpgid(0, 0) = 0',
-        '1 setpgid(5, 0) = 0',
-        '1 fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)',
-        '1 fcntl(7, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)',
-        '1 mkdirat(6</sys/fs/cgroup/bingsu-cmd-x>, "u0", 0755) = 0',
-    ])))
-    assert [supervisor_kind(c) for c in calls] == ["pgroup", "unknown-fs", "fd_flags", "unknown-fs", "mkdir"]
-    assert [helper_kind(c) for c in calls[:3]] == ["unknown-fs", "unknown-fs", "unknown-fs"]
+    got = [(line, supervisor_kind(call)) for line, call in zip((l for l, _ in SUPERVISOR_SHAPES),
+                                                              parse("\n".join(l for l, _ in SUPERVISOR_SHAPES)))]
+    assert got == SUPERVISOR_SHAPES
+
+
+def test_supervisor_vocabulary_is_the_supervisors_only():
+    from fsbudget.attribute import collector_attribute
     round_ = list(COMMAND_ROUND)
     at = round_.index('12 close(19</proc/12/fd>) = 0') + 1
     round_[at:at] = ['12 fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)', '12 setpgid(0, 0) = 0']
     got = collector_attribute(round_, PINNED_COMMAND, helper_vocabulary=True)
     assert got.counts["supervisor"].get("fd_flags") == 1 and got.counts["supervisor"].get("pgroup") == 1, got.counts
-    # The helper keeps its own vocabulary: the same shapes there stay unknown.
+    # The helper keeps its own vocabulary: the same shape there stays unknown.
     round_[3:3] = ['11 setpgid(0, 0) = 0']
     got = collector_attribute(round_, PINNED_COMMAND, helper_vocabulary=True)
     assert got.counts["helper"].get("unknown-fs") == 1, got.counts

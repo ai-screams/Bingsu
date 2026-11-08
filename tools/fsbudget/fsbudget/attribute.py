@@ -893,10 +893,10 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             continue
         # Only the exact existing loader pairs may be excluded, before the
         # process's first filter. A collector never borrows helper NSS paths.
-        # The helper's and a target command's prologue ends at their first
-        # counted call; later loader-shaped calls are counted.
-        # 이것을 실패시키는 것: 대상의 시작 경계를 두지 않는 것(실행 중 내내 loader 모양 호출이 제외됨).
-        tracked = helper_vocabulary and role == "helper" or role == "command"
+        # The helper's, the supervisor's and a target command's prologue ends
+        # at their first counted call; later loader-shaped calls are counted.
+        # 이것을 실패시키는 것: 대상이나 감독의 시작 경계를 두지 않는 것(실행 중 내내 loader 모양 호출이 제외됨).
+        tracked = helper_vocabulary and role in {"helper", "supervisor"} or role == "command"
         helper_startup = not tracked or process not in started
         if process not in confined and helper_startup and _prologue_call(c, target(c)):
             excluded["loader_prologue"] += 1

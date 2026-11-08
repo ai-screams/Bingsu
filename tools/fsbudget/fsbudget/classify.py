@@ -260,21 +260,78 @@ def helper_kind(c: Call) -> str | None:
     return collector_kind(c)
 
 
+_SUP_PROC = r"/proc/\d+"
+_SUP_CGROUP = r"/sys/fs/cgroup(?:/[^<>]+)?/bingsu-cmd-[0-9a-f]+"
+_SUP_UNIT = _SUP_CGROUP + r"/u[0-9a-f]+"
+_SUP_BOOT_ID = "/proc/sys/kernel/random/boot_id"
+_SUP_WRITE_FLAGS = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE")
+
+
+def _sup_fd(arg: str) -> str | None:
+    """The path strace (-y) names for an fd argument, or None."""
+    m = re.fullmatch(r"(?:\d+|AT_FDCWD)<(.*)>", arg)
+    return m.group(1) if m else None
+
+
+def _sup_open(args: list[str]) -> bool:
+    if len(args) < 3:
+        return False
+    at, name, flags = _sup_fd(args[0]), args[1], args[2]
+    write = any(f in flags.split("|") for f in _SUP_WRITE_FLAGS)
+    if at == "/" and name in (f'"{_SUP_BOOT_ID}"', '"/proc/self"', '"/dev/null"'):
+        return not write and (name != '"/proc/self"' or "O_DIRECTORY" in flags)
+    if at and re.fullmatch(_SUP_PROC, at) and name in ('"ns"', '"timens_offsets"'):
+        return not write
+    if at and re.fullmatch(_SUP_CGROUP, at) and re.fullmatch(r'"u[0-9a-f]+"', name):
+        return not write and "O_DIRECTORY" in flags
+    if at and re.fullmatch(_SUP_UNIT, at) and name == '"cgroup.kill"':
+        return flags.split("|")[0] == "O_WRONLY" and not any(
+            f in flags for f in ("O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND"))
+    return False
+
+
 def supervisor_kind(c: Call) -> str | None:
-    """Command supervisor vocabulary (GATE-CMD-FSBUDGET): the helper's, plus
-    the two shapes only the supervisor makes. A best-effort relay spawn
-    gives the relay its own process group (posix_spawn's setpgid in the
-    child), and the start marks fd 6, the session's cgroup parent, close-on-
-    exec even when the best-effort path handed none (EBADF). Any other shape
-    keeps the helper's kind, so an unreviewed call still lands in
-    `unknown-fs`."""
+    """Command supervisor vocabulary (GATE-CMD-FSBUDGET). The helper's kind
+    names the call, and the supervisor keeps it only for the paths, access
+    modes and descriptors it uses: the clock (boot_id, /proc/self, its ns
+    and timens_offsets), /dev/null read-only, the session's cgroup parent
+    and unit folders, and the unit's cgroup.kill opened write-only and the
+    only file it writes. Every other path or mode is `unknown-fs`, which no
+    formula has. Two shapes only the supervisor makes: a best-effort relay
+    spawn gives the relay its own process group (posix_spawn's setpgid in
+    the child), and the start marks fd 6, the session's cgroup parent,
+    close-on-exec even when the best-effort path handed none (EBADF).
+    Loader-shaped calls before the first counted call are the attribution's
+    to exclude; after it they are `unknown-fs` too."""
     args = split_args(c.args)
     if c.name == "setpgid" and args == ["0", "0"]:
         return "pgroup"
     if (c.name == "fcntl" and len(args) >= 2 and args[0] == "6" and args[1] == "F_SETFD"
             and c.ret.startswith("-1 EBADF")):
         return "fd_flags"
-    return helper_kind(c)
+    k = helper_kind(c)
+    if k is None or k in {"exec", "spawn"}:
+        return k
+    fd = _sup_fd(args[0]) if args else None
+    clock = fd is not None and (fd == _SUP_BOOT_ID or re.fullmatch(_SUP_PROC + r"(?:/ns|/timens_offsets)?", fd))
+    allowed = {
+        "openat": c.name == "openat" and _sup_open(args),
+        "fd_flags": c.name == "fcntl" and args[1:3] == ["F_SETFD", "FD_CLOEXEC"] and fd is not None
+                    and (re.fullmatch(r".*/bingsu/command-[0-9a-f]+\.lock", fd) or re.fullmatch(_SUP_CGROUP, fd)),
+        "read": c.name == "read" and fd == _SUP_BOOT_ID,
+        "fstat": c.name in {"fstat", "statx", "newfstatat"} and fd in {_SUP_BOOT_ID} | (
+                 {fd} if fd and re.fullmatch(_SUP_PROC + "/timens_offsets", fd) else set()),
+        "statfs": c.name == "fstatfs" and bool(clock),
+        "readlink": c.name == "readlinkat" and fd is not None and bool(re.fullmatch(_SUP_PROC + "/ns", fd))
+                    and len(args) > 1 and args[1] in ('"time"', '"time_for_children"'),
+        "mkdir": c.name == "mkdirat" and fd is not None and bool(re.fullmatch(_SUP_CGROUP, fd))
+                 and len(args) > 1 and bool(re.fullmatch(r'"u[0-9a-f]+"', args[1])),
+        "write": c.name == "write" and fd is not None and bool(re.fullmatch(_SUP_UNIT + "/cgroup.kill", fd))
+                 and args[1:] == ['"1"', "1"],
+        "cwd": True,  # helper_kind names only chdir("/") cwd
+        "seek": c.name == "lseek" and fd is not None and bool(re.fullmatch(_SUP_PROC + "/maps", fd)),
+    }
+    return k if allowed.get(k, False) else "unknown-fs"
 
 
 def _placed_at(args: list[str]) -> bool:

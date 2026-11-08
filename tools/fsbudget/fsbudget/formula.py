@@ -956,20 +956,29 @@ def _command_gc(e: dict, p: HelperPlan) -> None:
 SUPERVISOR_SPAWNS_MAX = 8 + 4
 
 
-def supervisor_expected(spawns: int, *, atomic: bool) -> dict[str, int]:
+def supervisor_expected(spawns: int, *, atomic: bool, arch: str, libc: str) -> dict[str, int]:
     """The command supervisor's calls in one round that spawns `spawns`
     relays, every one approved and run to its end: exact. `atomic` is the
     cgroup path (the session's cgroup parent opened); without it every
-    cgroup term is 0. The relay and the target command are their own roles
-    and are only counted (plan "decisive gates", 1382)."""
+    cgroup term is 0. The start adds the platform's stack guard seeks
+    (STARTUP_PRIMITIVES, x86_64 glibc). The aarch64 glibc and musl captures
+    agree term for term; x86_64 musl shares aarch64 musl's startup table.
+    The relay and the target command are their own roles and are only
+    counted (plan "decisive gates", 1382)."""
     if not 1 <= spawns <= SUPERVISOR_SPAWNS_MAX:
         raise ValueError("supervisor spawns: 1 to 12 a round")
-    e: dict[str, int] = {}
-    _add(e, "supervisor_start")
-    _add(e, "clock", spawns)
-    _add(e, "supervisor_spawn", spawns)
-    _add(e, "supervisor_unit_cgroup" if atomic else "supervisor_own_group", spawns)
-    return dict(sorted(e.items()))
+    global _primitives
+    _primitives = {**PRIMITIVES, **_LIBC[libc], **STARTUP_PRIMITIVES[arch, libc]}
+    try:
+        e: dict[str, int] = {}
+        _add(e, "supervisor_start")
+        _add(e, "stack_guard")
+        _add(e, "clock", spawns)
+        _add(e, "supervisor_spawn", spawns)
+        _add(e, "supervisor_unit_cgroup" if atomic else "supervisor_own_group", spawns)
+        return dict(sorted(e.items()))
+    finally:
+        _primitives = PRIMITIVES
 
 
 def helper_command_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:
