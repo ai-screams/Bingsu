@@ -80,8 +80,8 @@ looked for in the shell's folder and the folders above it, up to the repository 
 `interpreter` and `version` are the program that prints the version and its arguments.
 
 The segment runs its interpreter only where one of these files was found, and shows the first word of the first line
-that starts with a digit, after one leading `v`: `deno 2.1.4 (stable)` shows `2.1.4`, `v20.1.0` shows `20.1.0`. A line
-without such a word shows nothing.
+that, after one leading `v`, starts with a digit and reads as a version: `deno 2.1.4 (stable)` shows `2.1.4`,
+`v20.1.0` shows `20.1.0`. A line without such a word shows nothing.
 
 - `interpreter` is looked up as a command's first word: an absolute path (it may hold spaces), or a name without
   spaces searched in the cleaned `PATH`. A relative path such as `./deno` never runs.
