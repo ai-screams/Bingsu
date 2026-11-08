@@ -148,7 +148,7 @@ The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt
 - The first line of the output, at most 4 KB, is the value. A failed command (nonzero exit, timeout) shows nothing
   and is not run again for 10 seconds, unless its keys or the values of its passed variables change.
 - A result is reused while it is newer than `cache` and was made in the same folder with the same command and the
-  same values of the passed variables. Another shell with other values runs the command again.
+  same values of the passed variables, `TERM` aside. Another shell with other values runs the command again.
 - On Linux each command runs in its own cgroup when the system allows it, so it ends with everything it started.
 
 ### match
@@ -189,6 +189,8 @@ the config it reads.
   pattern are published as failures, which show nothing and run again after 10 seconds; results without a pattern
   are kept, and re-matching stored lines waits for a later round. A config with many slow patterns can see some of
   them hidden in every round.
+- Shells in terminals with different `TERM` share command values, so a command whose output depends on `TERM` can
+  briefly show the value made in another terminal.
 - A cached value can be reused within `cache` even if `PATH` now finds another program, a script's contents changed,
   or the folder at the same path was replaced. The default `cache` of 0 is not affected.
 - A repository that has no `.git` entry (a bare repository, or one placed with `GIT_DIR`) does not keep its folders
