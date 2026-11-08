@@ -15,7 +15,7 @@ import sys
 import pytest
 
 # Helpers only: importing test_* names here would collect them twice.
-from test_collector_security import ROOT, assert_acceptance_table, job_platforms, workflow_job
+from test_collector_security import ROOT, assert_acceptance_table, job_platforms, rust_attributes, workflow_job
 
 TABLE = "tests/gate-acceptance.tsv"
 WORKFLOWS = ("ci.yml", "shell.yml")
@@ -235,14 +235,27 @@ M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-abso
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
-# Clauses deferred to a later milestone, with that milestone. Each has a row
-# whose stage is `deferred:<milestone>`; removing one fails the table check.
+# Disposition rows close a clause without CI evidence; none counts as a passed
+# row. Two kinds:
+# - `deferred:<reason>`: the clause waits for a later milestone, or for a
+#   product rule in DEFERRAL_DECISIONS to change. Such a row names no test.
+# - `measured`: the clause is a timing comparison, recorded by a timing test
+#   that CI never asserts (`#[ignore = "timing…"]`); the row names that test.
+# Clauses deferred, with the milestone or the decision they wait for.
 M3D_DEFERRED = {
     "GATE-RUNTIME-ROOT.6": "M5",
-    "GATE-FDS.3": "M6",
-    "GATE-CLOCK-READS.2": "M6",
+    "GATE-FDS.3": "no-write-only-child",
 }
-DEFERRED_MILESTONES = ("M5", "M6")
+DEFERRED_MILESTONES = ("M5",)
+# A deferral that waits for a product rule, by a name that says the rule.
+DEFERRAL_DECISIONS = {
+    "no-write-only-child": "The prompt starts no write-only child and keeps no session state file; "
+                           "reopen when a write-only child is added",
+}
+# Clauses recorded by an ignored timing test, with that test.
+M3D_MEASURED = {
+    "GATE-CLOCK-READS.2": "crates/bingsu/src/commands/command_process.rs::commands::command_process::tests::c2_timings",
+}
 
 # Gates whose rows count a live capture of a release build: their evidence must
 # come from steps that run only in release matrix cells (followups 106).
@@ -275,7 +288,8 @@ def rows(table):
 
 
 def is_deferred(row):
-    return row["stage"].startswith("deferred")
+    """A disposition row (deferred or measured): it is not CI evidence."""
+    return row["stage"].startswith("deferred") or row["stage"] == "measured"
 
 
 def covered(table):
@@ -293,25 +307,53 @@ def without_deferred(table):
     return lines[0] + "".join(line for line, row in zip(lines[1:], rows(table)) if not is_deferred(row))
 
 
-def assert_deferred_rows(table):
-    # 이것을 실패시키는 것: deferred 행 삭제·추가·중복, 목록 밖 마일스톤, 시험을 가진 deferred 행,
-    # gate.clause와 다른 id, 마일스톤 밖 active stage, 보조 행 stage 변경.
+def assert_deferred_rows(table, read=lambda name: (ROOT / name).read_text()):
+    # 이것을 실패시키는 것: 처분 행 삭제·추가·중복, 목록 밖 마일스톤이나 결정 이름, 시험을 가진 deferred 행,
+    # 시험이 없거나 timing ignore가 아닌 measured 행, gate.clause와 다른 id, 마일스톤 밖 active stage, 보조 행
+    # stage 변경.
     ids = [row["id"] for row in rows(table)]
     assert len(ids) == len(set(ids)), sorted({i for i in ids if ids.count(i) > 1})
-    found = {}
+    found, measured = {}, {}
     for row in rows(table):
         if not is_deferred(row):
             assert row["stage"] in ACTIVE_STAGES, (row["id"], "stage", row["stage"])
             if row["id"] in M3D_SUPPLEMENTARY:
                 assert row["stage"] == M3D_SUPPLEMENTARY[row["id"]], (row["id"], "supplementary stage", row["stage"])
             continue
-        milestone = row["stage"].removeprefix("deferred:")
-        assert row["stage"] == "deferred:" + milestone and milestone in DEFERRED_MILESTONES, (row["id"], row["stage"])
-        assert row["id"] == f'{row["gate"]}.{row["clause"]}', (row["id"], "deferred id")
+        assert row["id"] == f'{row["gate"]}.{row["clause"]}', (row["id"], "disposition id")
+        assert row["property"].strip(), (row["id"], "disposition")
+        if row["stage"] == "measured":
+            path, name = row["test"].split("::", 1)
+            base = name.rsplit("::", 1)[-1]
+            assert (row["target"], path.endswith(".rs")) == ("-", True), (row["id"], "measured row names a Rust test")
+            groups = [g for g in rust_attributes(read(path), r"fn\s+" + re.escape(base) + r"\s*\(") if g]
+            assert len(groups) == 1, (row["id"], "measured test declaration", path, base)
+            attributes = [a.strip() for a in groups[0]]
+            assert "test" in attributes, (row["id"], "measured test is not a test")
+            assert any(re.fullmatch(r'ignore\s*=\s*"timing\b[^"]*"', a) for a in attributes), (
+                row["id"], "measured test is not an ignored timing test")
+            measured[row["id"]] = row["test"]
+            continue
+        reason = row["stage"].removeprefix("deferred:")
+        assert row["stage"] == "deferred:" + reason, (row["id"], row["stage"])
+        assert reason in DEFERRED_MILESTONES or reason in DEFERRAL_DECISIONS, (row["id"], "deferral reason", reason)
         assert (row["platform"], row["test"], row["target"]) == ("-", "-", "-"), (row["id"], "deferred row names a test")
-        assert row["property"].strip(), (row["id"], "deferred disposition")
-        found[row["id"]] = milestone
+        found[row["id"]] = reason
     assert found == M3D_DEFERRED, (sorted(found.items()), sorted(M3D_DEFERRED.items()))
+    assert measured == M3D_MEASURED, (sorted(measured.items()), sorted(M3D_MEASURED.items()))
+
+
+def test_disposition_rows_are_listed_apart_from_ci_evidence():
+    # Disposition rows close their clause without CI evidence, so they are
+    # printed apart and never counted as asserted rows.
+    # 이것을 실패시키는 것: 처분 행을 acceptance 표에 넘기는 것(CI 단언으로 셈).
+    table = (ROOT / TABLE).read_text()
+    disposed = {row["id"]: row["stage"] for row in rows(table) if is_deferred(row)}
+    assert disposed.keys() == M3D_DEFERRED.keys() | M3D_MEASURED.keys()
+    assert not disposed.keys() & {row["id"] for row in rows(without_deferred(table))}
+    for row_id, stage in sorted(disposed.items()):
+        print(f"not CI-asserted: {row_id} {stage}")
+
 
 
 def named(table):
@@ -329,7 +371,7 @@ def assert_gate_table(table, texts, *, pending=PENDING, collected=None):
     # 이것을 실패시키는 것: B1 release·runs-on 계약 검사를 primary 게이트에서 생략하는 것.
     assert_b1_contract(texts["shell.yml"])
     assert_deferred_rows(table)
-    required = clauses() - set(pending) - set(M3D_DEFERRED)
+    required = clauses() - set(pending) - set(M3D_DEFERRED) - set(M3D_MEASURED)
     assert_acceptance_table(without_deferred(table), texts, required_ids=frozenset(required) | set(M3D_SUPPLEMENTARY),
                             required_gates=frozenset(GATE_IDS), collected=collected,
                             release_gates=M3D_RELEASE_GATES)
@@ -599,14 +641,21 @@ def test_clause_accounting_rejects_mutations(damage):
         assert_clauses_accounted(table, pending)
 
 
-# 이것을 실패시키는 것: deferred 행 삭제·마일스톤 변경·시험을 가진 deferred 행·고정 목록 밖 deferred 행을 받는 것.
-@pytest.mark.parametrize("damage", ["removed", "milestone", "named-test", "extra", "id", "no-disposition",
-                                    "duplicate", "active-stage", "supplementary-stage"])
+# 이것을 실패시키는 것: 처분 행 삭제·마일스톤이나 결정 이름 변경·시험을 가진 deferred 행·고정 목록 밖 처분 행,
+# 없는 시험이나 timing ignore가 아닌 시험을 가리키는 measured 행을 받는 것.
+@pytest.mark.parametrize("damage", ["removed", "milestone", "decision", "named-test", "extra", "id", "no-disposition",
+                                    "duplicate", "active-stage", "supplementary-stage", "measured-removed",
+                                    "measured-misnamed", "measured-not-ignored", "measured-other-ignore",
+                                    "measured-extra"])
 def test_deferred_rows_reject_mutations(damage, monkeypatch):
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
-    line = next(line for line in table.splitlines(True) if line.startswith("GATE-CLOCK-READS.2\t"))
+    line = next(line for line in table.splitlines(True) if line.startswith("GATE-FDS.3\t"))
+    measured = next(line for line in table.splitlines(True) if line.startswith("GATE-CLOCK-READS.2\t"))
     supplementary = next(line for line in table.splitlines(True) if line.startswith("GATE-EXEC-DEADLINE.2-m3a\t"))
+    path, name = M3D_MEASURED["GATE-CLOCK-READS.2"].split("::", 1)
+    source = (ROOT / path).read_text()
+    read = lambda name: (ROOT / name).read_text()  # noqa: E731
     if damage == "removed":
         table = table.replace(line, "")
     elif damage == "duplicate":
@@ -620,21 +669,40 @@ def test_deferred_rows_reject_mutations(damage, monkeypatch):
         table = table.replace(supplementary, supplementary.replace("\tM3a\n", "\tM3b\n"))
     elif damage == "milestone":
         # The pinned list moves too, so only the milestone rule can refuse it.
-        monkeypatch.setitem(M3D_DEFERRED, "GATE-CLOCK-READS.2", "M7")
-        table = table.replace(line, line.replace("deferred:M6", "deferred:M7"))
+        monkeypatch.setitem(M3D_DEFERRED, "GATE-FDS.3", "M7")
+        table = table.replace(line, line.replace("deferred:no-write-only-child", "deferred:M7"))
+    elif damage == "decision":
+        # A decision name not in DEFERRAL_DECISIONS, with the pinned list moved.
+        monkeypatch.setitem(M3D_DEFERRED, "GATE-FDS.3", "no-write-child")
+        table = table.replace(line, line.replace("deferred:no-write-only-child", "deferred:no-write-child"))
     elif damage == "named-test":
         table = table.replace(line, line.replace("\t-\t-\t-\t", "\tUnix\tcrates/x/src/main.rs::t\tbin:x\t"))
     elif damage == "extra":
-        table += line.replace("GATE-CLOCK-READS.2\tGATE-CLOCK-READS\t2\t", "GATE-CLOCK-READS.1\tGATE-CLOCK-READS\t1\t")
+        table += line.replace("GATE-FDS.3\tGATE-FDS\t3\t", "GATE-FDS.1\tGATE-FDS\t1\t")
     elif damage == "id":
-        monkeypatch.delitem(M3D_DEFERRED, "GATE-CLOCK-READS.2")
-        monkeypatch.setitem(M3D_DEFERRED, "GATE-CLOCK-READS.2-m6", "M6")
-        table = table.replace(line, line.replace("GATE-CLOCK-READS.2\t", "GATE-CLOCK-READS.2-m6\t", 1))
+        monkeypatch.delitem(M3D_DEFERRED, "GATE-FDS.3")
+        monkeypatch.setitem(M3D_DEFERRED, "GATE-FDS.3-m6", "no-write-only-child")
+        table = table.replace(line, line.replace("GATE-FDS.3\t", "GATE-FDS.3-m6\t", 1))
+    elif damage == "measured-removed":
+        table = table.replace(measured, "")
+    elif damage == "measured-misnamed":
+        # The pinned test moves too, so only the declaration rule can refuse it.
+        wrong = M3D_MEASURED["GATE-CLOCK-READS.2"] + "_x"
+        monkeypatch.setitem(M3D_MEASURED, "GATE-CLOCK-READS.2", wrong)
+        table = table.replace(measured, measured.replace(M3D_MEASURED["GATE-CLOCK-READS.2"].removesuffix("_x") + "\t", wrong + "\t"))
+    elif damage in ("measured-not-ignored", "measured-other-ignore"):
+        ignore = '#[ignore = "timing: needs BINGSU_BIN"]\n    fn c2_timings'
+        assert source.count(ignore) == 1
+        swapped = source.replace(ignore, "fn c2_timings" if damage == "measured-not-ignored"
+                                 else '#[ignore = "runs in the cgroup cells"]\n    fn c2_timings')
+        read = lambda name: swapped if name == path else (ROOT / name).read_text()  # noqa: E731
+    elif damage == "measured-extra":
+        table += measured.replace("GATE-CLOCK-READS.2\tGATE-CLOCK-READS\t2\t", "GATE-CLOCK-READS.1\tGATE-CLOCK-READS\t1\t")
     else:
         table = table.replace(line, "\t".join(v if i != 3 else " " for i, v in enumerate(line.split("\t"))))
-    assert table != (ROOT / TABLE).read_text()
+    assert table != (ROOT / TABLE).read_text() or damage in ("measured-not-ignored", "measured-other-ignore")
     with pytest.raises(AssertionError):
-        assert_deferred_rows(table)
+        assert_deferred_rows(table, read)
 
 
 # 이것을 실패시키는 것: 보조 행이 있는 pending 쌍을 거부하는 것(부분 증거를 가리키되 쌍은 열어 둠),
