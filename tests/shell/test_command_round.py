@@ -673,6 +673,25 @@ def published_rounds(session):
     raise AssertionError("five publications in a row were deferred")
 
 
+def rounds_until(session, check, limit=5):
+    """Rounds until `check()` holds; how many ran, at most `limit`.
+    `published_rounds` counts a round as published when it logged no
+    deferral, but a round that decided nothing (its collection answered
+    late, so no language was decided, or it never reached the command
+    round) logs nothing either (m6-T9). A test that needs a value waits for
+    the value itself."""
+    for n in range(1, limit + 1):
+        rounds(session, 1)
+        if check():
+            return n
+    raise AssertionError(f"not there after {limit} rounds")
+
+
+def published(session, value):
+    """Rounds until `value` is in the command response; how many ran."""
+    return rounds_until(session, lambda: value in command_response(session))
+
+
 def counting(counter, value="v"):
     return ["/bin/sh", "-c", f"echo x >> {counter}; echo {value}"]
 
@@ -895,6 +914,27 @@ def test_match_size_limit_rejected_at_compile(tmp_path, _native_boot_required):
                        capture_output=True, timeout=20)
     out = r.stdout + r.stderr
     assert b"E203" in out and b"custom/bad" in out and b"size limit" in out, out
+
+
+# rounds_until은 조건이 설 때까지 회차를 더 돌리고, 다섯 회차 안에 서지 않으면 실패한다. 이것을 실패시키는 것: 첫
+# 회차 뒤 조건을 보지 않고 돌아오는 것(아무것도 정하지 않은 회차 뒤에 값을 단언함), 상한 없이 도는 것, 상한에서
+# 실패하지 않는 것.
+def test_rounds_until_waits_for_the_value():
+    class Session:
+        prompts = 0
+
+        def prompt(self):
+            self.prompts += 1
+
+        def wait_quiet(self, timeout):
+            pass
+
+    session = Session()
+    assert rounds_until(session, lambda: session.prompts >= 3) == 3
+    session = Session()
+    with pytest.raises(AssertionError, match="after 5 rounds"):
+        rounds_until(session, lambda: False)
+    assert session.prompts == 5
 
 
 # tests/command-acceptance.tsv의 행마다 실제 시험이 있다(넘긴 행은 "-"와 넘긴 Task). 이것을 실패시키는
