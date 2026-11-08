@@ -136,8 +136,9 @@ M6_GATES = {
         "In a command round the supervisor's calls by kind equal the formula exactly: its start with the "
         "platform's startup term, and per spawn the clock, the relay's /dev/null and folder, and on the atomic "
         "path the unit cgroup, its cgroup.kill open and the kill; the best-effort path has no cgroup term and puts "
-        "the relay in its own process group. Its loader exemption ends at its first counted call. The relay and "
-        "the target are counted only",
+        "the relay in its own process group. Its loader exemption ends at its first counted call. A builtin probe "
+        "is one such spawn; a builtin fast round's supervisor, started with nothing to run, makes its exec and the "
+        "session lock's close-on-exec only. The relay and the target are counted only",
         "The formula's coefficients hold for 1 to 12 spawns a round on each of the four platforms, and a supervisor "
         "call keeps its kind only on the supervisor's own paths, access modes and descriptors",
     ),
@@ -237,7 +238,8 @@ M3D_SUPPLEMENTARY["GATE-SHELL-EXTERNAL.1-empty_path"] = "M4"
 M3D_SUPPLEMENTARY.update({"GATE-CMD-GRANT.2-pipe": "M6", "GATE-CMD-SPAWN.1-not_run": "M6",
                           "GATE-CMD-SPAWN.2-lock": "M6"})
 # 이것을 실패시키는 것: 명령 회차 단계 행(실행·캐시 적중·화면 밖 단위)을 지우고 기존 단계만으로 GATE-FS-HELPER.1을 닫는 것.
-M3D_SUPPLEMENTARY.update({f"GATE-FS-HELPER.1-{stage}": "M6" for stage in ("command_miss", "command_hit", "command_not_run")})
+M3D_SUPPLEMENTARY.update({f"GATE-FS-HELPER.1-{stage}": "M6" for stage in ("command_miss", "command_hit", "command_not_run",
+                                                                           "builtin_probe", "builtin_fast")})
 # 이것을 실패시키는 것: merged-/usr `/bin/env` 별칭 행을 지우고 CLI 주 행 하나로 W411을 닫는 것.
 M3D_SUPPLEMENTARY["GATE-EXPLAIN.4-alias"] = "M6"
 # 이것을 실패시키는 것: Rust 프로필 환경 행이나 버전 없는 첫 줄 행을 지우고 주 행 하나로 닫는 것.
@@ -258,6 +260,8 @@ M3D_SUPPLEMENTARY.update({"GATE-CMD-REAP.1-reaped_first": "M6", "GATE-CMD-REAP.2
 # 이것을 실패시키는 것: 플랫폼 행 하나로 다른 플랫폼의 계수 칸을 닫는 것.
 M3D_SUPPLEMENTARY.update({f"GATE-CMD-FSBUDGET.2-{c}": "M6" for c in (
     "vocabulary", "vocabulary_role", "aarch64_gnu", "x86_64_musl", "aarch64_musl")})
+# 이것을 실패시키는 것: 내장 단계의 감독 행을 지우고 단위 회차 행 하나로 GATE-CMD-FSBUDGET.1을 닫는 것.
+M3D_SUPPLEMENTARY.update({f"GATE-CMD-FSBUDGET.1-{stage}": "M6" for stage in ("builtin_probe", "builtin_fast")})
 M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-absolute_space": "M6",
                           "GATE-LANG-USER.3-name": "M6",
                           "GATE-LANG-USER.1-cache": "M6", "GATE-LANG-USER.1-git": "M6"})
@@ -965,7 +969,8 @@ def test_profile_condition_needs_a_profile_axis():
 HELPER_STAGE_ROWS = ("GATE-FS-HELPER.1", "GATE-FS-HELPER.1-publish", "GATE-FS-HELPER.1-collect",
                      "GATE-FS-HELPER.1-last_good", "GATE-FS-HELPER.1-recover",
                      "GATE-FS-HELPER.1-command_miss", "GATE-FS-HELPER.1-command_hit",
-                     "GATE-FS-HELPER.1-command_not_run")
+                     "GATE-FS-HELPER.1-command_not_run", "GATE-FS-HELPER.1-builtin_probe",
+                     "GATE-FS-HELPER.1-builtin_fast")
 
 
 # 이것을 실패시키는 것: 단계 행 중 하나(와 그 CI 선택·단언)를 지워도 표 검사가 통과하는 것.

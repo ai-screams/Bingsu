@@ -1878,10 +1878,11 @@ class HelperStageFixture:
         if builtin:
             self.tools.mkdir(mode=0o755)
             # The language's folder first; the shell itself comes from /usr/bin.
-            self.env["PATH"] = f"{self.tools / 'bin'}:{COMMAND_PATH}"
             if stage == "builtin_probe":
+                self.env["PATH"] = f"{self.tools / 'bin'}:{COMMAND_PATH}"
                 self.language = builtin_install(self.tools / "bin", "node")
             else:
+                self.env["PATH"] = COMMAND_PATH
                 self.language = pyenv_layout(self.tools, self.env)
         # The helper-stage formulas count the `bingsu prompt` front; the helper
         # is the same process under either entry. child_capture traces the
@@ -1928,7 +1929,7 @@ class HelperStageFixture:
                                "collector_components": path_names(Path(self.collector).parent),
                                "collector_bytes": Path(self.collector).stat().st_size}
         self.command = {}
-        if command:
+        if command or builtin:
             # A unit off the screen never ran: no response, no lookup.
             responses = list((self.store / "collections-v1").glob("*/store/command"))
             assert len(responses) == int(stage != "command_not_run"), ("command responses after warm-up", responses)
@@ -1939,12 +1940,29 @@ class HelperStageFixture:
                             "cgroup_procs_bytes": len(procs.read_bytes()),
                             "cgroup_parent": session_cgroup_parent(
                                 self.script, Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"),
-                            "path_names": path_names(COMMAND_PATH), "target_names": path_names("/usr/bin"),
+                            "path_names": sum(path_names(f) for f in self.env["PATH"].split(":")) if builtin
+                            else path_names(COMMAND_PATH),
+                            "target_names": path_names(self.language.parent if stage == "builtin_probe" else
+                                                       self.tools / "pyenv" / "shims") if builtin
+                            else path_names("/usr/bin"),
                             "target_links": target_links("/usr/bin/true") if stage == "command_miss" else 0,
                             # The repository scan walks the shell's folder by its names
                             # (U-24): a canonical folder, so no link is followed.
                             "shell_names": path_names(self.pwd)}
             assert os.path.realpath(self.pwd) == str(self.pwd), ("a canonical shell folder", self.pwd)
+            if builtin:
+                # One catalog: the collection's (the same file, read once).
+                assert self.command.pop("catalog_bytes") == self.collection["catalog_bytes"]
+                # The probe's node is no manager's: classify stats each shim
+                # home bingsu knows (version_manager::unsupported: asdf,
+                # mise's data folder and /usr/local/share/mise, volta, nodenv,
+                # goenv; ASDF_DIR and MISE_SHIMS_DIR add one each when set).
+                # pyenv's shim folder matches first; python3 is a link to
+                # python3.12 inside its bin.
+                assert not {"ASDF_DIR", "MISE_SHIMS_DIR"} & set(self.env), "two more shim homes"
+                self.command.update(path_folders=len(self.env["PATH"].split(":")),
+                                    manager_homes=6 if stage == "builtin_probe" else 0,
+                                    bin_links=int(stage == "builtin_fast"))
         if stage == "builtin_probe":
             # A new node (its identity changed): the cached probe no longer
             # matches, so the traced round runs it again.
@@ -2098,20 +2116,43 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
 
 def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
     from fsbudget.formula import (helper_stage_expected, helper_collect_expected, helper_command_expected,
-                                  supervisor_expected)
-    from fsbudget.gate import check, check_collect, check_command
+                                  helper_builtin_expected, supervisor_expected)
+    from fsbudget.gate import check, check_builtin, check_collect, check_command
     if evidence is None:
         evidence = {}
-    status = collector_exit(lines, collector) if stage == "collect" else None
+    builtin = stage.startswith("builtin_")
+    status = collector_exit(lines, collector) if stage == "collect" or builtin else None
     evidence["collector_exit"] = status
     collectors, roles = measured_helper_attribution(lines, exe, collector)
     evidence["role_counts"] = roles.counts
-    assert collectors == int(stage == "collect"), ("collector spawns", collectors)
+    assert collectors == int(stage == "collect" or builtin), ("collector spawns", collectors)
     command_roles = {"supervisor", "relay", "command"} & set(roles.counts)
     # 이것을 실패시키는 것: 명령 단계에서 감독·relay·대상 역할이 비는 것(그 호출이 helper에 섞임), 명령 없는
     # 단계나 실행할 것 없는 명령 단계에 그 역할이 생기는 것.
-    assert command_roles == ({"supervisor", "relay", "command"} if stage == "command_miss" else set()), command_roles
-    if stage == "command_miss":
+    # Builtin stages: their exact supervisor check below fails on a missing
+    # or extra role's calls.
+    assert builtin or command_roles == ({"supervisor", "relay", "command"} if stage == "command_miss"
+                                        else set()), command_roles
+    if builtin:
+        # GATE-FS-HELPER.1 builtin stages; GATE-CMD-FSBUDGET.1: the probe's
+        # supervisor spawns one relay as a unit round's does, the fast path's
+        # starts with nothing to run (idle). A collector deadline leaves no
+        # answer and no decision: only the prefix is judged, and the stage
+        # tries again.
+        # 이것을 실패시키는 것: 내장 단계의 감독 호출을 정확 비교에서 빼는 것, fast 감독을 단위 회차 식으로 보는 것,
+        # 수집 마감 회차를 발행 회차로 세는 것.
+        assert status in (0, 75), ("unexpected collector exit", status)
+        full = status == 0
+        errors = check_builtin(roles, helper_builtin_expected(plan), stage, full=full, evidence=evidence)
+        fast = stage == "builtin_fast"
+        supervisor = {"supervisor": supervisor_expected(0 if fast else 1, atomic=plan.cgroup_parent, arch=plan.arch,
+                                                        libc=plan.libc, idle=fast)}
+        evidence.update(supervisor_counts=roles.counts.get("supervisor", {}), supervisor_expected=supervisor["supervisor"],
+                        relay_counts=roles.counts.get("relay", {}))
+        if full:
+            errors += check({"supervisor": roles.counts.get("supervisor", {})}, supervisor, "exact", ["supervisor"])
+        published = full
+    elif stage == "command_miss":
         errors = check_command(roles, helper_command_expected(plan), evidence=evidence)
         # GATE-CMD-FSBUDGET.1: the supervisor's calls, exact for this round's
         # one spawn on the path the host gave (the atomic path with the
@@ -2172,7 +2213,8 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     # Traces live outside the product fixture: cleanup must never erase a
     # failed attempt or earlier deadline attempts. --basetemp locates these
     # artifacts for the controller; each invocation needs its own basetemp.
-    for attempt in range(1, (COLLECT_ATTEMPTS if stage == "collect" else 1) + 1):
+    collecting = stage == "collect" or stage.startswith("builtin_")
+    for attempt in range(1, (COLLECT_ATTEMPTS if collecting else 1) + 1):
         artifacts = helper_stage_evidence / stage / f"attempt-{attempt}"
         artifacts.mkdir(parents=True)
         trace = artifacts / "trace.strace"
@@ -2190,7 +2232,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
             published = check_helper_capture(stage, lines, str(fixture.inst.exe), fixture.collector,
                                              fixture.plan(libc), evidence=evidence)
             evidence["publish_attempt"] = attempt if published else None
-            if stage != "collect" or published:
+            if not collecting or published:
                 return
         except BaseException as error:
             evidence["failure"] = str(error)

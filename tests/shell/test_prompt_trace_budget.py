@@ -3574,6 +3574,7 @@ def test_dedicated_front_starts_only_the_named_helper():
 
 
 STAGE_EXPECTATIONS = HELPER_STAGE_TRACES.parent / "helper-stage-expectations.json"
+BUILTIN_STAGE_NAMES = ["builtin_probe", "builtin_fast"]
 EXPECTATION_CELLS = [("x86_64", "gnu"), ("aarch64", "gnu"), ("x86_64", "musl"), ("aarch64", "musl")]
 
 
@@ -3587,6 +3588,8 @@ def stage_expectations():
                                   supervisor_expected)
     out = {}
     for stage in json.loads(HELPER_STAGE_TRACES.read_text()):
+        if stage in BUILTIN_STAGE_NAMES:
+            continue  # new with these stages: their own tests below
         _, _, plan = helper_stage_case(stage)
         for arch, libc in EXPECTATION_CELLS:
             # musl reads no nsswitch.conf; its fclose seeks passwd once.
@@ -3615,3 +3618,109 @@ def stage_expectations():
 # 기존 단계의 함수에 항 하나를 더하는 것.
 def test_existing_stage_formulas_are_unchanged():
     assert stage_expectations() == STAGE_EXPECTATIONS.read_text()
+
+
+# Builtin stages (D3a), captured on the atomic path (privileged aarch64 glibc
+# container): the probe runs node (the version stub) once its identity
+# changed; the fast path decides pyenv's 3.12.1 with nothing to run.
+def supervisor_pid(lines):
+    return next(l.split()[0] for l in lines if '"__command-v1"' in l and "execve(" in l)
+
+
+def helper_pid(lines):
+    return next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
+
+
+# 이것을 실패시키는 것: 내장 회차 식이 저장한 캡처와 종류별로 정확히 맞지 않는 것(shim 집 stat 하나, 정규 경로
+# readlinkat 하나, bin 링크 하나), 잠금 해제 경계를 요구하지 않는 것, probe의 설치를 요구하지 않는 것, fast의
+# 설치를 받는 것, 감독 식(probe 1회, fast idle)을 정확 비교에서 빼는 것, 수집 마감 회차를 발행으로 세는 것.
+@pytest.mark.parametrize("stage,damage", [
+    ("builtin_probe", None), ("builtin_fast", None),
+    ("builtin_probe", "missing-shim-home"), ("builtin_probe", "extra-canonical-readlink"),
+    ("builtin_probe", "no-unlock"), ("builtin_probe", "no-install"), ("builtin_probe", "supervisor-extra-clock"),
+    ("builtin_probe", "collector-deadline"), ("builtin_fast", "collector-deadline"),
+    ("builtin_probe", "deadline-without-decision"),
+    ("builtin_fast", "extra-bin-link"), ("builtin_fast", "fast-installs"), ("builtin_fast", "idle-supervisor-fd6"),
+    ("builtin_fast", "no-unlock")])
+def test_builtin_stage_traces_match_the_formula(stage, damage):
+    import re
+    lines, collector, plan = helper_stage_case(stage)
+    helper, supervisor = helper_pid(lines), supervisor_pid(lines)
+    def find(pid, pattern):
+        return next(i for i, l in enumerate(lines) if l.split()[0] == pid and re.search(pattern, l))
+    if damage == "missing-shim-home":
+        del lines[find(helper, r'statx\(AT_FDCWD</>, "/fx/home-t/\.volta/bin"')]
+    elif damage == "extra-canonical-readlink":
+        at = find(helper, r'readlinkat\(AT_FDCWD</>, "/fx/tools"')
+        lines.insert(at, lines[at])
+    elif damage == "no-unlock":
+        at = find(helper, r'/store/snapshot\.lock>, LOCK_UN')
+        lines[at] = lines[at].replace("snapshot.lock>, LOCK_UN", "snapshot.lock>, LOCK_SH")
+    elif damage == "no-install":
+        at = find(helper, r'renameat\(\d+<[^>]*>, "\.command\.stage", \d+<[^>]*>, "command"\) = 0$')
+        lines[at] = lines[at].replace(" = 0", " = -1 EACCES (Permission denied)")
+    elif damage == "supervisor-extra-clock":
+        at = find(supervisor, r'"/proc/sys/kernel/random/boot_id"')
+        lines.insert(at, lines[at])
+    elif damage in ("collector-deadline", "deadline-without-decision"):
+        if damage == "deadline-without-decision":
+            # After a deadline the round decides nothing: its calls are not judged.
+            del lines[find(helper, r'statx\(AT_FDCWD</>, "/fx/home-t/\.volta/bin"')]
+        collector_pid = next(l.split()[0] for l in lines if '"__collect-v1"' in l and "execve(" in l)
+        at = find(collector_pid, r"\+\+\+ exited with 0 \+\+\+")
+        lines[at] = lines[at].replace("exited with 0", "exited with 75")
+    elif damage == "extra-bin-link":
+        at = find(helper, r'readlinkat\(6</fx/tools/pyenv/versions/3\.12\.1/bin>, "python3"')
+        lines[at:at] = [lines[at - 1], lines[at]]
+    elif damage == "fast-installs":
+        at = find(helper, r'"\.breaker\.stage", \d+<[^>]*>, "breaker"\) = 0$') + 1
+        lines.insert(at, f'{helper}  renameat(7</fx/x>, ".command.stage", 7</fx/x>, "command") = 0')
+    elif damage == "idle-supervisor-fd6":
+        at = find(supervisor, r'fcntl\(5<')
+        lines.insert(at + 1, f"{supervisor}  fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)")
+    if damage is None:
+        assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is True
+    elif damage in ("collector-deadline", "deadline-without-decision"):
+        # No answer, no decision: the prefix alone is judged and the stage retries.
+        assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
+    else:
+        with pytest.raises(AssertionError):
+            budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+
+
+# The reviewed builtin shape; any other is refused before a formula is given.
+# 이것을 실패시키는 것: 내장 계획 검사의 조건 하나를 지우는 것(빈 응답, cgroup.procs 크기, 셸·PATH·대상 축,
+# PATH 이름 수, 대상 링크, probe의 shim 집, fast의 bin 링크, collect 없음, 명령 단계와 섞임, 내장 단계 둘).
+@pytest.mark.parametrize("stage,change", [
+    ("builtin_probe", {"command_bytes": 63}), ("builtin_probe", {"cgroup_procs_bytes": 0}),
+    ("builtin_probe", {"cgroup_procs_bytes": 4096}),
+    ("builtin_probe", {"shell_names": 0}), ("builtin_probe", {"path_folders": 0}), ("builtin_probe", {"target_names": 0}),
+    ("builtin_probe", {"path_names": 1}), ("builtin_probe", {"target_links": 1}), ("builtin_probe", {"manager_homes": 0}),
+    ("builtin_fast", {"bin_links": 0}), ("builtin_fast", {"manager_homes": 6}), ("builtin_probe", {"bin_links": 1}),
+    ("builtin_probe", {"stages": ("unchanged", "builtin_probe")}),
+    ("builtin_probe", {"stages": ("publish", "collect", "builtin_probe")}),
+    ("builtin_probe", {"stages": ("unchanged", "collect", "builtin_probe", "command_miss")}),
+    ("builtin_probe", {"stages": ("unchanged", "collect", "builtin_probe", "builtin_fast")})])
+def test_builtin_plan_shape_is_reviewed(stage, change):
+    from dataclasses import replace
+    from fsbudget.formula import helper_builtin_expected
+    _, _, plan = helper_stage_case(stage)
+    helper_builtin_expected(plan)
+    with pytest.raises(ValueError):
+        helper_builtin_expected(replace(plan, **change))
+
+
+# x86_64 glibc: the stack guard's two maps seeks in the helper and the
+# supervisor of the saved aarch64 builtin captures (a platform replay).
+# 이것을 실패시키는 것: 내장 단계에서 helper나 감독의 플랫폼 시작 항을 빼는 것.
+@pytest.mark.parametrize("stage", BUILTIN_STAGE_NAMES)
+def test_builtin_stack_guard_exact(stage):
+    import re
+    from dataclasses import replace
+    lines, collector, plan = helper_stage_case(stage)
+    for pid in (helper_pid(lines), supervisor_pid(lines)):
+        at = next(i for i, l in enumerate(lines) if l.split()[0] == pid and re.search(r"close\((\d+)</proc/\d+/maps>", l))
+        fd = re.search(r"close\((\d+)</proc/", lines[at])[1]
+        lines[at:at] = [f'{pid} lseek({fd}</proc/{pid}/maps>, 0, SEEK_CUR) = 2906',
+                        f'{pid} lseek({fd}</proc/{pid}/maps>, 2822, SEEK_SET) = 2822']
+    assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, replace(plan, arch="x86_64")) is True

@@ -190,3 +190,66 @@ def check_command(attribution, expected, *, evidence=None):
             if (mode == "exact" and g != w) or (mode == "le" and g > w):
                 errors.append(f"{phase}.{kind}: measured {g}, formula {w} ({mode})")
     return errors
+
+
+def check_builtin(attribution, expected, stage, *, full=True, evidence=None):
+    """A builtin language round (helper_builtin_expected). The helper's main
+    thread is `prefix` until the collection's snapshot unlock, then
+    `builtin` until the GC's first clock: after the command response's
+    install (probe), or after the breaker's save (fast, which installs
+    nothing). The collection supervisor thread is `supervisor`; the
+    collector's and supervisor's pre-exec setup is `prefix`. `prefix` and
+    `builtin` are exact, `supervisor` and `gc` upper bounds. With `full`
+    false (a collector deadline: no answer, so no language decision) only
+    the prefix is judged."""
+    from collections import Counter
+    from .classify import split_args
+
+    calls = attribution.helper_calls
+    mains = [c.pid for c, kind in calls if kind == "exec" and c.ret == "0"]
+    if len(mains) != 1:
+        return ["builtin: expected one helper exec"]
+    main = mains[0]
+    threads = [int(c.ret.split()[0]) for c, kind in calls
+               if kind == "thread" and c.pid == main and c.ret.split()[0].isdigit()]
+    if len(threads) != 2:
+        return ["builtin: expected watchdog and supervisor threads"]
+    supervisor = threads[1]
+    measured = {phase: Counter() for phase in expected}
+    phase, saved, installed = "prefix", False, False
+    for c, kind in calls:
+        args = split_args(c.args)
+        if c.pid == supervisor:
+            measured["supervisor"][kind] += 1
+            continue
+        if c.pid != main:
+            measured["prefix"][kind] += 1
+            continue
+        # 이것을 실패시키는 것: GC 경계를 첫 시계로 잡는 것(breaker 마무리의 시계에서 끊겨 결정이 GC 상한으로 샘),
+        # probe에서 설치 전 시계를 경계로 보는 것, fast에서 breaker 저장 전 시계를 경계로 보는 것.
+        if (phase == "builtin" and c.name in OPEN_ALIASES and '"/proc/sys/kernel/random/boot_id"' in args[:2]
+                and (installed if stage == "builtin_probe" else saved)):
+            phase = "gc"
+        measured[phase][kind] += 1
+        if (phase == "prefix" and c.name == "flock" and c.ret == "0" and len(args) == 2
+                and args[0].endswith("/snapshot.lock>") and args[1] == "LOCK_UN"):
+            phase = "builtin"
+        elif phase == "builtin" and c.name in {"renameat", "renameat2"} and c.ret == "0" and len(args) >= 4:
+            saved |= args[1] == '".breaker.stage"' and args[3] == '"breaker"'
+            installed |= saved and args[1] == '".command.stage"' and args[3] == '"command"'
+    if evidence is not None:
+        evidence.update(phase_counts=measured, phase_expected=expected, installed=installed, saved=saved)
+    # No unlock, no breaker save or no install leaves the next phase's calls
+    # in an exact one, so no separate check is needed (and a fast round's
+    # install is a counted rename the formula has not).
+    errors = []
+    for phase, want in expected.items():
+        if not full and phase != "prefix":
+            continue
+        mode = "exact" if phase in ("prefix", "builtin") else "le"
+        got = measured[phase]
+        for kind in sorted(set(got) | set(want)):
+            g, w = got.get(kind, 0), want.get(kind, 0)
+            if (mode == "exact" and g != w) or (mode == "le" and g > w):
+                errors.append(f"{phase}.{kind}: measured {g}, formula {w} ({mode})")
+    return errors

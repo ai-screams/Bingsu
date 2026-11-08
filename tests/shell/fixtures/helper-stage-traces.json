@@ -1,4 +1,116 @@
 {
+ "builtin_fast": {
+  "collector": "/usr/local/bin/bingsu-collect",
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     79
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 5,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "bin_links": 1,
+   "breaker_bytes": 275,
+   "buf": 2147479552,
+   "catalog_bytes": 678,
+   "cgroup_parent": true,
+   "cgroup_procs_bytes": 12,
+   "collector_bytes": 1315472,
+   "collector_components": 3,
+   "command_bytes": 441,
+   "context_components": 6,
+   "exe_components": 3,
+   "exe_link_components": 4,
+   "libc": "gnu",
+   "manager_homes": 0,
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "passwd_seeks": 0,
+   "path_folders": 2,
+   "path_names": 8,
+   "previous_bytes": 619,
+   "response_bytes": 619,
+   "runtime_components": 5,
+   "sequence_bytes": 96,
+   "shell_names": 4,
+   "snapshot_bytes": 18592,
+   "stages": [
+    "unchanged",
+    "collect",
+    "builtin_fast"
+   ],
+   "state_components": 5,
+   "target_links": 0,
+   "target_names": 6
+  },
+  "sha256": "4a8521fa65366f4e3c178f6b5044afbcf99c391f5f2f907cda9135ef12f6e9b4"
+ },
+ "builtin_probe": {
+  "collector": "/usr/local/bin/bingsu-collect",
+  "plan": {
+   "arch": "aarch64",
+   "ax": {
+    "B": [
+     77
+    ],
+    "D": 0,
+    "E_b": [],
+    "E_n": [],
+    "F": 1,
+    "L": 0,
+    "M": 0,
+    "P": 5,
+    "R": 3,
+    "acl": false,
+    "lock_fd_inherited": false
+   },
+   "bin_links": 0,
+   "breaker_bytes": 275,
+   "buf": 2147479552,
+   "catalog_bytes": 678,
+   "cgroup_parent": true,
+   "cgroup_procs_bytes": 12,
+   "collector_bytes": 1315472,
+   "collector_components": 3,
+   "command_bytes": 442,
+   "context_components": 6,
+   "exe_components": 3,
+   "exe_link_components": 4,
+   "libc": "gnu",
+   "manager_homes": 6,
+   "marker_bytes": 208,
+   "nsswitch_reads": 2,
+   "passwd_reads": 1,
+   "passwd_seeks": 0,
+   "path_folders": 2,
+   "path_names": 7,
+   "previous_bytes": 551,
+   "response_bytes": 551,
+   "runtime_components": 5,
+   "sequence_bytes": 96,
+   "shell_names": 4,
+   "snapshot_bytes": 18588,
+   "stages": [
+    "unchanged",
+    "collect",
+    "builtin_probe"
+   ],
+   "state_components": 5,
+   "target_links": 0,
+   "target_names": 5
+  },
+  "sha256": "a2b8ebb9cfbf3e663c3300085c57ff03f0b49e2383033f362b9f15c5b58ecd0b"
+ },
  "collect": {
   "collector": "/home/tester/target/release/bingsu-collect",
   "helper": {

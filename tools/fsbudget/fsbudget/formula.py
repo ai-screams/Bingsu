@@ -111,8 +111,12 @@ def synthetic_helper_expected(ax: HelperAxes, co: Coeffs, changed: bool, buf: in
 
 
 HelperStage = Literal["unchanged", "publish", "collect", "failure-last-good", "failure-recover",
-                      "command_not_run", "command_hit", "command_miss"]
+                      "command_not_run", "command_hit", "command_miss", "builtin_probe", "builtin_fast"]
 COMMAND_STAGES = ("command_not_run", "command_hit", "command_miss")
+# Builtin language rounds (D3a): a screen with dir and git and one language
+# segment, no config unit. The probe runs the language's command found on
+# PATH; the fast path decides pyenv's selected version without running.
+BUILTIN_STAGES = ("builtin_probe", "builtin_fast")
 # Linux read(2)/write(2) transfer at most MAX_RW_COUNT bytes per call. Outside
 # collection metering the release helper reads and writes each store file in
 # one call of its full length (read_exact_len, write_fd), plus one EOF read.
@@ -212,6 +216,23 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # cgroup.kill open and write, cgroup.events open and one pread, the
     # unit's own listing, then rmdir.
     "cgroup_unit": {"openat": 3, "fstat": 2, "write": 1, "read": 1, "seek": 1, "getdents": 2, "unlinkat": 1},
+    # builtin_probe::plan after exec_path::lookup_open_in: the found file's
+    # canonical path (one readlinkat per name of the target folder and the
+    # file), version_manager::classify (statx of the folder the lookup
+    # stopped in and of the file's canonical folder; each shim home of the
+    # managers bingsu knows that is absent, `manager_homes`), and for a run
+    # the checked file's own metadata.
+    "builtin_found_classify": {"fstat": 2},
+    "builtin_found_identity": {"fstat": 1},
+    # The same for pyenv's shim folder: the lookup's folder, the canonical
+    # folder and PYENV_ROOT/shims are one folder, each stat once.
+    "builtin_pyenv_classify": {"fstat": 3},
+    # version_manager::choose -> pyenv installed: PYENV_ROOT opened by its
+    # path, then versions, <v> and bin no-follow (each with its fstat), the
+    # executable's no-follow open and its fstat and statx; each link inside
+    # bin (`bin_links`) is an ELOOP open and its readlinkat.
+    "manager_install": {"openat": 5, "fstat": 6},
+    "manager_link": {"openat": 1, "readlink": 1},
     # The command supervisor (GATE-CMD-FSBUDGET), after its loader prologue:
     # its exec, then close-on-exec on the session lock (fd 5) and on fd 6,
     # the session's cgroup parent (EBADF on the best-effort path, still an
@@ -224,6 +245,7 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # its listing, the unit's rmdir and the reclaim of earlier rounds are
     # the helper's (cgroup_probe, cgroup_parent, cgroup_listing, cgroup_unit).
     "supervisor_start": {"exec": 1, "fd_flags": 2},
+    "supervisor_idle": {"exec": 1, "fd_flags": 1},
     "supervisor_spawn": {"spawn": 1, "openat": 1, "cwd": 1},
     "supervisor_unit_cgroup": {"mkdir": 1, "openat": 2, "write": 1},
     "supervisor_own_group": {"pgroup": 1},
@@ -256,6 +278,8 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
     "fd_listing": {"openat": 1, "getdents": 2, "fd_flags": 1},
     # libc::open(O_CLOEXEC) of /proc/self/cgroup and of the own cgroup folder.
     "cgroup_probe": {"kernel_release": 1, "openat": 4, "read": 2, "statfs": 1, "mkdir": 1, "fd_flags": 2},
+    # libc::open(O_CLOEXEC) of PYENV_ROOT by its path.
+    "manager_install": {"openat": 5, "fstat": 6, "fd_flags": 1},
 }
 
 # Parent-side successful posix_spawn exec-error channel, per libc.
@@ -382,6 +406,13 @@ class HelperPlan:
     # Names of the shell's folder below "/": the command round's repository
     # scan walks them (U-24).
     shell_names: int = 0
+    # Builtin stages: the PATH folders the round's one lookup walks (the
+    # names of all of them are `path_names`), the version managers' shim
+    # homes a found command is checked against when none matched, and the
+    # links inside a manager's bin folder its executable follows.
+    path_folders: int = 0
+    manager_homes: int = 0
+    bin_links: int = 0
 
 
 def read_to_end_calls(n: int) -> int:
@@ -535,12 +566,27 @@ def _check_plan(p: HelperPlan) -> None:
     if (p.arch, p.libc) not in STARTUP_PRIMITIVES:
         raise ValueError("unreviewed helper architecture/libc")
     ax = p.ax
-    base = [s for s in p.stages if s != "collect" and s not in COMMAND_STAGES]
+    base = [s for s in p.stages if s != "collect" and s not in COMMAND_STAGES and s not in BUILTIN_STAGES]
     command = [s for s in p.stages if s in COMMAND_STAGES]
+    builtin = [s for s in p.stages if s in BUILTIN_STAGES]
     if (len(base) != 1 or base[0] not in {"unchanged", "publish", "failure-last-good", "failure-recover"}
             or len(p.stages) != len(set(p.stages)) or not set(p.stages) <= set(HelperStage.__args__)
-            or len(command) > 1):
+            or len(command) > 1 or len(builtin) > 1):
         raise ValueError("stages: one non-collect stage, optionally collect or one command stage")
+    # A base other than unchanged, or a command stage beside it, is refused by
+    # the collect and command checks.
+    if builtin and (
+            "collect" not in p.stages
+            or p.command_bytes < 64 or not 0 < p.cgroup_procs_bytes < 4096
+            or min(p.shell_names, p.path_folders, p.target_names) < 1 or p.path_names < p.path_folders
+            or p.target_links
+            or (builtin[0] == "builtin_probe") != (p.manager_homes > 0)
+            or (builtin[0] == "builtin_fast") != (p.bin_links > 0)):
+        # Reviewed: a revalidated snapshot, a collection with the dir and git
+        # screen, one language whose response the warm-up published; the
+        # probe's command found as a regular file (no link), the fast path's
+        # interpreter behind a link inside pyenv's bin.
+        raise ValueError("unreviewed builtin shape")
     if command and (
             base != ["unchanged"] or "collect" in p.stages
             or (command[0] == "command_not_run") != (p.command_bytes == 0)
@@ -798,7 +844,11 @@ def _publish(e: dict, p: HelperPlan) -> None:
 
 
 def _breaker_finish_and_gc(e: dict, p: HelperPlan) -> None:
-    ctx, edges = p.context_components, 3
+    _breaker_finish(e, p)
+    _collection_gc(e, p)
+
+
+def _breaker_finish(e: dict, p: HelperPlan) -> None:
     # Ticket::finish after supervision: clock, session lock, checks around the
     # record update, then save.
     _add(e, "clock")
@@ -808,6 +858,10 @@ def _breaker_finish_and_gc(e: dict, p: HelperPlan) -> None:
     _ticket_verify(e)
     _add(e, "same_name")
     _breaker_save(e, p)
+
+
+def _collection_gc(e: dict, p: HelperPlan) -> None:
+    ctx, edges = p.context_components, 3
     # collection_gc::reclaim after the refresh: clock, catalog probe open,
     # runtime check, GC lock, catalog, the walk to the one store (no name
     # check on its last folder), its lock, a listing of response, previous and
@@ -956,7 +1010,7 @@ def _command_gc(e: dict, p: HelperPlan) -> None:
 SUPERVISOR_SPAWNS_MAX = 8 + 4
 
 
-def supervisor_expected(spawns: int, *, atomic: bool, arch: str, libc: str) -> dict[str, int]:
+def supervisor_expected(spawns: int, *, atomic: bool, arch: str, libc: str, idle: bool = False) -> dict[str, int]:
     """The command supervisor's calls in one round that spawns `spawns`
     relays, every one approved and run to its end: exact. `atomic` is the
     cgroup path (the session's cgroup parent opened); without it every
@@ -965,13 +1019,17 @@ def supervisor_expected(spawns: int, *, atomic: bool, arch: str, libc: str) -> d
     agree term for term; x86_64 musl shares aarch64 musl's startup table.
     The relay and the target command are their own roles and are only
     counted (plan "decisive gates", 1382)."""
-    if not 1 <= spawns <= SUPERVISOR_SPAWNS_MAX:
-        raise ValueError("supervisor spawns: 1 to 12 a round")
+    # A builtin fast round starts the supervisor before the collection's
+    # answer decides there is nothing to run (D3a Q-C): it marks the session
+    # lock close-on-exec, sees the grant pipe's EOF and exits. Only that
+    # stage asks for it (`idle`); a unit round never spawns none.
+    if idle != (spawns == 0) or not 0 <= spawns <= SUPERVISOR_SPAWNS_MAX:
+        raise ValueError("supervisor spawns: 1 to 12 a round, 0 only idle")
     global _primitives
     _primitives = {**PRIMITIVES, **_LIBC[libc], **STARTUP_PRIMITIVES[arch, libc]}
     try:
         e: dict[str, int] = {}
-        _add(e, "supervisor_start")
+        _add(e, "supervisor_idle" if idle else "supervisor_start")
         _add(e, "stack_guard")
         _add(e, "clock", spawns)
         _add(e, "supervisor_spawn", spawns)
@@ -995,6 +1053,109 @@ def helper_command_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:
         gc: dict[str, int] = {}
         _command_gc(gc, plan)
         return {"prefix": dict(sorted(prefix.items())), "gc": dict(sorted(gc.items()))}
+    finally:
+        _primitives = PRIMITIVES
+
+
+def _builtin_round(e: dict, p: HelperPlan, stage: str) -> None:
+    """After the collection's snapshot unlock, on the helper's main thread,
+    through the command response's install (probe) or the decision (fast):
+    exact. The order the trace shows: the breaker's finish, the grant (the
+    shell folder's identity and repository scan, the round's one PATH
+    lookup, the language's decision), the probe's admission and publication,
+    Round::end's reclaim of the session parent."""
+    _breaker_finish(e, p)
+    e["fstat"] = e.get("fstat", 0) + 1
+    _add(e, "folder_root")
+    _add(e, "folder_name", p.shell_names)
+    e["fstat"] += p.shell_names + 1
+    # exec_path::lookup_open_in: every PATH folder's walk, the found
+    # folder's walk again and the file, then its canonical path.
+    _add(e, "folder_root", p.path_folders + 1)
+    _add(e, "folder_name", p.path_names + p.target_names)
+    _add(e, "target_file")
+    e["readlink"] = e.get("readlink", 0) + p.target_names + 1
+    if stage == "builtin_fast":
+        _add(e, "builtin_pyenv_classify")
+        _add(e, "manager_install")
+        _add(e, "manager_link", p.bin_links)
+        if p.cgroup_parent:
+            _add(e, "cgroup_listing")  # no unit ran: nothing to reclaim
+        return
+    _add(e, "builtin_found_classify")
+    e["fstat"] += p.manager_homes
+    _add(e, "builtin_found_identity")
+    # publish_entries -> admit_commands into the store the collection
+    # admitted: its response and previous are read, not probed absent.
+    edges = 3
+    _registration_open(e, p.catalog_bytes)
+    _reserve_walk(e, p.context_components + edges)
+    _catalog_commit(e, p.catalog_bytes)
+    _add(e, "dup")
+    _add(e, "context_mkdir", edges)
+    _add(e, "open", edges)
+    _add(e, "check_directory", edges)
+    _add(e, "same_name", edges)
+    _close_only_lock(e, create=True)
+    _add(e, "metadata")
+    _catalog_commit(e, p.catalog_bytes)
+    _store_verify(e, edges)
+    _read_response(e, p.response_bytes)
+    _read_response(e, p.previous_bytes)
+    _store_verify(e, edges)
+    _add(e, "absent_slot", 2)  # .response.stage, .stage-request
+    # publish_commands, as command_miss's.
+    _store_verify(e, edges)
+    _read_response(e, p.command_bytes)
+    _add(e, "absent_slot")
+    _metered_stage(e, p.command_bytes)
+    _store_verify(e, edges)
+    _add(e, "metadata")
+    _add(e, "same_name")
+    _staged_verify(e)
+    _add(e, "rename")
+    if p.cgroup_parent:
+        _add(e, "cgroup_listing")
+        _add(e, "cgroup_unit")
+
+
+def helper_builtin_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:
+    """A builtin language round. `prefix` (the main thread until the
+    collection's snapshot unlock, and the pre-exec setup of the collector
+    and the command supervisor) is exact: the unchanged revalidation, the
+    collection's admission, breaker begin and spawn, the command lookup,
+    session and prepare (neutral folder, supervisor spawn). `supervisor` (the
+    collection's supervisor thread) is an upper bound as in collect.
+    `builtin` (after the unlock until the GC's first clock) is exact; `gc`
+    (the collection GC over the store, its command response included) is an
+    upper bound (its 20 ms budget)."""
+    _check_plan(plan)
+    stage = next((s for s in plan.stages if s in BUILTIN_STAGES), None)
+    if stage is None:
+        raise ValueError("builtin plan required")
+    global _primitives
+    _primitives = {**PRIMITIVES, **_LIBC[plan.libc], **STARTUP_PRIMITIVES[plan.arch, plan.libc]}
+    try:
+        prefix = _helper_stage_expected(replace(plan, stages=("unchanged",)))
+        _collect_prefix(prefix, plan)
+        _command_lookup(prefix, plan)
+        _command_session(prefix, plan)
+        _add(prefix, "neutral")
+        _add(prefix, "dup")
+        _add(prefix, "dup", 1 + int(plan.cgroup_parent))
+        _add(prefix, "fd_listing")
+        _add(prefix, "command_spawn")
+        _add(prefix, "dup", 3)
+        supervisor: dict[str, int] = {}
+        _add(supervisor, "clock")
+        _publish(supervisor, plan)
+        builtin: dict[str, int] = {}
+        _builtin_round(builtin, plan, stage)
+        gc: dict[str, int] = {}
+        _collection_gc(gc, plan)
+        _read_checked(gc, plan.command_bytes)
+        return {phase: dict(sorted(v.items())) for phase, v in
+                (("prefix", prefix), ("supervisor", supervisor), ("builtin", builtin), ("gc", gc))}
     finally:
         _primitives = PRIMITIVES
 
