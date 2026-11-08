@@ -129,6 +129,14 @@ M6_GATES = {
         "A round that draws no builtin language and whose every unit hits the cache starts no supervisor and runs "
         "nothing",
     ),
+    # M6 F1: the descriptors and environment a command round hands down (plan
+    # "decisive gates"; B1, B3, C2, C3 R2).
+    "GATE-CMD-FDS": (
+        "The supervisor starts with exactly {0,1,2,3,4,5} (and 6, the session's cgroup parent, on the atomic path) "
+        "and an empty environment, whatever the helper held without close-on-exec",
+        "The relay's target holds exactly {0,1,2}, its stderr /dev/null even when the relay started without fd 2",
+        "A script target holds exactly {0,1,2} and the sealed memfd its interpreter reads",
+    ),
     # M6 E2: `config check --explain` and W411 on the executor's own rule.
     "GATE-EXPLAIN": (
         "No environment value appears in the explanation, only names and their origins",
@@ -219,6 +227,8 @@ M3D_SUPPLEMENTARY.update({f"GATE-FS-FRONT.1-command_{shape}": "M6" for shape in 
 M3D_SUPPLEMENTARY["GATE-FS-FRONT.1-env_segment"] = "M6"
 # 이것을 실패시키는 것: 공백 이름·공백 절대 경로 행이나 PATH 이름 양성 대조 행을 지우고 상대 경로 행 하나로 GATE-LANG-USER.3을 닫는 것,
 # cache 행이나 git 행을 지우고 cache 없는 행 하나로 GATE-LANG-USER.1을 닫는 것.
+# 이것을 실패시키는 것: 원자 경로·fd 2 없는 중계 행을 지우고 주 행 하나로 GATE-CMD-FDS.1·.2를 닫는 것.
+M3D_SUPPLEMENTARY.update({"GATE-CMD-FDS.1-atomic": "M6", "GATE-CMD-FDS.2-no_fd2": "M6"})
 M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-absolute_space": "M6",
                           "GATE-LANG-USER.3-name": "M6",
                           "GATE-LANG-USER.1-cache": "M6", "GATE-LANG-USER.1-git": "M6"})
@@ -353,9 +363,9 @@ def test_gate_rows_exist_and_run_in_ci():
 
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
-    # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate, the 8 D3a language gates, D3b's display gate
-    # and D3c-2's user language gate.
-    assert len(GATE_IDS) == 32
+    # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate, the 8 D3a language gates, D3b's display gate,
+    # D3c-2's user language gate and F1's descriptor gate.
+    assert len(GATE_IDS) == 33
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     assert_clauses_accounted(table)
