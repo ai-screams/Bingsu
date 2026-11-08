@@ -594,3 +594,20 @@ def test_read_measurement_matches_the_prepared_tree(tmp_path, declared, environm
     # The real tree of this checkout declares both.
     real = product.read_measurement(SOURCE.parents[1])
     assert "ClockUse::Deadline" in real and "product_reader_clock,None,None)" in real
+
+
+# 고정 하네스가 복사한 `commands` 모듈을 rustc로 컴파일할 때, 그 트리의 bingsu가 의존하는 CLI 라이브러리
+# (bingsu-match)만 extern으로 넘긴다. 의존하지 않는 옛 base 트리에는 넘기지 않고, 이름이 [dependencies] 밖(features,
+# 주석)에만 있으면 의존으로 보지 않는다. 이것을 실패시키는 것: 늘 넘기는 것(base 빌드에 그 rlib이 없어 KeyError),
+# 넘기지 않는 것(후보 빌드가 `bingsu_match`를 못 찾음), [dependencies] 밖의 이름까지 세는 것.
+def test_cli_libraries_follow_the_trees_dependencies(tmp_path):
+    def tree(manifest):
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        (root / "crates/bingsu").mkdir(parents=True)
+        (root / "crates/bingsu/Cargo.toml").write_text(manifest)
+        return root
+    with_match = '[package]\nname = "bingsu"\n\n[dependencies]\nbingsu-core = { path = "../bingsu-core" }\nbingsu-match = { path = "../bingsu-match" }\n\n[features]\nx = []\n'
+    base = '[package]\nname = "bingsu"\n\n[dependencies]\nbingsu-core = { path = "../bingsu-core" }\n\n[features]\n# bingsu-match = later\nprobe = ["dep:bingsu-match"]\n'
+    assert product.cli_libraries(tree(with_match)) == ("bingsu_match",)
+    assert product.cli_libraries(tree(base)) == ()
+    assert product.cli_libraries(Path(SOURCE).resolve().parents[1]) == ("bingsu_match",)

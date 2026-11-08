@@ -10,8 +10,11 @@
 //!   `detect_files`);
 //! - this shell's original environment digest (the keep list, `LC_*` and
 //!   the unit's `env_allow`) is the one the entry ran with;
-//! - the entry succeeded (a failure shows nothing) and carries no `match`
-//!   pattern (the prompt does not apply patterns; C4b ruling Q4);
+//! - the entry succeeded (a failure shows nothing) and its pattern digest
+//!   is the one of the unit's `match` in this snapshot (all zeros without
+//!   one): the helper applied that pattern, and the prompt never runs one
+//!   (U-9c). An entry matched under an older `match` shows nothing until the
+//!   helper applies the new one;
 //! - for a config unit, the marker makes the snapshot's units eligible for
 //!   display (the security review's C4b condition). A builtin probe has no
 //!   such condition (D3 ruling Q3).
@@ -37,6 +40,7 @@ use super::{
     builtin::Language,
     plan::{self, Environ},
     response::{Binding, Response, Status},
+    wire::pattern_digest,
 };
 use crate::{config::compile::ExecUnit, handoff::Origin, snapshot::Clock};
 use alloc::vec::Vec;
@@ -93,7 +97,7 @@ pub fn value<'r>(prompt: &mut Prompt<'r>, unit: &ExecUnit, origin: Origin) -> Op
     let entry = prompt.response.entry(origin, &unit.id)?;
     let policy = plan::entry_digest(&runnable);
     (entry.status == Status::Ok
-        && entry.pattern == [0; 32]
+        && entry.pattern == pattern_digest(unit.pattern.as_deref())
         && entry.completed_at < prompt.entry.now
         && entry.policy == policy
         && entry.environment == prompt.env_digest(&runnable.env_allow))

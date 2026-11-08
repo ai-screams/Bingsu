@@ -277,6 +277,20 @@ fn hostile_classes_through_text() {
 // (one_mib 행).
 #[test]
 fn hostile_classes_through_command_output() {
+    through_command(None);
+}
+
+// C4c: 같은 값을 `match`가 고른 캡처로 보낸다. 패턴은 helper가 정제한 첫 줄에 적용하므로 캡처 안의 escape·bidi도
+// 이미 빠져 있고, 고른 값은 프롬프트가 읽는 앞부분으로 잘린 뒤 같은 정제·자르기로 그려진다. 4 KB 넘는 첫 줄
+// (one_mib)도 같다. helper의 bind(bingsu 바이너리 안)와 같은 순서를 여기서 따라 하고, bind 자체는
+// commands::command_match 시험이 고정한다. 이것을 실패시키는 것: 정제 전 stdout에 패턴을 적용하는 것(캡처에
+// escape가 남아 응답 인코딩이 거부), 캡처를 쓰지 않는 것(값이 비어 그려지지 않음).
+#[test]
+fn hostile_classes_through_a_match_capture() {
+    through_command(Some(r"^v=(.*)$"));
+}
+
+fn through_command(pattern: Option<&str>) {
     use bingsu_core::{
         collection::wire::BuildId,
         command::response::{self, Binding, Entry, Response},
@@ -327,7 +341,23 @@ fn hostile_classes_through_command_output() {
             Some(i) => [&stdout[..i], b"/tmp/x".as_slice(), &stdout[i + 6..]].concat(),
             None => stdout,
         };
-        let value = response::first_line(&stdout);
+        let value = match pattern {
+            None => response::first_line(&stdout),
+            Some(p) => {
+                // The helper's bind: the pattern on the sanitized first line,
+                // the pick cut to what the prompt reads.
+                let raw = response::first_line(&[b"v=".as_slice(), &stdout].concat());
+                let picked = bingsu_match::Matcher::new(p)
+                    .unwrap()
+                    .value(&raw)
+                    .to_owned();
+                bingsu_core::field::Clean::read_prefix(
+                    &picked,
+                    bingsu_core::field::CUSTOM_TEXT_CELLS,
+                )
+                .to_owned()
+            }
+        };
         let published = Response {
             binding: binding.clone(),
             entries: vec![Entry {

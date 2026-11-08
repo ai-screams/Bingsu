@@ -40,6 +40,8 @@ pub(crate) mod command_cgroup;
 #[allow(unsafe_code)]
 pub(crate) mod command_grant;
 #[cfg(unix)]
+pub(crate) mod command_match;
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) mod command_process;
 #[cfg(unix)]

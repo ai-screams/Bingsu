@@ -811,6 +811,21 @@ READ_MEASUREMENT = r'''
 '''
 
 
+# The CLI's own library crates the copied `commands` module may use, with
+# the dependency key and the extern name: a tree that does not depend on one
+# (an older base tip) does not get it, and a tree that does fails loudly if
+# the build did not produce it.
+CLI_LIBRARIES = (("bingsu-match", "bingsu_match"),)
+
+
+def cli_libraries(source):
+    """The extern names of `CLI_LIBRARIES` that `source`'s bingsu depends on."""
+    manifest = (Path(source) / "crates/bingsu/Cargo.toml").read_text()
+    deps = manifest.split("\n[dependencies]\n", 1)[1].split("\n[", 1)[0]
+    return tuple(extern for key, extern in CLI_LIBRARIES
+                 if re.search(rf"(?m)^{re.escape(key)}\s*=", deps))
+
+
 def build_context(binary):
     binary = Path(binary).resolve()
     source = next((p for p in binary.parents if (p / "Cargo.toml").is_file()), ROOT)
@@ -961,7 +976,7 @@ def prepare(binary):
     # 이것을 실패시키는 것: collector git 모듈의 bytes-parser extern을 누락하는 것 (--prepare).
     for name in ("bingsu_core", "bingsu_identity", "libc", "gix_config", "gix_ref", "gix_index",
                  "gix_object", "gix_pack", "gix_error", "gix_zlib", "gix_ignore",
-                 "gix_attributes", "gix_utils", "gix_revwalk"):
+                 "gix_attributes", "gix_utils", "gix_revwalk", *cli_libraries(source)):
         command += ["--extern", f"{name}={deps[name]}"]
     env = {**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": "0.0.0"}
     run(command, env=env, cwd=source, timeout=120)

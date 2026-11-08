@@ -92,6 +92,7 @@ fn full() -> Input {
             approved_by: Vec::new(),
             shown_at: Vec::new(),
             not_run: None,
+            pattern: None,
         };
         let r = plan::runnable(&unit).unwrap();
         entries.push(Entry {

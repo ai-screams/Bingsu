@@ -260,7 +260,7 @@ def prepare(binary):
                     .replace("@MARKER@", M3B.broker_marker(source)))
     fixture = directory / "git-product"
     command = ["rustc", "--edition=2024", "--cfg", "test", "-O", "-C", "lto=fat", "-C", "embed-bitcode=yes", str(rust), "-o", str(fixture), "-L", f"dependency={binary.parent / 'deps'}"]
-    for name in ("bingsu_core", "bingsu_identity", "libc"):
+    for name in ("bingsu_core", "bingsu_identity", "libc", *M3B.cli_libraries(source)):
         command += ["--extern", f"{name}={deps[name]}"]
     if cross:
         command += ["--target", triple]

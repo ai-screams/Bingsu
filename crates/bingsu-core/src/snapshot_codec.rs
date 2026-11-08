@@ -1,4 +1,4 @@
-//! BNGCFG11: bounded CompiledConfig codec with an explicit fact schema version.
+//! BNGCFG12: bounded CompiledConfig codec with an explicit fact schema version.
 //!
 //! HEAD, COMMON, INDEX (one entry per variant), the variants, the band names.
 //! The snapshot header checksum covers HEAD, COMMON and INDEX; each variant and
@@ -49,11 +49,11 @@ const MAX_ALLOC: usize = 64 * 1024 * 1024;
 pub const HEAD: usize = 20;
 /// Offset, length and CRC of one variant, then four reserved zero bytes.
 const ENTRY: usize = 16;
-const MAGIC: &[u8; 8] = b"BNGCFG11";
-const VERSION: u16 = 11;
+const MAGIC: &[u8; 8] = b"BNGCFG12";
+const VERSION: u16 = 12;
 /// CRC of one variant or of the name block.
 pub fn section_sum(section: &[u8]) -> [u8; 4] {
-    crate::snapshot::crc32c(&[b"bingsu-compiled-v11\0", section])
+    crate::snapshot::crc32c(&[b"bingsu-compiled-v12\0", section])
 }
 struct Reader<'a> {
     rest: &'a [u8],
@@ -526,6 +526,7 @@ impl Wire for ExecUnit {
         self.approved_by.put(o);
         self.shown_at.put(o);
         self.not_run.put(o);
+        self.pattern.put(o);
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Self {
@@ -537,6 +538,7 @@ impl Wire for ExecUnit {
             approved_by: Wire::get(r)?,
             shown_at: Wire::get(r)?,
             not_run: Wire::get(r)?,
+            pattern: Wire::get(r)?,
         })
     }
 }
@@ -803,6 +805,7 @@ impl Wire for NotRun {
             }
             Self::UnknownBand => 3u8.put(o),
             Self::ShellNotAllowed => 4u8.put(o),
+            Self::MatchInvalid => 5u8.put(o),
         }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Error> {
@@ -812,6 +815,7 @@ impl Wire for NotRun {
             2 => Self::UnsafeFile { key: Wire::get(r)? },
             3 => Self::UnknownBand,
             4 => Self::ShellNotAllowed,
+            5 => Self::MatchInvalid,
             _ => return Err(Error::Tag),
         })
     }
@@ -1604,6 +1608,11 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
         // could stand for the language's.
         if matches!(&u.policy, ExecPolicy::Language { detect_files, .. } if detect_files.is_empty())
         {
+            return Err(Error::Shape);
+        }
+        // `match` is a command key; a language entry keeps the version word
+        // and never a pattern's pick.
+        if matches!(&u.policy, ExecPolicy::Language { .. }) && u.pattern.is_some() {
             return Err(Error::Shape);
         }
         for (_, o) in &u.origins {
