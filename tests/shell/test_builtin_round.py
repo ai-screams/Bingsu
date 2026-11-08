@@ -16,7 +16,7 @@ from test_command_round import (
     _native_boot_required,  # noqa: F401 (fixture)
     command_response,
     forget_results,
-    published_rounds,
+    published,
     ready,
     rounds,
     runs,
@@ -96,7 +96,7 @@ def test_builtin_probe_runs_once_and_is_cached(tmp_path, _native_boot_required):
     session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
     ready(session)
     Path(f"{node}.runs").unlink(missing_ok=True)
-    published_rounds(session)
+    published(session, b"18.20.4")
     assert b"18.20.4" in command_response(session)
     assert counted(node) == 1, counted(node)
     rounds(session, 3)
@@ -125,7 +125,7 @@ def test_explain_shows_what_a_round_would_decide(tmp_path, _native_boot_required
     assert "builtin languages (--explain;" in before, before
     assert "node  not decided: no folder facts" in before, before
     ready(session)
-    published_rounds(session)
+    published(session, b"3.12.1")
     Path(f"{node}.runs").unlink(missing_ok=True)
     after = explain(session)
     assert "python  shows 3.12.1 without running anything" in after, after
@@ -153,7 +153,7 @@ def test_builtin_version_is_drawn_for_its_own_shell(tmp_path, _native_boot_requi
     node = install(session.base / "bin", "node")
     session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
     ready(session)
-    published_rounds(session)
+    published(session, b"18.20.4")
     assert b"18.20.4" in command_response(session)
     assert b"18.20.4" in session.prompt()
     session.wait_quiet(timeout=8)
@@ -170,7 +170,7 @@ def test_builtin_probe_publishes_only_a_version(tmp_path, _native_boot_required)
     Path(f"{node}.out").write_text("not-a-version-line\n")
     session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
     ready(session)
-    published_rounds(session)
+    published(session, b"node")
     assert counted(node) >= 1
     response = command_response(session)
     assert b"node" in response, response
@@ -184,7 +184,7 @@ def test_builtin_fast_value_is_written_once(tmp_path, _native_boot_required):
     session = session_with(tmp_path, "python")
     shim, real = pyenv_fast(session)
     ready(session)
-    published_rounds(session)
+    published(session, b"3.12.1")
     assert b"3.12.1" in command_response(session)
     store = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
     first = [(p, p.stat().st_ino, p.stat().st_mtime_ns) for p in store.rglob("collections-v1/*/store/command")]
@@ -211,7 +211,7 @@ def test_builtin_fast_value_survives_a_bad_neutral_folder(tmp_path, _native_boot
     (folder / "left").write_text("x")
     folder.chmod(0o500)
     Path(f"{node}.runs").unlink(missing_ok=True)
-    published_rounds(session)
+    published(session, b"3.12.1")
     assert b"3.12.1" in command_response(session)
     assert counted(node) == 0, counted(node)
     assert b"neutral folder is not empty" in session.log(), session.log()
@@ -231,7 +231,7 @@ def test_builtin_versions_survive_invalid_marker(tmp_path, _native_boot_required
     record = session.prompt()
     assert b"degraded:trust-invalid" in record, record
     session.wait_quiet(timeout=8)
-    published_rounds(session)
+    published(session, b"18.20.4")
     assert counted(node) >= 1, counted(node)
     assert b"18.20.4" in command_response(session)
 
@@ -254,7 +254,7 @@ def test_builtin_probe_never_runs_from_the_repository(tmp_path, _native_boot_req
     ready(session)
     for f in (inside, outside):
         Path(f"{f}.runs").unlink(missing_ok=True)
-    published_rounds(session)
+    published(session, b"18.20.4")
     assert counted(inside) == 0, "an executable inside the repository ran"
     assert counted(outside) >= 1
     assert b"18.20.4" in command_response(session)
@@ -282,7 +282,7 @@ def test_builtin_probe_skips_an_outer_repository_bin(tmp_path, _native_boot_requ
     ready(session)
     for f in (above, outside):
         Path(f"{f}.runs").unlink(missing_ok=True)
-    published_rounds(session)
+    published(session, b"18.20.4")
     assert counted(above) == 0, "a node in an outer repository's bin ran"
     assert counted(outside) >= 1
     assert b"18.20.4" in command_response(session)
@@ -296,7 +296,7 @@ def test_language_only_layout_is_collected(tmp_path, _native_boot_required):
     node = install(session.base / "bin", "node")
     session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
     ready(session)
-    published_rounds(session)
+    published(session, b"18.20.4")
     assert b"18.20.4" in command_response(session)
 
 
@@ -413,7 +413,7 @@ def test_rustup_round_resolves_the_shell_folder(tmp_path, _native_boot_required)
     session.env["PATH"] = f"{proxy.parent}:{session.env['PATH']}"
     ready(session)
     seen = session.log().count(RESOLVED)
-    published_rounds(session)
+    published(session, b"1.80.0")
     assert b"1.80.0" in command_response(session)
     assert session.log().count(RESOLVED) > seen, session.log()
     assert counted(proxy) == 0 and counted(rustc) == 0
@@ -462,7 +462,7 @@ def test_user_language_only_layout_draws_its_version_where_its_files_are(tmp_pat
     (session.pwd / "deno.json").write_text("{}\n")
     session.put(user_language(interpreter))
     ready(session)
-    published_rounds(session)
+    published(session, b"1.46.3")
     assert runs(counter) >= 1
     shown = session.prompt()
     session.wait_quiet(timeout=8)
@@ -518,7 +518,7 @@ def test_user_language_interpreter_is_looked_up_as_a_command(tmp_path, interpret
     interpreter = interpreter.format(base=session.base)
     session.put(user_language(interpreter))
     ready(session)
-    published_rounds(session)
+    published(session, b"custom/deno")
     assert (runs(counter) >= 1) == runs_it, (interpreter, runs(counter))
     assert (b"1.46.3" in session.prompt()) == runs_it
     session.wait_quiet(timeout=8)
@@ -540,7 +540,7 @@ def test_user_language_cache_hit_runs_nothing(tmp_path, _native_boot_required):
     (session.pwd / "deno.json").write_text("{}\n")
     session.put(user_language(interpreter, "cache='30s'\n"))
     ready(session)
-    published_rounds(session)
+    published(session, b"1.46.3")
     before = runs(counter)
     assert before >= 1
     rounds(session, 3)
