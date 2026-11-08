@@ -1874,9 +1874,9 @@ class HelperStageFixture:
         self.put("collect" if stage == "collect" else stage if command or builtin else config, template=template)
         if command:
             self.env["PATH"] = COMMAND_PATH
-        self.tools = self.base / "tools"
+        self.tools = None
         if builtin:
-            self.tools.mkdir(mode=0o755)
+            self.tools = tools_outside_repository(Path.home())
             # The language's folder first; the shell itself comes from /usr/bin.
             if stage == "builtin_probe":
                 self.env["PATH"] = f"{self.tools / 'bin'}:{COMMAND_PATH}"
@@ -2018,6 +2018,45 @@ class HelperStageFixture:
             nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc,
             passwd_seeks=passwd_seeks(libc, os.getuid()),
             arch=platform.machine(), **self.collection, **self.command)
+
+
+def tools_outside_repository(parent):
+    """A new folder for a builtin stage's language tools, under `parent` and
+    outside every git repository. The round leaves PATH folders inside the
+    shell's repository, or any folder above it holding `.git`, out of its
+    lookup (C2 ruling J9): a fixture base next to the build output sits in
+    the source checkout, as on a CI runner. Its folders must stay trusted
+    too: no ancestor writable by group or others."""
+    import tempfile
+    parent = Path(parent).resolve()
+    # 이것을 실패시키는 것: 도구 폴더를 fixture 기반(저장소 checkout 안)에 두는 것(CI 러너에서 PATH가 비고 내장
+    # 회차가 아무것도 결정하지 않음), 저장소 안이거나 남이 쓸 수 있는 부모를 받는 것.
+    for folder in [parent, *parent.parents]:
+        assert not os.path.lexists(folder / ".git"), ("a tools folder inside a git repository", folder)
+        assert not os.stat(folder).st_mode & 0o022, ("group/other-writable ancestor of the tools", folder)
+    tools = Path(tempfile.mkdtemp(prefix="bingsu-builtin-tools-", dir=parent))
+    tools.chmod(0o755)
+    return tools
+
+
+def test_tools_outside_repository_refuses_a_checkout(tmp_path):
+    base = tmp_path / "checkout"
+    base.mkdir(mode=0o755)
+    for folder in (tmp_path, *tmp_path.parents):
+        if os.stat(folder).st_mode & 0o022:
+            pytest.skip(f"a group/other-writable ancestor here: {folder}")
+    tools = tools_outside_repository(base)
+    assert tools.parent == base.resolve() and tools.is_dir()
+    # A .git in an ancestor, not only in the parent itself.
+    (base / ".git").mkdir()
+    sub = base / "sub"
+    sub.mkdir(mode=0o755)
+    with pytest.raises(AssertionError, match="inside a git repository"):
+        tools_outside_repository(sub)
+    (base / ".git").rmdir()
+    base.chmod(0o775)
+    with pytest.raises(AssertionError, match="writable"):
+        tools_outside_repository(base)
 
 
 def builtin_install(folder, name):
@@ -2251,6 +2290,9 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
             if fixture is not None:
                 wait_helpers(fixture.base)
                 shutil.rmtree(fixture.base, ignore_errors=True)
+                # Test doubles of the fixture carry no tools folder.
+                if getattr(fixture, "tools", None):
+                    shutil.rmtree(fixture.tools, ignore_errors=True)
     pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {helper_stage_evidence / stage}")
 
 
