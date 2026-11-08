@@ -79,7 +79,7 @@ TCB_SHA256 = {
     "crates/bingsu-core/src/command/env_frame.rs": "237c6cdd21b42d45f247651a923f050122ee65a1ff8b54abaa16a695b9272db6",
     "crates/bingsu/src/prompt_spawn.rs": "be8921dbeda19a51addc5cbbd6ddf037a2a24f2fecf168024c7f1dd980971120",
     "crates/bingsu/src/prompt_io.rs": "31dc5ba3b067a86a6f3ca2b3e4c849013259ae5e3882b592115bac846cff4d2e",
-    "crates/bingsu/src/prompt.rs": "79f5e5bf5c34c64211287c078701b43ceb9852eb3a64feb8dbc669dd7389776a",
+    "crates/bingsu/src/prompt.rs": "6887ba8a12325f477ba2f02755a4ef505d2a9975c89403c79204d15166ade6b7",
     "crates/bingsu/src/main.rs": "012b20fb9bd130c577497c3dc8da4ccc19305c601d7aeaed35f6c7301f2e52b8",
     "crates/bingsu/src/relay.rs": "aac26af4519aaca3d43d0c1fb2c48332d3e6611a47276378e8a490687af2556e",
     "crates/bingsu-core/src/fs_trust.rs": "cc71c39796a8fbb553ab678ada14860caa14a5f57b09591b0669e9f654575df9",
@@ -93,11 +93,11 @@ TCB_SHA256 = {
     # plan (staged.rs) and the text it lets reach the terminal (sanitize.rs),
     # the characters a builtin version may draw (language.rs), and the
     # folder digest and text cleaning those digests use (cwd_hash.rs, field.rs).
-    "crates/bingsu-core/src/command/plan.rs": "5e1f0c9c1d0185a69af1f541a62fb8dd5a434fdc0c930d9e0a7cca4a80880e3e",
+    "crates/bingsu-core/src/command/plan.rs": "748e8fc55f0d1b77f3a1b549a4ffc642569929e62d1b8d4e67106f4ee06de1b1",
     "crates/bingsu-core/src/command/wire.rs": "fae927873d7ccce472eb3ff743cb45b8670f979319b0f5458af0e9375f1e9f9a",
     "crates/bingsu-core/src/front/staged.rs": "9d00857fe58c170faa46752f3bb271e62352c5cff0c0fec81e05e280f1028444",
     "crates/bingsu-core/src/sanitize.rs": "bab17056bdadd1721f4ad71a66576d50423500cbc7e0f52cc23c551051359532",
-    "crates/bingsu-core/src/command/builtin.rs": "75e53059139a8320f055a8ff3d8b19555d53c0fed81663fb786bc8b061b9516d",
+    "crates/bingsu-core/src/command/builtin.rs": "ca84a653d01b513a3f47cf1d93777fe14f4bcaa5d44741e375f6693f599610fd",
     "crates/bingsu-core/src/collection/language.rs": "447cfa20cb266b0b3b21a07e2d3cdce1fa949313ed5fb7d00b479863f3c5114e",
     "crates/bingsu-core/src/collection/cwd_hash.rs": "63dd0e1ad5d643c100d8f0798729adab652533ef1c47f2a30253e8be1aff8549",
     "crates/bingsu-core/src/field.rs": "a405d7a33cb39bdadf4466da2b3694c094dac4bc261d718c456e250aa3112ecb",

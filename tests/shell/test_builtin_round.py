@@ -163,6 +163,23 @@ def test_builtin_version_is_drawn_for_its_own_shell(tmp_path, _native_boot_requi
     session.wait_quiet(timeout=8)
 
 
+# TERM·TZ만 다른 두 셸(같은 폴더)은 같은 내장 버전을 둘 다 그린다(F1-b). 이것을 실패시키는 것: 내장 언어
+# 요약값에 TERM이나 TZ를 다시 넣는 것.
+def test_builtin_version_is_shared_across_terminals(tmp_path, _native_boot_required):
+    session = session_with(tmp_path, "node")
+    node = install(session.base / "bin", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    session.env.update(TERM="xterm-256color", TZ="UTC")
+    ready(session)
+    published(session, b"18.20.4")
+    assert b"18.20.4" in session.prompt()
+    session.wait_quiet(timeout=8)
+    for name, value in (("TERM", "tmux-256color"), ("TZ", "Asia/Seoul")):
+        session.env[name] = value
+        assert b"18.20.4" in session.prompt(), name
+        session.wait_quiet(timeout=8)
+
+
 # 프로브의 첫 줄에서 버전만 값으로 남긴다. 버전이 없는 줄은 값 없는 실패 항목이고 원본 줄도 남기지 않는다. 이것을
 # 실패시키는 것: probe_entry의 버전 추출을 지우는 것(첫 줄이 그대로 값이 됨).
 def test_builtin_probe_publishes_only_a_version(tmp_path, _native_boot_required):
