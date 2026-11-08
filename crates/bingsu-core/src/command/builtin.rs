@@ -87,9 +87,10 @@ pub fn language(id: &[u8]) -> Option<&'static Language> {
 
 impl Language {
     /// The environment digest of this language's entry: `plan::env_digest`
-    /// over its own variables and `UNSUPPORTED`, without `TERM` or `TZ`
-    /// (still passed): a version does not depend on the terminal or the time
-    /// zone (F1-b ruling), so shells that differ only there share it.
+    /// over its own variables and `UNSUPPORTED`, without `TERM` or `TZ`:
+    /// the probe gets the fixed environment of `profile::environment`, which
+    /// holds neither, and a version does not depend on the terminal or the
+    /// time zone (F1-b ruling), so shells that differ only there share it.
     pub fn env_digest(&self, vars: &Environ<'_>) -> [u8; 32] {
         let names: Vec<Vec<u8>> = self
             .variables

@@ -146,9 +146,11 @@ The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt
 - Scripts must name an absolute interpreter on their first line; `#!/usr/bin/env` is refused because it would look
   the interpreter up in `PATH`.
 - The first line of the output, at most 4 KB, is the value. A failed command (nonzero exit, timeout) shows nothing
-  and is not run again for 10 seconds, unless its keys or the values of its passed variables change.
+  and is not run again for 10 seconds, unless its keys or the values its result depends on change (the passed
+  variables, `TERM` aside unless `env_allow` names it).
 - A result is reused while it is newer than `cache` and was made in the same folder with the same command and the
-  same values of the passed variables, `TERM` aside. Another shell with other values runs the command again.
+  same values of the passed variables; `TERM` does not count unless `env_allow` names it. Another shell with other
+  values runs the command again.
 - On Linux each command runs in its own cgroup when the system allows it, so it ends with everything it started.
 
 ### match

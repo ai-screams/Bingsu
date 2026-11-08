@@ -542,7 +542,7 @@ mod tests {
     // 원본 환경 요약값: 남기기 목록·LC_* 접두·env_allow의 값만 보고, 다른 이름은 보지 않으며, 없음과 빈 값을
     // 가린다. 이것을 실패시키는 것: env_allow를 이름 목록에 넣지 않는 것(KUBECONFIG만 다른 두 셸이 같은 값),
     // LC_* 접두 훑기를 지우는 것(LC_TIME만 다른 두 셸이 같은 값), 없음 표시를 빈 값과 같게 쓰는 것, TERM을 다시
-    // 요약하는 것(터미널이 다른 셸이 서로의 값을 숨김), env_allow에 쓴 TERM까지 빼는 것.
+    // 요약하는 것(터미널이 다른 셸이 서로의 값을 숨김), env_allow에 쓴 TERM까지 빼는 것, USER·LANG까지 빼는 것.
     #[test]
     fn env_digest_covers_kept_names_lc_and_env_allow_only() {
         let allow = [b"KUBECONFIG".to_vec()];
@@ -555,6 +555,9 @@ mod tests {
             d(b"HOME=/h\0PATH=/bin\0KUBECONFIG=a\0LC_TIME=ko_KR.UTF-8\0")
         );
         assert_ne!(base, d(b"HOME=/h\0PATH=/bin\0KUBECONFIG=a\0TZ=\0"));
+        // The other kept names still count.
+        assert_ne!(base, d(b"HOME=/h\0PATH=/bin\0KUBECONFIG=a\0USER=u\0"));
+        assert_ne!(base, d(b"HOME=/h\0PATH=/bin\0KUBECONFIG=a\0LANG=C\0"));
         // TERM is passed but not digested: another terminal shares the value.
         assert_eq!(
             base,
