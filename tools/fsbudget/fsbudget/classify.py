@@ -264,7 +264,6 @@ _SUP_PROC = r"/proc/\d+"
 _SUP_CGROUP = r"/sys/fs/cgroup(?:/[^<>]+)?/bingsu-cmd-[0-9a-f]+"
 _SUP_UNIT = _SUP_CGROUP + r"/u[0-9a-f]+"
 _SUP_BOOT_ID = "/proc/sys/kernel/random/boot_id"
-_SUP_WRITE_FLAGS = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE")
 
 
 def _sup_fd(arg: str) -> str | None:
@@ -273,21 +272,35 @@ def _sup_fd(arg: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _flags(arg: str) -> frozenset:
+    # musl's open adds O_LARGEFILE; it changes no access.
+    return frozenset(arg.split("|")) - {"O_LARGEFILE"}
+
+
+# The supervisor's opens: (dirfd path, name, the exact open flags). Every
+# other flag (O_PATH, O_TMPFILE, O_CREAT, another access mode) is refused.
+_R, _NF, _CX, _DIR = "O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC", "O_DIRECTORY"
+_SUP_OPENS = [
+    ("/", f'"{_SUP_BOOT_ID}"', frozenset({_R, _NF, _CX})),
+    ("/", '"/proc/self"', frozenset({_R, _CX, _DIR})),
+    # The relay's stdin: opened by the supervisor on the atomic path (clone3
+    # takes it), by posix_spawn's child on the best-effort path (fd 0).
+    ("/", '"/dev/null"', frozenset({_R, _CX})),
+    ("/", '"/dev/null"', frozenset({_R})),
+    (_SUP_PROC, '"ns"', frozenset({_R, _NF, _CX, _DIR})),
+    (_SUP_PROC, '"timens_offsets"', frozenset({_R, _NF, _CX})),
+    (_SUP_CGROUP, r'"u[0-9a-f]+"', frozenset({_R, _NF, _CX, _DIR})),
+    (_SUP_UNIT, '"cgroup.kill"', frozenset({"O_WRONLY", _NF, _CX})),
+]
+
+
 def _sup_open(args: list[str]) -> bool:
-    if len(args) < 3:
+    if len(args) != 3:
         return False
-    at, name, flags = _sup_fd(args[0]), args[1], args[2]
-    write = any(f in flags.split("|") for f in _SUP_WRITE_FLAGS)
-    if at == "/" and name in (f'"{_SUP_BOOT_ID}"', '"/proc/self"', '"/dev/null"'):
-        return not write and (name != '"/proc/self"' or "O_DIRECTORY" in flags)
-    if at and re.fullmatch(_SUP_PROC, at) and name in ('"ns"', '"timens_offsets"'):
-        return not write
-    if at and re.fullmatch(_SUP_CGROUP, at) and re.fullmatch(r'"u[0-9a-f]+"', name):
-        return not write and "O_DIRECTORY" in flags
-    if at and re.fullmatch(_SUP_UNIT, at) and name == '"cgroup.kill"':
-        return flags.split("|")[0] == "O_WRONLY" and not any(
-            f in flags for f in ("O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND"))
-    return False
+    at = _sup_fd(args[0])
+    return at is not None and any(
+        re.fullmatch(where, at) and re.fullmatch(name, args[1]) and _flags(args[2]) == flags
+        for where, name, flags in _SUP_OPENS)
 
 
 def supervisor_kind(c: Call) -> str | None:
@@ -319,8 +332,11 @@ def supervisor_kind(c: Call) -> str | None:
         "fd_flags": c.name == "fcntl" and args[1:3] == ["F_SETFD", "FD_CLOEXEC"] and fd is not None
                     and (re.fullmatch(r".*/bingsu/command-[0-9a-f]+\.lock", fd) or re.fullmatch(_SUP_CGROUP, fd)),
         "read": c.name == "read" and fd == _SUP_BOOT_ID,
-        "fstat": c.name in {"fstat", "statx", "newfstatat"} and fd in {_SUP_BOOT_ID} | (
-                 {fd} if fd and re.fullmatch(_SUP_PROC + "/timens_offsets", fd) else set()),
+        # fstat(fd) or statx(fd, "", AT_EMPTY_PATH): helper_kind names a statx
+        # with a path another kind, and newfstatat's path is never checked
+        # against its dirfd, so it is refused here.
+        "fstat": c.name in {"fstat", "statx"} and fd is not None
+                 and (fd == _SUP_BOOT_ID or bool(re.fullmatch(_SUP_PROC + "/timens_offsets", fd))),
         "statfs": c.name == "fstatfs" and bool(clock),
         "readlink": c.name == "readlinkat" and fd is not None and bool(re.fullmatch(_SUP_PROC + "/ns", fd))
                     and len(args) > 1 and args[1] in ('"time"', '"time_for_children"'),
