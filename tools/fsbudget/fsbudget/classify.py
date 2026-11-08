@@ -260,6 +260,102 @@ def helper_kind(c: Call) -> str | None:
     return collector_kind(c)
 
 
+_SUP_PROC = r"/proc/\d+"
+_SUP_CGROUP = r"/sys/fs/cgroup(?:/[^<>]+)?/bingsu-cmd-[0-9a-f]+"
+_SUP_UNIT = _SUP_CGROUP + r"/u[0-9a-f]+"
+_SUP_BOOT_ID = "/proc/sys/kernel/random/boot_id"
+
+
+def _sup_fd(arg: str) -> str | None:
+    """The path strace (-y) names for an fd argument, or None."""
+    m = re.fullmatch(r"(?:\d+|AT_FDCWD)<(.*)>", arg)
+    return m.group(1) if m else None
+
+
+def _flags(arg: str) -> frozenset:
+    # musl's open adds O_LARGEFILE; it changes no access.
+    return frozenset(arg.split("|")) - {"O_LARGEFILE"}
+
+
+# The supervisor's opens: (dirfd path, name, the exact open flags). Every
+# other flag (O_PATH, O_TMPFILE, O_CREAT, another access mode) is refused.
+_R, _NF, _CX, _DIR = "O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC", "O_DIRECTORY"
+_SUP_OPENS = [
+    ("/", f'"{_SUP_BOOT_ID}"', frozenset({_R, _NF, _CX})),
+    ("/", '"/proc/self"', frozenset({_R, _CX, _DIR})),
+    # The relay's stdin: opened by the supervisor on the atomic path (clone3
+    # takes it), by posix_spawn's child on the best-effort path (fd 0).
+    ("/", '"/dev/null"', frozenset({_R, _CX})),
+    ("/", '"/dev/null"', frozenset({_R})),
+    (_SUP_PROC, '"ns"', frozenset({_R, _NF, _CX, _DIR})),
+    (_SUP_PROC, '"timens_offsets"', frozenset({_R, _NF, _CX})),
+    (_SUP_CGROUP, r'"u[0-9a-f]+"', frozenset({_R, _NF, _CX, _DIR})),
+    (_SUP_UNIT, '"cgroup.kill"', frozenset({"O_WRONLY", _NF, _CX})),
+]
+
+
+def _sup_open(call: str, args: list[str]) -> bool:
+    # open(2) of an absolute path is openat(AT_FDCWD, ...): x86_64 musl's
+    # open() makes the open syscall (aarch64 has none), as for the relay's
+    # stdin on both paths. Only the "/" rows name absolute paths, and a mode
+    # argument fails the argument count, as for openat.
+    if call == "open":
+        args = ["AT_FDCWD</>", *args]
+    if len(args) != 3:
+        return False
+    at = _sup_fd(args[0])
+    return at is not None and any(
+        re.fullmatch(where, at) and re.fullmatch(name, args[1]) and _flags(args[2]) == flags
+        for where, name, flags in _SUP_OPENS)
+
+
+def supervisor_kind(c: Call) -> str | None:
+    """Command supervisor vocabulary (GATE-CMD-FSBUDGET). The helper's kind
+    names the call, and the supervisor keeps it only for the paths, access
+    modes and descriptors it uses: the clock (boot_id, /proc/self, its ns
+    and timens_offsets), /dev/null read-only, the session's cgroup parent
+    and unit folders, and the unit's cgroup.kill opened write-only and the
+    only file it writes. Every other path or mode is `unknown-fs`, which no
+    formula has. Two shapes only the supervisor makes: a best-effort relay
+    spawn gives the relay its own process group (posix_spawn's setpgid in
+    the child), and the start marks fd 6, the session's cgroup parent,
+    close-on-exec even when the best-effort path handed none (EBADF).
+    Loader-shaped calls before the first counted call are the attribution's
+    to exclude; after it they are `unknown-fs` too."""
+    args = split_args(c.args)
+    if c.name == "setpgid" and args == ["0", "0"]:
+        return "pgroup"
+    if (c.name == "fcntl" and len(args) >= 2 and args[0] == "6" and args[1] == "F_SETFD"
+            and c.ret.startswith("-1 EBADF")):
+        return "fd_flags"
+    k = helper_kind(c)
+    if k is None or k in {"exec", "spawn"}:
+        return k
+    fd = _sup_fd(args[0]) if args else None
+    clock = fd is not None and (fd == _SUP_BOOT_ID or re.fullmatch(_SUP_PROC + r"(?:/ns|/timens_offsets)?", fd))
+    allowed = {
+        "openat": c.name in {"openat", "open"} and _sup_open(c.name, args),
+        "fd_flags": c.name == "fcntl" and args[1:3] == ["F_SETFD", "FD_CLOEXEC"] and fd is not None
+                    and (re.fullmatch(r".*/bingsu/command-[0-9a-f]+\.lock", fd) or re.fullmatch(_SUP_CGROUP, fd)),
+        "read": c.name == "read" and fd == _SUP_BOOT_ID,
+        # fstat(fd) or statx(fd, "", AT_EMPTY_PATH): helper_kind names a statx
+        # with a path another kind, and newfstatat's path is never checked
+        # against its dirfd, so it is refused here.
+        "fstat": c.name in {"fstat", "statx"} and fd is not None
+                 and (fd == _SUP_BOOT_ID or bool(re.fullmatch(_SUP_PROC + "/timens_offsets", fd))),
+        "statfs": c.name == "fstatfs" and bool(clock),
+        "readlink": c.name == "readlinkat" and fd is not None and bool(re.fullmatch(_SUP_PROC + "/ns", fd))
+                    and len(args) > 1 and args[1] in ('"time"', '"time_for_children"'),
+        "mkdir": c.name == "mkdirat" and fd is not None and bool(re.fullmatch(_SUP_CGROUP, fd))
+                 and len(args) > 1 and bool(re.fullmatch(r'"u[0-9a-f]+"', args[1])),
+        "write": c.name == "write" and fd is not None and bool(re.fullmatch(_SUP_UNIT + "/cgroup.kill", fd))
+                 and args[1:] == ['"1"', "1"],
+        "cwd": True,  # helper_kind names only chdir("/") cwd
+        "seek": c.name == "lseek" and fd is not None and bool(re.fullmatch(_SUP_PROC + "/maps", fd)),
+    }
+    return k if allowed.get(k, False) else "unknown-fs"
+
+
 def _placed_at(args: list[str]) -> bool:
     # A dirfd-relative name whose dirfd strace names as a file.
     if len(args) < 2 or not args[1].startswith('"') or args[1].startswith('"/'):

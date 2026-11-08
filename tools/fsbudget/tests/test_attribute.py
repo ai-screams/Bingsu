@@ -807,3 +807,93 @@ def test_target_prologue_ends_at_a_spawn_and_passes_to_its_child(first):
     got = collector_attribute(lines, PINNED_COMMAND)
     assert not got.errors, got.errors
     assert got.counts["command"]["openat"] == (4 if first == "fork" else 3), got.counts["command"]
+
+
+# 감독 어휘(helper_vocabulary): 최선 노력 relay의 setpgid(0, 0)는 pgroup, 시작의 fd 6 F_SETFD가 EBADF여도
+# fd_flags, 단위 cgroup의 mkdirat은 mkdir이다. 경로·접근 방식·fd를 확인해 종류를 붙이고, 같은 호출이라도 다른 경로나
+# 쓰기 열기는 unknown-fs다. 이것을 실패시키는 것: 감독에 helper 어휘만 쓰는 것(pgroup·EBADF가 unknown-fs, 다른
+# 경로가 받아들여짐), setpgid 인자 검사를 지우는 것, EBADF 칸을 fd 6 밖으로 넓히는 것, 열기의 쓰기 방식·쓰기의 대상·
+# 읽기의 대상·mkdirat의 부모 확인을 지우는 것, 감독 어휘를 helper 역할에도 쓰는 것.
+SUP_CG = "/sys/fs/cgroup/bingsu-cmd-6bcb"
+SUP_UNIT = SUP_CG + "/u00ad"
+SUPERVISOR_SHAPES = [
+    ('1 setpgid(0, 0) = 0', "pgroup"),
+    ('1 setpgid(5, 0) = 0', "unknown-fs"),
+    ('1 fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)', "fd_flags"),
+    ('1 fcntl(7, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)', "unknown-fs"),
+    ('1 fcntl(5</run/u/bingsu/command-0a1f.lock>, F_SETFD, FD_CLOEXEC) = 0', "fd_flags"),
+    ('1 fcntl(5</run/u/bingsu/other.lock>, F_SETFD, FD_CLOEXEC) = 0', "unknown-fs"),
+    (f'1 mkdirat(6<{SUP_CG}>, "u00ad", 0755) = 0', "mkdir"),
+    ('1 mkdirat(6</tmp/x>, "u00ad", 0755) = 0', "unknown-fs"),
+    ('1 openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 7</proc/sys/kernel/random/boot_id>', "openat"),
+    ('1 openat(AT_FDCWD</>, "/fx/forbidden", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 7</fx/forbidden>', "unknown-fs"),
+    ('1 openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC) = 14</dev/null>', "openat"),
+    ('1 openat(AT_FDCWD</>, "/dev/null", O_WRONLY|O_CLOEXEC) = 14</dev/null>', "unknown-fs"),
+    (f'1 openat(7<{SUP_UNIT}>, "cgroup.kill", O_WRONLY|O_NOFOLLOW|O_CLOEXEC) = 8<{SUP_UNIT}/cgroup.kill>', "openat"),
+    (f'1 openat(7<{SUP_UNIT}>, "cgroup.procs", O_WRONLY|O_NOFOLLOW|O_CLOEXEC) = 8<{SUP_UNIT}/cgroup.procs>', "unknown-fs"),
+    (f'1 openat(6<{SUP_CG}>, "u00ad", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 7<{SUP_UNIT}>', "openat"),
+    (f'1 write(8<{SUP_UNIT}/cgroup.kill>, "1", 1) = 1', "write"),
+    (f'1 write(8<{SUP_UNIT}/cgroup.procs>, "1", 1) = 1', "unknown-fs"),
+    ('1 read(7</proc/sys/kernel/random/boot_id>, "", 1) = 0', "read"),
+    ('1 read(7</fx/forbidden>, "", 1) = 0', "unknown-fs"),
+    ('1 chdir("/") = 0', "cwd"),
+    ('1 chdir("/tmp") = 0', "unknown-fs"),
+    ('1 lseek(3</proc/1/maps>, 0, SEEK_CUR) = 2906', "seek"),
+    ('1 lseek(9</etc/passwd>, 2822, SEEK_SET) = 2822', "unknown-fs"),
+    # One condition broken at a time (each line names the check it fails).
+    (f'1 write(8<{SUP_UNIT}/cgroup.kill>, "0", 1) = 1', "unknown-fs"),  # write payload
+    ('1 readlinkat(8</proc/1/ns>, "time", "time:[4026531834]", 28) = 17', "readlink"),
+    ('1 readlinkat(8</proc/1/ns>, "mnt", "mnt:[4026531841]", 28) = 16', "unknown-fs"),  # readlink name
+    (f'1 mkdirat(6<{SUP_CG}>, "x", 0755) = 0', "unknown-fs"),  # mkdir name
+    ('1 fcntl(5</run/u/bingsu/command-0a1f.lock>, F_SETFD, 0) = 0', "unknown-fs"),  # FD_CLOEXEC value
+    ('1 openat(7</proc/1>, "ns", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 8</proc/1/ns>', "openat"),
+    ('1 openat(7</proc/1>, "ns", O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 8</proc/1/ns>', "unknown-fs"),  # proc open mode
+    ('1 openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CREAT|O_CLOEXEC) = 14</dev/null>', "unknown-fs"),  # O_CREAT
+    ('1 openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC, 0666) = 14</dev/null>', "unknown-fs"),  # a mode argument
+    ('1 openat(AT_FDCWD</>, "/dev/null", O_RDONLY) = 0</dev/null>', "openat"),
+    # x86_64 musl's open(): the open syscall, the same rows by path.
+    ('1 open("/dev/null", O_RDONLY|O_LARGEFILE) = 14</dev/null>', "openat"),
+    ('1 open("/dev/null", O_RDONLY|O_CLOEXEC) = 14</dev/null>', "openat"),
+    ('1 open("/dev/null", O_WRONLY|O_LARGEFILE) = 14</dev/null>', "unknown-fs"),
+    ('1 open("/etc/passwd", O_RDONLY|O_LARGEFILE) = 14</etc/passwd>', "unknown-fs"),
+    ('1 open("/dev/null", O_RDONLY|O_CREAT, 0666) = 14</dev/null>', "unknown-fs"),
+    ('1 open("/dev/null", O_RDONLY|O_CLOEXEC, 0666) = 14</dev/null>', "unknown-fs"),  # a mode argument
+    ('1 open("cgroup.kill", O_WRONLY|O_NOFOLLOW|O_CLOEXEC) = 8</x/cgroup.kill>', "unknown-fs"),
+    (f'1 openat(7<{SUP_UNIT}>, "cgroup.kill", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 8<{SUP_UNIT}/cgroup.kill>', "unknown-fs"),  # kill access
+    (f'1 openat(7<{SUP_UNIT}>, "cgroup.kill", O_WRONLY|O_NOFOLLOW|O_CLOEXEC|O_TMPFILE) = 8<{SUP_UNIT}/cgroup.kill>', "unknown-fs"),
+    ('1 openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH) = 7</proc/sys/kernel/random/boot_id>', "unknown-fs"),  # O_PATH
+    ('1 openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC) = 7</proc/sys/kernel/random/boot_id>', "openat"),  # musl
+    ('1 openat(AT_FDCWD</>, "/proc/self", O_RDONLY|O_CLOEXEC) = 7</proc/1>', "unknown-fs"),  # no O_DIRECTORY
+    ('1 openat(7</proc/1>, "timens_offsets", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH) = 9</proc/1/timens_offsets>', "unknown-fs"),
+    (f'1 openat(6<{SUP_CG}>, "u00ad", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY|O_PATH) = 7<{SUP_UNIT}>', "unknown-fs"),
+    ('1 fstatfs(7</proc/sys/kernel/random/boot_id>, {f_type=PROC_SUPER_MAGIC, f_bsize=4096}) = 0', "statfs"),
+    ('1 fstatfs(9</etc/passwd>, {f_type=EXT2_SUPER_MAGIC, f_bsize=4096}) = 0', "unknown-fs"),  # fstatfs target
+    ('1 statx(7</proc/sys/kernel/random/boot_id>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_BASIC_STATS}) = 0', "fstat"),
+    ('1 statx(7</proc/sys/kernel/random/boot_id>, "/etc/passwd", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_BASIC_STATS}) = 0', "unknown-fs"),
+    # An empty path without AT_EMPTY_PATH names no file (ENOENT), not the fd.
+    ('1 statx(7</proc/sys/kernel/random/boot_id>, "", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0xffff) = -1 ENOENT (No such file or directory)', "unknown-fs"),
+    ('1 newfstatat(7</proc/sys/kernel/random/boot_id>, "/etc/passwd", {st_mode=S_IFREG|0644, st_size=1}, 0) = 0', "unknown-fs"),  # path stat
+    ('1 fstat(7</proc/sys/kernel/random/boot_id>, {st_mode=S_IFREG|0444, st_size=0}) = 0', "fstat"),
+    ('1 fstat(7</fx/forbidden>, {st_mode=S_IFREG|0444, st_size=0}) = 0', "unknown-fs"),
+]
+
+
+def test_supervisor_vocabulary():
+    from fsbudget.classify import supervisor_kind
+    from fsbudget.strace_parse import parse
+    got = [(line, supervisor_kind(call)) for line, call in zip((l for l, _ in SUPERVISOR_SHAPES),
+                                                              parse("\n".join(l for l, _ in SUPERVISOR_SHAPES)))]
+    assert got == SUPERVISOR_SHAPES
+
+
+def test_supervisor_vocabulary_is_the_supervisors_only():
+    from fsbudget.attribute import collector_attribute
+    round_ = list(COMMAND_ROUND)
+    at = round_.index('12 close(19</proc/12/fd>) = 0') + 1
+    round_[at:at] = ['12 fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)', '12 setpgid(0, 0) = 0']
+    got = collector_attribute(round_, PINNED_COMMAND, helper_vocabulary=True)
+    assert got.counts["supervisor"].get("fd_flags") == 1 and got.counts["supervisor"].get("pgroup") == 1, got.counts
+    # The helper keeps its own vocabulary: the same shape there stays unknown.
+    round_[3:3] = ['11 setpgid(0, 0) = 0']
+    got = collector_attribute(round_, PINNED_COMMAND, helper_vocabulary=True)
+    assert got.counts["helper"].get("unknown-fs") == 1, got.counts

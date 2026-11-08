@@ -212,6 +212,21 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # cgroup.kill open and write, cgroup.events open and one pread, the
     # unit's own listing, then rmdir.
     "cgroup_unit": {"openat": 3, "fstat": 2, "write": 1, "read": 1, "seek": 1, "getdents": 2, "unlinkat": 1},
+    # The command supervisor (GATE-CMD-FSBUDGET), after its loader prologue:
+    # its exec, then close-on-exec on the session lock (fd 5) and on fd 6,
+    # the session's cgroup parent (EBADF on the best-effort path, still an
+    # attempt). Each spawn (a config unit or a builtin probe) observes the
+    # clock (`clock`) and opens /dev/null for the relay's stdin; the relay's
+    # child chdir("/") is the spawn's. The atomic path makes the unit
+    # cgroup, opens it and its cgroup.kill, spawns with clone3 into it and
+    # writes the kill when the unit ends; the best-effort path's posix_spawn
+    # puts the relay in its own process group instead. The session parent,
+    # its listing, the unit's rmdir and the reclaim of earlier rounds are
+    # the helper's (cgroup_probe, cgroup_parent, cgroup_listing, cgroup_unit).
+    "supervisor_start": {"exec": 1, "fd_flags": 2},
+    "supervisor_spawn": {"spawn": 1, "openat": 1, "cwd": 1},
+    "supervisor_unit_cgroup": {"mkdir": 1, "openat": 2, "write": 1},
+    "supervisor_own_group": {"pgroup": 1},
     # command_grant::neutral: the 0500 folder's mkdirat (EEXIST once made),
     # open and fd_facts, then its emptiness check through a cursor on a
     # duplicate (the dup itself is the "dup" primitive).
@@ -934,6 +949,36 @@ def _command_gc(e: dict, p: HelperPlan) -> None:
         _add(e, "chain_recheck_name")
         _add(e, "absent_slot")
     _catalog_commit(e, p.catalog_bytes)
+
+
+# One round spawns at most this many: config units (plan::CONFIG_MAX) and
+# builtin probes (plan::PROBE_MAX).
+SUPERVISOR_SPAWNS_MAX = 8 + 4
+
+
+def supervisor_expected(spawns: int, *, atomic: bool, arch: str, libc: str) -> dict[str, int]:
+    """The command supervisor's calls in one round that spawns `spawns`
+    relays, every one approved and run to its end: exact. `atomic` is the
+    cgroup path (the session's cgroup parent opened); without it every
+    cgroup term is 0. The start adds the platform's stack guard seeks
+    (STARTUP_PRIMITIVES, x86_64 glibc). The aarch64 glibc and musl captures
+    agree term for term; x86_64 musl shares aarch64 musl's startup table.
+    The relay and the target command are their own roles and are only
+    counted (plan "decisive gates", 1382)."""
+    if not 1 <= spawns <= SUPERVISOR_SPAWNS_MAX:
+        raise ValueError("supervisor spawns: 1 to 12 a round")
+    global _primitives
+    _primitives = {**PRIMITIVES, **_LIBC[libc], **STARTUP_PRIMITIVES[arch, libc]}
+    try:
+        e: dict[str, int] = {}
+        _add(e, "supervisor_start")
+        _add(e, "stack_guard")
+        _add(e, "clock", spawns)
+        _add(e, "supervisor_spawn", spawns)
+        _add(e, "supervisor_unit_cgroup" if atomic else "supervisor_own_group", spawns)
+        return dict(sorted(e.items()))
+    finally:
+        _primitives = PRIMITIVES
 
 
 def helper_command_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:

@@ -1940,6 +1940,45 @@ def test_helper_stack_guard_exact(stage, damage):
             budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
 
 
+# x86_64 glibc: Rust std's stack guard seeks /proc/self/maps twice in every
+# product process's startup, the supervisor's too (formula.STARTUP_PRIMITIVES
+# stack_guard). Replayed into the helper and the supervisor of the saved
+# aarch64 capture; the damage touches the supervisor only.
+# 이것을 실패시키는 것: 감독 식에 플랫폼 시작 항을 넣지 않는 것(정상 x86_64 캡처를 거부), seek을 하나 더하거나
+# 빼도 받는 것, 감독의 maps seek을 다른 fd에도 받는 것.
+@pytest.mark.parametrize("damage", [None, "extra-seek", "missing-cur", "missing-both", "other-fd"])
+def test_supervisor_stack_guard_exact(damage):
+    from dataclasses import replace
+    import re
+    lines, collector, plan = helper_stage_case("command_miss")
+    supervisor = next(l.split()[0] for l in lines if '"__command-v1"' in l and "execve(" in l)
+    for pattern, pid, fd in ((r"close\(3</proc/\d+/maps>", None, "3"), (None, supervisor, "7")):
+        if pattern:
+            at = first_helper_line(lines, pattern)
+            pid = lines[at].split()[0]
+        else:
+            at = next(i for i, l in enumerate(lines)
+                      if l.split()[0] == pid and re.search(rf"close\({fd}</proc/\d+/maps>", l))
+        seeks = [f'{pid} lseek({fd}</proc/{pid}/maps>, 0, SEEK_CUR) = 2906',
+                 f'{pid} lseek({fd}</proc/{pid}/maps>, 2822, SEEK_SET) = 2822']
+        if pid == supervisor:
+            if damage == "extra-seek":
+                seeks.append(seeks[1])
+            elif damage == "missing-cur":
+                del seeks[0]
+            elif damage == "missing-both":
+                seeks = []
+            elif damage == "other-fd":
+                seeks[1] = f'{pid} lseek(9</etc/passwd>, 2822, SEEK_SET) = 2822'
+        lines[at:at] = seeks
+    plan = replace(plan, arch="x86_64")
+    if damage is None:
+        assert budget.check_helper_capture("command_miss", lines, HELPER_EXE, collector, plan) is False
+    else:
+        with pytest.raises(AssertionError, match="supervisor"):
+            budget.check_helper_capture("command_miss", lines, HELPER_EXE, collector, plan)
+
+
 @pytest.mark.parametrize("ready_after", [0, 1, 3])
 def test_collection_warmup_waits_for_rotation(tmp_path, ready_after):
     (tmp_path / "response").write_bytes(b"r" * 64)
@@ -2566,14 +2605,20 @@ def last_gc_fstat(lines):
 
 # 이것을 실패시키는 것: 명령 회차 식이 저장한 캡처와 종류별로 정확히 맞지 않는 것(앞부분에 fstat 하나를 더하거나 뺌),
 # GC 꼬리를 정확 검사로 보는 것(예산으로 짧아진 꼬리가 실패), 꼬리의 상한을 지우는 것(GC에 호출을 더해도 통과),
-# 명령 응답 설치 경계를 잃는 것, 감독·relay·대상 역할을 helper로 세는 것.
+# 명령 응답 설치 경계를 잃는 것, 감독·relay·대상 역할을 helper로 세는 것, 감독 식에서 시계 한 번을 더 세거나 단위
+# cgroup 항을 빼는 것, 원자 경로 캡처를 최선 노력 식으로 받는 것, 감독의 열기·쓰기를 경로 확인 없이 받는 것
+# (cgroup.kill 대신 cgroup.procs, boot_id 대신 다른 파일), 감독의 loader 예외를 첫 집계 호출 뒤에도 두는 것, fd stat
+# 자리의 절대 경로 stat을 받는 것, O_PATH로 연 kill fd를 받는 것.
 @pytest.mark.parametrize("stage,damage", [
     ("command_miss", None), ("command_hit", None),
     ("command_miss", "extra-prefix-fstat"), ("command_hit", "extra-prefix-fstat"),
     ("command_miss", "missing-prefix-fstat"),
     ("command_miss", "short-gc"), ("command_miss", "extra-gc-fstat"), ("command_miss", "no-install"),
     ("command_miss", "no-install-no-gc"), ("command_miss", "uname-as-truncate"), ("command_hit", "uname-as-truncate"),
-    ("command_miss", "unpinned-supervisor")])
+    ("command_miss", "unpinned-supervisor"), ("command_miss", "extra-supervisor-clock"),
+    ("command_miss", "missing-unit-cgroup"), ("command_miss", "best-effort-plan"),
+    ("command_miss", "kill-as-procs"), ("command_miss", "forbidden-clock-path"), ("command_miss", "late-maps"),
+    ("command_miss", "path-stat"), ("command_miss", "kill-o-path")])
 def test_command_stage_traces_match_the_formula(stage, damage):
     lines, collector, plan = helper_stage_case(stage)
     if damage == "extra-prefix-fstat":
@@ -2607,6 +2652,51 @@ def test_command_stage_traces_match_the_formula(stage, damage):
         lines[at] = lines[at].split()[0] + '  truncate("/fx/anything", 0) = 0'
     elif damage == "unpinned-supervisor":
         lines = [l.replace('"__command-v1"', '"__command-v9"') for l in lines]
+    elif damage in ("extra-supervisor-clock", "missing-unit-cgroup"):
+        import re
+        supervisor = next(l.split()[0] for l in lines if '"__command-v1"' in l and "execve(" in l)
+        if damage == "extra-supervisor-clock":
+            # A second boot_id open: another clock observation.
+            at = next(i for i, l in enumerate(lines)
+                      if l.split()[0] == supervisor and '"/proc/sys/kernel/random/boot_id"' in l)
+            lines = lines[:at + 1] + [lines[at]] + lines[at + 1:]
+        else:
+            # The unit cgroup's mkdirat gone: one cgroup term short.
+            lines = [l for l in lines if not (l.split()[0] == supervisor and re.search(r"mkdirat\(", l))]
+    elif damage in ("kill-as-procs", "forbidden-clock-path", "late-maps", "path-stat", "kill-o-path"):
+        import re
+        supervisor = next(l.split()[0] for l in lines if '"__command-v1"' in l and "execve(" in l)
+        mine = [i for i, l in enumerate(lines) if l.split()[0] == supervisor]
+        if damage == "path-stat":
+            # The clock's fd stat turned into a stat of another path: an
+            # absolute name ignores the dirfd.
+            at = next(i for i in mine if lines[i].split(None, 1)[1].startswith("statx(") and "boot_id>" in lines[i])
+            lines[at] = (f'{supervisor}  newfstatat(7</proc/sys/kernel/random/boot_id>, "/etc/passwd", '
+                         '{st_mode=S_IFREG|0644, st_size=1}, 0) = 0')
+        elif damage == "kill-o-path":
+            # An unusable kill descriptor (O_PATH): the kill write then fails.
+            for i in mine:
+                if '"cgroup.kill", O_WRONLY|' in lines[i]:
+                    lines[i] = lines[i].replace('"cgroup.kill", O_WRONLY|', '"cgroup.kill", O_WRONLY|O_PATH|')
+        elif damage == "kill-as-procs":
+            # The same open and write, on the unit's cgroup.procs.
+            for i in mine:
+                lines[i] = lines[i].replace("cgroup.kill", "cgroup.procs")
+        elif damage == "forbidden-clock-path":
+            # The clock's boot_id open and reads redirected elsewhere.
+            for i in mine:
+                lines[i] = lines[i].replace("/proc/sys/kernel/random/boot_id", "/fx/forbidden")
+        else:
+            # A maps open and read after the first counted call: no longer
+            # the loader's.
+            at = next(i for i in mine if re.search(r"mkdirat\(", lines[i])) + 1
+            lines[at:at] = [f'{supervisor}  openat(AT_FDCWD</>, "/proc/self/maps", O_RDONLY|O_CLOEXEC) = 15</proc/{supervisor}/maps>',
+                            f'{supervisor}  read(15</proc/{supervisor}/maps>, "x", 1024) = 1',
+                            f'{supervisor}  close(15</proc/{supervisor}/maps>) = 0']
+    elif damage == "best-effort-plan":
+        # The same atomic capture judged as best effort: the cgroup terms differ.
+        from dataclasses import replace
+        plan = replace(plan, cgroup_parent=False)
     if damage in (None, "short-gc"):
         assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
         return

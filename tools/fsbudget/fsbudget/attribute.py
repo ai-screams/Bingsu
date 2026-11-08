@@ -701,7 +701,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     loader-shaped access after startup (say /proc/self/maps) is counted.
     """
     import json
-    from .classify import collector_kind, collector_bootstrap_kind, helper_kind
+    from .classify import collector_kind, collector_bootstrap_kind, helper_kind, supervisor_kind
     from .strace_parse import CALL_HEAD, LINE, RESUMED, UNKNOWN_HEAD, parse
 
     trace = parse("\n".join(lines))
@@ -813,7 +813,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         result = c.ret.split()[0]
         success = bool(re.match(r"^\d+", c.ret))
         k = (collector_bootstrap_kind(c) if role == "collector"
-             else helper_kind(c) if role == "helper" and helper_vocabulary else collector_kind(c))
+             else helper_kind(c) if role == "helper" and helper_vocabulary
+             else supervisor_kind(c) if role == "supervisor" and helper_vocabulary else collector_kind(c))
         if k in {"spawn", "thread"}:
             # A target command may start anything; its spawns stay "command".
             # A target command is counted and reported only: its own filter
@@ -892,10 +893,10 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
             continue
         # Only the exact existing loader pairs may be excluded, before the
         # process's first filter. A collector never borrows helper NSS paths.
-        # The helper's and a target command's prologue ends at their first
-        # counted call; later loader-shaped calls are counted.
-        # 이것을 실패시키는 것: 대상의 시작 경계를 두지 않는 것(실행 중 내내 loader 모양 호출이 제외됨).
-        tracked = helper_vocabulary and role == "helper" or role == "command"
+        # The helper's, the supervisor's and a target command's prologue ends
+        # at their first counted call; later loader-shaped calls are counted.
+        # 이것을 실패시키는 것: 대상이나 감독의 시작 경계를 두지 않는 것(실행 중 내내 loader 모양 호출이 제외됨).
+        tracked = helper_vocabulary and role in {"helper", "supervisor"} or role == "command"
         helper_startup = not tracked or process not in started
         if process not in confined and helper_startup and _prologue_call(c, target(c)):
             excluded["loader_prologue"] += 1
