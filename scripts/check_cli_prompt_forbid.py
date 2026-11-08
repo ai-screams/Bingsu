@@ -87,6 +87,15 @@ TCB_SHA256 = {
     "crates/bingsu-core/src/command/response.rs": "76794b243832e39756e20e436383ad1919ac5a94b7f079b529f59db3e9d05a69",
     "crates/bingsu-core/src/command/display.rs": "e1fcbe7c243614e6cc11215504590280f6dad9ff176cd6faf278e72d0c420047",
     "crates/bingsu-core/src/command/path.rs": "2ad44e19f8a5d9b1357a11ec84320738fbe7eec7ff9a1bf8fa38b135949eed98",
+    # The prompt links these and they decide what it reads and draws: the
+    # unit judgement and digests display.rs checks (plan.rs, wire.rs), the
+    # builtin languages' environment digest (builtin.rs), the front's read
+    # plan (staged.rs) and the text it lets reach the terminal (sanitize.rs).
+    "crates/bingsu-core/src/command/plan.rs": "5e1f0c9c1d0185a69af1f541a62fb8dd5a434fdc0c930d9e0a7cca4a80880e3e",
+    "crates/bingsu-core/src/command/wire.rs": "fae927873d7ccce472eb3ff743cb45b8670f979319b0f5458af0e9375f1e9f9a",
+    "crates/bingsu-core/src/front/staged.rs": "9d00857fe58c170faa46752f3bb271e62352c5cff0c0fec81e05e280f1028444",
+    "crates/bingsu-core/src/sanitize.rs": "bab17056bdadd1721f4ad71a66576d50423500cbc7e0f52cc23c551051359532",
+    "crates/bingsu-core/src/command/builtin.rs": "75e53059139a8320f055a8ff3d8b19555d53c0fed81663fb786bc8b061b9516d",
     "crates/bingsu/src/sandbox.rs": "a8ef03197c75a326c365b3c2ac0ce0170df58b05b4d9af13c8d9e5064bcac929",
     "crates/bingsu/Cargo.toml": "1e56b43b80795d4042f862c4f563ca1121b1edd88ec401d0e16765a750b1cae8",
     "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
