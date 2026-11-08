@@ -851,6 +851,14 @@ SUPERVISOR_SHAPES = [
     ('1 openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CREAT|O_CLOEXEC) = 14</dev/null>', "unknown-fs"),  # O_CREAT
     ('1 openat(AT_FDCWD</>, "/dev/null", O_RDONLY|O_CLOEXEC, 0666) = 14</dev/null>', "unknown-fs"),  # a mode argument
     ('1 openat(AT_FDCWD</>, "/dev/null", O_RDONLY) = 0</dev/null>', "openat"),
+    # x86_64 musl's open(): the open syscall, the same rows by path.
+    ('1 open("/dev/null", O_RDONLY|O_LARGEFILE) = 14</dev/null>', "openat"),
+    ('1 open("/dev/null", O_RDONLY|O_CLOEXEC) = 14</dev/null>', "openat"),
+    ('1 open("/dev/null", O_WRONLY|O_LARGEFILE) = 14</dev/null>', "unknown-fs"),
+    ('1 open("/etc/passwd", O_RDONLY|O_LARGEFILE) = 14</etc/passwd>', "unknown-fs"),
+    ('1 open("/dev/null", O_RDONLY|O_CREAT, 0666) = 14</dev/null>', "unknown-fs"),
+    ('1 open("/dev/null", O_RDONLY|O_CLOEXEC, 0666) = 14</dev/null>', "unknown-fs"),  # a mode argument
+    ('1 open("cgroup.kill", O_WRONLY|O_NOFOLLOW|O_CLOEXEC) = 8</x/cgroup.kill>', "unknown-fs"),
     (f'1 openat(7<{SUP_UNIT}>, "cgroup.kill", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 8<{SUP_UNIT}/cgroup.kill>', "unknown-fs"),  # kill access
     (f'1 openat(7<{SUP_UNIT}>, "cgroup.kill", O_WRONLY|O_NOFOLLOW|O_CLOEXEC|O_TMPFILE) = 8<{SUP_UNIT}/cgroup.kill>', "unknown-fs"),
     ('1 openat(AT_FDCWD</>, "/proc/sys/kernel/random/boot_id", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_PATH) = 7</proc/sys/kernel/random/boot_id>', "unknown-fs"),  # O_PATH

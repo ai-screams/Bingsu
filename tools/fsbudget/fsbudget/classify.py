@@ -294,7 +294,13 @@ _SUP_OPENS = [
 ]
 
 
-def _sup_open(args: list[str]) -> bool:
+def _sup_open(call: str, args: list[str]) -> bool:
+    # open(2) of an absolute path is openat(AT_FDCWD, ...): x86_64 musl's
+    # open() makes the open syscall (aarch64 has none), as for the relay's
+    # stdin on both paths. Only the "/" rows name absolute paths, and a mode
+    # argument fails the argument count, as for openat.
+    if call == "open":
+        args = ["AT_FDCWD</>", *args]
     if len(args) != 3:
         return False
     at = _sup_fd(args[0])
@@ -328,7 +334,7 @@ def supervisor_kind(c: Call) -> str | None:
     fd = _sup_fd(args[0]) if args else None
     clock = fd is not None and (fd == _SUP_BOOT_ID or re.fullmatch(_SUP_PROC + r"(?:/ns|/timens_offsets)?", fd))
     allowed = {
-        "openat": c.name == "openat" and _sup_open(args),
+        "openat": c.name in {"openat", "open"} and _sup_open(c.name, args),
         "fd_flags": c.name == "fcntl" and args[1:3] == ["F_SETFD", "FD_CLOEXEC"] and fd is not None
                     and (re.fullmatch(r".*/bingsu/command-[0-9a-f]+\.lock", fd) or re.fullmatch(_SUP_CGROUP, fd)),
         "read": c.name == "read" and fd == _SUP_BOOT_ID,
