@@ -323,6 +323,7 @@ mod tests {
             approved_by: Vec::new(),
             shown_at: Vec::new(),
             not_run: None,
+            pattern: None,
         }
     }
     fn command(argv: &[&str], cwd: Option<&str>) -> ExecPolicy {

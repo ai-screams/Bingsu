@@ -996,7 +996,7 @@ def assert_b1_contract(text):
           target="$arch-unknown-linux-$LIBC"
           rustup target add "$target"
           if [ "$LIBC" = musl ]; then sudo apt-get update -q; sudo apt-get install -y musl-tools; fi
-          cargo build -p bingsu -p bingsu-collect --release --target "$target"
+          cargo build -p bingsu -p bingsu-prompt -p bingsu-collect --release --target "$target"
           echo "BINGSU_BIN=$PWD/target/$target/release/bingsu" >> "$GITHUB_ENV"
 '''
     actual_build = job.split("      - name: Build release siblings\n        run: |\n", 1)[1].split("      - name:", 1)[0]
@@ -1005,7 +1005,7 @@ def assert_b1_contract(text):
     for required in ("runs-on: ${{ matrix.os }}", "os: [ubuntu-latest, ubuntu-24.04-arm]",
                      "libc: [gnu, musl]", "PROFILE: release", "arch=$(uname -m)",
                      'target="$arch-unknown-linux-$LIBC"',
-                     'cargo build -p bingsu -p bingsu-collect --release --target "$target"',
+                     'cargo build -p bingsu -p bingsu-prompt -p bingsu-collect --release --target "$target"',
                      '--basetemp="$RUNNER_TEMP/b1-evidence"', "if: failure()"):
         # 이것을 실패시키는 것: assert required in job, required 조건을 제거하거나 반전하는 변이.
         assert required in job, required

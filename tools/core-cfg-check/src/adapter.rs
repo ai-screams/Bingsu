@@ -79,6 +79,7 @@ struct Walk<'a> {
     out: Vec<Finding>,
     prefilter_lines: Option<[(usize, usize); 2]>,
     timer_lines: Option<[(usize, usize); 2]>,
+    dedicated_line: Option<(usize, usize)>,
 }
 
 impl Walk<'_> {
@@ -192,6 +193,10 @@ impl<'ast> Visit<'ast> for Walk<'_> {
                     && self.timer_lines.map(|lines| lines[0])
                         == Some((line_of(path.span()), path.span().start().column)) => {}
             Some("crate")
+                if full == "crate::prompt_io::entry_deadline"
+                    && self.dedicated_line
+                        == Some((line_of(path.span()), path.span().start().column)) => {}
+            Some("crate")
                 if full == "crate::prompt_io::arm_deadline"
                     && self.timer_lines.map(|lines| lines[1])
                         == Some((line_of(path.span()), path.span().start().column)) => {}
@@ -257,6 +262,7 @@ pub fn check_adapter(source: &str, tsv: &str) -> Vec<Finding> {
         out: Vec::new(),
         prefilter_lines: prefilter_lines(&file),
         timer_lines: timer_lines(&file),
+        dedicated_line: dedicated_line(&file),
     };
     if walk.prefilter_lines.is_some() && walk.timer_lines.is_none() {
         walk.bad(
@@ -446,6 +452,28 @@ fn prefilter_lines(file: &syn::File) -> Option<[(usize, usize); 2]> {
             prepare.func.span().start().column,
         ),
     ])
+}
+
+/// `bingsu-prompt`'s entry, `dedicated`, captures time as its first
+/// statement, exactly as `dispatch` does; that call site is the only other
+/// one allowed. Without the function there is no such site.
+fn dedicated_line(file: &syn::File) -> Option<(usize, usize)> {
+    let dedicated = file.items.iter().find_map(|i| match i {
+        syn::Item::Fn(f) if f.sig.ident == "dedicated" => Some(f),
+        _ => None,
+    })?;
+    let syn::Stmt::Local(local) = dedicated.block.stmts.first()? else {
+        return None;
+    };
+    let pinned: syn::Stmt = syn::parse_str("let deadline = crate::prompt_io::entry_deadline();")
+        .expect("pinned dedicated entry");
+    if syn::Stmt::Local(local.clone()) != pinned {
+        return None;
+    }
+    let syn::Expr::Call(entry) = local.init.as_ref()?.expr.as_ref() else {
+        return None;
+    };
+    Some((line_of(entry.func.span()), entry.func.span().start().column))
 }
 
 /// N6: capture time as dispatch's first statement; install the timer in a

@@ -285,7 +285,11 @@ fn run(
     let report = if unchanged {
         None
     } else {
-        Some(report::from_loaded(loaded, Mode::Dark))
+        let mut r = report::from_loaded(loaded, Mode::Dark);
+        // The `match` check (C4c ruling Q1): the snapshot published keeps a
+        // unit whose pattern fails off, as config check reports it.
+        super::command_match::check(&mut r);
+        Some(r)
     };
     b.check(clock)?;
     let compiled = unchanged || report.as_ref().is_some_and(|r| r.snapshot.is_some());

@@ -1268,7 +1268,37 @@ def assert_repository_trace(lines: list[str], capabilities: dict, phases: dict) 
     phases.update({key: dict(value) for key, value in counts.items()})
 
 
-def _product_roles(trace):
+def _value_flags():
+    """The envelope's two-word flags, read from the one Rust list."""
+    import pathlib
+    source = (pathlib.Path(__file__).resolve().parents[3] / "crates/bingsu-core/src/envelope.rs").read_text()
+    body = re.search(r"fn is_value_flag.*?\n}\n", source, re.S)[0]
+    return frozenset(re.findall(r'b"(--[a-z-]+)"', body))
+
+
+def _helper_exe(argv, exe, entry):
+    """The helper the front may start: the one `--helper-exe=` word of its
+    argv in flag position (front::helper_exe), else the front itself for the
+    `bingsu prompt` entry ("cli") and none for `bingsu-prompt` ("dedicated").
+    The caller says which entry it ran; the file name does not, and any
+    other value is treated as "dedicated". Two such words or a relative one:
+    none."""
+    flags = _value_flags()
+    named, i = [], 2
+    while i < len(argv):
+        if argv[i].startswith("--helper-exe="):
+            named.append(argv[i].split("=", 1)[1])
+        i += 2 if argv[i] in flags else 1
+    # 이것을 실패시키는 것: 중복·상대 경로 helper 단어를 받는 것.
+    if len(named) > 1 or (named and not named[0].startswith("/")):
+        return None
+    if named:
+        return named[0]
+    # 이것을 실패시키는 것: bingsu-prompt가 helper 단어 없이 자기 자신을 helper로 띄우는 것을 받는 것.
+    return exe if entry == "cli" else None
+
+
+def _product_roles(trace, entry):
     """Resolve task lifetimes using creation edges and fixed product argv.
 
     A vfork exec can be recorded before the parent's spawn return. Resolve
@@ -1294,6 +1324,7 @@ def _product_roles(trace):
     if initial is None:
         raise ValueError("missing successful root exec")
     exe = ast.literal_eval(split_args(initial.args)[0])
+    helper = _helper_exe(ast.literal_eval(split_args(initial.args)[1]), exe, entry)
     parents, spawns = {}, []
     for c in trace:
         # 이것을 실패시키는 것: if c.name in SPAWN and re.fullmatch(r"[1-9][0-9]*", c.ret) 조건을 제거하거나 반전하는 변이.
@@ -1334,8 +1365,8 @@ def _product_roles(trace):
                 path = ast.literal_eval(args[0])
                 argv = ast.literal_eval(args[1])
                 empty_env = bool(re.fullmatch(r"(?:0x[0-9a-f]+ /\* 0 vars \*/|\[\])", args[2]))
-                # 이것을 실패시키는 것: if empty_env and argv[:2] == [exe, "__refresh-v1"] and path == exe and parent == "front" 조건을 제거하거나 반전하는 변이.
-                if empty_env and argv[:2] == [exe, "__refresh-v1"] and path == exe and parent == "front":
+                # 이것을 실패시키는 것: if empty_env and argv[:2] == [helper, "__refresh-v1"] and path == helper and parent == "front" 조건을 제거하거나 반전하는 변이.
+                if empty_env and argv[:2] == [helper, "__refresh-v1"] and path == helper and parent == "front":
                     role = "helper"
                 collector = next((a.split("=", 1)[1] for a in ast.literal_eval(split_args(initial.args)[1])
                                   # 이것을 실패시키는 것: if a.startswith("--collector-exe=")), exe.rpartition("/")[0] + "/bingsu-collect") 조건을 제거하거나 반전하는 변이.
@@ -1353,9 +1384,10 @@ def _product_roles(trace):
     return keys, roles, spawns, starts
 
 
-def role_children(trace):
-    """Successful process creations per parent role; threads are separate."""
-    keys, roles, spawns, _ = _product_roles(trace)
+def role_children(trace, entry):
+    """Successful process creations per parent role; threads are separate.
+    `entry`: "cli" for a traced `bingsu prompt`, "dedicated" for `bingsu-prompt`."""
+    keys, roles, spawns, _ = _product_roles(trace, entry)
     counts = dict.fromkeys(("front", "helper", "collector", "command"), 0)
     for call, child in spawns:
         # 이것을 실패시키는 것: watchdog 스레드의 exec로 collector 프로세스 생성을 숨기는 변이.
@@ -1373,13 +1405,13 @@ def role_children(trace):
     return counts
 
 
-def first_index(trace, role, predicate):
+def first_index(trace, role, predicate, entry):
     """First matching completed call in a role, failing closed if missing.
 
     Calls before the validated product exec cannot supply timing evidence.
     Timing comparisons use calls in the helper's own main TID; its reads
     cannot execute during its pending process creation syscall.
     """
-    keys, roles, _, starts = _product_roles(trace)
+    keys, roles, _, starts = _product_roles(trace, entry)
     return next(c.index for c in trace if roles[keys[c.index]] == role
                 and c.index >= starts[keys[c.index]] and predicate(c))

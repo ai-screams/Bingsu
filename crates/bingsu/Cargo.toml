@@ -18,6 +18,8 @@ bench-stubs = ["dep:bingsu-bench", "bingsu-identity/bench-build"]
 [dependencies]
 bingsu-core = { path = "../bingsu-core" }
 bingsu-identity = { path = "../bingsu-identity" }
+# `match` of command segments (C4c): regex in the CLI only, never in core.
+bingsu-match = { path = "../bingsu-match" }
 bingsu-bench = { path = "../bingsu-bench", optional = true }
 
 [target.'cfg(unix)'.dependencies]

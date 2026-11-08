@@ -25,6 +25,8 @@ bench = false
 
 [dependencies]
 bingsu-core = { path = "../bingsu-core" }
+# The helper's `match` (C4c): measured here so CI job icount counts it.
+bingsu-match = { path = "../bingsu-match" }
 
 # The runner binary must have the same version (job icount installs
 # gungraun-runner 0.20.0).
@@ -110,6 +112,12 @@ test = false
 [[bench]]
 # M6 C4b: the prompt's command response decode, display decision and cut.
 name = "command"
+harness = false
+test = false
+
+[[bench]]
+# M6 C4c: the helper's `match` check and apply, 32 units of 4 KB.
+name = "command_match"
 harness = false
 test = false
 

@@ -8,21 +8,25 @@
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
-use std::ffi::{CString, OsStr};
+use std::ffi::{CString, OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 
 /// Starts the refresh helper (unless the shell asked for a redraw) and
 /// returns the shell's environment frame: the one pass over environ serves
 /// the helper's fd 4 and the prompt's command display (C4b ruling Q6).
 /// `None` for an environment over the frame cap, as the helper sees it.
+/// The helper is the hook's `--helper-exe=` word, else `fallback`
+/// (`front::helper_exe`): argv0 for `bingsu prompt`, none for `bingsu-prompt`.
 pub fn bootstrap(
-    exe: &OsStr,
+    fallback: Option<&OsString>,
     raw: &[&[u8]],
     deadline: Option<bingsu_core::front::output::Deadline>,
 ) -> Option<Vec<u8>> {
     let frame = bingsu_core::command::env_frame::encode(environ_entries());
-    if bingsu_core::front::spawns_helper(raw) {
-        let _ = spawn_until(exe, raw, frame.as_deref(), deadline);
+    if bingsu_core::front::spawns_helper(raw)
+        && let Some(exe) = bingsu_core::front::helper_exe(raw, fallback.map(|exe| exe.as_bytes()))
+    {
+        let _ = spawn_until(OsStr::from_bytes(exe), raw, frame.as_deref(), deadline);
     }
     frame
 }

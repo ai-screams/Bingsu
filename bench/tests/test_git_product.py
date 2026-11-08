@@ -93,7 +93,7 @@ def test_admission_yield_and_panic_keep_raw_evidence(monkeypatch, tmp_path, pani
 
 @pytest.fixture
 def pair(monkeypatch, tmp_path):
-    prep = {"hashes": {"front": "front", "collector": "collector"}, "source_hashes": {"source": "digest"},
+    prep = {"front": "/x/bingsu-prompt", "hashes": {"front": "front", "collector": "collector"}, "source_hashes": {"source": "digest"},
             "sibling_build_id": "id", "stripped_bytes": {"front": 101, "collector": 202, "combined": 303},
             "compiler": "rustc", "product_mask": 10}
     monkeypatch.setattr(git, "OUT", tmp_path)
@@ -216,20 +216,21 @@ def test_stage_memory_and_previous_read_intervals_keep_their_basis():
 
 
 # 이것을 실패시키는 것: 다른 binary/source, debug 빌드 또는 mask 0의 준비 파일을 받아들이는 것.
-@pytest.mark.parametrize("damage", ["front", "collector", "fixture", "diagnostic", "sources", "profile", "mask"])
+@pytest.mark.parametrize("damage", ["front", "cli", "collector", "fixture", "diagnostic", "sources", "profile", "mask"])
 def test_preparation_is_bound_to_release_sources_and_both_siblings(monkeypatch, tmp_path, damage):
     import json
     files = {name: tmp_path / filename for name, filename in
-             (("front", "bingsu"), ("collector", "bingsu-collect"), ("fixture", "helper"), ("diagnostic", "stages"))}
+             (("front", "bingsu-prompt"), ("cli", "bingsu"), ("collector", "bingsu-collect"), ("fixture", "helper"),
+              ("diagnostic", "stages"))}
     for name, path in files.items():
         path.write_text(name)
-    prepared = {"fixture": str(files["fixture"]), "diagnostic": str(files["diagnostic"]), "source": str(tmp_path),
+    prepared = {"front": str(files["front"]), "fixture": str(files["fixture"]), "diagnostic": str(files["diagnostic"]), "source": str(tmp_path),
                 "source_hashes": {"source": "hash"}, "profile": "release", "product_mask": 10,
                 "hashes": {name: git.M3B.digest(path) for name, path in files.items()}}
     monkeypatch.setattr(git, "sources", lambda _: {"source": "hash"})
-    manifest = git.manifest_path(files["front"])
+    manifest = git.manifest_path(files["cli"])
     manifest.write_text(json.dumps(prepared))
-    assert git.prepared(files["front"]) == prepared
+    assert git.prepared(files["cli"]) == prepared
     if damage in files:
         files[damage].write_text("changed")
     elif damage == "sources":
@@ -240,7 +241,7 @@ def test_preparation_is_bound_to_release_sources_and_both_siblings(monkeypatch, 
         prepared["product_mask"] = 0
     manifest.write_text(json.dumps(prepared))
     with pytest.raises(ValueError):
-        git.prepared(files["front"])
+        git.prepared(files["cli"])
 
 
 # 이것을 실패시키는 것: Darwin rusage 필드 위치를 wired/resident와 혼동해 footprint를 잘못 보고하는 것.

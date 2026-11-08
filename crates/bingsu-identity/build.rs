@@ -49,6 +49,7 @@ fn main() {
     }
     for package in [
         "bingsu",
+        "bingsu-prompt",
         "bingsu-core",
         "bingsu-collect",
         "bingsu-bench",

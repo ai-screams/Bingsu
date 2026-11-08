@@ -2094,7 +2094,7 @@ def assert_real_collection_ci(workflow, table):
     named = {step.get("name"): step for step in steps}
     positions = {step.get("name"): i for i, step in enumerate(steps)}
     release = next(i for i, step in enumerate(steps) if
-                   ["cargo", "build", "-j", "2", "--release", "-p", "bingsu", "-p", "bingsu-collect"] in run_commands(step))
+                   ["cargo", "build", "-j", "2", "--release", "-p", "bingsu", "-p", "bingsu-prompt", "-p", "bingsu-collect"] in run_commands(step))
     assert positions["F2 fixed fuzz seed regression corpus"] < release < positions["Prepare F3 release collection observations"]
     assert positions["Prepare F3 release collection observations"] < positions["Prepare M3b compiler-free product fixtures"] < positions["M3b product security and measurements contracts"]
     assert run_commands(named["Prepare F3 release collection observations"]) == [[
@@ -2158,7 +2158,7 @@ def test_real_collection_ci_rejects_mutations(damage):
     elif damage == "global":
         workflow = workflow.replace("test_product_global_excludes_reaches_stage_b[invalid-both]", "removed")
     elif damage == "release-order":
-        release = "      - run: cargo build -j 2 --release -p bingsu -p bingsu-collect\n"
+        release = "      - run: cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect\n"
         workflow = workflow.replace(release, "").replace("      - name: F2 fixed fuzz seed regression corpus\n",
                                                         release + "      - name: F2 fixed fuzz seed regression corpus\n")
     else:

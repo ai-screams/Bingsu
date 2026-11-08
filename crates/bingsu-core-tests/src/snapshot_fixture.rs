@@ -85,6 +85,7 @@ pub fn config() -> CompiledConfig {
         not_run: Some(NotRun::UnsafeFile {
             key: "interpreter".into(),
         }),
+        pattern: None,
     });
     c.palette.warnings = vec![
         PaletteWarning::TextContrast {

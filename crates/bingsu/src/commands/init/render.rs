@@ -4,8 +4,8 @@
 use crate::commands::messages::{MsgId, en};
 use bingsu_core::record::RecordVersion;
 use bingsu_core::root_arg::{
-    CONFIG_ROOT_PREFIX, CONFIG_ROOT_SHAPE_ONLY, CONFIG_ROOT_WRITTEN_PREFIX, HOME_PREFIX,
-    LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
+    CONFIG_ROOT_PREFIX, CONFIG_ROOT_SHAPE_ONLY, CONFIG_ROOT_WRITTEN_PREFIX, HELPER_EXE_PREFIX,
+    HOME_PREFIX, LOG_ROOT_PREFIX, RUNTIME_ROOT_PREFIX, STATE_ROOT_PREFIX,
 };
 use bingsu_core::shell_word::{Shell, encode_word};
 use bingsu_core::status::Status;
@@ -13,6 +13,9 @@ use bingsu_core::status::Status;
 pub struct ScriptInputs<'a> {
     pub shell: Shell,
     pub exe: &'a [u8],
+    /// The verified `bingsu-prompt` beside `exe`. `None`: the hook calls
+    /// `exe prompt`, the slower entry that also links every other command.
+    pub prompt_exe: Option<&'a [u8]>,
     pub collector_exe: Option<&'a [u8]>,
     pub runtime_groups: &'a [bingsu_core::fs_trust::GroupPin],
     pub runtime_root: Option<(u64, u64, &'a [u8])>,
@@ -139,7 +142,11 @@ fn prefixed(shell: Shell, prefix: &[u8], value: &[u8], out: &mut Vec<u8>) {
 fn emit(inp: &ScriptInputs<'_>, name: &[u8], out: &mut Vec<u8>) -> bool {
     let sh = inp.shell;
     match name {
-        b"BIN" => encode_word(sh, inp.exe, out),
+        b"PROMPT_BIN" => encode_word(sh, inp.prompt_exe.unwrap_or(inp.exe), out),
+        // The helper is `exe`, the path init pins, in either case. No one
+        // checks that file when the prompt runs: whoever can edit the hook
+        // can already run anything in the shell (as with argv0).
+        b"HELPER_EXE" => prefixed(sh, HELPER_EXE_PREFIX, inp.exe, out),
         b"COLLECTOR_EXE" => {
             if let Some(exe) = inp.collector_exe {
                 prefixed(sh, b"--collector-exe=", exe, out);
@@ -320,6 +327,7 @@ mod tests {
         ScriptInputs {
             shell,
             exe: b"/bin/bingsu",
+            prompt_exe: Some(b"/bin/bingsu-prompt"),
             collector_exe: Some(b"/bin/bingsu-collect"),
             runtime_groups: &[],
             runtime_root: Some((1, 2, b"/r")),
@@ -378,6 +386,33 @@ mod tests {
             prefixed(shell, HOME_PREFIX, home, &mut want);
             assert_eq!(count(&s, &want), 1, "{shell:?}");
             assert_eq!(count(&s, b"@HOME@"), 0, "{shell:?}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 확인한 bingsu-prompt 대신 bingsu를 부르는 것, 형제가 없을 때
+    // `bingsu prompt`로 돌아가지 않는 것, helper 단어를 빼거나 형제 경로로 쓰는 것.
+    #[test]
+    fn prompt_call_uses_the_verified_sibling_and_names_the_helper() {
+        for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
+            for prompt_exe in [Some(b"/opt/bingsu-prompt".as_slice()), None] {
+                let mut inp = sample(shell);
+                inp.prompt_exe = prompt_exe;
+                let mut s = Vec::new();
+                script_text(&inp, &mut s);
+                let mut call = Vec::new();
+                encode_word(shell, prompt_exe.unwrap_or(b"/bin/bingsu"), &mut call);
+                call.extend_from_slice(b" prompt ");
+                assert_eq!(count(&s, &call), 1, "{shell:?} {prompt_exe:?}");
+                let mut cli = Vec::new();
+                encode_word(shell, b"/bin/bingsu", &mut cli);
+                cli.extend_from_slice(b" prompt ");
+                let want = usize::from(prompt_exe.is_none());
+                assert_eq!(count(&s, &cli), want, "{shell:?} {prompt_exe:?}");
+                let mut helper = Vec::new();
+                prefixed(shell, HELPER_EXE_PREFIX, b"/bin/bingsu", &mut helper);
+                assert_eq!(count(&s, &helper), 1, "{shell:?} {prompt_exe:?}");
+                assert_eq!(count(&s, HELPER_EXE_PREFIX), 1, "{shell:?}");
+            }
         }
     }
 
@@ -442,6 +477,7 @@ mod tests {
                 &ScriptInputs {
                     shell,
                     exe: b"/bin/bingsu",
+                    prompt_exe: None,
                     collector_exe: Some(b"/bin/bingsu-collect"),
                     runtime_groups: &[],
                     runtime_root: None,

@@ -120,6 +120,13 @@ running shell. Hooks and the binary must come from the same version: newer hooks
 binary does not know, and older hooks can leave a newer binary unable to trust saved settings until init runs again.
 The record reader can accept older compatible records; that does not promise compatibility between hook and binary versions.
 
+Keep `bingsu-prompt` and `bingsu-collect` in the same folder as `bingsu`, from the same build. `bingsu-prompt` draws the
+prompt with only the prompt code, so it starts faster than `bingsu`. Init checks the files beside `bingsu` once, when it
+runs: their owner and permissions, and that they come from the same build. It writes the path of `bingsu-prompt` into the
+hooks. Without a matching `bingsu-prompt`, the hooks call `bingsu prompt`, which draws the same prompt more slowly. The
+hooks also name `bingsu` as the program that refreshes the prompt's data. Nothing checks these files again while the shell
+runs, so run init again after you replace them.
+
 For global Git excludes, init also pins `HOME` and `XDG_CONFIG_HOME` into the hooks. Later environment changes
 (including direnv) do not select different global config or ignore files; run init again to change these locations.
 Unset or empty values stay empty. Invalid values (relative paths, including literal `~/.config`, or more than

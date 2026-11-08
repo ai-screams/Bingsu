@@ -1134,8 +1134,7 @@ def slow_redraw(tmp_path, inst, seconds):
     fake = (ROOT / "tests/shell/fake_bingsu.sh").read_text()
     slow.write_text(fake.replace("here=", f'case " $* " in *" --redraw "*) sleep {seconds} ;; esac\nhere=', 1))
     slow.chmod(0o755)
-    (inst.dir / "bingsu").unlink()
-    (inst.dir / "bingsu").symlink_to(slow)
+    inst.use_fake((inst.dir / "record.bin").read_bytes(), slow)
 
 
 def changing_width(s, turns):
@@ -1176,8 +1175,7 @@ def scripted_redraw(tmp_path, inst, step):
     script.write_text(fake.replace("here=", f'case " $* " in *" --redraw "*) echo x >>"${{0%/*}}/steps"; '
                                             f'n=$(wc -l <"${{0%/*}}/steps"); {step} ;; esac\nhere=', 1))
     script.chmod(0o755)
-    (inst.dir / "bingsu").unlink()
-    (inst.dir / "bingsu").symlink_to(script)
+    inst.use_fake((inst.dir / "record.bin").read_bytes(), script)
 
 
 # 첫 호출 중에 폭이 바뀌고 키가 도착하면 그 호출로 멈추고, 폭이 틀어진 채 키를 먼저 처리한다.

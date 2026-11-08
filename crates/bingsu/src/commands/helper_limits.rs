@@ -423,7 +423,7 @@ mod tests {
         let old = get(libc::RLIMIT_NOFILE).unwrap();
         set(libc::RLIMIT_NOFILE, 256.min(old.rlim_max), old.rlim_max).unwrap();
         let before = get(libc::RLIMIT_NOFILE).unwrap();
-        crate::prompt_spawn::bootstrap(std::ffi::OsStr::new("/n7-does-not-exist"), &[], None);
+        crate::prompt_spawn::bootstrap(Some(&"/n7-does-not-exist".into()), &[], None);
         let after = get(libc::RLIMIT_NOFILE).unwrap();
         assert_eq!(
             (before.rlim_cur, before.rlim_max),

@@ -105,6 +105,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         Default::default();
     let mut command_round = None;
     let mut command_skip = None;
+    let reapply = std::cell::Cell::new(None);
     let mut round_marker = None;
     let mut filter_failed = false;
     let mut supervisor = None;
@@ -235,6 +236,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 me: sys::current_uid(),
                 helper_deadline: _watchdog.expires_ns(),
                 builtins: &drawn_builtins(config, &e),
+                reapply: &reapply,
             };
             match command_grant::prepare(&inputs) {
                 Ok(round) => {
@@ -416,6 +418,17 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 }
             }
         }
+    }
+    // A round that runs nothing but re-matched cached entries under a
+    // changed `match` (U-9c) publishes them once its marker stands.
+    if let Some(publish) = reapply.take()
+        && grant_permit(round_marker, &result).is_some()
+    {
+        let text = match publish.publish_reapplied() {
+            Ok(_) => "command round: values matched again under a changed match",
+            Err(_) => "command round: results not published; the store was busy or refused",
+        };
+        report(&mut groups, LogLevel::Info, text);
     }
     if let Some(text) = command_skip.and_then(command_grant::Skip::message) {
         report(&mut groups, LogLevel::Info, text);
@@ -776,6 +789,7 @@ mod query_tests {
             approved_by: Vec::new(),
             shown_at: Vec::new(),
             not_run: None,
+            pattern: None,
         };
         let mut off = unit("custom/off", Some("deno"));
         off.not_run = Some(bingsu_core::config::compile::NotRun::Disabled);

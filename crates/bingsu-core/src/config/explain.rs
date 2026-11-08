@@ -69,6 +69,10 @@ pub fn not_run_text(n: &NotRun) -> (&'static str, Option<DiagCode>) {
             "`shell` is set without `unsafe_shell = true`",
             Some(codes::SHELL_NOT_ALLOWED),
         ),
+        NotRun::MatchInvalid => (
+            "`match` is not a regular expression within the size limit",
+            Some(codes::BAD_VALUE),
+        ),
     }
 }
 

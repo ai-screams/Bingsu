@@ -29,7 +29,7 @@ jobs:
         with:
           toolchain: stable
       - run: cargo build --release -p bingsu --features bench-stubs
-      - run: cargo build --release -p bingsu-collect -p bingsu-bench
+      - run: cargo build --release -p bingsu-prompt -p bingsu-collect -p bingsu-bench
       # Runs without --cgroup-dir, as the plan records the CI matrix: the cgroup
       # rows are na here; the delegated-cgroup rows are measured on the Linux host.
       - name: Run the matrix
@@ -71,8 +71,10 @@ jobs:
       - name: Build both sibling pairs and main-thread fixtures
         run: |
           mkdir -p "$RUNNER_TEMP/measurements"
-          cargo build --manifest-path base/Cargo.toml -j 2 --release -p bingsu -p bingsu-collect
-          cargo build --manifest-path candidate/Cargo.toml -j 2 --release -p bingsu -p bingsu-collect
+          base_packages=(-p bingsu -p bingsu-collect)
+          if [ -f base/crates/bingsu-prompt/Cargo.toml ]; then base_packages+=(-p bingsu-prompt); fi
+          cargo build --manifest-path base/Cargo.toml -j 2 --release "${base_packages[@]}"
+          cargo build --manifest-path candidate/Cargo.toml -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect
           python3 candidate/bench/git-product.py --prepare base/target/release/bingsu --out ${{ runner.temp }}/measurements/base-preparation.json
           python3 candidate/bench/git-product.py --prepare candidate/target/release/bingsu --out ${{ runner.temp }}/measurements/candidate-preparation.json
       - name: Record 200 alternating warm observations and first-process cold
@@ -122,7 +124,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends zsh fish
           uname -r; nproc; cat /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/ksm/run || true
-      - run: cargo build --release -p bingsu -p bingsu-collect
+      - run: cargo build --release -p bingsu -p bingsu-prompt -p bingsu-collect
       # Rows stay BLOCKED until every proof obligation holds on the host; the
       # raw rows are the record either way.
       - name: Record 200 traced prompts per case

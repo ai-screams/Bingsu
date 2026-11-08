@@ -141,7 +141,9 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
     };
     let roots_in = loader.roots(BUILTIN_TOML.as_bytes());
     let loaded = load(roots_in, &mut loader, ctx::version());
-    let report = report::from_loaded(loaded, Mode::Dark);
+    let mut report = report::from_loaded(loaded, Mode::Dark);
+    // The same `match` check the published snapshot gets (C4c ruling Q1).
+    super::command_match::check(&mut report);
     let before = loader.io_used();
     let verdict = if matches!(selection, Selection::Incomplete) {
         Verified::Incomplete

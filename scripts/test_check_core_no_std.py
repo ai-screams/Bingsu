@@ -16,8 +16,12 @@ EDGES = {
     "bingsu-core": ["libm", "unicode-segmentation", "toml"],
     "toml": ["toml_parser", "toml_datetime", "serde_spanned", "winnow"],
     "toml_parser": ["winnow"],
-    "bingsu": ["bingsu-core", "bingsu-identity", "libc"],
+    "bingsu": ["bingsu-core", "bingsu-identity", "libc", "bingsu-match"],
+    "bingsu-prompt": ["bingsu-core", "bingsu-identity", "libc"],
     "bingsu-identity": ["bingsu-core"],
+    "bingsu-match": ["regex"],
+    "regex": ["regex-automata", "regex-syntax"],
+    "regex-automata": ["regex-syntax"],
 }
 
 
@@ -26,7 +30,7 @@ def package(key, features, kinds):
     workspace = source.endswith("Cargo.toml")
     targets = [{"name": name, "kind": [k], "crate_types": [k], "required-features": [],
                 "src_path": str(ROOT / pathlib.Path(source).parent / "src/main.rs")
-                if k == "bin" else "/x/lib.rs"} for k in kinds]
+                if k == "bin" else "/x/lib.rs", "test": name != "bingsu-prompt"} for k in kinds]
     targets.append({"name": "t", "kind": ["test"], "crate_types": ["bin"],
                     "src_path": "/x/t.rs", "required-features": []})
     pkg = {"id": name, "name": name, "version": version, "targets": targets,
@@ -40,7 +44,7 @@ def package(key, features, kinds):
 def clean():
     """Metadata that matches the pins exactly."""
     meta = {"packages": [], "resolve": {"nodes": []}}
-    for key, (features, kinds) in gate.BINGSU_GRAPH.items():
+    for key, (features, kinds) in {**gate.BINGSU_GRAPH, **gate.PROMPT_GRAPH}.items():
         pkg, node = package(key, features, kinds)
         meta["packages"].append(pkg)
         meta["resolve"]["nodes"].append(node)
@@ -77,7 +81,8 @@ class Judge(unittest.TestCase):
 
     # 이것을 실패시키는 것: identity 분리를 핑계로 앞단 pin을 늘리거나 worker/Git edge를 허용하는 것.
     def test_identity_split_does_not_expand_the_front(self):
-        self.assertEqual(len(gate.BINGSU_GRAPH), 11)
+        # 11 plus the four of `match` (U-28: bingsu-match, regex, regex-automata, regex-syntax).
+        self.assertEqual(len(gate.BINGSU_GRAPH), 15)
         self.assertEqual(EDGES["bingsu-identity"], ["bingsu-core"])
         for parent in ("bingsu", "bingsu-identity"):
             for name in ("bingsu-collect", "gix-index"):
@@ -245,6 +250,22 @@ class Judge(unittest.TestCase):
         m = clean()
         pkg(m, "bingsu")["targets"][0]["src_path"] = str(ROOT / "crates/bingsu/alt.rs")
         self.fails_with(m, "bingsu targets")
+
+    # 이것을 실패시키는 것: bingsu-prompt의 bin 고정을 지우거나 시험 빌드를 허용하는 것.
+    def test_prompt_targets(self):
+        m = clean()
+        pkg(m, "bingsu-prompt")["targets"][0]["test"] = True
+        self.fails_with(m, "bingsu-prompt targets")
+        m = clean()
+        pkg(m, "bingsu-prompt")["targets"][0]["src_path"] = str(ROOT / "crates/bingsu/src/main.rs")
+        self.fails_with(m, "bingsu-prompt targets")
+
+    # 이것을 실패시키는 것: 다른 명령의 의존(regex 등)이 프롬프트 그래프에 들어와도 통과시키는 것.
+    def test_prompt_graph_refuses_cli_dependencies(self):
+        for name in ("regex", "bingsu-match", "bingsu"):
+            m = clean()
+            add_dep(m, "bingsu-prompt", name, ["lib"])
+            self.fails_with(m, f"bingsu-prompt graph: ('{name}', '1.0.0', ")
 
     # 이것을 실패시키는 것: 같은 이름의 workspace package가 둘일 때 하나만 보는 것.
     def test_one_workspace_root(self):

@@ -114,8 +114,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # Include Linux-only unit/integration test paths for both sibling crates.
-      - run: cargo clippy -j 2 -p bingsu -p bingsu-collect --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
-      - run: cargo clippy -j 2 -p bingsu -p bingsu-collect --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+      - run: cargo clippy -j 2 -p bingsu -p bingsu-prompt -p bingsu-collect --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+      - run: cargo clippy -j 2 -p bingsu -p bingsu-prompt -p bingsu-collect --all-targets --target x86_64-unknown-linux-musl -- -D warnings
 
   collector-msrv:
     name: Collector deployment MSRV (1.88)
@@ -131,7 +131,7 @@ jobs:
         with:
           toolchain: 1.88.0
       # 이것을 실패시키는 것: 제품이나 전이 의존성이 MSRV보다 새 문법/API를 쓰는 것.
-      - run: cargo build --locked -j 2 -p bingsu -p bingsu-collect
+      - run: cargo build --locked -j 2 -p bingsu -p bingsu-prompt -p bingsu-collect
 
   # Independent probe crates have their own lock/build graph. Keep their
   # native glibc+musl gates off the product job's 30-minute critical path.
@@ -430,7 +430,7 @@ jobs:
           grep -F 'test every_fuzz_target_calls_its_shared_entry ... ok' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test pattern_flags_reach_every_source_label ... ok' "$RUNNER_TEMP/f2-seeds.txt"
           grep -F 'test assert_live_rejects_unreserved_heap - should panic ... ok' "$RUNNER_TEMP/f2-seeds.txt"
-      - run: cargo build -j 2 --release -p bingsu -p bingsu-collect
+      - run: cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect
       # 이것을 실패시키는 것: build script·RUSTFLAGS·config가 제품 rustc에 --cfg collector_fuzz를 넘기는 것.
       - name: Product rustc never enables collector_fuzz
         shell: bash --noprofile --norc -euo pipefail {0}
@@ -452,6 +452,11 @@ jobs:
       # 이것을 실패시키는 것: 출하 collector의 spawn/import 또는 앞단 gix 심벌 유입.
       - name: Product imports and matching deployment pair
         run: python3 scripts/check_collector_symbols.py target/release/bingsu-collect --sibling target/release/bingsu --unstripped-dir target/release/symbol-audit --strip
+      # 이것을 실패시키는 것: 두 제품 바이너리 중 하나라도 collector 시험 fixture를 담는 것.
+      - name: Product binaries hold no collector fixture
+        run: |
+          cargo build -j 2 -p core-cfg-check
+          python3 scripts/check_cli_prompt_forbid.py --checker target/debug/core-cfg-check --product-binary target/release/bingsu --product-binary target/release/bingsu-prompt
       - name: Prepare Python audit tests
         run: |
           python3 -m venv "$RUNNER_TEMP/collector-tests"
@@ -671,7 +676,7 @@ jobs:
         run: |
           set -o pipefail
           triple="$(uname -m)-unknown-linux-musl"
-          cargo build -j 2 --release -p bingsu -p bingsu-collect --target "$triple"
+          cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect --target "$triple"
           # 이것을 실패시키는 것: 정적 musl ELF를 빈 동적 심벌 표만으로 통과시키는 것.
           python3 scripts/check_collector_symbols.py "target/$triple/release/bingsu-collect" --sibling "target/$triple/release/bingsu" --unstripped-dir "target/$triple/release/symbol-audit" --strip
           python3 bench/git-product.py --prepare "target/$triple/release/bingsu" --out "$RUNNER_TEMP/measurements/musl-preparation.json"
@@ -789,6 +794,18 @@ jobs:
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
           BINGSU_REQUIRE_NONROOT_TESTS: "1"
+      # Without the prompt files (no Unix), bingsu-prompt only exits 2, silently.
+      # 이것을 실패시키는 것: Windows의 bingsu-prompt가 prompt를 받아 돌거나 무언가 출력하는 것.
+      - name: bingsu-prompt exits 2 on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build -j 2 -p bingsu-prompt
+          set +e
+          out=$(target/debug/bingsu-prompt.exe prompt --ctx 1 --record B1 2>&1)
+          rc=$?
+          set -e
+          test "$rc" -eq 2 && test -z "$out" || { echo "::error::bingsu-prompt.exe prompt: exit $rc, output '$out'"; exit 1; }
       # 이것을 실패시키는 것: 오버플로 검사가 꺼지는 release에서 코어와 색인 범위 시험을 돌리지 않는 것.
       - name: Core tests without overflow checks (release)
         if: runner.os == 'Linux'
@@ -1166,8 +1183,12 @@ jobs:
           fi
           git worktree add "$RUNNER_TEMP/base" "$(git rev-parse HEAD^1)"
           mkdir -p "$RUNNER_TEMP/measurements"
-          cargo build --manifest-path "$RUNNER_TEMP/base/Cargo.toml" -j 2 --release -p bingsu -p bingsu-collect
-          cargo build -j 2 --release -p bingsu -p bingsu-collect
+          # The base builds bingsu-prompt when its tree has the package; the
+          # measurement then fails if a hook does not call the built binary.
+          base_packages=(-p bingsu -p bingsu-collect)
+          if [ -f "$RUNNER_TEMP/base/crates/bingsu-prompt/Cargo.toml" ]; then base_packages+=(-p bingsu-prompt); fi
+          cargo build --manifest-path "$RUNNER_TEMP/base/Cargo.toml" -j 2 --release "${base_packages[@]}"
+          cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect
           python3 bench/git-product.py --prepare "$RUNNER_TEMP/base/target/release/bingsu" --out "$RUNNER_TEMP/measurements/base-preparation.json"
           python3 bench/git-product.py --prepare target/release/bingsu --out "$RUNNER_TEMP/measurements/candidate-preparation.json"
       - name: Alternate 200 pairs per case in the controlled protocol

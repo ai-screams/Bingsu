@@ -100,6 +100,9 @@ pub enum NotRun {
     UnknownBand,
     /// `shell` without `unsafe_shell = true` (an error, E211).
     ShellNotAllowed,
+    /// `match` does not compile or passes the size limit (E203, decided by
+    /// the CLI's `bingsu-match`, never by core).
+    MatchInvalid,
 }
 
 /// One user segment that runs something, with its whole policy, where each
@@ -118,6 +121,11 @@ pub struct ExecUnit {
     pub shown_at: Vec<LayoutRef>,
     /// `None`: it runs.
     pub not_run: Option<NotRun>,
+    /// A command segment's `match`: the helper applies it to the first line
+    /// before publishing (U-9c), the prompt compares its digest
+    /// (`command::wire::pattern_digest`). Not in the policy digest, so a
+    /// change of `match` alone runs nothing again.
+    pub pattern: Option<String>,
 }
 
 /// Most user segments a config draws, text and command together (the
@@ -1538,6 +1546,9 @@ fn exec_units(
         } else {
             None
         };
+        // `match` is a command key (keys.rs): a language segment that writes
+        // it fails the check (E206) before it compiles.
+        let pattern = str_of("match");
         out.push(ExecUnit {
             id: e.key.clone(),
             policy,
@@ -1547,6 +1558,7 @@ fn exec_units(
             approved_by,
             shown_at,
             not_run,
+            pattern,
         });
     }
     // Only units that may run count: drawn by a trusted layout at some

@@ -7,6 +7,7 @@ mod render;
 pub(super) mod roots;
 pub(super) mod trusted_env;
 
+use crate::commands::collector::Sibling;
 use crate::commands::{ctx, sys};
 use bingsu_core::shell_word::Shell;
 use std::ffi::{OsStr, OsString};
@@ -70,7 +71,7 @@ fn prime_cold(
     let mut spawn = || {
         if let Some(words) = prime::helper_words(roots, &user.pw.home) {
             let raw: Vec<&[u8]> = words.iter().map(Vec::as_slice).collect();
-            crate::prompt_spawn::bootstrap(exe.as_os_str(), &raw, None);
+            crate::prompt_spawn::bootstrap(Some(&exe.as_os_str().to_owned()), &raw, None);
         }
     };
     prime::prime_with_deadline(
@@ -124,14 +125,14 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
             false
         }
     };
-    let collector = if exe_safe {
-        exe_path::collector_sibling(
-            &exe,
-            uid,
-            &mut crate::commands::group_policy::SystemGroups::new(&pw.name),
+    let (collector, prompt) = if exe_safe {
+        let mut groups = crate::commands::group_policy::SystemGroups::new(&pw.name);
+        (
+            exe_path::collector_sibling(&exe, uid, &mut groups),
+            exe_path::sibling(Sibling::PROMPT, &exe, uid, &mut groups),
         )
     } else {
-        None
+        (None, None)
     };
     let roots = roots::resolve(&env, &pw.home, &pw.name);
     for line in root_warnings(&roots) {
@@ -159,6 +160,7 @@ pub fn run(argv0: &OsStr, args: &[OsString]) -> ExitCode {
     let inputs = render::ScriptInputs {
         shell,
         exe: exe.as_os_str().as_bytes(),
+        prompt_exe: prompt.as_ref().map(|p| p.as_os_str().as_bytes()),
         collector_exe: collector.as_ref().map(|p| p.as_os_str().as_bytes()),
         runtime_groups: roots
             .runtime
@@ -230,6 +232,7 @@ mod tests {
                 &render::ScriptInputs {
                     shell,
                     exe: exe.as_os_str().as_bytes(),
+                    prompt_exe: None,
                     collector_exe: None,
                     runtime_groups: &[],
                     runtime_root: None,

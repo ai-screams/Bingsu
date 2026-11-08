@@ -3462,3 +3462,22 @@ def test_valid_marker_needs_a_record_within_its_attempts(capsys):
         run_marker_attempts([without_times(silent_valid()), record])
     assert untimed.value.made == [1]
 
+
+
+PROMPT_EXE = "/pinned/bin/bingsu-prompt"
+
+
+# 이것을 실패시키는 것: 전용 front(bingsu-prompt)가 helper 경로 없이 자기 자신을 `__refresh-v1`로 띄우는 trace를
+# 받는 것, 전용 front가 hook의 helper를 띄우는 정상 trace를 거부하는 것.
+def test_dedicated_front_starts_only_the_named_helper():
+    run = budget._assert_prompt_trace_budget
+    dedicated = valid_trace()
+    dedicated[0] = dedicated[0].replace(EXE, PROMPT_EXE)
+    run(dedicated, PROMPT_EXE, ROOTS, collector_limit=1, entry="dedicated", helper_exe=EXE)
+    self_spawn = [line.replace(EXE, PROMPT_EXE) for line in valid_trace()]
+    for helper_exe in (None, PROMPT_EXE):
+        with pytest.raises(AssertionError):
+            run(self_spawn, PROMPT_EXE, ROOTS, collector_limit=1, entry="dedicated", helper_exe=helper_exe)
+    with pytest.raises(AssertionError):
+        run(dedicated, PROMPT_EXE, ROOTS, collector_limit=1, entry="cli", helper_exe=EXE)
+    run(valid_trace(), EXE, ROOTS, collector_limit=1, entry="cli")
