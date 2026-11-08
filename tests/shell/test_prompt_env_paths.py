@@ -1529,7 +1529,9 @@ HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
                  "collect": ("unchanged", "collect"), "failure-last-good": ("failure-last-good",),
                  "failure-recover": ("failure-recover",),
                  "command_miss": ("unchanged", "command_miss"), "command_hit": ("unchanged", "command_hit"),
-                 "command_not_run": ("unchanged", "command_not_run")}
+                 "command_not_run": ("unchanged", "command_not_run"),
+                 "builtin_probe": ("unchanged", "collect", "builtin_probe"),
+                 "builtin_fast": ("unchanged", "collect", "builtin_fast")}
 # Command stages (M6 C4): one config unit run through the relay, on a screen
 # without dir or git. The miss runs it (no cache: every round); the hit finds
 # the warm-up's result inside its cache time; not_run keeps the unit off the
@@ -1557,6 +1559,13 @@ TEMPLATES = {"plain": "[style]\ntemplate='BASE {char}'\n", "edited": "[style]\nt
 TEMPLATES["command_miss"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="'custom/probe', ")
 TEMPLATES["command_hit"] = COMMAND_UNIT + "cache='30s'\n" + COMMAND_SCREEN.format(shown="'custom/probe', ")
 TEMPLATES["command_not_run"] = COMMAND_UNIT + COMMAND_SCREEN.format(shown="")
+# Builtin stages (D3a): the collect stage's screen (dir and git) and one
+# builtin language segment, with no config unit. The probe runs node (the
+# version stub) once its identity changed since the warm-up; the fast path
+# decides python from pyenv's selection with nothing to run.
+BUILTIN_SCREEN = "[layout.line1]\nleft=['dir','git','char']\n[layout.line2]\nleft=['{language}','char']\n"
+TEMPLATES["builtin_probe"] = BUILTIN_SCREEN.format(language="node")
+TEMPLATES["builtin_fast"] = BUILTIN_SCREEN.format(language="python")
 # The unit drawn only from 120 columns: the prompts here are 80 wide.
 TEMPLATES["command_wide"] = (COMMAND_UNIT + "cache='30s'\n" + COMMAND_SCREEN.format(shown="")
                              + "[layout.when.wide]\nmin_cols=120\n[layout.when.wide.line2]\nleft=['custom/probe','char']\n")
@@ -1861,9 +1870,20 @@ class HelperStageFixture:
         self.config = Path(self.env["XDG_CONFIG_HOME"]) / "bingsu"
         self.config.mkdir(parents=True, mode=0o700)
         command = stage.startswith("command_")
-        self.put("collect" if stage == "collect" else stage if command else config, template=template)
+        builtin = stage.startswith("builtin_")
+        self.put("collect" if stage == "collect" else stage if command or builtin else config, template=template)
         if command:
             self.env["PATH"] = COMMAND_PATH
+        self.tools = None
+        if builtin:
+            self.tools = folder_outside_repository(Path.home(), "bingsu-builtin-tools-")
+            # The language's folder first; the shell itself comes from /usr/bin.
+            if stage == "builtin_probe":
+                self.env["PATH"] = f"{self.tools / 'bin'}:{COMMAND_PATH}"
+                self.language = builtin_install(self.tools / "bin", "node")
+            else:
+                self.env["PATH"] = COMMAND_PATH
+                self.language = pyenv_layout(self.tools, self.env)
         # The helper-stage formulas count the `bingsu prompt` front; the helper
         # is the same process under either entry. child_capture traces the
         # `bingsu-prompt` front ("dedicated").
@@ -1871,11 +1891,21 @@ class HelperStageFixture:
         self.collector = init_collector_exe(self.script)
         wait_helpers(self.base)
         self.pwd = self.base
-        if stage == "collect":
-            self.pwd = self.base / "repo"
+        self.shell_root = None
+        if stage == "collect" or builtin:
+            # The collector's discovery walks the shell's folder from "/" within
+            # its 5 ms stage budget (budget::A_MS), five traced calls a level:
+            # next to the build output it is eight names deep on a CI runner,
+            # under a shallow folder of the home folder four, as in the local
+            # containers. Only collect and builtin stages: command stages scan
+            # the shell's folder too and keep the one they were measured with.
+            self.shell_root = folder_outside_repository(Path.home(), "bingsu-stage-shell-")
+            self.pwd = self.shell_root / "repo"
             self.pwd.mkdir()
             subprocess.run(["git", "init", "-q", str(self.pwd)], check=True, env={"PATH": os.environ["PATH"]})
             (self.pwd / "a").write_text("x")
+            if stage == "builtin_fast":
+                (self.pwd / ".python-version").write_text("3.12.1\n")
         self.store = context_store(self.env["XDG_RUNTIME_DIR"], os.path.realpath(self.config),
                                    os.path.realpath(Path(self.env["XDG_STATE_HOME"]) / "bingsu"))
         runtime = Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"
@@ -1888,15 +1918,16 @@ class HelperStageFixture:
         # and on a slow runner so can an untraced one, so collect goes on past
         # its three prompts until the store and the breaker are there.
         # Command stages: the first round publishes the snapshot, the second
-        # leaves the unit's response (and the session cgroup parent).
-        if stage == "collect":
+        # leaves the unit's response (and the session cgroup parent). Builtin
+        # stages warm as collect does: their round needs the stored answer.
+        if stage == "collect" or builtin:
             warm = warm_until(prompt_and_wait, lambda: collect_ready(self.store, runtime), least=3, most=COLLECT_WARMUP_MAX)
             print(f"collect warm-up prompts: {warm}")
         else:
             warm_until(prompt_and_wait, lambda: True, least=2 if command else 1, most=2 if command else 1)
         assert (self.store / "snapshot").is_file(), "warm-up did not publish"
         self.collection = {}
-        if stage == "collect":
+        if stage == "collect" or builtin:
             stores, breakers = collect_files(self.store, runtime)
             assert len(stores) == len(breakers) == 1, ("one store and breaker after warm-up", stores, breakers)
             sizes = warm_collection_previous(stores[0], self.prompt, lambda: wait_helpers(self.base))
@@ -1906,7 +1937,7 @@ class HelperStageFixture:
                                "collector_components": path_names(Path(self.collector).parent),
                                "collector_bytes": Path(self.collector).stat().st_size}
         self.command = {}
-        if command:
+        if command or builtin:
             # A unit off the screen never ran: no response, no lookup.
             responses = list((self.store / "collections-v1").glob("*/store/command"))
             assert len(responses) == int(stage != "command_not_run"), ("command responses after warm-up", responses)
@@ -1917,12 +1948,34 @@ class HelperStageFixture:
                             "cgroup_procs_bytes": len(procs.read_bytes()),
                             "cgroup_parent": session_cgroup_parent(
                                 self.script, Path(self.env["XDG_RUNTIME_DIR"]) / "bingsu"),
-                            "path_names": path_names(COMMAND_PATH), "target_names": path_names("/usr/bin"),
+                            "path_names": sum(path_names(f) for f in self.env["PATH"].split(":")) if builtin
+                            else path_names(COMMAND_PATH),
+                            "target_names": path_names(self.language.parent if stage == "builtin_probe" else
+                                                       self.tools / "pyenv" / "shims") if builtin
+                            else path_names("/usr/bin"),
                             "target_links": target_links("/usr/bin/true") if stage == "command_miss" else 0,
                             # The repository scan walks the shell's folder by its names
                             # (U-24): a canonical folder, so no link is followed.
                             "shell_names": path_names(self.pwd)}
             assert os.path.realpath(self.pwd) == str(self.pwd), ("a canonical shell folder", self.pwd)
+            if builtin:
+                # One catalog: the collection's (the same file, read once).
+                assert self.command.pop("catalog_bytes") == self.collection["catalog_bytes"]
+                # The probe's node is no manager's: classify stats each shim
+                # home bingsu knows (version_manager::unsupported: asdf,
+                # mise's data folder and /usr/local/share/mise, volta, nodenv,
+                # goenv; ASDF_DIR and MISE_SHIMS_DIR add one each when set).
+                # pyenv's shim folder matches first; python3 is a link to
+                # python3.12 inside its bin.
+                assert not {"ASDF_DIR", "MISE_SHIMS_DIR"} & set(self.env), "two more shim homes"
+                self.command.update(path_folders=len(self.env["PATH"].split(":")),
+                                    manager_homes=6 if stage == "builtin_probe" else 0,
+                                    bin_links=int(stage == "builtin_fast"))
+        if stage == "builtin_probe":
+            # A new node (its identity changed): the cached probe no longer
+            # matches, so the traced round runs it again.
+            stamp = self.language.stat().st_mtime_ns + 1_000_000_000
+            os.utime(self.language, ns=(stamp, stamp))
         if stage == "publish":
             self.put("edited")
         elif stage == "failure-last-good":
@@ -1973,6 +2026,85 @@ class HelperStageFixture:
             nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc,
             passwd_seeks=passwd_seeks(libc, os.getuid()),
             arch=platform.machine(), **self.collection, **self.command)
+
+
+def folder_outside_repository(parent, prefix):
+    """A new folder under `parent`, outside every git repository and with no
+    ancestor writable by group or others. A builtin stage's language tools
+    live there: the round leaves PATH folders inside the shell's repository,
+    or any folder above it holding `.git`, out of its lookup (C2 ruling J9),
+    and a fixture base next to the build output sits in the source checkout,
+    as on a CI runner. The collect and builtin stages' shell folder too, to
+    keep the collector's discovery shallow."""
+    import tempfile
+    parent = Path(parent).resolve()
+    # 이것을 실패시키는 것: 도구 폴더를 fixture 기반(저장소 checkout 안)에 두는 것(CI 러너에서 PATH가 비고 내장
+    # 회차가 아무것도 결정하지 않음), 저장소 안이거나 남이 쓸 수 있는 부모를 받는 것.
+    for folder in [parent, *parent.parents]:
+        assert not os.path.lexists(folder / ".git"), ("a tools folder inside a git repository", folder)
+        assert not os.stat(folder).st_mode & 0o022, ("group/other-writable ancestor of the tools", folder)
+    folder = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    folder.chmod(0o755)
+    return folder
+
+
+def remove_fixture(fixture):
+    """The fixture's base and the folders it made outside it."""
+    shutil.rmtree(fixture.base, ignore_errors=True)
+    # Test doubles of the fixture carry neither.
+    for extra in (getattr(fixture, "tools", None), getattr(fixture, "shell_root", None)):
+        if extra:
+            shutil.rmtree(extra, ignore_errors=True)
+
+
+def test_folder_outside_repository_refuses_a_checkout(tmp_path):
+    base = tmp_path / "checkout"
+    base.mkdir(mode=0o755)
+    for folder in (tmp_path, *tmp_path.parents):
+        if os.stat(folder).st_mode & 0o022:
+            pytest.skip(f"a group/other-writable ancestor here: {folder}")
+    tools = folder_outside_repository(base, "t-")
+    assert tools.parent == base.resolve() and tools.is_dir() and tools.name.startswith("t-")
+    # A .git in an ancestor, not only in the parent itself.
+    (base / ".git").mkdir()
+    sub = base / "sub"
+    sub.mkdir(mode=0o755)
+    with pytest.raises(AssertionError, match="inside a git repository"):
+        folder_outside_repository(sub, "t-")
+    (base / ".git").rmdir()
+    base.chmod(0o775)
+    with pytest.raises(AssertionError, match="writable"):
+        folder_outside_repository(base, "t-")
+
+
+def builtin_install(folder, name):
+    """The version stub (crates/bingsu-bench) copied under a language's
+    command name: a probe never runs a `#!` script."""
+    stub = Path(os.environ.get("BINGSU_VERSION_STUB", real_bin().with_name("version-stub")))
+    assert stub.is_file(), f"build it first: cargo build -p bingsu-bench --bin version-stub ({stub})"
+    folder.mkdir(parents=True, mode=0o755, exist_ok=True)
+    target = folder / name
+    target.write_bytes(stub.read_bytes())
+    target.chmod(0o755)
+    return target
+
+
+def pyenv_layout(tools, env):
+    """pyenv as it installs: its shim folder first on PATH (a `#!` script),
+    3.12.1 installed with python3 a link to python3.12, and the repository's
+    `.python-version` selecting it."""
+    root = tools / "pyenv"
+    shim = root / "shims" / "python3"
+    shim.parent.mkdir(parents=True, mode=0o755)
+    shim.write_text("#!/usr/bin/env bash\nexec pyenv exec python3 \"$@\"\n")
+    shim.chmod(0o755)
+    real = builtin_install(root / "versions" / "3.12.1" / "bin", "python3.12")
+    (real.parent / "python3").symlink_to("python3.12")
+    for folder in (root, root / "versions", root / "versions" / "3.12.1"):
+        folder.chmod(0o755)
+    env["PYENV_ROOT"] = str(root)
+    env["PATH"] = f"{shim.parent}:{env['PATH']}"
+    return real
 
 
 def own_cgroup():
@@ -2041,20 +2173,51 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
 
 def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
     from fsbudget.formula import (helper_stage_expected, helper_collect_expected, helper_command_expected,
-                                  supervisor_expected)
-    from fsbudget.gate import check, check_collect, check_command
+                                  helper_builtin_expected, supervisor_expected)
+    from fsbudget.gate import check, check_builtin, check_collect, check_command
     if evidence is None:
         evidence = {}
-    status = collector_exit(lines, collector) if stage == "collect" else None
+    builtin = stage.startswith("builtin_")
+    status = collector_exit(lines, collector) if stage == "collect" or builtin else None
     evidence["collector_exit"] = status
     collectors, roles = measured_helper_attribution(lines, exe, collector)
     evidence["role_counts"] = roles.counts
-    assert collectors == int(stage == "collect"), ("collector spawns", collectors)
+    assert collectors == int(stage == "collect" or builtin), ("collector spawns", collectors)
     command_roles = {"supervisor", "relay", "command"} & set(roles.counts)
     # 이것을 실패시키는 것: 명령 단계에서 감독·relay·대상 역할이 비는 것(그 호출이 helper에 섞임), 명령 없는
     # 단계나 실행할 것 없는 명령 단계에 그 역할이 생기는 것.
-    assert command_roles == ({"supervisor", "relay", "command"} if stage == "command_miss" else set()), command_roles
-    if stage == "command_miss":
+    # Builtin stages: their exact supervisor check below fails on a missing
+    # or extra role's calls.
+    assert builtin or command_roles == ({"supervisor", "relay", "command"} if stage == "command_miss"
+                                        else set()), command_roles
+    if builtin:
+        # GATE-FS-HELPER.1 builtin stages; GATE-CMD-FSBUDGET.1: the probe's
+        # supervisor spawns one relay as a unit round's does, the fast path's
+        # starts with nothing to run (idle). Which formula applies comes from
+        # the trace: a round that published the collection's response (even
+        # after a deadline) is held to the full one; without it, the deadline
+        # bounds apply and the stage tries again. The command supervisor is
+        # always checked exactly, by the relays it spawned.
+        # 이것을 실패시키는 것: 내장 단계의 감독 호출을 정확 비교에서 빼는 것, fast 감독을 단위 회차 식으로 보는 것,
+        # 마감 회차의 판정을 종료 코드로 정하는 것, 응답 없는 정상 종료를 받는 것.
+        assert status in (0, 75), ("unexpected collector exit", status)
+        errors, published, installed = check_builtin(
+            roles, helper_builtin_expected(plan), stage, deadline=helper_builtin_expected(plan, deadline=True),
+            evidence=evidence)
+        if status == 0 and not published:
+            errors.append("builtin: the collector answered but no response was published")
+        # The probe stage's fixture runs its probe once: a round that had an
+        # answer or installed a result spawned one relay. Only a probe round
+        # without either (a deadline with nothing verified) leaves the
+        # supervisor idle, as the fast stage always does.
+        # 이것을 실패시키는 것: 측정한 생성 수로 idle을 고르는 것(발행한 probe 회차가 relay 없이 통과).
+        idle = stage == "builtin_fast" or not (published or installed)
+        supervisor = {"supervisor": supervisor_expected(0 if idle else 1, atomic=plan.cgroup_parent, arch=plan.arch,
+                                                        libc=plan.libc, idle=idle)}
+        evidence.update(supervisor_counts=roles.counts.get("supervisor", {}), supervisor_expected=supervisor["supervisor"],
+                        relay_counts=roles.counts.get("relay", {}))
+        errors += check({"supervisor": roles.counts.get("supervisor", {})}, supervisor, "exact", ["supervisor"])
+    elif stage == "command_miss":
         errors = check_command(roles, helper_command_expected(plan), evidence=evidence)
         # GATE-CMD-FSBUDGET.1: the supervisor's calls, exact for this round's
         # one spawn on the path the host gave (the atomic path with the
@@ -2115,7 +2278,8 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     # Traces live outside the product fixture: cleanup must never erase a
     # failed attempt or earlier deadline attempts. --basetemp locates these
     # artifacts for the controller; each invocation needs its own basetemp.
-    for attempt in range(1, (COLLECT_ATTEMPTS if stage == "collect" else 1) + 1):
+    collecting = stage == "collect" or stage.startswith("builtin_")
+    for attempt in range(1, (COLLECT_ATTEMPTS if collecting else 1) + 1):
         artifacts = helper_stage_evidence / stage / f"attempt-{attempt}"
         artifacts.mkdir(parents=True)
         trace = artifacts / "trace.strace"
@@ -2133,7 +2297,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
             published = check_helper_capture(stage, lines, str(fixture.inst.exe), fixture.collector,
                                              fixture.plan(libc), evidence=evidence)
             evidence["publish_attempt"] = attempt if published else None
-            if stage != "collect" or published:
+            if not collecting or published:
                 return
         except BaseException as error:
             evidence["failure"] = str(error)
@@ -2143,7 +2307,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
             print(f"helper stage evidence: {artifacts}")
             if fixture is not None:
                 wait_helpers(fixture.base)
-                shutil.rmtree(fixture.base, ignore_errors=True)
+                remove_fixture(fixture)
     pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {helper_stage_evidence / stage}")
 
 
@@ -2308,7 +2472,7 @@ def test_live_helper_stops_config_io_past_an_axis_cap(axis, tmp_path):
         assert not later, ("config source calls after the cap", later[:5])
     finally:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # Fixture metadata, pinned independently from the product source.
@@ -2650,7 +2814,7 @@ def front_capture(request, tmp_path_factory):
             lock.close()
         if fixture is not None:
             wait_helpers(fixture.base)
-            shutil.rmtree(fixture.base, ignore_errors=True)
+            remove_fixture(fixture)
 
 
 # 이것을 실패시키는 것: TrustMetadata 길이 추가, last-good 뒤 현재 사본 재읽기, 사본별 머리/prefix 읽기 생략.
@@ -2712,6 +2876,7 @@ def child_capture(tmp_path):
         finally:
             wait_helpers(fixture.base)
             shutil.rmtree(fixture.base)
+            remove_fixture(fixture)
 
     def capture_prompt(fixture, base, invalid, timestamps, redraw):
         marker = fixture.store / "marker"
@@ -3200,7 +3365,7 @@ def shell_fd_capture(stage, tmp_path):
         spawn, = [c for c in trace if c.pid == shell and c.name in SPAWNS and c.ret.split(" ")[0] == str(recorder)]
     except BaseException:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
         raise
     finally:
         pipes.close()
@@ -3280,7 +3445,7 @@ def test_helper_fds_after_env(tmp_path):
         assert on_env[-1].index < first_open, ("fd 4 is read before the helper opens anything", on_env)
     finally:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # 이것을 실패시키는 것: 잠금의 adddup2 대상을 5에서 4로 바꾸는 것, collector 복사본을 F_DUPFD(CLOEXEC 없이)로
@@ -3309,7 +3474,7 @@ def test_live_collector_holds_only_fixed_fds(tmp_path):
         assert response[1:] == request[1:] == lock[1:] == (False, "spawn-action"), collector
     finally:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 def env_prompt(tmp_path, env):
@@ -3329,7 +3494,7 @@ def env_prompt(tmp_path, env):
         return trace, fixture, exec_pid(trace, exe, "prompt"), exec_pid(trace, exe, "__refresh-v1")
     except BaseException:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
         raise
 
 
@@ -3370,7 +3535,7 @@ def test_ld_preload_not_loaded_into_helper(tmp_path):
         assert direct.returncode != 0
         assert sorted(p.name.rsplit("-", 1)[0] for p in canaries.iterdir()) == ["__refresh-v1", "prompt"]
     finally:
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # 이것을 실패시키는 것: 도우미가 환경의 XDG_RUNTIME_DIR로 위치를 정하는 것(그 폴더를 연다).
@@ -3390,7 +3555,7 @@ def test_helper_ignores_xdg_runtime_dir_from_env(tmp_path):
         named = [c for c in trace if str(repo) in c.args and c not in reads and c not in writes]
         assert named == [], named
     finally:
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # 이것을 실패시키는 것: 앞단 프레임의 상한 검사를 지우는 것(70 KB 프레임을 쓰고 일부만 들어간다).
@@ -3406,7 +3571,7 @@ def test_oversize_env_block_means_no_env(tmp_path):
         reads = helper_env_reads(trace, helper, inode)
         assert [c.ret for c in reads] == ["0"], reads
     finally:
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
 
 
 # How long after the shell exits its pipes must reach EOF. The helper lives
@@ -3729,4 +3894,4 @@ def test_live_front_command_response_shapes(shape, tmp_path):
                                                    body), counts
     finally:
         wait_helpers(fixture.base)
-        shutil.rmtree(fixture.base, ignore_errors=True)
+        remove_fixture(fixture)
