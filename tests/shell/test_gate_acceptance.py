@@ -15,7 +15,7 @@ import sys
 import pytest
 
 # Helpers only: importing test_* names here would collect them twice.
-from test_collector_security import ROOT, assert_acceptance_table, job_platforms, rust_attributes, workflow_job
+from test_collector_security import ROOT, assert_acceptance_table, job_platforms, workflow_job
 
 TABLE = "tests/gate-acceptance.tsv"
 WORKFLOWS = ("ci.yml", "shell.yml")
@@ -249,26 +249,22 @@ M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-abso
 # Stages an active row may name: the milestone whose work added the test.
 ACTIVE_STAGES = ("M1", "M2", "M3a", "M3b", "M3c", "M3d", "M4", "M6")
 
-# Disposition rows close a clause without CI evidence; none counts as a passed
-# row. Two kinds:
-# - `deferred:<reason>`: the clause waits for a later milestone, or for a
-#   product rule in DEFERRAL_DECISIONS to change. Such a row names no test.
-# - `measured`: the clause is a timing comparison, recorded by a timing test
-#   that CI never asserts (`#[ignore = "timing…"]`); the row names that test.
+# Disposition rows (`deferred:<reason>`) close a clause without CI evidence and
+# never count as a passed row: the clause waits for a later milestone, or for
+# a product rule in DEFERRAL_DECISIONS to change. Such a row names no test.
 # Clauses deferred, with the milestone or the decision they wait for.
 M3D_DEFERRED = {
     "GATE-RUNTIME-ROOT.6": "M5",
     "GATE-FDS.3": "no-write-only-child",
+    "GATE-CLOCK-READS.2": "timing-comparison-not-gated",
 }
 DEFERRED_MILESTONES = ("M5",)
 # A deferral that waits for a product rule, by a name that says the rule.
 DEFERRAL_DECISIONS = {
     "no-write-only-child": "The prompt starts no write-only child and keeps no session state file; "
                            "reopen when a write-only child is added",
-}
-# Clauses recorded by an ignored timing test, with that test.
-M3D_MEASURED = {
-    "GATE-CLOCK-READS.2": "crates/bingsu/src/commands/command_process.rs::commands::command_process::tests::c2_timings",
+    "timing-comparison-not-gated": "A timing comparison is not a CI-blocking test; "
+                                   "reopen when a same-machine A/B comparison is measured",
 }
 
 # Gates whose rows count a live capture of a release build: their evidence must
@@ -302,8 +298,8 @@ def rows(table):
 
 
 def is_deferred(row):
-    """A disposition row (deferred or measured): it is not CI evidence."""
-    return row["stage"].startswith("deferred") or row["stage"] == "measured"
+    """A disposition row: it is not CI evidence."""
+    return row["stage"].startswith("deferred")
 
 
 def covered(table):
@@ -321,40 +317,26 @@ def without_deferred(table):
     return lines[0] + "".join(line for line, row in zip(lines[1:], rows(table)) if not is_deferred(row))
 
 
-def assert_deferred_rows(table, read=lambda name: (ROOT / name).read_text()):
+def assert_deferred_rows(table):
     # 이것을 실패시키는 것: 처분 행 삭제·추가·중복, 목록 밖 마일스톤이나 결정 이름, 시험을 가진 deferred 행,
-    # 시험이 없거나 timing ignore가 아닌 measured 행, gate.clause와 다른 id, 마일스톤 밖 active stage, 보조 행
-    # stage 변경.
+    # gate.clause와 다른 id, 마일스톤 밖 active stage, 보조 행 stage 변경.
     ids = [row["id"] for row in rows(table)]
     assert len(ids) == len(set(ids)), sorted({i for i in ids if ids.count(i) > 1})
-    found, measured = {}, {}
+    found = {}
     for row in rows(table):
         if not is_deferred(row):
             assert row["stage"] in ACTIVE_STAGES, (row["id"], "stage", row["stage"])
             if row["id"] in M3D_SUPPLEMENTARY:
                 assert row["stage"] == M3D_SUPPLEMENTARY[row["id"]], (row["id"], "supplementary stage", row["stage"])
             continue
-        assert row["id"] == f'{row["gate"]}.{row["clause"]}', (row["id"], "disposition id")
-        assert row["property"].strip(), (row["id"], "disposition")
-        if row["stage"] == "measured":
-            path, name = row["test"].split("::", 1)
-            base = name.rsplit("::", 1)[-1]
-            assert (row["target"], path.endswith(".rs")) == ("-", True), (row["id"], "measured row names a Rust test")
-            groups = [g for g in rust_attributes(read(path), r"fn\s+" + re.escape(base) + r"\s*\(") if g]
-            assert len(groups) == 1, (row["id"], "measured test declaration", path, base)
-            attributes = [a.strip() for a in groups[0]]
-            assert "test" in attributes, (row["id"], "measured test is not a test")
-            assert any(re.fullmatch(r'ignore\s*=\s*"timing\b[^"]*"', a) for a in attributes), (
-                row["id"], "measured test is not an ignored timing test")
-            measured[row["id"]] = row["test"]
-            continue
         reason = row["stage"].removeprefix("deferred:")
         assert row["stage"] == "deferred:" + reason, (row["id"], row["stage"])
         assert reason in DEFERRED_MILESTONES or reason in DEFERRAL_DECISIONS, (row["id"], "deferral reason", reason)
+        assert row["id"] == f'{row["gate"]}.{row["clause"]}', (row["id"], "deferred id")
         assert (row["platform"], row["test"], row["target"]) == ("-", "-", "-"), (row["id"], "deferred row names a test")
+        assert row["property"].strip(), (row["id"], "deferred disposition")
         found[row["id"]] = reason
     assert found == M3D_DEFERRED, (sorted(found.items()), sorted(M3D_DEFERRED.items()))
-    assert measured == M3D_MEASURED, (sorted(measured.items()), sorted(M3D_MEASURED.items()))
 
 
 def test_disposition_rows_are_listed_apart_from_ci_evidence():
@@ -363,7 +345,7 @@ def test_disposition_rows_are_listed_apart_from_ci_evidence():
     # 이것을 실패시키는 것: 처분 행을 acceptance 표에 넘기는 것(CI 단언으로 셈).
     table = (ROOT / TABLE).read_text()
     disposed = {row["id"]: row["stage"] for row in rows(table) if is_deferred(row)}
-    assert disposed.keys() == M3D_DEFERRED.keys() | M3D_MEASURED.keys()
+    assert disposed.keys() == M3D_DEFERRED.keys()
     assert not disposed.keys() & {row["id"] for row in rows(without_deferred(table))}
     for row_id, stage in sorted(disposed.items()):
         print(f"not CI-asserted: {row_id} {stage}")
@@ -385,7 +367,7 @@ def assert_gate_table(table, texts, *, pending=PENDING, collected=None):
     # 이것을 실패시키는 것: B1 release·runs-on 계약 검사를 primary 게이트에서 생략하는 것.
     assert_b1_contract(texts["shell.yml"])
     assert_deferred_rows(table)
-    required = clauses() - set(pending) - set(M3D_DEFERRED) - set(M3D_MEASURED)
+    required = clauses() - set(pending) - set(M3D_DEFERRED)
     assert_acceptance_table(without_deferred(table), texts, required_ids=frozenset(required) | set(M3D_SUPPLEMENTARY),
                             required_gates=frozenset(GATE_IDS), collected=collected,
                             release_gates=M3D_RELEASE_GATES)
@@ -655,21 +637,15 @@ def test_clause_accounting_rejects_mutations(damage):
         assert_clauses_accounted(table, pending)
 
 
-# 이것을 실패시키는 것: 처분 행 삭제·마일스톤이나 결정 이름 변경·시험을 가진 deferred 행·고정 목록 밖 처분 행,
-# 없는 시험이나 timing ignore가 아닌 시험을 가리키는 measured 행을 받는 것.
+# 이것을 실패시키는 것: 처분 행 삭제·마일스톤이나 결정 이름 변경·시험을 가진 deferred 행·고정 목록 밖 처분 행을
+# 받는 것.
 @pytest.mark.parametrize("damage", ["removed", "milestone", "decision", "named-test", "extra", "id", "no-disposition",
-                                    "duplicate", "active-stage", "supplementary-stage", "measured-removed",
-                                    "measured-misnamed", "measured-not-ignored", "measured-other-ignore",
-                                    "measured-extra"])
+                                    "duplicate", "active-stage", "supplementary-stage"])
 def test_deferred_rows_reject_mutations(damage, monkeypatch):
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     line = next(line for line in table.splitlines(True) if line.startswith("GATE-FDS.3\t"))
-    measured = next(line for line in table.splitlines(True) if line.startswith("GATE-CLOCK-READS.2\t"))
     supplementary = next(line for line in table.splitlines(True) if line.startswith("GATE-EXEC-DEADLINE.2-m3a\t"))
-    path, name = M3D_MEASURED["GATE-CLOCK-READS.2"].split("::", 1)
-    source = (ROOT / path).read_text()
-    read = lambda name: (ROOT / name).read_text()  # noqa: E731
     if damage == "removed":
         table = table.replace(line, "")
     elif damage == "duplicate":
@@ -697,26 +673,11 @@ def test_deferred_rows_reject_mutations(damage, monkeypatch):
         monkeypatch.delitem(M3D_DEFERRED, "GATE-FDS.3")
         monkeypatch.setitem(M3D_DEFERRED, "GATE-FDS.3-m6", "no-write-only-child")
         table = table.replace(line, line.replace("GATE-FDS.3\t", "GATE-FDS.3-m6\t", 1))
-    elif damage == "measured-removed":
-        table = table.replace(measured, "")
-    elif damage == "measured-misnamed":
-        # The pinned test moves too, so only the declaration rule can refuse it.
-        wrong = M3D_MEASURED["GATE-CLOCK-READS.2"] + "_x"
-        monkeypatch.setitem(M3D_MEASURED, "GATE-CLOCK-READS.2", wrong)
-        table = table.replace(measured, measured.replace(M3D_MEASURED["GATE-CLOCK-READS.2"].removesuffix("_x") + "\t", wrong + "\t"))
-    elif damage in ("measured-not-ignored", "measured-other-ignore"):
-        ignore = '#[ignore = "timing: needs BINGSU_BIN"]\n    fn c2_timings'
-        assert source.count(ignore) == 1
-        swapped = source.replace(ignore, "fn c2_timings" if damage == "measured-not-ignored"
-                                 else '#[ignore = "runs in the cgroup cells"]\n    fn c2_timings')
-        read = lambda name: swapped if name == path else (ROOT / name).read_text()  # noqa: E731
-    elif damage == "measured-extra":
-        table += measured.replace("GATE-CLOCK-READS.2\tGATE-CLOCK-READS\t2\t", "GATE-CLOCK-READS.1\tGATE-CLOCK-READS\t1\t")
     else:
         table = table.replace(line, "\t".join(v if i != 3 else " " for i, v in enumerate(line.split("\t"))))
-    assert table != (ROOT / TABLE).read_text() or damage in ("measured-not-ignored", "measured-other-ignore")
+    assert table != (ROOT / TABLE).read_text()
     with pytest.raises(AssertionError):
-        assert_deferred_rows(table, read)
+        assert_deferred_rows(table)
 
 
 # 이것을 실패시키는 것: 보조 행이 있는 pending 쌍을 거부하는 것(부분 증거를 가리키되 쌍은 열어 둠),
@@ -1586,7 +1547,10 @@ def test_pty_ignored_files_exist():
 # /cell --include-ignored --exact … | tee` 또는 `sh -c 'install … && exec python3 -m pytest …' | tee`)과 그 뒤의
 # `grep -Fx` 단언으로만 받는다. 이것을 실패시키는 것: grep 단언을 지우는 것, pull_request 트리거를 지우는 것,
 # job 조건을 바꾸는 것, --include-ignored를 빼는 것, tee 대상을 바꾸는 것, pytest에 -k를 붙이는 것, cell
-# 실행 파일을 다른 target에서 만드는 것, cell 조건(`matrix.cell == …`)을 cell job 밖 step에서 받는 것.
+# 실행 파일을 다른 target에서 만드는 것, cell 조건(`matrix.cell == …`)을 cell job 밖 step에서 받는 것, 건너뛰는
+# job을 needs에 더하는 것, `--entrypoint`나 grep 셸 함수로 실행·단언을 비우는 것, PR 갱신에서 돌지 않게 하는
+# 트리거 필터, 건너뛰거나 한 칸에서만 돌거나 다른 파일에 쓰거나 증거 뒤에 오는 build, 다른 mount, 압축 꼴
+# `-k`·`-m`과 `--collect-only`(cell 밖 회차 step에서도), cell 밖 step의 grep 셸 함수.
 CELL_RUST_GREP = ("          grep -Fx 'test commands::command_supervisor::tests::test_nested_cgroup_removed_postorder"
                   " ... ok' \"$RUNNER_TEMP/cell-rust.txt\"\n")
 CELL_PY_GREP = ("          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_reclaim_after_supervisor_sigkill'"
@@ -1594,7 +1558,12 @@ CELL_PY_GREP = ("          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::
 
 
 @pytest.mark.parametrize("damage", ["rust-grep", "py-grep", "no-pull-request", "job-if", "no-include-ignored",
-                                    "other-tee", "py-filter", "cell-from-other-target", "cell-if-elsewhere"])
+                                    "other-tee", "py-filter", "cell-from-other-target", "cell-if-elsewhere",
+                                    "skipped-need", "entrypoint", "grep-function", "entrypoint-and-grep-function",
+                                    "pr-closed-only", "pr-closed-inline", "pr-branch-filter", "pr-path-filter",
+                                    "build-skipped", "build-plain-only", "build-other-output", "mount-other-file",
+                                    "build-after", "py-compact-k", "py-compact-m", "py-collect-only",
+                                    "rounds-compact-k", "rounds-grep-function", "py-entrypoint"])
 def test_cell_evidence_rejects_bypasses(damage):
     table = (ROOT / TABLE).read_text()
     texts = workflows()
@@ -1625,13 +1594,85 @@ def test_cell_evidence_rejects_bypasses(damage):
         rounds = "      - name: Command rounds run through the supervisor (release)\n        if: matrix.profile == 'release'\n"
         assert shell.count(rounds) == 1
         shell = shell.replace(rounds, rounds.replace("matrix.profile == 'release'", "matrix.cell == 'priv'"))
-    else:
+    elif damage == "cell-from-other-target":
         build = "cargo test -p bingsu --bin bingsu --target x86_64-unknown-linux-musl --no-run"
         assert shell.count(build) == 1
         shell = shell.replace(build, "cargo test -p bingsu --lib --target x86_64-unknown-linux-musl --no-run")
+    else:
+        shell = cell_bypass(shell, damage)
     texts["shell.yml"] = shell
     with pytest.raises(AssertionError):
         assert_gate_table(table, texts)
+
+
+CELL_BUILD_STEP = "      - name: Build the cell binaries\n        run: |\n"
+CELL_RUST_STEP = "      - name: Rust tests in the cell\n        run: |\n          set -o pipefail\n"
+ROUNDS_STEP = ("      - name: Command rounds run through the supervisor (release)\n"
+               "        if: matrix.profile == 'release'\n        run: |\n          set -o pipefail\n")
+
+
+def cell_bypass(shell, damage):
+    """The workflow with one of the bypass shapes a review found (F1 PR A)."""
+    for piece in (CELL_BUILD_STEP, CELL_RUST_STEP, ROUNDS_STEP, "\n  pull_request:\n"):
+        assert shell.count(piece) == 1, piece
+    cell_rust = "bingsu-cgroup-d13 /cell --include-ignored"
+    cell_py = "&& exec python3 -m pytest tests/shell/test_command_cgroup.py -q"
+    rounds_py = "\"$RUNNER_TEMP/venv/bin/python\" -m pytest 'tests/shell/test_command_round.py::test_configured_command_runs'"
+    function = "          grep() { return 0; }\n"
+    if damage == "skipped-need":
+        need = "  command-cgroup:\n    name: Command cgroup cell (${{ matrix.cell }})\n    needs: detect\n"
+        assert shell.count(need) == 1
+        skip = "  skip-cell:\n    runs-on: ubuntu-latest\n    if: false\n    steps:\n      - run: true\n\n"
+        return shell.replace(need, skip + need.replace("needs: detect", "needs: [detect, skip-cell]"))
+    if damage in ("entrypoint", "entrypoint-and-grep-function"):
+        shell = shell.replace(cell_rust, cell_rust.replace("bingsu-cgroup-d13", "--entrypoint /bin/true bingsu-cgroup-d13"))
+    if damage in ("grep-function", "entrypoint-and-grep-function"):
+        shell = shell.replace(CELL_RUST_STEP, CELL_RUST_STEP + function)
+    if damage == "pr-closed-only":
+        return shell.replace("\n  pull_request:\n", "\n  pull_request:\n    types: [closed]\n")
+    if damage == "pr-closed-inline":
+        return shell.replace("\n  pull_request:\n", "\n  pull_request: {types: [closed]}\n")
+    if damage == "pr-branch-filter":
+        return shell.replace("\n  pull_request:\n", "\n  pull_request:\n    branches: [release]\n")
+    if damage == "pr-path-filter":
+        return shell.replace("\n  pull_request:\n", "\n  pull_request:\n    paths: [docs/**]\n")
+    if damage == "build-skipped":
+        return shell.replace(CELL_BUILD_STEP, CELL_BUILD_STEP.replace("        run: |", "        if: false\n        run: |"))
+    if damage == "build-plain-only":
+        return shell.replace(CELL_BUILD_STEP, CELL_BUILD_STEP.replace("        run: |", "        if: matrix.cell == 'plain'\n        run: |"))
+    if damage == "build-other-output":
+        out = '> "$RUNNER_TEMP/cell-bin"\n'
+        assert shell.count(out) == 1
+        return shell.replace(out, '> "$RUNNER_TEMP/cell-bin2"\n')
+    if damage == "mount-other-file":
+        mount = '-v "$(cat "$RUNNER_TEMP/cell-bin"):/cell:ro"'
+        assert shell.count(mount) == 1
+        return shell.replace(mount, '-v "$(cat "$RUNNER_TEMP/other-bin"):/cell:ro"')
+    if damage == "build-after":
+        start = shell.index(CELL_BUILD_STEP)
+        end = shell.index("      - run: tests/shell/containers/check-digests.sh\n", start)
+        build = shell[start:end]
+        shell = shell[:start] + shell[end:]
+        record = "      # The prompt tests run as root with a root-owned copy"
+        assert shell.count(record) == 1
+        return shell.replace(record, build + record)
+    if damage == "py-compact-k":
+        return shell.replace(cell_py, cell_py.replace(" -q", " -kdoes_not_exist -q"))
+    if damage == "py-compact-m":
+        return shell.replace(cell_py, cell_py.replace(" -q", " -mdoes_not_exist -q"))
+    if damage == "py-collect-only":
+        return shell.replace(cell_py, cell_py.replace(" -q", " --collect-only -q"))
+    if damage == "rounds-compact-k":
+        assert shell.count(rounds_py) == 2
+        return shell.replace(rounds_py, rounds_py.replace(" -m pytest ", " -m pytest -kdoes_not_exist "))
+    if damage == "py-entrypoint":
+        py = "-v \"$PWD:/w\" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-prompt target/x86_64-unknown-linux-musl/release/bingsu-collect /usr/local/bin/ && exec python3 -m pytest tests/shell/test_command_cgroup.py"
+        assert shell.count(py) == 1, "cell pytest run"
+        return shell.replace(py, py.replace("-w /w bingsu-cgroup-d13", "-w /w --entrypoint /bin/true bingsu-cgroup-d13"))
+    if damage == "rounds-grep-function":
+        return shell.replace(ROUNDS_STEP, ROUNDS_STEP + function)
+    assert damage in ("entrypoint", "grep-function", "entrypoint-and-grep-function"), damage
+    return shell
 
 
 # cell 행의 시험은 cell 표시(`#[ignore = "runs in the cgroup cells …"]`)가 있는 ignored 시험이어야 한다. 이것을
