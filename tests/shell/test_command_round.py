@@ -659,27 +659,34 @@ def rounds(session, n):
 NOT_PUBLISHED = b"command round: results not published"
 
 
-def published_rounds(session):
-    """Rounds until one publishes its results; how many ran. A round whose
-    publication was deferred (the store busy or its admission past its
-    budget; the helper logs it) leaves no response, so the next prompt runs
-    the unit again, as designed (C4 ruling P1). Needs the info log."""
-    assert session.level in ("info", "debug")
-    for n in range(1, 6):
-        seen = session.log().count(NOT_PUBLISHED)
+ROUND_FINISHED = b"command round finished"
+
+
+def supervised_rounds(session, limit=8):
+    """Rounds until one that ran the units also published; how many ran
+    them. A round ran the units when it logged `command round finished`
+    (debug log); a round that never reached the command round ("refresh
+    incomplete" under load) ran nothing and does not count (m6-T9). A round
+    whose publication was deferred ran the units, counts, and the next round
+    runs them again (C4 ruling P1)."""
+    assert session.level == "debug"
+    ran = 0
+    for _ in range(limit):
+        finished = session.log().count(ROUND_FINISHED)
+        deferred = session.log().count(NOT_PUBLISHED)
         rounds(session, 1)
-        if session.log().count(NOT_PUBLISHED) == seen:
-            return n
-    raise AssertionError("five publications in a row were deferred")
+        if session.log().count(ROUND_FINISHED) > finished:
+            ran += 1
+            if session.log().count(NOT_PUBLISHED) == deferred:
+                return ran
+    raise AssertionError(f"no round ran and published the units in {limit} prompts")
 
 
 def rounds_until(session, check, limit=5):
-    """Rounds until `check()` holds; how many ran, at most `limit`.
-    `published_rounds` counts a round as published when it logged no
-    deferral, but a round that decided nothing (its collection answered
-    late, so no language was decided, or it never reached the command
-    round) logs nothing either (m6-T9). A test that needs a value waits for
-    the value itself."""
+    """Rounds until `check()` holds; how many ran, at most `limit`. A round
+    that decided nothing (its collection answered late, so no language was
+    decided, or it never reached the command round) logs no deferral either
+    (m6-T9), so a test that needs a value waits for the value itself."""
     for n in range(1, limit + 1):
         rounds(session, 1)
         if check():
@@ -706,7 +713,7 @@ def test_cache_hit_runs_nothing(tmp_path, _native_boot_required):
     session.level = "debug"
     ready(session)
     before = runs(counter)
-    ran = published_rounds(session)
+    ran = supervised_rounds(session)
     assert runs(counter) == before + ran, (before, ran, runs(counter))
     before += ran
     # Each round that starts a supervisor ends with this line.
@@ -735,10 +742,10 @@ def test_failure_cached_10s(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     counter = session.base / "runs"
     session.put(config(["/bin/sh", "-c", f"echo x >> {counter}; exit 3"]))
-    session.level = "info"
+    session.level = "debug"
     ready(session)
     before = runs(counter)
-    ran = published_rounds(session)
+    ran = supervised_rounds(session)
     first = runs(counter)
     assert first == before + ran, (before, ran, first)
     rounds(session, 3)
@@ -748,19 +755,19 @@ def test_failure_cached_10s(tmp_path, _native_boot_required):
 # 적중은 이 셸의 원본 환경 요약값과 맞을 때만이다. 다른 KUBECONFIG로 낸 프롬프트는 다른 셸의 값을 쓰지 않고 다시
 # 실행하고, 같은 값으로 다시 내면 적중한다. 이것을 실패시키는 것: 적중 판정에서 환경 요약값 비교를 지우는 것(값이
 # 바뀌어도 실행하지 않음), env_digest에 env_allow를 넣지 않는 것. 발행이 미뤄진 회차(저장소 busy, 예산 초과)는
-# 다음 회차가 다시 실행하는 설계라, 발행된 회차까지 기다린 뒤 센다(published_rounds).
+# 다음 회차가 다시 실행하는 설계라, 명령을 돌리고 발행한 회차까지 기다린 뒤 센다(supervised_rounds).
 def test_cache_hit_is_display_match(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     counter = session.base / "runs"
     session.put(config(counting(counter), "cache='30s'\nenv_allow=['KUBECONFIG']\n"))
     session.env["KUBECONFIG"] = "/a"
-    session.level = "info"
+    session.level = "debug"
     ready(session)
     before = runs(counter)
-    ran = published_rounds(session)
+    ran = supervised_rounds(session)
     assert runs(counter) == before + ran, (before, ran, runs(counter))
     session.env["KUBECONFIG"] = "/b"
-    ran += published_rounds(session)
+    ran += supervised_rounds(session)
     assert runs(counter) == before + ran, "another environment's entry was taken as a hit"
     rounds(session, 2)
     assert runs(counter) == before + ran, runs(counter)
@@ -844,7 +851,7 @@ def test_match_picks_the_published_value(tmp_path, _native_boot_required):
                        "cache='3600s'\nmatch='go([0-9.]+)'\n"))
     session.level = "info"
     ready(session)
-    published_rounds(session)
+    published(session, b"1.23.1")
     record = session.prompt()
     session.wait_quiet(timeout=8)
     assert b"1.23.1" in record and b"darwin" not in record, record
@@ -873,7 +880,7 @@ def test_match_only_change_reapplies_without_exec(tmp_path, _native_boot_require
     session.put(config_with("(a/[a-z]+)"))
     session.level = "info"
     ready(session)
-    published_rounds(session)
+    published(session, b"a/b/kube-ctx")
     before = runs(counter)
     record = session.prompt()
     session.wait_quiet(timeout=8)
@@ -905,7 +912,7 @@ def test_match_size_limit_rejected_at_compile(tmp_path, _native_boot_required):
                 .replace("left=['custom/probe','char']", "left=['custom/bad','custom/probe','char']"))
     session.level = "info"
     ready(session)
-    published_rounds(session)
+    published(session, b"good-value")
     record = session.prompt()
     session.wait_quiet(timeout=8)
     assert b"good-value" in record and b"bad-value" not in record, record
@@ -935,6 +942,36 @@ def test_rounds_until_waits_for_the_value():
     with pytest.raises(AssertionError, match="after 5 rounds"):
         rounds_until(session, lambda: False)
     assert session.prompts == 5
+
+
+# supervised_rounds는 명령 회차에 닿은 회차만 세고, 발행이 미뤄진 회차는 세되 다음 회차까지 돌며, 발행한 회차에서
+# 멈춘다. 이것을 실패시키는 것: 명령 회차에 닿지 못한 회차(refresh incomplete)도 세는 것, 미뤄진 회차에서 멈추는
+# 것, 상한 없이 도는 것.
+def test_supervised_rounds_counts_rounds_that_ran_the_units():
+    class Session:
+        level = "debug"
+
+        def __init__(self, script):
+            self.script = list(script)
+            self.lines = b""
+
+        def prompt(self):
+            self.lines += self.script.pop(0) if self.script else b"refresh incomplete\n"
+
+        def wait_quiet(self, timeout):
+            pass
+
+        def log(self):
+            return self.lines
+
+    incomplete = b"refresh incomplete\n"
+    deferred = NOT_PUBLISHED + b"; the store was busy\n" + ROUND_FINISHED + b"\n"
+    published = ROUND_FINISHED + b"\n"
+    assert supervised_rounds(Session([incomplete, deferred, incomplete, published])) == 2
+    assert supervised_rounds(Session([published])) == 1
+    session = Session([])
+    with pytest.raises(AssertionError, match="in 8 prompts"):
+        supervised_rounds(session)
 
 
 # tests/command-acceptance.tsv의 행마다 실제 시험이 있다(넘긴 행은 "-"와 넘긴 Task). 이것을 실패시키는
@@ -980,7 +1017,7 @@ def test_command_value_is_drawn_for_its_own_shell(tmp_path, _native_boot_require
     session.env["KUBECONFIG"] = "/a"
     session.level = "info"
     ready(session)
-    published_rounds(session)
+    published(session, b"shown-value")
     assert b"shown-value" in session.prompt()
     session.wait_quiet(timeout=8)
     session.env["KUBECONFIG"] = "/b"
