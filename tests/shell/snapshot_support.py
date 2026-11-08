@@ -116,7 +116,10 @@ class SnapshotSession:
                 "--width", "120", "--pwd", str(self.base), "--log-level=off", *self.words]
 
     def prompt(self):
-        result = self.run(*self.prompt_args(), timeout=2)
+        return self.record(self.run(*self.prompt_args(), timeout=2))
+
+    @staticmethod
+    def record(result):
         assert result.returncode == 0 and result.stderr == b"", result.stderr
         assert result.stdout.startswith(b"B1\x1f") and result.stdout.endswith(b"\x1e"), result.stdout
         return result.stdout
@@ -141,7 +144,16 @@ class SnapshotSession:
         end = time.monotonic() + timeout
         records = []
         while time.monotonic() < end:
-            record = self.prompt()
+            result = self.run(*self.prompt_args(), timeout=2)
+            # A prompt past its deadline exits 0 with no record and nothing on
+            # stderr (prompt_io::check_deadline); a slow runner may do that, so
+            # wait for the next prompt. Every other result is judged now.
+            # 이것을 실패시키는 것: 빈 기록을 재시도하지 않는 것, 상태 0·빈 stderr가 아닌 빈 결과를 재시도하는 것.
+            if result.returncode == 0 and result.stderr == b"" and result.stdout == b"":
+                records.append(b"<deadline>")
+                time.sleep(0.02)
+                continue
+            record = self.record(result)
             records.append(record)
             if text.encode() in record:
                 return record
