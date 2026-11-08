@@ -8,7 +8,7 @@ use bingsu_core::{
     command::{
         display::{self, Prompt},
         plan::{self, Environ},
-        response::{Binding, ENTRIES_MAX, Entry, Response, Status, VALUE_MAX},
+        response::{Binding, CONFIG_ENTRIES_MAX, Entry, Response, Status, VALUE_MAX},
         wire::policy_digest,
     },
     config::compile::{ExecPolicy, ExecUnit},
@@ -76,7 +76,7 @@ fn full() -> Input {
     }
     let mut units = Vec::new();
     let mut entries = Vec::new();
-    for i in 0..ENTRIES_MAX {
+    for i in 0..CONFIG_ENTRIES_MAX {
         let unit = ExecUnit {
             id: format!("custom/k{i:02}"),
             policy: ExecPolicy::Command {
@@ -141,7 +141,7 @@ fn draw(input: &Input) -> Vec<Field> {
 #[bench::full(setup = full)]
 fn command_render(input: Input) -> (Input, Vec<Field>) {
     let out = black_box(draw(black_box(&input)));
-    assert_eq!(out.len(), ENTRIES_MAX);
+    assert_eq!(out.len(), CONFIG_ENTRIES_MAX);
     (input, out)
 }
 

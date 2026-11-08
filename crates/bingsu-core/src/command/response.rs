@@ -15,19 +15,24 @@ use crate::{
 };
 use alloc::{string::String, vec::Vec};
 
-const MAGIC: &[u8; 8] = b"BNGCMD01";
-const VERSION: u16 = 1;
+const MAGIC: &[u8; 8] = b"BNGCMD02";
+const VERSION: u16 = 2;
 pub const HEADER: usize = 64;
-/// Entries in one response (U-9d: 32 units).
-pub const ENTRIES_MAX: usize = 32;
+/// Config unit entries in one response: one per unit that may run (U-9d).
+pub const CONFIG_ENTRIES_MAX: usize = crate::config::compile::MAX_EXEC_UNITS;
+/// Builtin language entries in one response: one per builtin language.
+pub const BUILTIN_ENTRIES_MAX: usize = super::builtin::LANGUAGES.len();
+/// Entries in one response: each origin has its own room, so builtin
+/// languages and 32 config units never push each other out (U-32).
+pub const ENTRIES_MAX: usize = CONFIG_ENTRIES_MAX + BUILTIN_ENTRIES_MAX;
 /// A value or a raw first line, in bytes (U-9c).
 pub const VALUE_MAX: usize = 4_096;
 /// A unit id, in bytes.
 pub const ID_MAX: usize = 256;
 /// The longest config, state or cwd path.
 pub const PATH_MAX: usize = 65_536;
-/// The whole file: the header, a binding of three longest paths, and 32
-/// entries of longest id, value and raw line.
+/// The whole file: the header, a binding of three longest paths, and
+/// `ENTRIES_MAX` entries of longest id, value and raw line.
 pub const RESPONSE_MAX: usize =
     HEADER + BINDING_FIXED + 3 * (4 + PATH_MAX) + 1 + ENTRIES_MAX * ENTRY_MAX;
 /// How long a failed or timed-out result stands (spec: 10 s failure cache).
@@ -36,6 +41,20 @@ pub const FAILURE_NS: u64 = 10_000_000_000;
 const BINDING_FIXED: usize = 32 + 16 + 16 + 4 + 1 + 16 + 8;
 const ENTRY_FIXED: usize = 2 + 1 + 32 * 3 + 8 + 8 + 1 + 4 + 4;
 const ENTRY_MAX: usize = ENTRY_FIXED + ID_MAX + 2 * VALUE_MAX;
+// The entry count is one byte.
+const _: () = assert!(ENTRIES_MAX <= u8::MAX as usize);
+
+/// The most entries `origin` may hold in one response.
+pub const fn origin_max(origin: Origin) -> usize {
+    match origin {
+        Origin::Config => CONFIG_ENTRIES_MAX,
+        Origin::Builtin => BUILTIN_ENTRIES_MAX,
+    }
+}
+
+fn count(entries: &[Entry], origin: Origin) -> usize {
+    entries.iter().filter(|e| e.origin == origin).count()
+}
 
 /// What a response is bound to: the build, the boot and its clock domain, the
 /// exact config and state roots and the raw cwd. Not the snapshot generation:
@@ -311,7 +330,12 @@ enum Raw {
 }
 
 fn check_entries(entries: &[Entry], raw_text: Raw) -> Result<(), Error> {
-    if entries.len() > ENTRIES_MAX {
+    // Fails without the per-origin half: an_origin_past_its_room_is_refused.
+    if entries.len() > ENTRIES_MAX
+        || [Origin::Config, Origin::Builtin]
+            .into_iter()
+            .any(|o| count(entries, o) > origin_max(o))
+    {
         return Err(Error::Limit);
     }
     for (i, e) in entries.iter().enumerate() {
@@ -383,8 +407,9 @@ impl<'a> Reader<'a> {
 /// The response after this round: `current` when it is bound to `binding`
 /// (else nothing), with each of `mine` put in place of the entry of the same
 /// unit when it completed later. Entries of other units, and their attempt
-/// times, stay. Past `ENTRIES_MAX`, the entries tried longest ago that this
-/// round did not write go first.
+/// times, stay. Past its origin's room (`origin_max`), the entries of that
+/// origin tried longest ago that this round did not write go first; the
+/// other origin's entries are never pushed out for it.
 pub fn merge(current: Option<&Response>, binding: &Binding, mine: &[Entry]) -> Response {
     let mut entries: Vec<Entry> = match current {
         Some(c) if c.binding == *binding => c.entries.clone(),
@@ -400,19 +425,21 @@ pub fn merge(current: Option<&Response>, binding: &Binding, mine: &[Entry]) -> R
             None => entries.push(m.clone()),
         }
     }
-    while entries.len() > ENTRIES_MAX {
-        let ours = |e: &Entry| mine.iter().any(|m| m.origin == e.origin && m.id == e.id);
-        let Some(oldest) = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| !ours(e))
-            .min_by_key(|(_, e)| e.attempted_at)
-            .map(|(i, _)| i)
-        else {
-            entries.truncate(ENTRIES_MAX);
-            break;
-        };
-        entries.remove(oldest);
+    for origin in [Origin::Config, Origin::Builtin] {
+        // Fails without the origin filter: a_full_origin_never_pushes_out_the_other.
+        while count(&entries, origin) > origin_max(origin) {
+            let ours = |e: &Entry| mine.iter().any(|m| m.origin == e.origin && m.id == e.id);
+            let oldest = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.origin == origin && !ours(e))
+                .min_by_key(|(_, e)| e.attempted_at)
+                .map(|(i, _)| i)
+                // Only this round's own entries are left: the last of them goes.
+                .or_else(|| entries.iter().rposition(|e| e.origin == origin));
+            let Some(at) = oldest else { break };
+            entries.remove(at);
+        }
     }
     Response {
         binding: binding.clone(),

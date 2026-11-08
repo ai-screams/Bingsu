@@ -863,8 +863,8 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
 # tests/shell/fixtures/recorded-envelopes.tsv, and only portable tests pass it.
 RESPONSE_HEADERS = (b"BNGRES05\x05\x00",)
 # The command response the prompt prefetches beside them (C4b), and its cap.
-COMMAND_HEADER = b"BNGCMD01\x01\x00"
-COMMAND_RESPONSE_MAX = 471_082
+COMMAND_HEADER = b"BNGCMD02\x02\x00"
+COMMAND_RESPONSE_MAX = 505_370
 
 
 def assert_prompt_trace_budget(lines, exe, pinned, *, global_inputs=(), collector_exe=None,
