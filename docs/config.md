@@ -119,14 +119,15 @@ Any other extended file (for example a theme a repository ships) can set colors 
 are ignored with a warning. A file that fails the safety check turns the segments whose keys it sets off.
 
 A command or language segment runs only when a layout from your own files draws it at some width; it then runs at
-every terminal width, also where the layout chosen for a narrow terminal leaves it out. An `env` segment is shown
-only where a layout from your own files draws it. Naming a segment only in a theme's layout does not run the command
+every terminal width, also where the layout chosen for a narrow terminal leaves it out. An `env` segment is allowed
+the same way: once a layout from your own files draws it at some width, its value is shown wherever a layout draws
+it, including a theme's layout at a narrow width. Naming a segment only in a theme's layout does not run the command
 or show the variable.
 
 ## How commands run
 
-The refresh helper starts with each prompt and runs commands, and the version commands of language segments, in the
-background; the prompt never waits for a command. A value shows on a later prompt once its round has finished:
+The refresh helper starts with each prompt (not with a redraw, such as after a terminal resize) and runs commands,
+and the version commands of language segments, in the background; the prompt never waits for a command. A value shows on a later prompt once its round has finished:
 usually the next one, and after several when a round has more segments to run than it takes at once.
 The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt` beside it. Keep `bingsu`,
 `bingsu-prompt` and `bingsu-collect` in one folder and run init again after replacing them (see
@@ -137,8 +138,9 @@ The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt
   config is invalid. Only segments that can run count: drawn by a layout from your own files at some width and not
   turned off.
 - A command gets a cleaned environment: `HOME`, `USER`, `LANG`, `LC_*`, `TERM`, `TZ`, a cleaned `PATH`, and the
-  names in `env_allow`. Its program, arguments and passed variables must fit in 16 KiB together; a larger command does not
-  run.
+  names in `env_allow`. The run information the helper hands over, the passed variables, the folder and the
+  interpreter among it, must fit in about 16 KiB; past that, the command does not run. The arguments are passed
+  separately and do not count.
 - The cleaned `PATH` keeps only absolute folders that nobody but you and root can change, and leaves out the folders
   inside the repository the shell is in, so a checked-out repository cannot place a program under a command's name.
 - Scripts must name an absolute interpreter on their first line; `#!/usr/bin/env` is refused because it would look
@@ -178,8 +180,9 @@ the config it reads.
 
 ## Current limits
 
-- Values appear on a later prompt, not the current one: after a command's first run, after a config edit, and after
-  a version selection file (`.python-version`, `rust-toolchain.toml`) changes.
+- Command and language values appear on a later prompt, not the current one: after a command's first run, after a
+  config edit, and after a version selection file (`.python-version`, `rust-toolchain.toml`) changes. Text and `env`
+  values do not wait for a command to run.
 - A shell environment over 64 KiB is not passed to the helper: command and `env` segments then show nothing. A
   variable named twice in the environment is not shown and not passed.
 - Patterns are applied within about 250 ms per round. Past that, the round's remaining new results that need a
@@ -202,7 +205,7 @@ the config it reads.
 ## Group-writable files
 
 Many systems create files and folders writable by your group (umask `002`). A config file, config folder or program
-that your group can write is accepted only when every member of that group is you or root. When membership cannot
-be confirmed that way, your primary group still counts if it has your name and `/etc/group` lists no other members.
+that your group can write is accepted when it is your primary group, has your name and `/etc/group` lists no other
+members; otherwise only when every member of that group is you or root.
 On a shared group, `config check` names a config file it refuses, and `config check --explain` shows a program it
 would not run; remove the group write bit (`chmod g-w`) or change the group.
