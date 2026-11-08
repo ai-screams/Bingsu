@@ -2136,22 +2136,26 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
     if builtin:
         # GATE-FS-HELPER.1 builtin stages; GATE-CMD-FSBUDGET.1: the probe's
         # supervisor spawns one relay as a unit round's does, the fast path's
-        # starts with nothing to run (idle). A collector deadline leaves no
-        # answer and no decision: only the prefix is judged, and the stage
-        # tries again.
+        # starts with nothing to run (idle). Which formula applies comes from
+        # the trace: a round that published the collection's response (even
+        # after a deadline) is held to the full one; without it, the deadline
+        # bounds apply and the stage tries again. The command supervisor is
+        # always checked exactly, by the relays it spawned.
         # 이것을 실패시키는 것: 내장 단계의 감독 호출을 정확 비교에서 빼는 것, fast 감독을 단위 회차 식으로 보는 것,
-        # 수집 마감 회차를 발행 회차로 세는 것.
+        # 마감 회차의 판정을 종료 코드로 정하는 것, 응답 없는 정상 종료를 받는 것.
         assert status in (0, 75), ("unexpected collector exit", status)
-        full = status == 0
-        errors = check_builtin(roles, helper_builtin_expected(plan), stage, full=full, evidence=evidence)
-        fast = stage == "builtin_fast"
-        supervisor = {"supervisor": supervisor_expected(0 if fast else 1, atomic=plan.cgroup_parent, arch=plan.arch,
-                                                        libc=plan.libc, idle=fast)}
+        errors, published = check_builtin(roles, helper_builtin_expected(plan), stage,
+                                          deadline=helper_builtin_expected(plan, deadline=True), evidence=evidence)
+        if status == 0 and not published:
+            errors.append("builtin: the collector answered but no response was published")
+        spawns = roles.counts.get("supervisor", {}).get("spawn", 0)
+        # A probe round that ran nothing (no answer) leaves its supervisor idle.
+        idle = stage == "builtin_fast" or spawns == 0
+        supervisor = {"supervisor": supervisor_expected(0 if idle else 1, atomic=plan.cgroup_parent, arch=plan.arch,
+                                                        libc=plan.libc, idle=idle)}
         evidence.update(supervisor_counts=roles.counts.get("supervisor", {}), supervisor_expected=supervisor["supervisor"],
                         relay_counts=roles.counts.get("relay", {}))
-        if full:
-            errors += check({"supervisor": roles.counts.get("supervisor", {})}, supervisor, "exact", ["supervisor"])
-        published = full
+        errors += check({"supervisor": roles.counts.get("supervisor", {})}, supervisor, "exact", ["supervisor"])
     elif stage == "command_miss":
         errors = check_command(roles, helper_command_expected(plan), evidence=evidence)
         # GATE-CMD-FSBUDGET.1: the supervisor's calls, exact for this round's

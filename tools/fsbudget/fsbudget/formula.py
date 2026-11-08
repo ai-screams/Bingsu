@@ -117,6 +117,15 @@ COMMAND_STAGES = ("command_not_run", "command_hit", "command_miss")
 # segment, no config unit. The probe runs the language's command found on
 # PATH; the fast path decides pyenv's selected version without running.
 BUILTIN_STAGES = ("builtin_probe", "builtin_fast")
+# The product's bounds on the builtin axes (each pinned to its source by
+# test_builtin_axis_caps_match_the_product): version_manager::BIN_LINKS_MAX,
+# the entries of version_manager::unsupported, exec_path::DEPTH_MAX (the
+# folders one walk holds), and env_frame::FRAME_MAX over the shortest PATH
+# entry ("/" and its ":").
+BUILTIN_BIN_LINKS_MAX = 4
+BUILTIN_SHIM_HOMES_MAX = 8
+BUILTIN_WALK_DEPTH_MAX = 256
+BUILTIN_PATH_FOLDERS_MAX = 65_536 // 2
 # Linux read(2)/write(2) transfer at most MAX_RW_COUNT bytes per call. Outside
 # collection metering the release helper reads and writes each store file in
 # one call of its full length (read_exact_len, write_fd), plus one EOF read.
@@ -579,6 +588,9 @@ def _check_plan(p: HelperPlan) -> None:
             "collect" not in p.stages
             or p.command_bytes < 64 or not 0 < p.cgroup_procs_bytes < 4096
             or min(p.shell_names, p.path_folders, p.target_names) < 1 or p.path_names < p.path_folders
+            or p.path_folders > BUILTIN_PATH_FOLDERS_MAX
+            or p.path_names > p.path_folders * BUILTIN_WALK_DEPTH_MAX or p.target_names > BUILTIN_WALK_DEPTH_MAX
+            or p.manager_homes > BUILTIN_SHIM_HOMES_MAX or p.bin_links > BUILTIN_BIN_LINKS_MAX
             or p.target_links
             or (builtin[0] == "builtin_probe") != (p.manager_homes > 0)
             or (builtin[0] == "builtin_fast") != (p.bin_links > 0)):
@@ -1119,7 +1131,7 @@ def _builtin_round(e: dict, p: HelperPlan, stage: str) -> None:
         _add(e, "cgroup_unit")
 
 
-def helper_builtin_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:
+def helper_builtin_expected(plan: HelperPlan, *, deadline: bool = False) -> dict[str, dict[str, int]]:
     """A builtin language round. `prefix` (the main thread until the
     collection's snapshot unlock, and the pre-exec setup of the collector
     and the command supervisor) is exact: the unchanged revalidation, the
@@ -1148,12 +1160,20 @@ def helper_builtin_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:
         _add(prefix, "dup", 3)
         supervisor: dict[str, int] = {}
         _add(supervisor, "clock")
-        _publish(supervisor, plan)
         builtin: dict[str, int] = {}
         _builtin_round(builtin, plan, stage)
         gc: dict[str, int] = {}
         _collection_gc(gc, plan)
         _read_checked(gc, plan.command_bytes)
+        if deadline:
+            # No verified answer: the supervisor stores nothing, and the rest
+            # of the main thread is bounded by the full round's.
+            tail = dict(builtin)
+            for kind, n in gc.items():
+                tail[kind] = tail.get(kind, 0) + n
+            return {phase: dict(sorted(v.items())) for phase, v in
+                    (("prefix", prefix), ("supervisor", supervisor), ("tail", tail))}
+        _publish(supervisor, plan)
         return {phase: dict(sorted(v.items())) for phase, v in
                 (("prefix", prefix), ("supervisor", supervisor), ("builtin", builtin), ("gc", gc))}
     finally:

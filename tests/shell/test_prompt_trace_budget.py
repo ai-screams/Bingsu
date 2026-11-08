@@ -3575,6 +3575,9 @@ def test_dedicated_front_starts_only_the_named_helper():
 
 STAGE_EXPECTATIONS = HELPER_STAGE_TRACES.parent / "helper-stage-expectations.json"
 BUILTIN_STAGE_NAMES = ["builtin_probe", "builtin_fast"]
+# Every stage the formula had before the builtin ones.
+# 이것을 실패시키는 것: 저장된 캡처 목록에서 단계를 고르는 것(캡처 없는 command_not_run이 빠짐).
+PINNED_STAGE_NAMES = [*STAGE_NAMES, "command_not_run", "command_hit", "command_miss"]
 EXPECTATION_CELLS = [("x86_64", "gnu"), ("aarch64", "gnu"), ("x86_64", "musl"), ("aarch64", "musl")]
 
 
@@ -3587,10 +3590,14 @@ def stage_expectations():
     from fsbudget.formula import (helper_collect_expected, helper_command_expected, helper_stage_expected,
                                   supervisor_expected)
     out = {}
-    for stage in json.loads(HELPER_STAGE_TRACES.read_text()):
-        if stage in BUILTIN_STAGE_NAMES:
-            continue  # new with these stages: their own tests below
-        _, _, plan = helper_stage_case(stage)
+    # The stage names, not the saved captures: command_not_run has none (its
+    # plan is command_hit's with no response).
+    for stage in PINNED_STAGE_NAMES:
+        if stage == "command_not_run":
+            _, _, plan = helper_stage_case("command_hit")
+            plan = replace(plan, stages=("unchanged", "command_not_run"), command_bytes=0)
+        else:
+            _, _, plan = helper_stage_case(stage)
         for arch, libc in EXPECTATION_CELLS:
             # musl reads no nsswitch.conf; its fclose seeks passwd once.
             cell = replace(plan, arch=arch, libc=libc, **({"nsswitch_reads": 0, "passwd_seeks": 1} if libc == "musl"
@@ -3623,6 +3630,23 @@ def test_existing_stage_formulas_are_unchanged():
 # Builtin stages (D3a), captured on the atomic path (privileged aarch64 glibc
 # container): the probe runs node (the version stub) once its identity
 # changed; the fast path decides pyenv's 3.12.1 with nothing to run.
+def joined(lines, pid):
+    """`lines` with each of `pid`'s unfinished calls joined to its resumed
+    half, in the unfinished call's place, so one call is one line."""
+    import re
+    out, open_at = [], None
+    for line in lines:
+        if line.split()[0] == pid and line.endswith("<unfinished ...>"):
+            open_at = len(out)
+            out.append(line[: -len(" <unfinished ...>")])
+        elif line.split()[0] == pid and open_at is not None and re.search(r"<\.\.\. \w+ resumed>", line):
+            out[open_at] += re.sub(r"^\S+\s+<\.\.\. \w+ resumed>", "", line)
+            open_at = None
+        else:
+            out.append(line)
+    return out
+
+
 def supervisor_pid(lines):
     return next(l.split()[0] for l in lines if '"__command-v1"' in l and "execve(" in l)
 
@@ -3632,14 +3656,21 @@ def helper_pid(lines):
 
 
 # 이것을 실패시키는 것: 내장 회차 식이 저장한 캡처와 종류별로 정확히 맞지 않는 것(shim 집 stat 하나, 정규 경로
-# readlinkat 하나, bin 링크 하나), 잠금 해제 경계를 요구하지 않는 것, probe의 설치를 요구하지 않는 것, fast의
-# 설치를 받는 것, 감독 식(probe 1회, fast idle)을 정확 비교에서 빼는 것, 수집 마감 회차를 발행으로 세는 것.
+# readlinkat 하나, bin 링크 하나), 잠금 해제 경계를 요구하지 않는 것, breaker 저장·probe 설치의 성공을 요구하지
+# 않는 것(실패 뒤 GC가 없으면 개수가 맞음), fast의 설치를 받는 것, 감독 식(probe 1회, fast idle)을 정확 비교에서
+# 빼는 것, 마감 회차의 판정을 종료 코드로 정하는 것(발행한 마감 회차의 결정을 보지 않음), 발행 없는 마감 회차의
+# 앞부분을 보지 않는 것.
 @pytest.mark.parametrize("stage,damage", [
     ("builtin_probe", None), ("builtin_fast", None),
     ("builtin_probe", "missing-shim-home"), ("builtin_probe", "extra-canonical-readlink"),
     ("builtin_probe", "no-unlock"), ("builtin_probe", "no-install"), ("builtin_probe", "supervisor-extra-clock"),
     ("builtin_probe", "collector-deadline"), ("builtin_fast", "collector-deadline"),
-    ("builtin_probe", "deadline-without-decision"),
+    ("builtin_probe", "deadline-without-decision"), ("builtin_probe", "deadline-unpublished"),
+    ("builtin_fast", "deadline-unpublished"), ("builtin_probe", "deadline-unpublished-extra-prefix"),
+    ("builtin_probe", "deadline-unpublished-extra-tail"), ("builtin_probe", "deadline-staged-not-renamed"),
+    ("builtin_probe", "answered-unpublished"), ("builtin_probe", "deadline-unpublished-supervisor-clock"),
+    ("builtin_probe", "breaker-fails-no-gc"), ("builtin_fast", "breaker-fails-no-gc"),
+    ("builtin_probe", "install-fails-no-gc"),
     ("builtin_fast", "extra-bin-link"), ("builtin_fast", "fast-installs"), ("builtin_fast", "idle-supervisor-fd6"),
     ("builtin_fast", "no-unlock")])
 def test_builtin_stage_traces_match_the_formula(stage, damage):
@@ -3662,13 +3693,72 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
     elif damage == "supervisor-extra-clock":
         at = find(supervisor, r'"/proc/sys/kernel/random/boot_id"')
         lines.insert(at, lines[at])
-    elif damage in ("collector-deadline", "deadline-without-decision"):
-        if damage == "deadline-without-decision":
-            # After a deadline the round decides nothing: its calls are not judged.
-            del lines[find(helper, r'statx\(AT_FDCWD</>, "/fx/home-t/\.volta/bin"')]
+    elif damage in ("breaker-fails-no-gc", "install-fails-no-gc"):
+        # A failed marker rename counts as the same kind; with no GC after
+        # it the exact counts would still match.
+        name = "breaker" if damage == "breaker-fails-no-gc" else "command"
+        # The last one: breaker begin, in the prefix, renames the same name.
+        at = max(i for i, l in enumerate(lines) if l.split()[0] == helper
+                 and re.search(rf'renameat\(\d+<[^>]*>, "\.{name}\.stage", \d+<[^>]*>, "{name}"\) = 0$', l))
+        lines[at] = lines[at].replace(" = 0", " = -1 EACCES (Permission denied)")
+        # The staged file keeps its name: its descriptor's later calls name it so.
+        stage_fd = next(re.search(r"= (\d+)<", lines[i])[1] for i in range(at, 0, -1)
+                        if lines[i].split()[0] == helper and f'"\x2e{name}.stage", O_RDWR|O_CREAT' in lines[i])
+        for i in range(at + 1, len(lines)):
+            if lines[i].split()[0] == helper and f"{stage_fd}<" in lines[i]:
+                lines[i] = re.sub(rf"\b{stage_fd}<([^>]*)/{name}>", rf"{stage_fd}<\1/.{name}.stage>", lines[i])
+                if re.search(rf"close\({stage_fd}<", lines[i]):
+                    break
+        gc_at = None
+        if stage == "builtin_probe" and damage == "breaker-fails-no-gc":
+            at = find(helper, r'renameat\(\d+<[^>]*>, "\.command\.stage", \d+<[^>]*>, "command"\) = 0$')
+        gc_at = next(i for i in range(at, len(lines))
+                     if lines[i].split()[0] == helper and '"/proc/sys/kernel/random/boot_id"' in lines[i])
+        lines = lines[:gc_at] + [l for l in lines[gc_at:] if l.split()[0] != helper or "+++ " in l]
+    elif damage == "deadline-staged-not-renamed":
+        # A deadline whose supervisor staged a response and failed to
+        # install it: past the deadline's clock-only bound.
+        at = next(i for i, l in enumerate(lines)
+                  if re.search(r'renameat\(\d+<[^>]*>, "\.response\.stage", \d+<[^>]*>, "response"', l))
+        pid = lines[at].split()[0]
+        done = next(i for i in range(at, len(lines)) if lines[i].split()[0] == pid and " = 0" in lines[i])
+        lines[done] = lines[done].replace(" = 0", " = -1 EACCES (Permission denied)")
+        lines[done + 1:] = [l.replace("/store/response>", "/store/.response.stage>") if l.split()[0] == pid else l
+                            for l in lines[done + 1:]]
         collector_pid = next(l.split()[0] for l in lines if '"__collect-v1"' in l and "execve(" in l)
         at = find(collector_pid, r"\+\+\+ exited with 0 \+\+\+")
         lines[at] = lines[at].replace("exited with 0", "exited with 75")
+    elif damage in ("collector-deadline", "deadline-without-decision", "deadline-unpublished",
+                    "deadline-unpublished-extra-prefix", "deadline-unpublished-extra-tail",
+                    "answered-unpublished", "deadline-unpublished-supervisor-clock"):
+        if damage == "deadline-without-decision":
+            # A deadline that still published: the round decided and is judged in full.
+            del lines[find(helper, r'statx\(AT_FDCWD</>, "/fx/home-t/\.volta/bin"')]
+        if damage.startswith("deadline-unpublished") or damage == "answered-unpublished":
+            # Nothing verified: the collection supervisor observes its clock
+            # and stores nothing (its store calls after the clock removed).
+            at = next(i for i, l in enumerate(lines)
+                      if re.search(r'renameat\(\d+<[^>]*>, "\.response\.stage", \d+<[^>]*>, "response"', l))
+            pid = lines[at].split()[0]
+            clock = max(i for i in range(at) if lines[i].split()[0] == pid and "/proc/sys/kernel/random/boot_id>" in lines[i])
+            lines = lines[:clock + 1] + [l for l in joined(lines[clock + 1:], pid)
+                                         if l.split()[0] != pid or not re.search(r"/(?:store|collections-v1)[/>]", l)]
+        if damage == "deadline-unpublished-extra-prefix":
+            at = find(helper, r'"command-[0-9a-f]+\.lock", .*\) = 0$')
+            lines.insert(at, lines[at])
+        if damage == "deadline-unpublished-extra-tail":
+            # A second unit rmdir: past the full round's bound.
+            at = find(helper, r"unlinkat\(.*AT_REMOVEDIR\) = 0$")
+            lines.insert(at, lines[at])
+        if damage == "deadline-unpublished-supervisor-clock":
+            # The command supervisor is judged exactly even without an answer:
+            # its lock marked close-on-exec twice.
+            at = find(supervisor, r"fcntl\(5<[^>]*\.lock>, F_SETFD, FD_CLOEXEC")
+            lines[at:at] = [lines[at].replace(" <unfinished ...>", ") = 0")]
+        if damage != "answered-unpublished":
+            collector_pid = next(l.split()[0] for l in lines if '"__collect-v1"' in l and "execve(" in l)
+            at = find(collector_pid, r"\+\+\+ exited with 0 \+\+\+")
+            lines[at] = lines[at].replace("exited with 0", "exited with 75")
     elif damage == "extra-bin-link":
         at = find(helper, r'readlinkat\(6</fx/tools/pyenv/versions/3\.12\.1/bin>, "python3"')
         lines[at:at] = [lines[at - 1], lines[at]]
@@ -3680,8 +3770,11 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
         lines.insert(at + 1, f"{supervisor}  fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)")
     if damage is None:
         assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is True
-    elif damage in ("collector-deadline", "deadline-without-decision"):
-        # No answer, no decision: the prefix alone is judged and the stage retries.
+    elif damage == "collector-deadline":
+        # A deadline after a verified partial: published, judged in full.
+        assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is True
+    elif damage == "deadline-unpublished":
+        # Nothing verified: the deadline bounds hold and the stage retries.
         assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
     else:
         with pytest.raises(AssertionError):
@@ -3697,17 +3790,50 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
     ("builtin_probe", {"shell_names": 0}), ("builtin_probe", {"path_folders": 0}), ("builtin_probe", {"target_names": 0}),
     ("builtin_probe", {"path_names": 1}), ("builtin_probe", {"target_links": 1}), ("builtin_probe", {"manager_homes": 0}),
     ("builtin_fast", {"bin_links": 0}), ("builtin_fast", {"manager_homes": 6}), ("builtin_probe", {"bin_links": 1}),
+    ("builtin_probe", {"path_folders": 32_769, "path_names": 32_769}),
+    ("builtin_probe", {"path_names": 2 * 256 + 1}), ("builtin_probe", {"target_names": 257}),
+    ("builtin_probe", {"manager_homes": 9}), ("builtin_fast", {"bin_links": 5}),
     ("builtin_probe", {"stages": ("unchanged", "builtin_probe")}),
     ("builtin_probe", {"stages": ("publish", "collect", "builtin_probe")}),
     ("builtin_probe", {"stages": ("unchanged", "collect", "builtin_probe", "command_miss")}),
     ("builtin_probe", {"stages": ("unchanged", "collect", "builtin_probe", "builtin_fast")})])
 def test_builtin_plan_shape_is_reviewed(stage, change):
+    # The bounds themselves are accepted (the caps are inclusive).
     from dataclasses import replace
     from fsbudget.formula import helper_builtin_expected
     _, _, plan = helper_stage_case(stage)
     helper_builtin_expected(plan)
     with pytest.raises(ValueError):
         helper_builtin_expected(replace(plan, **change))
+
+
+# 이것을 실패시키는 것: 상한을 하나 줄이는 것(경계값 계획이 거부됨). 상한을 늘리면 위 거부 시험이 실패한다.
+def test_builtin_axis_caps_are_inclusive():
+    from dataclasses import replace
+    from fsbudget.formula import helper_builtin_expected
+    _, _, probe = helper_stage_case("builtin_probe")
+    _, _, fast = helper_stage_case("builtin_fast")
+    helper_builtin_expected(replace(probe, path_folders=32_768, path_names=32_768 * 256, target_names=256,
+                                    manager_homes=8))
+    helper_builtin_expected(replace(fast, bin_links=4))
+
+
+# The caps above come from the product's constants.
+# 이것을 실패시키는 것: 제품 상수(BIN_LINKS_MAX, DEPTH_MAX, FRAME_MAX, shim 집 목록)를 바꾸고 식의 상한은 그대로 두는 것.
+def test_builtin_axis_caps_match_the_product():
+    import re
+    from fsbudget import formula
+    ROOT = Path(__file__).resolve().parents[2]
+    manager = (ROOT / "crates/bingsu/src/commands/version_manager.rs").read_text().replace("\r\n", "\n")
+    walk = (ROOT / "crates/bingsu/src/commands/exec_path.rs").read_text().replace("\r\n", "\n")
+    frame = (ROOT / "crates/bingsu-core/src/command/env_frame.rs").read_text().replace("\r\n", "\n")
+    assert re.search(r"pub\(crate\) const BIN_LINKS_MAX: usize = (\d+);", manager)[1] == str(formula.BUILTIN_BIN_LINKS_MAX)
+    assert re.search(r"\nconst DEPTH_MAX: usize = (\d+);", walk)[1] == str(formula.BUILTIN_WALK_DEPTH_MAX)
+    assert int(re.search(r"pub const FRAME_MAX: usize = ([\d_]+);", frame)[1].replace("_", "")) // 2 == \
+        formula.BUILTIN_PATH_FOLDERS_MAX
+    body = re.search(r"fn unsupported\(vars: &Environ<'_>\) -> Vec<PathBuf> \{.*?\n    \[\n(.*?)\n    \]\n", manager, re.S)[1]
+    entries = [l for l in body.splitlines() if l.strip() and not l.strip().startswith("//")]
+    assert len(entries) == formula.BUILTIN_SHIM_HOMES_MAX, entries
 
 
 # x86_64 glibc: the stack guard's two maps seeks in the helper and the

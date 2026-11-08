@@ -677,6 +677,102 @@
    }
   }
  },
+ "command_not_run/aarch64-gnu": {
+  "stage": {
+   "chmod": 2,
+   "cwd": 1,
+   "dup": 4,
+   "exec": 1,
+   "flock": 7,
+   "fstat": 829,
+   "fsync": 0,
+   "getdents": 2,
+   "kernel_release": 1,
+   "mkdir": 7,
+   "network": 4,
+   "openat": 260,
+   "read": 50,
+   "readlink": 30,
+   "renameat": 2,
+   "seek": 5,
+   "statfs": 88,
+   "thread": 1,
+   "umask": 1,
+   "write": 2
+  }
+ },
+ "command_not_run/aarch64-musl": {
+  "stage": {
+   "chmod": 2,
+   "cwd": 1,
+   "dup": 4,
+   "exec": 1,
+   "fd_flags": 9,
+   "flock": 7,
+   "fstat": 824,
+   "fsync": 0,
+   "getdents": 2,
+   "kernel_release": 1,
+   "mkdir": 7,
+   "openat": 259,
+   "read": 48,
+   "readlink": 30,
+   "renameat": 2,
+   "seek": 5,
+   "statfs": 88,
+   "thread": 1,
+   "umask": 1,
+   "write": 2
+  }
+ },
+ "command_not_run/x86_64-gnu": {
+  "stage": {
+   "chmod": 2,
+   "cwd": 1,
+   "dup": 4,
+   "exec": 1,
+   "flock": 7,
+   "fstat": 829,
+   "fsync": 0,
+   "getdents": 2,
+   "kernel_release": 1,
+   "mkdir": 7,
+   "network": 4,
+   "openat": 260,
+   "read": 50,
+   "readlink": 30,
+   "renameat": 2,
+   "seek": 7,
+   "statfs": 88,
+   "thread": 1,
+   "umask": 1,
+   "write": 2
+  }
+ },
+ "command_not_run/x86_64-musl": {
+  "stage": {
+   "chmod": 2,
+   "cwd": 1,
+   "dup": 4,
+   "exec": 1,
+   "fd_flags": 9,
+   "flock": 7,
+   "fstat": 824,
+   "fsync": 0,
+   "getdents": 2,
+   "kernel_release": 1,
+   "mkdir": 7,
+   "openat": 259,
+   "read": 48,
+   "readlink": 30,
+   "renameat": 2,
+   "seek": 5,
+   "statfs": 88,
+   "thread": 1,
+   "umask": 1,
+   "write": 2
+  }
+ },
  "failure-last-good/aarch64-gnu": {
   "stage": {
    "chmod": 2,
