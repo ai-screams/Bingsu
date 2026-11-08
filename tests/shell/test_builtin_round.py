@@ -17,6 +17,7 @@ from test_command_round import (
     command_response,
     forget_results,
     published,
+    rounds_until,
     ready,
     rounds,
     runs,
@@ -581,3 +582,26 @@ def test_git_shows_beside_a_user_language(tmp_path, _native_boot_required):
                 "[layout.line1]\nleft=['git', 'custom/deno']\n[layout.line2]\nleft=['char']\n")
     session.init()
     session.await_text("main", timeout=8)
+
+
+# U-32: 명령 응답에서 내장 언어와 설정 단위는 칸을 따로 쓴다. 설정 단위 32개를 모두 그리고 node를 함께 그려도, 32개의
+# 값과 node 버전이 한 응답에 함께 남는다. 이것을 실패시키는 것: 응답 상한을 출처 구분 없이 32로 되돌리는 것(서로
+# 밀어내 하나가 빠짐), merge가 넘친 출처 밖의 항목을 지우는 것.
+def test_builtin_and_32_units_share_the_response(tmp_path, _native_boot_required):
+    session = session_with(tmp_path)
+    node = install(session.base / "bin", "node")
+    session.env["PATH"] = f"{node.parent}:{session.env['PATH']}"
+    ids = [f"custom/u{i:02}" for i in range(32)]
+    units = "".join(f"[segment.\"{u}\"]\nkind='command'\ncommand=['/bin/echo', 'value-{u[-2:]}']\ncache='300s'\n"
+                    for u in ids)
+    drawn = ", ".join(f"'{u}'" for u in ids)
+    session.put(units + f"[layout.line1]\nleft=['node', {drawn}]\n[layout.line2]\nleft=['char']\n")
+    ready(session)
+    # Eight config units run a round (round robin): four rounds reach all 32.
+    rounds_until(session, lambda: all(f"value-{u[-2:]}".encode() in command_response(session) for u in ids)
+                 and b"18.20.4" in command_response(session), limit=12)
+    rounds(session, 2)
+    response = command_response(session)
+    assert b"18.20.4" in response
+    missing = [u for u in ids if f"value-{u[-2:]}".encode() not in response]
+    assert not missing, missing

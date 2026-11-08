@@ -133,7 +133,7 @@ pub struct ExecUnit {
 pub const MAX_CUSTOM_TEXT: usize = 256;
 /// Command and language segments one config may draw: those a trusted
 /// layout draws at some width and that may run (plan U-9d: 32 units, the
-/// command response's `ENTRIES_MAX`, which holds only units that run). A
+/// command response's `CONFIG_ENTRIES_MAX`, which holds only units that run). A
 /// declared segment no layout draws is not counted.
 pub const MAX_EXEC_UNITS: usize = 32;
 
