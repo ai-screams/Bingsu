@@ -340,9 +340,23 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_millis(1500));
     }
 
+    /// A child under the real prompt deadline: run again while it ends there.
     fn child(name: &str, want: &[u8]) {
+        child_tries(name, want, DEADLINE_TRIES)
+    }
+
+    /// A child with no real deadline (a fixed clock): its header-only exit
+    /// is a failure, never a loaded machine, so it runs once.
+    fn child_once(name: &str, want: &[u8]) {
+        child_tries(name, want, FIXED_CLOCK_TRIES)
+    }
+
+    /// Tries of a child with a fixed clock.
+    const FIXED_CLOCK_TRIES: usize = 1;
+
+    fn child_tries(name: &str, want: &[u8], tries: usize) {
         let me = std::env::current_exe().expect("test binary");
-        child_with(name, want, || {
+        child_with(name, want, tries, || {
             std::process::Command::new(&me)
                 .args([
                     "--ignored",
@@ -368,10 +382,15 @@ mod tests {
         out.status.code() == Some(0) && out.stderr.is_empty() && out.stdout == b"\nrunning 1 test\n"
     }
 
-    /// `run` once, or up to `DEADLINE_TRIES` times while it ends at the
-    /// deadline; any other result is judged at once.
-    fn child_with(name: &str, want: &[u8], mut run: impl FnMut() -> std::process::Output) {
-        for _ in 0..DEADLINE_TRIES {
+    /// `run` once, or up to `tries` times while it ends at the deadline;
+    /// any other result is judged at once.
+    fn child_with(
+        name: &str,
+        want: &[u8],
+        tries: usize,
+        mut run: impl FnMut() -> std::process::Output,
+    ) {
+        for _ in 0..tries {
             let out = run();
             if deadline_exit(&out) {
                 continue;
@@ -392,12 +411,13 @@ mod tests {
             );
             return;
         }
-        panic!("{name}: ended at the prompt deadline {DEADLINE_TRIES} times");
+        panic!("{name}: ended at the prompt deadline {tries} times");
     }
 
     // 마감 종료 모양(rc 0, 머리말만)만 다시 돌리고, 다른 결과는 바로 판정한다. 다섯 번 모두 마감 종료면 실패다.
     // 이것을 실패시키는 것: 재시도를 지우는 것(마감 종료 한 번에 실패), 재시도 조건을 넓혀 다른 실패(다른
-    // record, stderr 출력, 0이 아닌 종료)도 다시 돌리는 것, 횟수 상한을 지우는 것.
+    // record, stderr 출력, 0이 아닌 종료)도 다시 돌리는 것, 횟수 상한을 지우는 것, 실제 마감이 없는(가짜 시계)
+    // 자식에도 재시도를 켜는 것(첫 쓰기 전에 panic을 삼키는 회귀가 마감 종료처럼 보여 가려짐).
     #[test]
     fn only_a_deadline_exit_runs_the_child_again() {
         use std::os::unix::process::ExitStatusExt;
@@ -408,11 +428,11 @@ mod tests {
         };
         let header: &[u8] = b"\nrunning 1 test\n";
         let record = [header, b"<rendered>"].concat();
-        let runs = |results: Vec<std::process::Output>| {
+        let runs_with = |limit: usize, results: Vec<std::process::Output>| {
             let mut results = results.into_iter();
             let mut tries = 0;
             let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                child_with("c", b"<rendered>", || {
+                child_with("c", b"<rendered>", limit, || {
                     tries += 1;
                     results.next().expect("no more results")
                 })
@@ -420,6 +440,15 @@ mod tests {
             .is_ok();
             (ok, tries)
         };
+        let runs = |results| runs_with(DEADLINE_TRIES, results);
+        // A fixed-clock child has no deadline: a header-only exit fails at once.
+        assert_eq!(
+            runs_with(
+                FIXED_CLOCK_TRIES,
+                vec![out(0, header, b""), out(0, &record, b"")]
+            ),
+            (false, 1)
+        );
         assert_eq!(
             runs(vec![
                 out(0, header, b""),
@@ -558,6 +587,8 @@ mod tests {
     #[test]
     fn partial_panic_never_appends_another_record() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        child("partial_panic_child", b"B1\x1f");
+        // Its clock is fixed (always inside the deadline), so a header-only
+        // exit means the panic was swallowed before the first write.
+        child_once("partial_panic_child", b"B1\x1f");
     }
 }
