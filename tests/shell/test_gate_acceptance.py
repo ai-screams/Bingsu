@@ -1550,7 +1550,8 @@ def test_pty_ignored_files_exist():
 # 실행 파일을 다른 target에서 만드는 것, cell 조건(`matrix.cell == …`)을 cell job 밖 step에서 받는 것, 건너뛰는
 # job을 needs에 더하는 것, `--entrypoint`나 grep 셸 함수로 실행·단언을 비우는 것, PR 갱신에서 돌지 않게 하는
 # 트리거 필터, 건너뛰거나 한 칸에서만 돌거나 다른 파일에 쓰거나 증거 뒤에 오는 build, 다른 mount, 압축 꼴
-# `-k`·`-m`과 `--collect-only`(cell 밖 회차 step에서도), cell 밖 step의 grep 셸 함수.
+# `-k`·`-m`과 `--collect-only`(cell 밖 회차 step에서도), cell 밖 step의 grep 셸 함수, 단어에 붙은 연산자
+# (`x;set +e`), 이스케이프한 env 키, detect job의 조건·출력 변경, 빈 줄 뒤의 트리거 필터, 다른 폴더의 build.
 CELL_RUST_GREP = ("          grep -Fx 'test commands::command_supervisor::tests::test_nested_cgroup_removed_postorder"
                   " ... ok' \"$RUNNER_TEMP/cell-rust.txt\"\n")
 CELL_PY_GREP = ("          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::test_reclaim_after_supervisor_sigkill'"
@@ -1563,7 +1564,9 @@ CELL_PY_GREP = ("          grep -Fx 'PASSED tests/shell/test_command_cgroup.py::
                                     "pr-closed-only", "pr-closed-inline", "pr-branch-filter", "pr-path-filter",
                                     "build-skipped", "build-plain-only", "build-other-output", "mount-other-file",
                                     "build-after", "py-compact-k", "py-compact-m", "py-collect-only",
-                                    "rounds-compact-k", "rounds-grep-function", "py-entrypoint"])
+                                    "rounds-compact-k", "rounds-grep-function", "py-entrypoint",
+                                    "joined-operator", "escaped-env-key", "detect-if", "detect-output",
+                                    "pr-blank-types", "working-directory", "evidence-working-directory"])
 def test_cell_evidence_rejects_bypasses(damage):
     table = (ROOT / TABLE).read_text()
     texts = workflows()
@@ -1669,6 +1672,24 @@ def cell_bypass(shell, damage):
         py = "-v \"$PWD:/w\" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-prompt target/x86_64-unknown-linux-musl/release/bingsu-collect /usr/local/bin/ && exec python3 -m pytest tests/shell/test_command_cgroup.py"
         assert shell.count(py) == 1, "cell pytest run"
         return shell.replace(py, py.replace("-w /w bingsu-cgroup-d13", "-w /w --entrypoint /bin/true bingsu-cgroup-d13"))
+    if damage == "joined-operator":
+        return shell.replace(CELL_RUST_STEP, CELL_RUST_STEP + "          printf x;set +e\n")
+    if damage == "escaped-env-key":
+        return shell.replace(CELL_RUST_STEP, CELL_RUST_STEP.replace(
+            "        run: |", '        env:\n          "BASH\\u005fENV": /tmp/skip-cell.sh\n        run: |'))
+    if damage in ("detect-if", "detect-output"):
+        detect = "  detect:\n    name: Detect project\n"
+        run = 'echo "rust=true" >> "$GITHUB_OUTPUT"; else'
+        assert shell.count(detect) == 1 and shell.count(run) == 1
+        if damage == "detect-if":
+            return shell.replace(detect, detect + "    if: github.event_name == 'push'\n")
+        return shell.replace(run, run.replace("rust=true", "rust=false"))
+    if damage == "pr-blank-types":
+        return shell.replace("\n  pull_request:\n", "\n  pull_request:\n\n    types: [closed]\n")
+    if damage == "working-directory":
+        return shell.replace(CELL_BUILD_STEP, CELL_BUILD_STEP.replace("        run: |", "        working-directory: previous\n        run: |"))
+    if damage == "evidence-working-directory":
+        return shell.replace(CELL_RUST_STEP, CELL_RUST_STEP.replace("        run: |", "        working-directory: previous\n        run: |"))
     if damage == "rounds-grep-function":
         return shell.replace(ROUNDS_STEP, ROUNDS_STEP + function)
     assert damage in ("entrypoint", "grep-function", "entrypoint-and-grep-function"), damage

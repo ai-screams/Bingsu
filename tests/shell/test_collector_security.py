@@ -260,6 +260,12 @@ def assert_shell_settings(fields):
     if "env" in fields:
         value, nested = fields["env"]
         assert not value, "inline env is unsupported"
+        # Keys are plain names: a quoted or escaped key (`"BASH\u005fENV"`)
+        # would name a variable this check cannot read without a YAML parser.
+        # 이것을 실패시키는 것: 따옴표·이스케이프로 쓴 env 키를 받는 것.
+        for line in nested:
+            if line.strip() and not line.lstrip().startswith("#"):
+                assert re.fullmatch(r"\s+[A-Za-z_][A-Za-z0-9_]*:(?: .*)?", line), ("env key", line)
         assert not re.search(r"\b(?:BASH_ENV|SHELLOPTS)\b", "\n".join(nested)), "shell startup env"
 
 
@@ -372,8 +378,23 @@ def run_commands(step):
             if (tokens := shlex.split(line, comments=True))]
 
 
+def shell_operators(line):
+    """The control operators of one run line, found apart from whitespace:
+    `x;set +e` holds a `;` that shlex.split leaves inside a word."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>")
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    return [token for token in lexer if token and set(token) <= set(";&|<>")]
+
+
 def assert_run_unconditional(step):
-    # 이것을 실패시키는 것: 옵션 해제·동적 실행·heredoc·성공 명령으로 grep 실패를 숨기는 것.
+    # 이것을 실패시키는 것: 옵션 해제·동적 실행·heredoc·성공 명령으로 grep 실패를 숨기는 것, 공백 없이 붙인
+    # `x;set +e`·`a&&b`·`a||b`·`a&`처럼 단어에 붙은 연산자.
+    for line in step.get("run", "").splitlines():
+        if line.strip():
+            # A pipe and redirections (`>`, `>>`, `2>&1`) stay; a list or
+            # background operator would let a failure pass.
+            assert set(shell_operators(line)) <= {"|", ">", ">>", ">&", "<"}, (line, "shell operator")
     for command in run_commands(step):
         assert command[0] not in {
             "if", "for", "while", "until", "case", "exit", ":", "!", "true",
@@ -542,6 +563,36 @@ CELL_INSTALL = ["install", "-m", "0755", "target/x86_64-unknown-linux-musl/relea
                 "target/x86_64-unknown-linux-musl/release/bingsu-collect", "/usr/local/bin/", "&&"]
 
 
+def assert_bare_pull_request(on):
+    """`pull_request:` with nothing under it, blank lines and comments
+    aside: every opened, synchronize and reopened event runs the workflow."""
+    # 이것을 실패시키는 것: 빈 줄·주석 뒤에 둔 types·branches·paths 하위 키를 받는 것.
+    lines = on.splitlines()
+    starts = [i for i, line in enumerate(lines) if re.fullmatch(r"  pull_request:[ \t]*", line)]
+    assert len(starts) == 1, "cell job not on every pull request"
+    for line in lines[starts[0] + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        assert not line.startswith("   "), ("pull_request filter", line)
+        break
+
+
+# The detect job every cell job needs, as it must stay: unconditional, its
+# `rust` output from the one step that tests for Cargo.toml.
+DETECT_RUN = 'if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi'
+
+
+def assert_detect_runs(text):
+    # 이것을 실패시키는 것: detect에 if를 붙이는 것, rust 출력을 다른 값이나 다른 step에서 내는 것.
+    meta, steps = workflow_job(text, "detect")
+    assert not {"if", "needs", "continue-on-error"} & set(meta), ("detect", sorted(meta))
+    outputs = [line.strip() for line in meta.get("outputs", ("", []))[1] if line.strip()]
+    assert outputs == ["rust: ${{ steps.check.outputs.rust }}"], ("detect outputs", outputs)
+    checks = [step for step in steps if step.get("id") == "check"]
+    assert len(checks) == 1 and not {"if", "continue-on-error", "working-directory"} & set(checks[0]), "detect step"
+    assert [line.strip() for line in checks[0]["run"].splitlines() if line.strip()] == [DETECT_RUN], "detect run"
+
+
 def cell_rust_names(run):
     """The exact test names a cell's Rust run selects, or None when `run` is
     not exactly `docker run … bingsu-cgroup-d13 /cell --include-ignored
@@ -588,7 +639,7 @@ def cell_built_before(run_step, steps):
     # 이것을 실패시키는 것: if가 붙은 build(건너뛰거나 한 칸에서만 돎), 다른 출력 파일, 증거 step 뒤의 build를 받는 것.
     cell = [step for step in steps if step["_job"] == CELL_JOB]
     before = cell[:next(i for i, step in enumerate(cell) if step is run_step)]
-    return any("if" not in step and run_commands(step) == CELL_BUILD for step in before)
+    return any(not {"if", "working-directory"} & set(step) and run_commands(step) == CELL_BUILD for step in before)
 
 
 def shell_test_evidence(text):
@@ -605,8 +656,9 @@ def shell_test_evidence(text):
             # 것, 건너뛰는 job을 needs에 더하는 것.
             on = re.search(r"(?ms)^on:\n(.*?)(?=^\S)", text)
             assert on, "workflow trigger block"
-            assert re.search(r"(?m)^  pull_request:[ \t]*\n(?!    )", on[1] + "\n"), "cell job not on every pull request"
+            assert_bare_pull_request(on[1])
             assert meta.get("needs") == ("detect", []), (job, "needs", meta.get("needs"))
+            assert_detect_runs(text)
         assert "continue-on-error" not in meta, job
         assert meta["if"][0] == "needs.detect.outputs.rust == 'true'", job
         strategy = meta.get("strategy", ("", []))[1]
@@ -754,6 +806,8 @@ def acceptance_pair_allowed(row, step, run_step, run):
         return None
     for entry in (step, run_step):
         assert "continue-on-error" not in entry, (row["id"], "skippable evidence step")
+        # 이것을 실패시키는 것: 다른 checkout 폴더에서 도는 증거 step을 받는 것.
+        assert "working-directory" not in entry, (row["id"], "evidence step in another folder")
         assert_run_unconditional(entry)
     if "|" in run:
         commands = run_commands(run_step)
