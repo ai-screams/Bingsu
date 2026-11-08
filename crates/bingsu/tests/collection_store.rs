@@ -1043,13 +1043,13 @@ fn gc_cannot_split_lock_inode_or_delete_inflight_store() {
 // 이것을 실패시키는 것: mkdir 전에 store/node/논리 bytes 상한을 검사하지 않는 것, cwd를 경로 조각으로 쓰는 것.
 #[test]
 fn store_capacity_is_reserved_before_mkdir() {
-    for (stores, nodes, bytes) in [(128, 8_192, 16_100_000), (0, 0, 0)] {
+    for (stores, nodes, bytes) in [(128, 8_192, 16_600_000), (0, 0, 0)] {
         assert!(collection_gc::capacity(stores, nodes, bytes));
     }
     for (stores, nodes, bytes) in [
-        (129, 8_192, 16_100_000),
-        (128, 8_193, 16_100_000),
-        (128, 8_192, 16_100_001),
+        (129, 8_192, 16_600_000),
+        (128, 8_193, 16_600_000),
+        (128, 8_192, 16_600_001),
     ] {
         assert!(!collection_gc::capacity(stores, nodes, bytes));
     }
@@ -1080,9 +1080,9 @@ fn store_capacity_is_reserved_before_mkdir() {
             Ok(store) => held.push(store),
             Err(StoreError::Busy) => {
                 assert!(!f.path_for(&b).exists());
-                // U-21: ⌊(16,100,000 − 2 × 1,048,576 catalog copies) ÷ (4 × 262,144
-                // + 2 × 471,082 command response maximum)⌋ = 7, as at 10 MB before
-                // the command response.
+                // U-21: ⌊(16,600,000 − 2 × 1,048,576 catalog copies) ÷ (4 × 262,144
+                // + 2 × 505,370 command response maximum)⌋ = 7, as at 10 MB before
+                // the command response. One byte under 16,512,364 leaves 6.
                 assert_eq!(
                     held.len(),
                     7,
@@ -3005,6 +3005,29 @@ mod command_store {
         assert_eq!(read(&f), r);
     }
 
+    // 앞 형식(BNGCMD01)의 응답은 읽지 못하는 응답으로 보고 지운 뒤 새 형식으로 덮어쓴다(U-32: 이전 판의 항목은
+    // 남기지 않는다). 이것을 실패시키는 것: read_command가 decode 실패를 오류로 돌려 발행을 막는 것, 옛 응답을
+    // 지우지 않고 그 위에 섞는 것.
+    #[test]
+    fn a_response_of_the_previous_format_is_replaced() {
+        let f = Fixture::new("command-old-format");
+        let b = command_binding(&f, b"/cwd");
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/a", 10)])
+            .unwrap();
+        let path = f.path().join(COMMAND);
+        let mut old = fs::read(&path).unwrap();
+        old[..10].copy_from_slice(b"BNGCMD01\x01\x00");
+        fs::write(&path, &old).unwrap();
+        assert!(Response::decode(&old).is_err());
+        admit(&f, &b)
+            .publish_commands(&b, &[entry("custom/b", 20)])
+            .unwrap();
+        let r = read(&f);
+        assert!(r.entry(Origin::Config, "custom/b").is_some(), "{r:?}");
+        assert!(r.entry(Origin::Config, "custom/a").is_none(), "{r:?}");
+    }
+
     // 발행 잠금을 쥔 동안 같은 cwd의 다른 회차는 들어오지 못하고(Deferred), 그 회차의 발행은 버려진다. 이것을
     // 실패시키는 것: admit_work가 collection.lock을 잡지 않는 것(둘째 회차가 들어와 같은 순간 발행).
     #[test]
@@ -3075,7 +3098,7 @@ mod command_store {
     fn gc_accounts_and_evicts_command_responses() {
         let f = Fixture::new("command-gc");
         let b = command_binding(&f, b"/cwd");
-        let big: Vec<Entry> = (0..response::ENTRIES_MAX)
+        let big: Vec<Entry> = (0..response::CONFIG_ENTRIES_MAX)
             .map(|i| Entry {
                 value: "v".repeat(response::VALUE_MAX),
                 raw: "r".repeat(response::VALUE_MAX),

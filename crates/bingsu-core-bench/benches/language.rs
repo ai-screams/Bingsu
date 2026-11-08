@@ -9,7 +9,7 @@ use bingsu_core::{
         builtin::LANGUAGES,
         display::{self, Prompt},
         plan::Environ,
-        response::{Binding, ENTRIES_MAX, Entry, Response, Status, VALUE_MAX},
+        response::{Binding, CONFIG_ENTRIES_MAX, Entry, Response, Status, VALUE_MAX},
     },
     field::Field,
     handoff::Origin,
@@ -68,7 +68,8 @@ fn full() -> Input {
     let vars = Environ::parse(&environ);
     let value: String = "x".repeat(VALUE_MAX);
     let mut entries = Vec::new();
-    for i in 0..ENTRIES_MAX - LANGUAGES.len() {
+    // The response size this bench has always measured: 32 entries.
+    for i in 0..CONFIG_ENTRIES_MAX - LANGUAGES.len() {
         entries.push(Entry {
             origin: Origin::Config,
             id: format!("custom/k{i:02}"),

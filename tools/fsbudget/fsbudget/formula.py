@@ -1168,7 +1168,7 @@ def collection_front_expected(directories: int, file_sizes: tuple[int | None, ..
         raise ValueError("invalid collection prefetch axes")
     if directories == 3 and len(file_sizes) != 3 or directories < 3 and file_sizes:
         raise ValueError("invalid collection prefetch axes")
-    if len(body_bytes) > 3 or any(not 0 <= n <= 471_082 - 64 for n in body_bytes):
+    if len(body_bytes) > 3 or any(not 0 <= n <= 505_370 - 64 for n in body_bytes):
         raise ValueError("invalid collection read axes")
     if absent and (directories or file_sizes or body_bytes):
         raise ValueError("absent namespace has no facts or reads")
