@@ -12,7 +12,7 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 - **Stage**: M3a (config, snapshot, refresh helper), M3b (collector process protocol, supervision, publication) and
   M3c (git, path facts, safe reads), M3d (performance and process gates, measured budgets) and M4 (zsh integration) are done;
-  M6 (running user-defined commands) is next; M5 (bash and fish integration) is deferred until after M7. M4 is closed with open items: the shell time gate runs on Linux only and records its
+  M6 (running user-defined commands) is in progress; M5 (bash and fish integration) is deferred until after M7. M4 is closed with open items: the shell time gate runs on Linux only and records its
   verdict without failing the job, some of its runs can end BLOCKED, and the redraw time has no recorded value on Linux or macOS.
   `bingsu prompt` renders the built-in default
   theme or the user's TOML config through a snapshot the refresh helper publishes; the helper runs the pinned
@@ -20,7 +20,7 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
   status and folder facts from the next prompt on; zsh also prints status notices, keeps the exit status and duration, shortens
   past prompts (transient line), switches the vi mode prompt without calling `bingsu`, and redraws on a width change without
   starting the refresh helper; bash and fish already handle the exit status and duration, but the fixed notices, transient line, vi mode switch and width redraw stay for M5, which comes after M7;
-  command segments are checked but not run (M6); there is no release. `README.md` lists features as planned until they ship and records working behavior in its Status table.
+  text, command and env segments are drawn and commands run in the background on Linux and macOS (M6, `docs/config.md`); there is no release. `README.md` lists features as planned until they ship and records working behavior in its Status table.
 - **Repository**: `ai-screams/Bingsu`, public.
 
 ## Layout
