@@ -129,6 +129,17 @@ M6_GATES = {
         "A round that draws no builtin language and whose every unit hits the cache starts no supervisor and runs "
         "nothing",
     ),
+    # M6 F1: the supervisor's own file system calls (plan "decisive gates";
+    # C3, C4 moved the session parent, its listing and the unit rmdir to the
+    # helper's formula).
+    "GATE-CMD-FSBUDGET": (
+        "In a command round the supervisor's calls by kind equal the formula exactly: its start, and per spawn the "
+        "clock, the relay's /dev/null and folder, and on the atomic path the unit cgroup, its cgroup.kill open and "
+        "the kill; the best-effort path has no cgroup term and puts the relay in its own process group. The relay "
+        "and the target are counted only",
+        "The formula's coefficients hold for 1 to 12 spawns a round, and the supervisor's own call shapes have "
+        "their own kinds, never the helper's",
+    ),
     # M6 F1: what a command round leaves behind (plan "decisive gates"; C2, C3).
     "GATE-CMD-REAP": (
         "A round removes the cgroups it made, and a session's next reclaim takes the units it left only once their "
@@ -243,6 +254,8 @@ M3D_SUPPLEMENTARY.update({"GATE-CMD-FDS.1-atomic": "M6", "GATE-CMD-FDS.2-no_fd2"
 M3D_SUPPLEMENTARY.update({"GATE-CMD-REAP.1-reaped_first": "M6", "GATE-CMD-REAP.2-nested": "M6",
                           "GATE-CMD-REAP.2-setsid": "M6", "GATE-CMD-REAP.4-backpressure": "M6",
                           "GATE-CMD-REAP.4-backpressure_macos": "M6"})
+# 이것을 실패시키는 것: 감독 어휘 행을 지우고 계수 행 하나로 GATE-CMD-FSBUDGET.2를 닫는 것.
+M3D_SUPPLEMENTARY["GATE-CMD-FSBUDGET.2-vocabulary"] = "M6"
 M3D_SUPPLEMENTARY.update({"GATE-LANG-USER.3-space": "M6", "GATE-LANG-USER.3-absolute_space": "M6",
                           "GATE-LANG-USER.3-name": "M6",
                           "GATE-LANG-USER.1-cache": "M6", "GATE-LANG-USER.1-git": "M6"})
@@ -402,8 +415,8 @@ def test_gate_rows_exist_and_run_in_ci():
 def test_every_gate_clause_is_a_row_or_pending():
     assert len(M3D_GATE_IDS) == 14
     # 14 M3d, 5 M4, the 2 M6 C2 gates, the E2 explain gate, the 8 D3a language gates, D3b's display gate,
-    # D3c-2's user language gate and F1's reap and descriptor gates.
-    assert len(GATE_IDS) == 34
+    # D3c-2's user language gate and F1's file system, reap and descriptor gates.
+    assert len(GATE_IDS) == 35
     table = (ROOT / TABLE).read_text()
     assert_deferred_rows(table)
     assert_clauses_accounted(table)

@@ -701,7 +701,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     loader-shaped access after startup (say /proc/self/maps) is counted.
     """
     import json
-    from .classify import collector_kind, collector_bootstrap_kind, helper_kind
+    from .classify import collector_kind, collector_bootstrap_kind, helper_kind, supervisor_kind
     from .strace_parse import CALL_HEAD, LINE, RESUMED, UNKNOWN_HEAD, parse
 
     trace = parse("\n".join(lines))
@@ -813,7 +813,8 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         result = c.ret.split()[0]
         success = bool(re.match(r"^\d+", c.ret))
         k = (collector_bootstrap_kind(c) if role == "collector"
-             else helper_kind(c) if role == "helper" and helper_vocabulary else collector_kind(c))
+             else helper_kind(c) if role == "helper" and helper_vocabulary
+             else supervisor_kind(c) if role == "supervisor" and helper_vocabulary else collector_kind(c))
         if k in {"spawn", "thread"}:
             # A target command may start anything; its spawns stay "command".
             # A target command is counted and reported only: its own filter

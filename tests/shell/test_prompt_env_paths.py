@@ -1976,7 +1976,8 @@ def measured_helper_calls(lines, exe, collector, helper_vocabulary=True):
 
 
 def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
-    from fsbudget.formula import helper_stage_expected, helper_collect_expected, helper_command_expected
+    from fsbudget.formula import (helper_stage_expected, helper_collect_expected, helper_command_expected,
+                                  supervisor_expected)
     from fsbudget.gate import check, check_collect, check_command
     if evidence is None:
         evidence = {}
@@ -1991,6 +1992,16 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
     assert command_roles == ({"supervisor", "relay", "command"} if stage == "command_miss" else set()), command_roles
     if stage == "command_miss":
         errors = check_command(roles, helper_command_expected(plan), evidence=evidence)
+        # GATE-CMD-FSBUDGET.1: the supervisor's calls, exact for this round's
+        # one spawn on the path the host gave (the atomic path with the
+        # session's cgroup parent, best effort without). The relay and the
+        # target are counted only.
+        # 이것을 실패시키는 것: 감독 식에서 시계·생성·cgroup 항 하나를 빼거나 더하는 것, 원자 경로와 최선 노력
+        # 경로를 바꿔 세는 것, 감독 호출을 정확 비교에서 빼는 것.
+        supervisor = {"supervisor": supervisor_expected(1, atomic=plan.cgroup_parent)}
+        evidence.update(supervisor_counts=roles.counts.get("supervisor", {}), supervisor_expected=supervisor["supervisor"],
+                        relay_counts=roles.counts.get("relay", {}))
+        errors += check({"supervisor": roles.counts.get("supervisor", {})}, supervisor, "exact", ["supervisor"])
         published = False
     elif stage != "collect":
         measured = {"helper": roles.counts.get("helper", {})}

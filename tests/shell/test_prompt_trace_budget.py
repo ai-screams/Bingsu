@@ -2566,14 +2566,16 @@ def last_gc_fstat(lines):
 
 # 이것을 실패시키는 것: 명령 회차 식이 저장한 캡처와 종류별로 정확히 맞지 않는 것(앞부분에 fstat 하나를 더하거나 뺌),
 # GC 꼬리를 정확 검사로 보는 것(예산으로 짧아진 꼬리가 실패), 꼬리의 상한을 지우는 것(GC에 호출을 더해도 통과),
-# 명령 응답 설치 경계를 잃는 것, 감독·relay·대상 역할을 helper로 세는 것.
+# 명령 응답 설치 경계를 잃는 것, 감독·relay·대상 역할을 helper로 세는 것, 감독 식에서 시계 한 번을 더 세거나 단위
+# cgroup 항을 빼는 것, 원자 경로 캡처를 최선 노력 식으로 받는 것.
 @pytest.mark.parametrize("stage,damage", [
     ("command_miss", None), ("command_hit", None),
     ("command_miss", "extra-prefix-fstat"), ("command_hit", "extra-prefix-fstat"),
     ("command_miss", "missing-prefix-fstat"),
     ("command_miss", "short-gc"), ("command_miss", "extra-gc-fstat"), ("command_miss", "no-install"),
     ("command_miss", "no-install-no-gc"), ("command_miss", "uname-as-truncate"), ("command_hit", "uname-as-truncate"),
-    ("command_miss", "unpinned-supervisor")])
+    ("command_miss", "unpinned-supervisor"), ("command_miss", "extra-supervisor-clock"),
+    ("command_miss", "missing-unit-cgroup"), ("command_miss", "best-effort-plan")])
 def test_command_stage_traces_match_the_formula(stage, damage):
     lines, collector, plan = helper_stage_case(stage)
     if damage == "extra-prefix-fstat":
@@ -2607,6 +2609,21 @@ def test_command_stage_traces_match_the_formula(stage, damage):
         lines[at] = lines[at].split()[0] + '  truncate("/fx/anything", 0) = 0'
     elif damage == "unpinned-supervisor":
         lines = [l.replace('"__command-v1"', '"__command-v9"') for l in lines]
+    elif damage in ("extra-supervisor-clock", "missing-unit-cgroup"):
+        import re
+        supervisor = next(l.split()[0] for l in lines if '"__command-v1"' in l and "execve(" in l)
+        if damage == "extra-supervisor-clock":
+            # A second boot_id open: another clock observation.
+            at = next(i for i, l in enumerate(lines)
+                      if l.split()[0] == supervisor and '"/proc/sys/kernel/random/boot_id"' in l)
+            lines = lines[:at + 1] + [lines[at]] + lines[at + 1:]
+        else:
+            # The unit cgroup's mkdirat gone: one cgroup term short.
+            lines = [l for l in lines if not (l.split()[0] == supervisor and re.search(r"mkdirat\(", l))]
+    elif damage == "best-effort-plan":
+        # The same atomic capture judged as best effort: the cgroup terms differ.
+        from dataclasses import replace
+        plan = replace(plan, cgroup_parent=False)
     if damage in (None, "short-gc"):
         assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
         return

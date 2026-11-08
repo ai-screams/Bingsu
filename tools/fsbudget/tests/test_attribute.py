@@ -807,3 +807,31 @@ def test_target_prologue_ends_at_a_spawn_and_passes_to_its_child(first):
     got = collector_attribute(lines, PINNED_COMMAND)
     assert not got.errors, got.errors
     assert got.counts["command"]["openat"] == (4 if first == "fork" else 3), got.counts["command"]
+
+
+# 감독 어휘(helper_vocabulary): 최선 노력 relay의 setpgid(0, 0)는 pgroup, 시작의 fd 6 F_SETFD가 EBADF여도
+# fd_flags, 단위 cgroup의 mkdirat은 mkdir이다. 같은 모양이라도 다른 인자는 그대로 unknown-fs로 남는다. 이것을
+# 실패시키는 것: 감독에 helper 어휘만 쓰는 것(pgroup·EBADF가 unknown-fs), setpgid 인자 검사를 지우는 것, EBADF 칸을
+# fd 6 밖으로 넓히는 것, 감독 어휘를 helper 역할에도 쓰는 것.
+def test_supervisor_vocabulary():
+    from fsbudget.attribute import collector_attribute
+    from fsbudget.classify import helper_kind, supervisor_kind
+    from fsbudget.strace_parse import parse
+    calls = list(parse("\n".join([
+        '1 setpgid(0, 0) = 0',
+        '1 setpgid(5, 0) = 0',
+        '1 fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)',
+        '1 fcntl(7, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)',
+        '1 mkdirat(6</sys/fs/cgroup/bingsu-cmd-x>, "u0", 0755) = 0',
+    ])))
+    assert [supervisor_kind(c) for c in calls] == ["pgroup", "unknown-fs", "fd_flags", "unknown-fs", "mkdir"]
+    assert [helper_kind(c) for c in calls[:3]] == ["unknown-fs", "unknown-fs", "unknown-fs"]
+    round_ = list(COMMAND_ROUND)
+    at = round_.index('12 close(19</proc/12/fd>) = 0') + 1
+    round_[at:at] = ['12 fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)', '12 setpgid(0, 0) = 0']
+    got = collector_attribute(round_, PINNED_COMMAND, helper_vocabulary=True)
+    assert got.counts["supervisor"].get("fd_flags") == 1 and got.counts["supervisor"].get("pgroup") == 1, got.counts
+    # The helper keeps its own vocabulary: the same shapes there stay unknown.
+    round_[3:3] = ['11 setpgid(0, 0) = 0']
+    got = collector_attribute(round_, PINNED_COMMAND, helper_vocabulary=True)
+    assert got.counts["helper"].get("unknown-fs") == 1, got.counts

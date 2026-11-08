@@ -260,6 +260,23 @@ def helper_kind(c: Call) -> str | None:
     return collector_kind(c)
 
 
+def supervisor_kind(c: Call) -> str | None:
+    """Command supervisor vocabulary (GATE-CMD-FSBUDGET): the helper's, plus
+    the two shapes only the supervisor makes. A best-effort relay spawn
+    gives the relay its own process group (posix_spawn's setpgid in the
+    child), and the start marks fd 6, the session's cgroup parent, close-on-
+    exec even when the best-effort path handed none (EBADF). Any other shape
+    keeps the helper's kind, so an unreviewed call still lands in
+    `unknown-fs`."""
+    args = split_args(c.args)
+    if c.name == "setpgid" and args == ["0", "0"]:
+        return "pgroup"
+    if (c.name == "fcntl" and len(args) >= 2 and args[0] == "6" and args[1] == "F_SETFD"
+            and c.ret.startswith("-1 EBADF")):
+        return "fd_flags"
+    return helper_kind(c)
+
+
 def _placed_at(args: list[str]) -> bool:
     # A dirfd-relative name whose dirfd strace names as a file.
     if len(args) < 2 or not args[1].startswith('"') or args[1].startswith('"/'):

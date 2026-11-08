@@ -127,3 +127,24 @@ def test_gc_checkpoint_linux_syscalls(gc_test_binary, tmp_path):
     assert ended and 0 < len(phase) <= 512
     assert "renameat" in names and "read" in names and "write" in names
     assert not ({"getdents", "getdents64", "fsync", "execve", "clone"} & set(names))
+
+
+# GATE-CMD-FSBUDGET.1 계수: 감독은 시작에 exec·fd 표시 2를, 생성마다 시계 한 번·/dev/null·chdir을, 원자 경로에서는
+# 단위 cgroup 만들기·열기 둘·kill 쓰기를, 최선 노력에서는 자기 프로세스 그룹을 센다. 생성 수는 1–12. N = 1 값은 live
+# 캡처(test_live_helper_calls_match_stage_formula[command_miss])가 정확히 맞추는 값이다. 이것을 실패시키는 것: 시계를
+# 회차에 한 번으로 세는 것(N > 1에서 줄어듦), cgroup 항을 최선 노력에도 세는 것, 생성 수 상한을 늘리거나 0을 받는 것.
+def test_supervisor_coefficients():
+    from fsbudget.formula import supervisor_expected
+    clock = {"openat": 4, "fstat": 2, "statfs": 4, "read": 2, "readlink": 2}
+    for n in (1, 2, 12):
+        atomic = supervisor_expected(n, atomic=True)
+        best = supervisor_expected(n, atomic=False)
+        assert atomic == {"exec": 1, "fd_flags": 2, "fstat": clock["fstat"] * n, "statfs": clock["statfs"] * n,
+                          "read": clock["read"] * n, "readlink": clock["readlink"] * n,
+                          "openat": (clock["openat"] + 1 + 2) * n, "spawn": n, "cwd": n, "mkdir": n, "write": n}
+        assert best == {"exec": 1, "fd_flags": 2, "fstat": clock["fstat"] * n, "statfs": clock["statfs"] * n,
+                        "read": clock["read"] * n, "readlink": clock["readlink"] * n,
+                        "openat": (clock["openat"] + 1) * n, "spawn": n, "cwd": n, "pgroup": n}
+    for n in (0, 13):
+        with pytest.raises(ValueError):
+            supervisor_expected(n, atomic=True)
