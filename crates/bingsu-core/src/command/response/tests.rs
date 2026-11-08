@@ -59,9 +59,74 @@ mod cases {
         let crc = snapshot::crc32c(&[&padded[HEADER..]]);
         padded[16..20].copy_from_slice(&crc);
         assert_eq!(Response::decode(&padded), Err(Error::Trailing));
-        let mut magic = bytes;
+        let mut magic = bytes.clone();
         magic[0] = b'X';
         assert_eq!(Response::decode(&magic), Err(Error::Magic));
+        // A response of the previous format (one room for both origins).
+        let mut old = bytes;
+        old[..10].copy_from_slice(b"BNGCMD01\x01\x00");
+        assert_eq!(Response::decode(&old), Err(Error::Magic));
+    }
+
+    fn builtin(id: &str, attempted_at: u64) -> Entry {
+        Entry {
+            origin: Origin::Builtin,
+            ..entry(id, attempted_at, attempted_at + 1)
+        }
+    }
+
+    // 출처마다 자기 칸이 있다: 설정 32, 내장 4, 합계 36. 이것을 실패시키는 것: check_entries의 출처별 검사를 지우는
+    // 것(설정 33개를 받음), 내장 상한을 5로 늘리는 것, 합계만 보는 것.
+    #[test]
+    fn an_origin_past_its_room_is_refused() {
+        assert_eq!(
+            (CONFIG_ENTRIES_MAX, BUILTIN_ENTRIES_MAX, ENTRIES_MAX),
+            (32, 4, 36)
+        );
+        // tests/shell/test_prompt_env_paths.py and tools/fsbudget pin this size.
+        assert_eq!(RESPONSE_MAX, 505_370);
+        let configs = |n: usize| (0..n).map(|i| entry(&format!("custom/u{i}"), 1, 2));
+        let builtins = |n: usize| (0..n).map(|i| builtin(&format!("lang{i}"), 1));
+        let full: Vec<Entry> = configs(32).chain(builtins(4)).collect();
+        assert!(check_entries(&full, Raw::Checked).is_ok());
+        let config_over: Vec<Entry> = configs(33).collect();
+        assert_eq!(check_entries(&config_over, Raw::Checked), Err(Error::Limit));
+        let builtin_over: Vec<Entry> = builtins(5).collect();
+        assert_eq!(
+            check_entries(&builtin_over, Raw::Checked),
+            Err(Error::Limit)
+        );
+    }
+
+    // 한 출처가 넘쳐도 다른 출처의 항목은 밀어내지 않는다. 넘친 출처 안에서 이 회차가 쓰지 않은 가장 오래된 항목이
+    // 빠진다. 이것을 실패시키는 것: merge의 출처 거름을 지우는 것(더 오래된 다른 출처 항목이 빠짐), 출처별이 아닌
+    // 합계로 세는 것.
+    #[test]
+    fn a_full_origin_never_pushes_out_the_other() {
+        // The builtin entries are tried before every config entry.
+        let current = Response {
+            binding: binding(),
+            entries: (0..CONFIG_ENTRIES_MAX)
+                .map(|i| entry(&format!("custom/u{i}"), 100 + i as u64, 200 + i as u64))
+                .chain((0..BUILTIN_ENTRIES_MAX).map(|i| builtin(&format!("lang{i}"), i as u64)))
+                .collect(),
+        };
+        let r = merge(Some(&current), &binding(), &[entry("custom/new", 1, 600)]);
+        assert_eq!(r.entries.len(), ENTRIES_MAX);
+        assert!(r.entry(Origin::Config, "custom/u0").is_none());
+        assert!(
+            (0..BUILTIN_ENTRIES_MAX)
+                .all(|i| r.entry(Origin::Builtin, &format!("lang{i}")).is_some())
+        );
+        assert!(r.encode().is_ok());
+        let r = merge(Some(&current), &binding(), &[builtin("lang-new", 500)]);
+        assert_eq!(r.entries.len(), ENTRIES_MAX);
+        assert!(r.entry(Origin::Builtin, "lang0").is_none());
+        assert!(
+            (0..CONFIG_ENTRIES_MAX)
+                .all(|i| r.entry(Origin::Config, &format!("custom/u{i}")).is_some())
+        );
+        assert!(r.encode().is_ok());
     }
 
     // 항목 상한과 같은 단위 중복. 이것을 실패시키는 것: check_entries의 개수 상한을 지우는 것, 같은 origin·id 중복
@@ -88,16 +153,24 @@ mod cases {
         assert!(r.encode().is_ok());
     }
 
-    // 최대 크기 응답도 상한 안에서 왕복한다. 이것을 실패시키는 것: RESPONSE_MAX 계산에서 항목 하나의 최대를 줄이는 것.
+    // 최대 크기 응답(설정 32 + 내장 4)도 상한 안에서 왕복한다. 이것을 실패시키는 것: RESPONSE_MAX 계산에서 항목
+    // 하나의 최대를 줄이는 것, 내장 칸을 빼는 것.
     #[test]
     fn the_largest_response_fits_its_cap() {
         let mut b = binding();
-        b.cwd = [b"/".as_slice(), &[b'a'; PATH_MAX - 1]].concat();
+        let longest = |c: u8| [b"/".as_slice(), &[c; PATH_MAX - 1]].concat();
+        (b.config, b.state, b.cwd) = (longest(b'c'), longest(b's'), longest(b'a'));
+        b.context = snapshot::context_crc(&b.config, &b.state).unwrap();
         let r = Response {
             binding: b,
             entries: (0..ENTRIES_MAX)
                 .map(|i| Entry {
                     id: format!("custom/{i:0>width$}", width = ID_MAX - 7),
+                    origin: if i < CONFIG_ENTRIES_MAX {
+                        Origin::Config
+                    } else {
+                        Origin::Builtin
+                    },
                     value: "v".repeat(VALUE_MAX),
                     raw: "r".repeat(VALUE_MAX),
                     ..entry("x", 1, 2)
@@ -105,6 +178,7 @@ mod cases {
                 .collect(),
         };
         let bytes = r.encode().unwrap();
+        assert_eq!(bytes.len(), RESPONSE_MAX);
         assert_eq!(Response::decode(&bytes).unwrap(), r);
     }
 
@@ -138,20 +212,20 @@ mod cases {
         assert_eq!(r.entries.len(), 1);
     }
 
-    // 32개를 넘으면 이 회차가 쓰지 않은 항목 가운데 가장 오래 전에 시도한 것부터 뺀다. 이것을 실패시키는 것:
-    // 넘친 항목을 자르지 않는 것(인코딩이 Limit으로 실패), 내 항목을 빼는 것.
+    // 설정 32개를 넘으면 이 회차가 쓰지 않은 설정 항목 가운데 가장 오래 전에 시도한 것부터 뺀다. 이것을
+    // 실패시키는 것: 넘친 항목을 자르지 않는 것(인코딩이 Limit으로 실패), 내 항목을 빼는 것.
     #[test]
     fn merge_drops_the_oldest_other_entries_past_the_cap() {
         let current = Response {
             binding: binding(),
-            entries: (0..ENTRIES_MAX)
+            entries: (0..CONFIG_ENTRIES_MAX)
                 .map(|i| entry(&format!("custom/u{i}"), 100 + i as u64, 200 + i as u64))
                 .collect(),
         };
         // Tried before every entry there: still never the one dropped.
         let mine = [entry("custom/new", 1, 600)];
         let r = merge(Some(&current), &binding(), &mine);
-        assert_eq!(r.entries.len(), ENTRIES_MAX);
+        assert_eq!(r.entries.len(), CONFIG_ENTRIES_MAX);
         assert!(r.entry(Origin::Config, "custom/new").is_some());
         assert!(r.entry(Origin::Config, "custom/u0").is_none());
         assert!(r.encode().is_ok());
@@ -232,7 +306,7 @@ mod cases {
         };
         let bytes = good.encode().unwrap();
         let mut version = bytes.clone();
-        version[8] = 2;
+        version[8] = 3;
         assert_eq!(Response::decode(&version), Err(Error::Version));
         let mut reserved = bytes.clone();
         reserved[30] = 1;

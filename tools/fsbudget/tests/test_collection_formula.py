@@ -40,7 +40,7 @@ def test_front_prefetch_and_read_coefficients():
     assert front(3, (100, 262144, None), (36, 262080)) == {
         "openat": 6, "fstat": 5, "fstatfs": 5, "fgetxattr": 5, "getxattr": 3, "read": 19}
     # A command response opened and read, and one opened and left unread.
-    assert front(3, (None, None, 471_082), (471_018,))["read"] == 1 + 29
+    assert front(3, (None, None, 505_370), (505_306,))["read"] == 1 + 31
     assert front(3, (None, None, 1000), ()) == {
         "openat": 6, "fstat": 4, "fstatfs": 4, "fgetxattr": 4, "getxattr": 3, "read": 0}
     for depth in range(3):
@@ -55,7 +55,7 @@ def test_front_axes_fail_closed():
     from fsbudget.formula import collection_front_expected as front
     for directories, sizes, bodies in [(-1, (), ()), (4, (), ()), (2, (1,), ()),
                                       (3, (1, 2), ()), (3, (1, 2, 3, 4), ()), (3, (-1, 1, 1), ()),
-                                      (3, (1, 1, 1), (-1,)), (3, (1, 1, 1), (471_019,)),
+                                      (3, (1, 1, 1), (-1,)), (3, (1, 1, 1), (505_307,)),
                                       (3, (1, 1, 1), (1, 1, 1, 1))]:
         with pytest.raises(ValueError):
             front(directories, sizes, bodies)
