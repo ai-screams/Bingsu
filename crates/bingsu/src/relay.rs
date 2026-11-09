@@ -535,6 +535,14 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
             Err(Some(())) => (path_fd, false),
             Err(None) => return Err(RELAY_TARGET),
         };
+        // U-33: no target or interpreter with file capabilities, also when
+        // the pin cannot tell (a setcap in the same coarse timestamp tick as
+        // the lookup leaves the ctime unchanged).
+        // 이것을 실패시키는 것: 이 확인을 지우는 것(root test_relay_refuses_a_capability_target,
+        // test_relay_refuses_capabilities_set_in_the_lookups_tick).
+        if !capability_free(&fd) {
+            return Err(RELAY_TARGET);
+        }
         (Exe { fd, dir, name, st }, readable)
     };
     #[cfg(target_os = "macos")]
@@ -981,6 +989,33 @@ fn native_only(errno: i32) -> Option<()> {
 /// changes move the ctime).
 /// `ownership`: whether the file's mount enforces ownership (Linux file
 /// systems do; macOS asks `local_ownership`).
+/// Linux: whether the opened target is known to carry no file capabilities,
+/// by the helper's rule (`sys::capability_free`): only ENODATA and EOPNOTSUPP
+/// mean none; an attribute of any length or another answer refuses. A
+/// path-only descriptor asks through `/proc/self/fd/N`.
+#[cfg(target_os = "linux")]
+fn capability_free(fd: &OwnedFd) -> bool {
+    let name = c"security.capability";
+    // SAFETY: `fd` is open; size 0 asks only for the length.
+    let mut n = unsafe { libc::fgetxattr(fd.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF) {
+        let Ok(p) = CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())) else {
+            return false;
+        };
+        // SAFETY: names are NUL-terminated; size 0 asks only for the length.
+        n = unsafe { libc::getxattr(p.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    }
+    capability_answer(n, std::io::Error::last_os_error().raw_os_error())
+}
+
+/// The helper's mapping (`sys::capability_answer`), kept here so the relay
+/// links nothing of the helper; `test_relay_capability_rule_is_the_helpers`
+/// holds the two equal.
+#[cfg(target_os = "linux")]
+fn capability_answer(n: libc::ssize_t, errno: Option<i32>) -> bool {
+    n < 0 && matches!(errno, Some(libc::ENODATA | libc::EOPNOTSUPP))
+}
+
 fn allowed(st: &libc::stat, pin: Option<ExecPin>, ownership: Option<bool>) -> Result<bool, u8> {
     // U-33: no setuid or setgid target, on any system (the helper refuses
     // them too; this holds for a bit set after its check). 이것을 실패시키는
@@ -1722,6 +1757,72 @@ mod tests {
         crate::commands::sys::test_set_file_capability(&exe, true);
         assert!(refused(&exe, pin), "setcap");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-33: relay의 capability 판정은 helper와 같다. 이것을 실패시키는 것: relay의 답 매핑을 helper와 다르게 바꾸는
+    // 것(다른 errno를 없음으로 봄, 길이 0을 없음으로 봄 등).
+    #[test]
+    fn test_relay_capability_rule_is_the_helpers() {
+        for n in [-1, 0, 20] {
+            for errno in [
+                None,
+                Some(libc::ENODATA),
+                Some(libc::EOPNOTSUPP),
+                Some(libc::EACCES),
+                Some(libc::EIO),
+                Some(libc::EBADF),
+                Some(libc::ERANGE),
+            ] {
+                assert_eq!(
+                    capability_answer(n, errno),
+                    crate::commands::sys::capability_answer(n, errno),
+                    "n={n} errno={errno:?}"
+                );
+            }
+        }
+    }
+
+    // U-33(root): file capability가 있는 대상은 pin 없이도 relay가 거부한다. 양성 대조: 속성을 지우면 돈다. CI가
+    // sudo로 --ignored로 돌린다. 이것을 실패시키는 것: relay의 capability 확인을 지우는 것.
+    #[test]
+    #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
+    fn test_relay_refuses_a_capability_target() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(crate::commands::sys::current_uid(), 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("caps-target")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o755);
+        crate::commands::sys::test_set_file_capability(&exe, true);
+        assert!(refused(&exe, None), "capabilities");
+        crate::commands::sys::test_set_file_capability(&exe, false);
+        assert!(!refused(&exe, None), "removed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-33(root): 조회와 같은 coarse tick 안에서 붙인 capability(pin이 그대로 맞음)도 relay가 거부한다. 기다리지 않고,
+    // setcap 뒤에도 pin이 맞는 경우(정말 같은 tick)가 나올 때까지 100번까지 되풀이한다. 이것을 실패시키는 것: relay의
+    // capability 확인을 지우는 것.
+    #[test]
+    #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
+    fn test_relay_refuses_capabilities_set_in_the_lookups_tick() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(crate::commands::sys::current_uid(), 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("caps-same-tick")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for attempt in 0..100 {
+            let exe = dir.join(format!("cat-{attempt}"));
+            cat_copy(&exe, 0o755);
+            let name = format!("cat-{attempt}");
+            let pin = looked_up(&dir, name.as_bytes());
+            crate::commands::sys::test_set_file_capability(&exe, true);
+            if pin == Some(pin_of(&exe)) {
+                assert!(refused(&exe, pin), "setcap in the same tick");
+                std::fs::remove_dir_all(&dir).unwrap();
+                return;
+            }
+        }
+        panic!("no setcap within the lookup's timestamp tick in 100 tries");
     }
 
     // N-078. 이것을 실패시키는 것: 중계가 마감이나 permit을 대상 envp·argv에 넣는 것.

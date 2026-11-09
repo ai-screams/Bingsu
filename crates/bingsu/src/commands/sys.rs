@@ -541,7 +541,7 @@ pub fn capability_free(fd: std::os::fd::BorrowedFd<'_>) -> bool {
 /// `true` only for "no such attribute" (ENODATA) and "this file system keeps
 /// none" (EOPNOTSUPP); `errno` is read only when `n` is negative.
 #[cfg(target_os = "linux")]
-fn capability_answer(n: libc::ssize_t, errno: Option<i32>) -> bool {
+pub(crate) fn capability_answer(n: libc::ssize_t, errno: Option<i32>) -> bool {
     n < 0 && matches!(errno, Some(libc::ENODATA | libc::EOPNOTSUPP))
 }
 
