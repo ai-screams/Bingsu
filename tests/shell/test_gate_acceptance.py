@@ -1418,10 +1418,10 @@ def assert_command_cgroup_cells(text):
     step = block.split("      - name: Helper calls of command rounds in the cell\n")[1].split("\n      - ")[0]
     assert step.startswith("        if: success() || failure()\n") and "set -o pipefail" in step
     assert "${{ matrix.opts }} --cap-add SYS_PTRACE -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in step
-    assert f"python3 -m pytest {HELPER_STAGE_NODE} -k command -q -rA" in step
+    assert f'python3 -m pytest {HELPER_STAGE_NODE} -k "command or builtin" -q -rA' in step
     stages = set(re.findall(r"grep -Fx 'PASSED " + re.escape(HELPER_STAGE_NODE)
                             + r"\[(\w+)\]' \"\$RUNNER_TEMP/cell-helper\.txt\"\n", step))
-    assert stages == {"command_miss", "command_hit", "command_not_run"}, stages
+    assert stages == {"command_miss", "command_hit", "command_not_run", "builtin_probe", "builtin_fast"}, stages
     step = block.split("      - name: Every atomic-path test passed (privileged cell)\n")[1].split("\n      - ")[0]
     assert step.startswith("        if: matrix.cell == 'priv'\n")
     priv = set(re.findall(r"grep -Fx 'PASSED \S+::(\w+)' ", step))
@@ -1438,7 +1438,8 @@ def assert_command_cgroup_cells(text):
     ("      - name: Helper calls of command rounds in the cell\n        if: success() || failure()\n",
      "      - name: Helper calls of command rounds in the cell\n        if: matrix.cell == 'priv'\n"),
     ("[command_hit]' \"$RUNNER_TEMP/cell-helper.txt\"", "[command_hit]' /dev/null || true"),
-    (" -k command -q -rA", " -k command_miss -q -rA"),
+    (' -k "command or builtin" -q -rA', " -k command -q -rA"),
+    ("[builtin_fast]' \"$RUNNER_TEMP/cell-helper.txt\"", "[builtin_fast]' /dev/null || true"),
 ])
 def test_command_cgroup_cells_reject_mutations(old, new):
     text = workflows()["shell.yml"]
@@ -1742,7 +1743,7 @@ def cell_bypass(shell, damage):
         assert shell.count(rounds_py) == 2
         return shell.replace(rounds_py, rounds_py.replace(" -m pytest ", " -m pytest -kdoes_not_exist "))
     if damage == "py-entrypoint":
-        py = "-v \"$PWD:/w\" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-prompt target/x86_64-unknown-linux-musl/release/bingsu-collect /usr/local/bin/ && exec python3 -m pytest tests/shell/test_command_cgroup.py"
+        py = "-v \"$PWD:/w\" -w /w bingsu-cgroup-d13 sh -c 'install -m 0755 target/x86_64-unknown-linux-musl/release/bingsu target/x86_64-unknown-linux-musl/release/bingsu-prompt target/x86_64-unknown-linux-musl/release/bingsu-collect target/x86_64-unknown-linux-musl/release/version-stub /usr/local/bin/ && exec python3 -m pytest tests/shell/test_command_cgroup.py"
         assert shell.count(py) == 1, "cell pytest run"
         return shell.replace(py, py.replace("-w /w bingsu-cgroup-d13", "-w /w --entrypoint /bin/true bingsu-cgroup-d13"))
     if damage == "joined-operator":

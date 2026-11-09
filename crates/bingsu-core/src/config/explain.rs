@@ -6,7 +6,7 @@
 //! never sees one, so no output can print one.
 use super::compile::{CompiledConfig, ExecPolicy, NotRun};
 use super::merge::Origin;
-use crate::command::grant::{KEEP, KEEP_PREFIX};
+use crate::command::keep::{KEEP, KEEP_PREFIX};
 use crate::diag::DiagCode;
 use crate::diag_codes as codes;
 use alloc::{string::String, vec::Vec};

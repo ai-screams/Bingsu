@@ -554,13 +554,15 @@ CELL_BUILD = [
     ["set", "-o", "pipefail"],
     ["cargo", "build", "--release", "-p", "bingsu", "-p", "bingsu-prompt", "-p", "bingsu-collect",
      "--target", "x86_64-unknown-linux-musl"],
+    ["cargo", "build", "--release", "-p", "bingsu-bench", "--bin", "version-stub", "--target", "x86_64-unknown-linux-musl"],
     ["cargo", "test", "-p", "bingsu", "--bin", "bingsu", "--target", "x86_64-unknown-linux-musl", "--no-run",
      "--message-format=json", "|", "jq", "-r",
      "select(.profile.test == true and .executable != null) | .executable", ">", "$RUNNER_TEMP/cell-bin"],
 ]
 CELL_INSTALL = ["install", "-m", "0755", "target/x86_64-unknown-linux-musl/release/bingsu",
                 "target/x86_64-unknown-linux-musl/release/bingsu-prompt",
-                "target/x86_64-unknown-linux-musl/release/bingsu-collect", "/usr/local/bin/", "&&"]
+                "target/x86_64-unknown-linux-musl/release/bingsu-collect",
+                "target/x86_64-unknown-linux-musl/release/version-stub", "/usr/local/bin/", "&&"]
 
 
 def assert_bare_pull_request(on):
