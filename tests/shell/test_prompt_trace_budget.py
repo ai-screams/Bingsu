@@ -3,6 +3,7 @@ from pathlib import Path
 from collections import Counter
 from types import SimpleNamespace
 import hashlib
+import re
 
 import pytest
 
@@ -1846,7 +1847,69 @@ def helper_stage_case(stage):
     lines = data.decode().splitlines()
     if stage == "collect":
         lines = with_session_listing(with_command_stage_probe(lines))
-    return with_capability_queries(lines), meta["collector"], HelperPlan(**plan)
+    return with_mount_id_queries(with_capability_queries(lines)), meta["collector"], HelperPlan(**plan)
+
+
+KILL_OPEN = re.compile(r'^(\d+)\s+openat\((\d+<[^>]*/u[0-9a-f]+>), "cgroup\.kill", O_WRONLY\|O_NOFOLLOW\|O_CLOEXEC\) = '
+                       r'(\d+<[^>]*/u[0-9a-f]+/cgroup\.kill>)$')
+
+
+def mount_id_query(pid, fd, mode):
+    return (f'{pid}  statx({fd}, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID, '
+            f'{{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode={mode}, stx_size=0, ...}}) = 0')
+
+
+def with_mount_id_queries(lines):
+    """The captures predate the kill file's mount check (m6-C3b): right after
+    a unit's cgroup.kill opens, the supervisor and the helper's reclaim ask
+    for the mount ids of the unit folder and of the file (statx, as a live
+    capture shows them). Replay those two calls on the saved capture; a
+    product-shape replay, not a new capture."""
+    sites = [(i, m) for i, l in enumerate(lines) if (m := KILL_OPEN.match(l))]
+    queries = {i: [mount_id_query(m[1], m[2], "S_IFDIR|0700"), mount_id_query(m[1], m[3], "S_IFREG|0200")]
+               for i, m in sites}
+    # A capture that already has the calls keeps them; one with only some,
+    # or of another shape, is not this product shape.
+    # 이것을 실패시키는 것: 이미 있는 호출 위에 또 끼워 넣는 것, 일부만 있거나 다른 자리·다른 모양의 호출을 받는 것.
+    def shown(i):
+        after = lines[i + 1:i + 3]
+        if after == queries[i]:
+            return True
+        assert not any("STATX_MNT_ID" in l for l in after), ("mount id query", i, after)
+        return False
+    found = {shown(i) for i in queries}
+    assert len(found) <= 1, ("mount id query", "some sites only")
+    if found == {True}:
+        return lines
+    out = list(lines)
+    for i in reversed(list(queries)):
+        out[i + 1:i + 1] = queries[i]
+    return out
+
+
+# 이것을 실패시키는 것: 재생이 이미 있는 호출을 두 번 넣는 것, 일부만 있거나 다른 모양의 캡처를 받는 것, kill 파일
+# open 뒤가 아닌 곳에 넣는 것.
+@pytest.mark.parametrize("shape", ["absent", "present", "partial", "different"])
+def test_mount_id_query_replay(shape):
+    raw = (HELPER_STAGE_TRACES.parent / "helper-stage-command_miss.strace").read_text().splitlines()
+    replayed = with_mount_id_queries(raw)
+    opens = [i for i, l in enumerate(replayed) if KILL_OPEN.match(l)]
+    assert len(opens) == 2 and len(replayed) == len(raw) + 4
+    for i in opens:
+        assert "S_IFDIR" in replayed[i + 1] and "/cgroup.kill>" in replayed[i + 2] and "S_IFREG" in replayed[i + 2]
+        assert replayed[i + 1].split()[0] == replayed[i].split()[0] == replayed[i + 2].split()[0]
+    if shape == "absent":
+        return
+    if shape == "present":
+        assert with_mount_id_queries(replayed) == replayed
+        return
+    damaged = list(replayed)
+    if shape == "partial":
+        del damaged[opens[0] + 2]
+    else:
+        damaged[opens[0] + 1] = damaged[opens[0] + 1].replace("STATX_MNT_ID, {", "STATX_BASIC_STATS|STATX_MNT_ID, {")
+    with pytest.raises(AssertionError, match="mount id query"):
+        with_mount_id_queries(damaged)
 
 
 CAPABILITY_RESULT = "-1 ENODATA (No data available)"

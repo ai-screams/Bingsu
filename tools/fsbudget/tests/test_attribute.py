@@ -833,6 +833,13 @@ SUPERVISOR_SHAPES = [
     (f'1 openat(7<{SUP_UNIT}>, "cgroup.procs", O_WRONLY|O_NOFOLLOW|O_CLOEXEC) = 8<{SUP_UNIT}/cgroup.procs>', "unknown-fs"),
     (f'1 openat(6<{SUP_CG}>, "u00ad", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 7<{SUP_UNIT}>', "openat"),
     (f'1 write(8<{SUP_UNIT}/cgroup.kill>, "1", 1) = 1', "write"),
+    # The mount ids of a unit folder and its cgroup.kill (m6-C3b); only that
+    # exact query on those two descriptors.
+    (f'1 statx(7<{SUP_UNIT}>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=0, ...}}) = 0', "fstat"),
+    (f'1 statx(8<{SUP_UNIT}/cgroup.kill>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=0, ...}}) = 0', "fstat"),
+    (f'1 statx(7<{SUP_UNIT}>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_BASIC_STATS, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=0, ...}}) = 0', "unknown-fs"),  # other mask
+    (f'1 statx(7<{SUP_UNIT}>, "cgroup.procs", AT_STATX_SYNC_AS_STAT, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS}}) = 0', "unknown-fs"),  # a name
+    (f'1 statx(9</sys/fs/cgroup/other>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=0, ...}}) = 0', "unknown-fs"),  # outside the units
     (f'1 write(8<{SUP_UNIT}/cgroup.procs>, "1", 1) = 1', "unknown-fs"),
     ('1 read(7</proc/sys/kernel/random/boot_id>, "", 1) = 0', "read"),
     ('1 read(7</fx/forbidden>, "", 1) = 0', "unknown-fs"),
