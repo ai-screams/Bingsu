@@ -53,10 +53,9 @@ pub fn approve(
     Ok(deadline::run_deadline(now.now, timeout, limit))
 }
 
-/// Names every config unit may pass (spec, sanitized environment: keep
-/// list), plus every `LC_*`.
-pub const KEEP: [&[u8]; 6] = [b"HOME", b"USER", b"LANG", b"TERM", b"TZ", b"PATH"];
-pub const KEEP_PREFIX: &[u8] = b"LC_";
+/// Names every config unit may pass, plus every `LC_*`: in `keep.rs`,
+/// which the prompt reads too and is pinned with its files.
+pub use super::keep::{KEEP, KEEP_PREFIX};
 /// Never passed, not even through `env_allow` (U-13 V2, closed list S-24,
 /// S-25): loader injection, then language and shell startup settings.
 pub const FORBIDDEN: [&[u8]; 20] = [

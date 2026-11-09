@@ -13,7 +13,7 @@ import time
 
 import pytest
 from blocked_mount import blocked_mount
-from shell_support import Blocked
+from shell_support import Blocked, real_collector
 from snapshot_support import SnapshotSession, require_native_boot
 
 # Process and file-descriptor views below come from /proc on Linux and from
@@ -41,6 +41,11 @@ class CommandSession(SnapshotSession):
 
     def prompt_args(self):
         args = super().prompt_args() + (["--session", self.session] if self.session else [])
+        # The pinned collector, as the shell hook passes one, so the
+        # collection runs and its folder facts reach the round. A session that
+        # adds init's pin itself (LifetimeSession) keeps its one word.
+        if not hasattr(self, "collector_word"):
+            args.append(f"--collector-exe={real_collector()}")
         if self.pwd is not None:
             args[args.index("--pwd") + 1] = str(self.pwd)
         return [f"--log-level={self.level}" if a == "--log-level=off" else a for a in args]
@@ -137,6 +142,19 @@ def test_configured_command_runs(tmp_path, _native_boot_required):
     ready(session)
     assert until(lambda: (session.prompt(), canary.exists())[1]), "the unit never ran"
     session.wait_quiet()
+
+
+# 명령 회차 시험의 세션도 실제 셸처럼 collector를 넘겨 수집을 돌린다(기본 테마의 첫 줄이 git을
+# 그려 수집을 요청한다). 수집이 없으면 회차가 셸 폴더를 저장소 대신 쓰는 경로만 시험된다. 이것을 실패시키는 것:
+# CommandSession이 collector를 넘기지 않는 것("collection unsafe", 수집 응답 없음).
+def test_command_session_runs_the_collection(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    session.level = "debug"
+    session.put(config(["/usr/bin/true"]))
+    ready(session)
+    responses = lambda: list(session.store().glob("collections-v1/*/store/response"))
+    assert until(lambda: (session.prompt(), session.wait_quiet(), responses())[2]), session.log()
+    assert b"collection unsafe" not in session.log()
 
 
 # 이것을 실패시키는 것: 허가 단위를 고를 때 not_run을 거르지 않는 것(plan::runnable의 거름 삭제):

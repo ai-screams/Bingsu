@@ -4,7 +4,7 @@
 //! and whether a result frame names a place in the grant. Pure; the helper
 //! and the supervisor do the I/O.
 use super::{
-    grant::{KEEP, KEEP_PREFIX},
+    keep::{KEEP, KEEP_PREFIX},
     wire::{Grant, Outcome, Policy},
 };
 use crate::{

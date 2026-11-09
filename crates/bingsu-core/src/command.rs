@@ -7,6 +7,7 @@ pub mod deadline;
 pub mod display;
 pub mod env_frame;
 pub mod grant;
+pub mod keep;
 pub mod path;
 pub mod plan;
 pub mod profile;

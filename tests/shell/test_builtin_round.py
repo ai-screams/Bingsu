@@ -48,11 +48,8 @@ def draws(*segments):
 
 
 class BuiltinSession(CommandSession):
-    """A command session whose prompts also pass the pinned collector, so
-    the collection runs and answers the drawn languages."""
-
-    def prompt_args(self):
-        return super().prompt_args() + [f"--collector-exe={real_collector()}"]
+    """A command session; its prompts pass the pinned collector (as every
+    CommandSession's do), so the collection answers the drawn languages."""
 
 
 def session_with(tmp_path, *segments):

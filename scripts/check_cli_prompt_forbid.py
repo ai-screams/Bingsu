@@ -93,7 +93,7 @@ TCB_SHA256 = {
     # plan (staged.rs) and the text it lets reach the terminal (sanitize.rs),
     # the characters a builtin version may draw (language.rs), and the
     # folder digest and text cleaning those digests use (cwd_hash.rs, field.rs).
-    "crates/bingsu-core/src/command/plan.rs": "748e8fc55f0d1b77f3a1b549a4ffc642569929e62d1b8d4e67106f4ee06de1b1",
+    "crates/bingsu-core/src/command/plan.rs": "5f27eb6a7ad3fbe6110a9139c0c2c0d8cbe78443657996da0fa6b475dbf67ea0",
     "crates/bingsu-core/src/command/wire.rs": "fae927873d7ccce472eb3ff743cb45b8670f979319b0f5458af0e9375f1e9f9a",
     "crates/bingsu-core/src/front/staged.rs": "9d00857fe58c170faa46752f3bb271e62352c5cff0c0fec81e05e280f1028444",
     "crates/bingsu-core/src/sanitize.rs": "bab17056bdadd1721f4ad71a66576d50423500cbc7e0f52cc23c551051359532",
@@ -101,6 +101,9 @@ TCB_SHA256 = {
     "crates/bingsu-core/src/collection/language.rs": "447cfa20cb266b0b3b21a07e2d3cdce1fa949313ed5fb7d00b479863f3c5114e",
     "crates/bingsu-core/src/collection/cwd_hash.rs": "63dd0e1ad5d643c100d8f0798729adab652533ef1c47f2a30253e8be1aff8549",
     "crates/bingsu-core/src/field.rs": "a405d7a33cb39bdadf4466da2b3694c094dac4bc261d718c456e250aa3112ecb",
+    # The names the prompt keeps from its environment frame: data plan.rs reads
+    # (keep.rs; no code of its own reaches the prompt binary).
+    "crates/bingsu-core/src/command/keep.rs": "217bf65950b2e90607f0114cd5a8afcf36ef44cb76698a1cd82d44647c04cba6",
     "crates/bingsu/src/sandbox.rs": "a8ef03197c75a326c365b3c2ac0ce0170df58b05b4d9af13c8d9e5064bcac929",
     "crates/bingsu/Cargo.toml": "1e56b43b80795d4042f862c4f563ca1121b1edd88ec401d0e16765a750b1cae8",
     "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
