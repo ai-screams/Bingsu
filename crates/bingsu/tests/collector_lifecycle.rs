@@ -258,42 +258,122 @@ int main(int argc, char **argv) {
 }
 "#;
 
-/// `dir` exists and is empty: whatever an earlier run left there is gone.
-fn fresh_dir(dir: &std::path::Path) {
-    match std::fs::remove_dir_all(dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => panic!("cannot clear {}: {e}", dir.display()),
+/// A folder this process made (`create_dir`, never one that was already
+/// there), removed when the guard drops. Only what it made is removed, so a
+/// symlinked ancestor never leads to deleting someone else's folder.
+struct OwnedDir(PathBuf);
+
+impl OwnedDir {
+    /// A new folder `name` under `parent`; `name-1`, `name-2`, ... when one
+    /// by that name is already there (left by an earlier process with the
+    /// same pid, or anyone's).
+    fn create(parent: &std::path::Path, name: &str) -> OwnedDir {
+        for n in 0..1000 {
+            let path = if n == 0 {
+                parent.join(name)
+            } else {
+                parent.join(format!("{name}-{n}"))
+            };
+            match std::fs::create_dir(&path) {
+                Ok(()) => return OwnedDir(std::fs::canonicalize(path).unwrap()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("cannot make {}: {e}", path.display()),
+            }
+        }
+        panic!("no free folder name for {name} under {}", parent.display())
     }
-    std::fs::create_dir_all(dir).unwrap();
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn remove(&self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
-// 이것을 실패시키는 것: 남은 폴더를 비우지 않는 것, 비운 뒤 다시 만들지 않는 것, 처음 만드는 폴더에서 실패하는 것.
+impl Drop for OwnedDir {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+/// The environment word naming the folder of the process that spawned this
+/// one: a child makes its folder inside it, so the parent's removal takes a
+/// killed child's folder too.
+const LIFECYCLE_DIR: &str = "BINGSU_LIFECYCLE_DIR";
+
+/// This process's fixture folder: under the parent's (a child) or under
+/// `target`, removed at exit (statics are never dropped, so through atexit).
+fn owned_dir() -> &'static OwnedDir {
+    static DIR: OnceLock<OwnedDir> = OnceLock::new();
+    extern "C" fn remove_at_exit() {
+        if let Some(dir) = DIR.get() {
+            dir.remove();
+        }
+    }
+    DIR.get_or_init(|| {
+        #[expect(clippy::disallowed_methods, reason = "test-only fixture folder")]
+        let parent = std::env::var_os(LIFECYCLE_DIR).map(PathBuf::from);
+        let child = parent.is_some();
+        let parent = parent.unwrap_or_else(|| {
+            let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+            std::fs::create_dir_all(&target).unwrap();
+            target
+        });
+        let dir = OwnedDir::create(
+            &parent,
+            &format!("collector-lifecycle-{}", std::process::id()),
+        );
+        if !child {
+            // SAFETY: registers a C-ABI function with no arguments that only
+            // removes this process's own folder.
+            assert_eq!(unsafe { libc::atexit(remove_at_exit) }, 0);
+        }
+        dir
+    })
+}
+
+/// `command` with this process's folder named for its children.
+fn spawned(mut command: Command) -> Command {
+    command.env(LIFECYCLE_DIR, owned_dir().path());
+    command
+}
+
+// 이것을 실패시키는 것: 이미 있던 폴더를 받아 쓰는 것(create_dir_all, 남의 폴더를 지우게 됨), 가드가 만든
+// 폴더를 지우지 않는 것, 이름이 겹칠 때 다음 이름을 찾지 않는 것. 조상이 symlink여도 그 대상 쪽의 같은 이름
+// 폴더는 남는다.
 #[test]
-fn fresh_dir_clears_what_an_earlier_run_left() {
-    let base = std::env::temp_dir().join(format!("bingsu-fresh-dir-{}", std::process::id()));
-    let dir = base.join("collector-lifecycle-1");
+fn owned_dir_removes_only_what_it_made() {
+    let base = std::env::temp_dir().join(format!("bingsu-owned-dir-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    fresh_dir(&dir);
-    assert!(dir.is_dir());
-    std::fs::write(dir.join("interrupt-0"), b"").unwrap();
-    std::fs::create_dir(dir.join("nested")).unwrap();
-    fresh_dir(&dir);
-    assert!(dir.is_dir());
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    let real = base.join("real");
+    std::fs::create_dir_all(real.join("collector-lifecycle-7")).unwrap();
+    std::fs::write(real.join("collector-lifecycle-7/theirs"), b"x").unwrap();
+    let link = base.join("target");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let made = OwnedDir::create(&link, "collector-lifecycle-7");
+    let mine = made.path().to_owned();
+    assert_eq!(
+        mine,
+        std::fs::canonicalize(real.join("collector-lifecycle-7-1")).unwrap()
+    );
+    std::fs::write(mine.join("peer"), b"").unwrap();
+    drop(made);
+    assert!(!mine.exists(), "the guard's own folder stays");
+    assert!(
+        real.join("collector-lifecycle-7/theirs").is_file(),
+        "a folder it did not make was removed"
+    );
     std::fs::remove_dir_all(&base).unwrap();
 }
 
 fn peer() -> &'static PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target")
-            .join(format!("collector-lifecycle-{}", std::process::id()));
-        // A folder left by an earlier process with this pid would make the
-        // create_new locks below fail with EEXIST.
-        fresh_dir(&dir);
-        let dir = std::fs::canonicalize(dir).unwrap();
+        // A folder of this run's own: the create_new locks below never meet
+        // one an earlier process left.
+        let dir = owned_dir().path().to_owned();
         let exe = dir.join("peer");
         let source = dir.join("peer.c");
         std::fs::write(&source, PEER).unwrap();
@@ -851,7 +931,7 @@ fn ready_cannot_raise_the_memory_allowance() {
 }
 
 fn isolated(name: &str) -> std::process::Output {
-    Command::new(std::env::current_exe().unwrap())
+    spawned(Command::new(std::env::current_exe().unwrap()))
         .args([
             "--exact",
             name,
@@ -862,22 +942,32 @@ fn isolated(name: &str) -> std::process::Output {
         .output()
         .unwrap()
 }
-/// The marker a child prints when it misses only a wall-clock bound a
-/// loaded host can miss; every other failure is judged at once.
-const OVERRUN: &str = "timing bound exceeded";
+/// The exit status a child gives when it misses only a wall-clock bound a
+/// loaded host can miss. A status, not text: paths and backtraces in a
+/// failure's output never read as a missed bound. Every other failure is
+/// judged at once.
+const OVERRUN_EXIT: i32 = 86;
 const OVERRUN_TRIES: usize = 3;
 
-/// In a child: fail with OVERRUN when `started` is `bound` or more ago.
-fn within(started: Instant, bound: Duration) {
+/// How far past `bound` it is since `started`, if it is.
+fn missed(started: Instant, bound: Duration) -> Option<Duration> {
     let elapsed = started.elapsed();
-    assert!(elapsed < bound, "{OVERRUN}: {elapsed:?} >= {bound:?}");
+    (elapsed >= bound).then_some(elapsed)
 }
 
-/// A child that failed on OVERRUN only.
+/// In a child: exit with OVERRUN_EXIT when `started` is `bound` or more ago.
+fn within(started: Instant, bound: Duration) {
+    if let Some(elapsed) = missed(started, bound) {
+        eprintln!("timing bound exceeded: {elapsed:?} >= {bound:?}");
+        // SAFETY: _exit takes no pointers and never returns; stderr is
+        // unbuffered, so the line above is already written.
+        unsafe { libc::_exit(OVERRUN_EXIT) }
+    }
+}
+
+/// A child that exited on a missed time bound only.
 fn overran(out: &std::process::Output) -> bool {
-    !out.status.success()
-        && (String::from_utf8_lossy(&out.stdout).contains(OVERRUN)
-            || String::from_utf8_lossy(&out.stderr).contains(OVERRUN))
+    out.status.code() == Some(OVERRUN_EXIT)
 }
 
 /// `run` up to `tries` times while `overran` holds; the last result is the
@@ -892,14 +982,14 @@ fn retry_overrun<T>(tries: usize, mut run: impl FnMut() -> T, overran: impl Fn(&
     run()
 }
 
-// 이것을 실패시키는 것: 시간 표식이 없는 실패도 재시도하는 것, 재시도하지 않는 것, tries를 넘어 도는 것,
-// 성공한 자식의 표식을 초과로 보는 것.
+// 이것을 실패시키는 것: 시간 초과 종료 코드가 아닌 실패도 재시도하는 것(출력에 표식 글자가 섞인 실패 포함),
+// 재시도하지 않는 것, tries를 넘어 도는 것, 경계 판정을 뒤집는 것.
 #[test]
 fn retry_overrun_retries_only_a_missed_time_bound() {
     use std::os::unix::process::ExitStatusExt;
     let out = |code: i32, text: &str| std::process::Output {
         status: std::process::ExitStatus::from_raw(code << 8),
-        stdout: Vec::new(),
+        stdout: text.as_bytes().to_vec(),
         stderr: text.as_bytes().to_vec(),
     };
     let calls = |outs: Vec<std::process::Output>| {
@@ -915,32 +1005,23 @@ fn retry_overrun_retries_only_a_missed_time_bound() {
         );
         (n, last.status.success())
     };
-    let over = || out(101, &format!("panicked: {OVERRUN}: 600ms >= 500ms"));
+    let over = || out(OVERRUN_EXIT, "timing bound exceeded: 600ms >= 500ms");
     assert_eq!(calls(vec![out(0, ""), over()]), (1, true));
     assert_eq!(calls(vec![over(), over(), out(0, "")]), (3, true));
     assert_eq!(calls(vec![over(), over(), over(), out(0, "")]), (3, false));
-    assert_eq!(
-        calls(vec![
-            out(101, "assertion failed: report.reaped"),
-            out(0, "")
-        ]),
-        (1, false)
-    );
-    assert!(!overran(&out(0, OVERRUN)));
-    let missed = std::panic::catch_unwind(|| {
-        within(
-            Instant::now() - Duration::from_millis(10),
-            Duration::from_millis(5),
-        )
-    });
+    // A failed assertion whose output carries the marker text (a checkout
+    // path, a backtrace) is judged at once.
+    let mixed = "/home/timing bound exceeded/src/lib.rs: assertion failed: report.reaped";
+    assert_eq!(calls(vec![out(101, mixed), out(0, "")]), (1, false));
+    assert!(!overran(&out(0, mixed)));
+    assert_eq!(missed(Instant::now(), Duration::from_secs(60)), None);
     assert!(
-        missed
-            .unwrap_err()
-            .downcast_ref::<String>()
-            .unwrap()
-            .contains(OVERRUN)
+        missed(
+            Instant::now() - Duration::from_millis(10),
+            Duration::from_millis(5)
+        )
+        .is_some()
     );
-    within(Instant::now(), Duration::from_secs(60));
 }
 
 fn passed(out: &std::process::Output) {
@@ -1251,7 +1332,7 @@ fn verified_screen_spawns_once_before_helper_tsync() {
         "unsafe-context",
         "unsafe-screen",
     ] {
-        let out = Command::new(std::env::current_exe().unwrap())
+        let out = spawned(Command::new(std::env::current_exe().unwrap()))
             .args([
                 "--exact",
                 "verified_screen_child",
@@ -1271,7 +1352,7 @@ fn verified_screen_spawns_once_before_helper_tsync() {
 #[test]
 fn snapshot_lock_is_not_extended_by_collection() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
-    let out = Command::new(std::env::current_exe().unwrap())
+    let out = spawned(Command::new(std::env::current_exe().unwrap()))
         .args([
             "--exact",
             "verified_screen_child",
@@ -1502,7 +1583,7 @@ fn helper_exit_and_worker_orphan_do_not_hold_shell() {
             .unwrap();
         drop(file);
         let start = Instant::now();
-        let out = Command::new(std::env::current_exe().unwrap())
+        let out = spawned(Command::new(std::env::current_exe().unwrap()))
             .args([
                 "--exact",
                 "orphan_helper_child",
