@@ -1851,9 +1851,12 @@ def helper_stage_case(stage):
 
 def with_session_listing(lines):
     """The collect capture predates the GC's sweep of stale session locks
-    (m6-C4a7): one block of the runtime root's listing just before the
-    catalog commit (no session lock in a collect-only fixture). Replay that
-    shape on the saved capture; a product-shape replay, not a new capture."""
+    (m6-C4a7): the runtime root's listing, one block and the block that ends
+    it, just before the catalog commit (no session lock in a collect-only
+    fixture). The saved plans name no GC cgroup (`gc_cgroup_procs` None), so
+    the parent sweep, which Linux runs when the GC's own cgroup v2 folder
+    holds it, is not replayed; the live stages measure it. Replay that shape
+    on the saved capture; a product-shape replay, not a new capture."""
     import re
     helper = next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
     commits = [i for i, l in enumerate(lines) if l.split()[0] == helper
@@ -1865,6 +1868,11 @@ def with_session_listing(lines):
     listing = [f'{helper}  openat({root}</fx/run-t/bingsu>, ".", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = {fd}</fx/run-t/bingsu>',
                f'{helper}  lseek({fd}</fx/run-t/bingsu>, 0, SEEK_SET) = 0',
                f'{helper}  getdents64({fd}</fx/run-t/bingsu>, 0x7ffd0000 /* 12 entries */, 8192) = 432',
+               f'{helper}  lseek({fd}</fx/run-t/bingsu>, 0, SEEK_CUR) = 432',
+               f'{helper}  close({fd}</fx/run-t/bingsu>) = 0',
+               f'{helper}  openat({root}</fx/run-t/bingsu>, ".", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = {fd}</fx/run-t/bingsu>',
+               f'{helper}  lseek({fd}</fx/run-t/bingsu>, 432, SEEK_SET) = 432',
+               f'{helper}  getdents64({fd}</fx/run-t/bingsu>, 0x7ffd0000 /* 0 entries */, 8192) = 0',
                f'{helper}  lseek({fd}</fx/run-t/bingsu>, 0, SEEK_CUR) = 432',
                f'{helper}  close({fd}</fx/run-t/bingsu>) = 0']
     return lines[:at] + listing + lines[at:]
@@ -3805,9 +3813,9 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
             # the full round's bound.
             at = (find(helper, r"unlinkat\(.*AT_REMOVEDIR\) = 0$") if stage == "builtin_probe" else
                   find(helper, r"getdents64\(\d+</sys/fs/cgroup/bingsu-cmd-[0-9a-f]+>, .* = 0$"))
-            # Two for the listing: the GC's own runtime listing gives one of
-            # slack (m6-C4a7) that the capture predates.
-            lines[at:at] = [lines[at]] * (1 if stage == "builtin_probe" else 2)
+            # Three for the listing: the GC's own runtime listing (a block and
+            # its end, m6-C4a7) gives two of slack that the capture predates.
+            lines[at:at] = [lines[at]] * (1 if stage == "builtin_probe" else 3)
         if damage == "deadline-installed-missing-stat":
             # No answer, but the probe's result installed: a decision, judged
             # exactly (GC slack must not cover a missing stat).

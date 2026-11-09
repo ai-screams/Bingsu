@@ -168,3 +168,48 @@ def test_gc_sweep_counts_each_session_lock():
     none = helper_command_expected(replace(plan, session_locks=0))["gc"]
     three = helper_command_expected(replace(plan, session_locks=3))["gc"]
     assert {k: three[k] - none.get(k, 0) for k in three if three[k] != none.get(k, 0)} == {"fstat": 3}
+    # At most EXAMINE_MAX (32) names a sweep.
+    many = helper_command_expected(replace(plan, session_locks=40))["gc"]
+    assert many["fstat"] - none["fstat"] == 32
+
+
+def _gc(plan, **axes):
+    from dataclasses import replace
+    from fsbudget.formula import helper_command_expected
+    return helper_command_expected(replace(plan, **axes))["gc"]
+
+
+def _delta(a, b):
+    return {k: b.get(k, 0) - a.get(k, 0) for k in set(a) | set(b) if b.get(k, 0) != a.get(k, 0)}
+
+
+# m6-C4a7(C 판정): Linux GC가 자기 cgroup을 찾으면 그 찾기(/proc/self/cgroup 열기와 읽기 2, 자기 폴더 열기와
+# fstatfs, cgroup.procs 열기와 4 KiB씩 EOF까지 pread)와 그 폴더 목록(한 블록과 끝 블록)이 더해진다. 부모가 있으면
+# runtime stamp 1, 부모마다 많아야 잠금 stat과 부모 stat이 더해지고(자기 부모는 둘 다 없지만 상한이라 같이 셈)
+# 살펴보는 수는 32까지다. musl은 libc open 둘에 F_SETFD가 붙는다. 이것을 실패시키는 것: 찾기 항, cgroup 목록 항,
+# pread 수, 부모 항, runtime stamp 항, 상한, musl 항 가운데 하나를 지우거나 바꾸는 것.
+@pytest.mark.parametrize("libc", ["gnu", "musl"])
+def test_gc_parent_sweep_terms(libc):
+    import json
+    from dataclasses import replace
+    from pathlib import Path
+    from fsbudget.formula import HelperAxes, HelperPlan
+    meta = json.loads((Path(__file__).resolve().parents[3] / "tests/shell/fixtures/helper-stage-traces.json")
+                      .read_text())["command_miss"]
+    plan = dict(meta["plan"]); plan["stages"] = tuple(plan["stages"]); plan["ax"] = HelperAxes(**plan["ax"])
+    plan = replace(HelperPlan(**plan), libc=libc, nsswitch_reads=0 if libc == "musl" else 2,
+                   passwd_seeks=1 if libc == "musl" else 0)
+    off = _gc(plan)
+    on = _gc(plan, gc_cgroup_procs=100)
+    lookup = {"openat": 3 + 2, "read": 2 + 2, "statfs": 1, "seek": 4, "getdents": 2}
+    if libc == "musl":
+        lookup["fd_flags"] = 2
+    assert _delta(off, on) == lookup
+    # 4 KiB preads: a full chunk then the EOF read (4096 B: 2), one more past it.
+    assert _gc(plan, gc_cgroup_procs=4096) == on
+    assert _delta(on, _gc(plan, gc_cgroup_procs=4097)) == {"read": 1}
+    assert _delta(on, _gc(plan, gc_cgroup_procs=100, cgroup_parents=1)) == {"fstat": 3}
+    assert _delta(on, _gc(plan, gc_cgroup_procs=100, cgroup_parents=3)) == {"fstat": 7}
+    assert _delta(on, _gc(plan, gc_cgroup_procs=100, cgroup_parents=40)) == {"fstat": 65}
+    # Parents count only where the GC found its cgroup.
+    assert _gc(plan, cgroup_parents=3) == off

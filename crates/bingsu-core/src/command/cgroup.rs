@@ -89,8 +89,8 @@ pub fn parent_name(session: &[u8], runtime: (u64, u64)) -> String {
 
 /// The digest part of [`parent_name`]: 32 lowercase hex digits. The
 /// session lock is named by it too (`command-<digest>.lock`), so a helper
-/// that holds a lock owns the parent of the same digest, and a stale lock
-/// names the parent to reclaim with it (m6-C4a7).
+/// that holds a lock owns the parent of the same digest: the GC's parent
+/// sweep takes the lock of each parent it lists (m6-C4a7).
 pub fn parent_digest(session: &[u8], runtime: (u64, u64)) -> String {
     let mut input = alloc::vec::Vec::with_capacity(session.len() + 17);
     input.extend_from_slice(&runtime.0.to_le_bytes());
