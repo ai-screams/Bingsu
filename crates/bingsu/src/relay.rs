@@ -982,13 +982,6 @@ fn native_only(errno: i32) -> Option<()> {
     matches!(errno, libc::EACCES | libc::ENOENT).then_some(())
 }
 
-/// Only root or the user may change the file. Group write passes only with
-/// a pin, and a pin must name this file unchanged: same device, inode,
-/// group, mode and status change time as when the helper's group check
-/// cleared it (spec section 2 safety row; rewriting, chmod, chown and ACL
-/// changes move the ctime).
-/// `ownership`: whether the file's mount enforces ownership (Linux file
-/// systems do; macOS asks `local_ownership`).
 /// Linux: whether the opened target is known to carry no file capabilities,
 /// by the helper's rule (`sys::capability_free`): only ENODATA and EOPNOTSUPP
 /// mean none; an attribute of any length or another answer refuses. A
@@ -1016,6 +1009,13 @@ fn capability_answer(n: libc::ssize_t, errno: Option<i32>) -> bool {
     n < 0 && matches!(errno, Some(libc::ENODATA | libc::EOPNOTSUPP))
 }
 
+/// Only root or the user may change the file. Group write passes only with
+/// a pin, and a pin must name this file unchanged: same device, inode,
+/// group, mode and status change time as when the helper's group check
+/// cleared it (spec section 2 safety row; rewriting, chmod, chown and ACL
+/// changes move the ctime).
+/// `ownership`: whether the file's mount enforces ownership (Linux file
+/// systems do; macOS asks `local_ownership`).
 fn allowed(st: &libc::stat, pin: Option<ExecPin>, ownership: Option<bool>) -> Result<bool, u8> {
     // U-33: no setuid or setgid target, on any system (the helper refuses
     // them too; this holds for a bit set after its check). 이것을 실패시키는
@@ -1800,9 +1800,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // U-33(root): 조회와 같은 coarse tick 안에서 붙인 capability(pin이 그대로 맞음)도 relay가 거부한다. 기다리지 않고,
-    // setcap 뒤에도 pin이 맞는 경우(정말 같은 tick)가 나올 때까지 100번까지 되풀이한다. 이것을 실패시키는 것: relay의
-    // capability 확인을 지우는 것.
+    // U-33(root): 조회와 같은 시각 tick 안에서 붙인 capability는 pin이 그대로 맞아 pin으로는 가리지 못한다. setcap 뒤
+    // 그 파일의 지금 stamp로 pin을 만들어 넘기면 정확히 그 상태가 되고, relay의 capability 확인만 거부할 수 있다.
+    // 이것을 실패시키는 것: relay의 capability 확인을 지우는 것.
     #[test]
     #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
     fn test_relay_refuses_capabilities_set_in_the_lookups_tick() {
@@ -1810,19 +1810,15 @@ mod tests {
         assert_eq!(crate::commands::sys::current_uid(), 0, "run as root");
         let dir = std::fs::canonicalize(fresh_dir("caps-same-tick")).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for attempt in 0..100 {
-            let exe = dir.join(format!("cat-{attempt}"));
-            cat_copy(&exe, 0o755);
-            let name = format!("cat-{attempt}");
-            let pin = looked_up(&dir, name.as_bytes());
-            crate::commands::sys::test_set_file_capability(&exe, true);
-            if pin == Some(pin_of(&exe)) {
-                assert!(refused(&exe, pin), "setcap in the same tick");
-                std::fs::remove_dir_all(&dir).unwrap();
-                return;
-            }
-        }
-        panic!("no setcap within the lookup's timestamp tick in 100 tries");
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o755);
+        crate::commands::sys::test_set_file_capability(&exe, true);
+        // The pin a lookup in the same tick would have made.
+        let pin = pin_of(&exe);
+        assert!(refused(&exe, Some(pin)), "setcap the pin cannot see");
+        crate::commands::sys::test_set_file_capability(&exe, false);
+        assert!(!refused(&exe, Some(pin_of(&exe))), "removed");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // N-078. 이것을 실패시키는 것: 중계가 마감이나 permit을 대상 envp·argv에 넣는 것.
