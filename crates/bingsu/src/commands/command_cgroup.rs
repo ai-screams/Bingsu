@@ -342,6 +342,9 @@ pub(crate) mod fs {
     }
 
     fn read_small(path: &std::ffi::CStr, max: usize) -> io::Result<Vec<u8>> {
+        // Inside the collection GC every call is charged (open and its close,
+        // then each read); outside it the meter is empty and charges nothing.
+        sys::collection_ops(2)?;
         // SAFETY: fixed NUL-terminated path; the descriptor is owned below.
         let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
@@ -353,6 +356,7 @@ pub(crate) mod fs {
         let mut out = vec![0u8; max + 1];
         let mut len = 0;
         while len < out.len() {
+            sys::collection_ops(1)?;
             // SAFETY: writable tail of `out`.
             let n = unsafe {
                 libc::read(
@@ -419,10 +423,40 @@ pub(crate) mod fs {
         open_session_at(b"/sys/fs/cgroup", release.to_bytes(), &text, who)
     }
 
-    /// The process's own cgroup folder on the cgroup v2 mount, or `None`.
+    /// The process's own cgroup folder on the cgroup v2 mount, holding this
+    /// process (the round's check, for the collection GC), or `None`.
     pub(crate) fn open_own() -> Option<File> {
         let text = read_small(c"/proc/self/cgroup", cgroup::PROC_CGROUP_MAX).ok()?;
-        open_own_at(b"/sys/fs/cgroup", &text)
+        open_own_member_at(b"/sys/fs/cgroup", &text)
+    }
+
+    /// [`open_own`] from its inputs, for this process.
+    pub(crate) fn open_own_member_at(mount: &[u8], proc_self_cgroup: &[u8]) -> Option<File> {
+        open_member_at(mount, proc_self_cgroup, std::process::id())
+    }
+
+    /// The folder `proc_self_cgroup` names on `mount` when its
+    /// `cgroup.procs` lists `pid`: a cgroup namespace whose mount was not
+    /// redone names another folder (U-14 F0).
+    fn open_member_at(mount: &[u8], proc_self_cgroup: &[u8], pid: u32) -> Option<File> {
+        let own = open_own_at(mount, proc_self_cgroup)?;
+        sys::collection_ops(2).ok()?;
+        let procs = open_at(&own, b"cgroup.procs", libc::O_RDONLY).ok()?;
+        let text = super::read_bounded(
+            &mut |buf, at| {
+                sys::collection_ops(1)?;
+                let at = libc::off_t::try_from(at).map_err(|_| io::Error::other("offset"))?;
+                // SAFETY: writable buffer of its length.
+                let n = unsafe {
+                    libc::pread(procs.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), at)
+                };
+                usize::try_from(n).map_err(|_| io::Error::last_os_error())
+            },
+            cgroup::PROCS_MAX,
+        )?;
+        // 이것을 실패시키는 것: 이 소속 확인을 지우는 것(회차: test_capability_needs_its_own_cgroup,
+        // GC: test_gc_own_cgroup_needs_its_own_cgroup).
+        cgroup::procs_contains(&text, pid).then_some(own)
     }
 
     /// [`open_own`] from its inputs: the cgroup v2 mount and
@@ -430,6 +464,8 @@ pub(crate) mod fs {
     pub(crate) fn open_own_at(mount: &[u8], proc_self_cgroup: &[u8]) -> Option<File> {
         let own = cgroup::own_path(proc_self_cgroup)?;
         let own = std::ffi::CString::new([mount, own].concat()).ok()?;
+        // The open and its close, then the fstatfs.
+        sys::collection_ops(3).ok()?;
         // SAFETY: NUL-terminated path; the descriptor is owned below.
         let fd = unsafe {
             libc::open(
@@ -457,22 +493,7 @@ pub(crate) mod fs {
         if !cgroup::kernel_has_kill(release) {
             return None;
         }
-        let own = open_own_at(mount, proc_self_cgroup)?;
-        let procs = open_at(&own, b"cgroup.procs", libc::O_RDONLY).ok()?;
-        let text = super::read_bounded(
-            &mut |buf, at| {
-                let at = libc::off_t::try_from(at).map_err(|_| io::Error::other("offset"))?;
-                // SAFETY: writable buffer of its length.
-                let n = unsafe {
-                    libc::pread(procs.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), at)
-                };
-                usize::try_from(n).map_err(|_| io::Error::last_os_error())
-            },
-            cgroup::PROCS_MAX,
-        )?;
-        if !cgroup::procs_contains(&text, who.pid) {
-            return None;
-        }
+        let own = open_member_at(mount, proc_self_cgroup, who.pid)?;
         let name = cgroup::parent_name(who.session, who.runtime);
         let name = OsStr::new(&name);
         // A failed mkdir (read-only, not delegated) leaves nothing to open.
@@ -1171,6 +1192,29 @@ pub(crate) mod cell {
             .join(&other)
             .join(cgroup::parent_name(&who(&session).0, who(&session).1));
         let _ = std::fs::remove_dir(&made);
+        std::fs::remove_dir(own_cgroup().join(&other)).unwrap();
+        assert!(got.is_none());
+    }
+
+    // GC의 자기 cgroup도 회차와 같이 이 프로세스를 담은 cgroup이어야 한다(m6-C4a7). 양성 대조: 실제
+    // `/proc/self/cgroup`은 연다. 이것을 실패시키는 것: GC가 cgroup.procs 확인 없이 폴더를 여는 것(남의
+    // cgroup에서 빈 부모를 지울 수 있음).
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_gc_own_cgroup_needs_its_own_cgroup() {
+        if !privileged() {
+            return;
+        }
+        let text = std::fs::read("/proc/self/cgroup").unwrap();
+        assert!(fs::open_own_member_at(b"/sys/fs/cgroup", &text).is_some());
+        let own = cgroup::own_path(&text).unwrap();
+        let other = format!("bingsu-gc-other-{}", std::process::id());
+        let fake = format!(
+            "0::{}/{other}\n",
+            String::from_utf8_lossy(own).trim_end_matches('/')
+        );
+        std::fs::create_dir(own_cgroup().join(&other)).unwrap();
+        let got = fs::open_own_member_at(b"/sys/fs/cgroup", fake.as_bytes());
         std::fs::remove_dir(own_cgroup().join(&other)).unwrap();
         assert!(got.is_none());
     }

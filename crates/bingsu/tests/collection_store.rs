@@ -1166,6 +1166,7 @@ fn gc_time_cap_stops_before_filesystem_work() {
             max_ops: u32::MAX,
             max_ns: 0,
         },
+        None,
     )
     .unwrap();
     assert!(r.incomplete);
@@ -2673,13 +2674,13 @@ fn gc_checkpoint_reserve_case(block: Option<usize>) {
         return;
     }
     let cold = std::time::Instant::now();
-    collection_gc::reclaim(&f.runtime, clock(), GcBudget::default()).unwrap();
+    collection_gc::reclaim(&f.runtime, clock(), GcBudget::default(), None).unwrap();
     let cold_ns = cold.elapsed().as_nanos();
     let mut samples = Vec::new();
     let mut max_checkpoint = 0;
     for _ in 0..200 {
         let start = std::time::Instant::now();
-        let r = collection_gc::reclaim(&f.runtime, clock(), GcBudget::default()).unwrap();
+        let r = collection_gc::reclaim(&f.runtime, clock(), GcBudget::default(), None).unwrap();
         samples.push(start.elapsed().as_nanos());
         assert!(r.ops <= 4_096 && r.checkpoint_ops <= 512);
         max_checkpoint = max_checkpoint.max(r.checkpoint_ops);

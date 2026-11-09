@@ -481,10 +481,13 @@ pub(super) fn reserve_breaker_write(
     save(runtime, me, &catalog)
 }
 
+/// `session` is the calling helper's shell session: its own lock is never
+/// reclaimed (m6-C4a7).
 pub(crate) fn reclaim(
     runtime: &File,
     now: Clock,
     budget: GcBudget,
+    session: Option<&[u8]>,
 ) -> Result<GcReport, StoreError> {
     reclaim_inner(
         runtime,
@@ -492,6 +495,7 @@ pub(crate) fn reclaim(
         budget,
         bingsu_core::field::BUILTIN,
         budget.start(),
+        session,
     )
 }
 #[cfg(test)]
@@ -514,6 +518,7 @@ pub(crate) fn fixture_reclaim(
         budget,
         schema,
         sys::CollectionMeter::fixture_operations(budget.max_ops),
+        None,
     )
 }
 #[cfg(test)]
@@ -531,6 +536,7 @@ pub(crate) fn fixture_timed_reclaim(
         budget,
         schema,
         sys::CollectionMeter::fixture_clock(budget.max_ops, budget.max_ns, clock),
+        None,
     )
 }
 #[cfg(test)]
@@ -595,6 +601,7 @@ fn reclaim_inner(
     budget: GcBudget,
     schema: &[SegmentDecl],
     meter: sys::CollectionMeter,
+    session: Option<&[u8]>,
 ) -> Result<GcReport, StoreError> {
     let mut report = GcReport::default();
     // This is the first filesystem operation. A runtime that never collected
@@ -658,6 +665,7 @@ fn reclaim_inner(
                 runtime,
                 me,
                 super::command_sessions::now_secs(),
+                session,
                 &mut super::command_sessions::own_cgroup,
             );
         }
