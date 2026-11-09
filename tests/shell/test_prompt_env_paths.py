@@ -1693,6 +1693,26 @@ def collect_ready(store, runtime):
     return bool(stores) and bool(breakers)
 
 
+# A command stage's untraced warm-up: at most this many prompts.
+COMMAND_WARMUP_MAX = 10
+
+
+def command_ready(store):
+    """A command warm-up is done when a command response is stored."""
+    return bool(list((store / "collections-v1").glob("*/store/command")))
+
+
+# 이것을 실패시키는 것: 명령 응답이 없어도 데우기가 끝났다고 보는 것, 다른 이름의 파일을 응답으로 보는 것.
+def test_command_warm_needs_a_command_response(tmp_path):
+    store = tmp_path / "store"
+    assert not command_ready(store)
+    (store / "collections-v1/a/store").mkdir(parents=True)
+    (store / "collections-v1/a/store/response").write_bytes(b"")
+    assert not command_ready(store)
+    (store / "collections-v1/a/store/command").write_bytes(b"")
+    assert command_ready(store)
+
+
 # 이것을 실패시키는 것: 저장소나 breaker 하나만 있어도 데우기가 끝났다고 보는 것.
 def test_collect_warm_needs_both_store_and_breaker(tmp_path):
     store, runtime = tmp_path / "store", tmp_path / "runtime"
@@ -1918,11 +1938,16 @@ class HelperStageFixture:
         # and on a slow runner so can an untraced one, so collect goes on past
         # its three prompts until the store and the breaker are there.
         # Command stages: the first round publishes the snapshot, the second
-        # leaves the unit's response (and the session cgroup parent). Builtin
-        # stages warm as collect does: their round needs the stored answer.
+        # leaves the unit's response (and the session cgroup parent); a slow
+        # runner can defer that round, so a stage that runs its unit goes on
+        # until the response is there. Builtin stages warm as collect does:
+        # their round needs the stored answer.
         if stage == "collect" or builtin:
             warm = warm_until(prompt_and_wait, lambda: collect_ready(self.store, runtime), least=3, most=COLLECT_WARMUP_MAX)
             print(f"collect warm-up prompts: {warm}")
+        elif command and stage != "command_not_run":
+            warm = warm_until(prompt_and_wait, lambda: command_ready(self.store), least=2, most=COMMAND_WARMUP_MAX)
+            print(f"command warm-up prompts: {warm}")
         else:
             warm_until(prompt_and_wait, lambda: True, least=2 if command else 1, most=2 if command else 1)
         assert (self.store / "snapshot").is_file(), "warm-up did not publish"

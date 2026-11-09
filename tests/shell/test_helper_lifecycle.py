@@ -10,7 +10,7 @@ import sys
 import time
 
 import pytest
-from blocked_mount import blocked_mount
+from blocked_mount import all_stopped, blocked_mount, task_states
 from shell_support import Blocked, role_processes
 from snapshot_support import SnapshotSession, require_native_boot
 from test_snapshot_refresh import appearance
@@ -319,3 +319,34 @@ def test_one_blocked_helper_per_context_after_lock(tmp_path):
                 stop_helpers(a, b)
     except Blocked as error:
         fail_blocked(error)
+
+
+def _until(check, timeout=4.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if check():
+            return True
+        time.sleep(0.01)
+    return check()
+
+
+# 이것을 실패시키는 것: 스레드 하나만 멈춰도 멈췄다고 보는 것, 스레드 목록이 비면 멈췄다고 보는 것,
+# 추적 중 멈춤(t)을 멈춤으로 보지 않는 것.
+def test_blocked_mount_waits_for_every_thread_to_stop():
+    assert all_stopped(["T", "T"]) and all_stopped(["t", "T"])
+    assert not all_stopped(["T", "S"]) and not all_stopped(["R"]) and not all_stopped([])
+
+
+# 이것을 실패시키는 것: /proc의 상태 칸을 잘못 읽는 것, 스레드 일부만 읽는 것.
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
+def test_task_states_reads_every_thread():
+    code = "import threading, time; [threading.Thread(target=time.sleep, args=(30,), daemon=True).start() for _ in range(3)]; time.sleep(30)"
+    child = subprocess.Popen([sys.executable, "-c", code])
+    try:
+        assert _until(lambda: len(task_states(child.pid)) == 4), task_states(child.pid)
+        assert not all_stopped(task_states(child.pid))
+        child.send_signal(signal.SIGSTOP)
+        assert _until(lambda: all_stopped(task_states(child.pid))), task_states(child.pid)
+    finally:
+        child.kill()
+        child.wait()
