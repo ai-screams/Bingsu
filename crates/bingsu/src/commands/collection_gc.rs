@@ -665,6 +665,7 @@ fn reclaim_inner(
                 runtime,
                 me,
                 super::command_sessions::now_secs(),
+                super::command_sessions::start_seed(),
                 session,
                 &mut super::command_sessions::own_cgroup,
             );

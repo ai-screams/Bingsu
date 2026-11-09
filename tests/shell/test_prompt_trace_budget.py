@@ -1853,10 +1853,9 @@ def with_session_listing(lines):
     """The collect capture predates the GC's sweep of stale session locks
     (m6-C4a7): the runtime root's listing, one block and the block that ends
     it, just before the catalog commit (no session lock in a collect-only
-    fixture). The saved plans name no GC cgroup (`gc_cgroup_procs` None), so
-    the parent sweep, which Linux runs when the GC's own cgroup v2 folder
-    holds it, is not replayed; the live stages measure it. Replay that shape
-    on the saved capture; a product-shape replay, not a new capture."""
+    fixture). With no stale lock, no lock is taken and the GC's own cgroup is
+    not looked up. Replay that shape on the saved capture; a product-shape
+    replay, not a new capture."""
     import re
     helper = next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
     commits = [i for i, l in enumerate(lines) if l.split()[0] == helper

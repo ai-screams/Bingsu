@@ -211,10 +211,6 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     "directory_cursor": {"openat": 1, "fstat": 1, "fd_query": 1, "fd_flags": 1, "getdents": 2},
     # sys::directory_batch of the runtime root, one 8 KiB block.
     "session_listing": {"openat": 1, "seek": 2, "getdents": 1},
-    # command_cgroup::fs::open_own for the GC (m6-C4a7): /proc/self/cgroup
-    # opened and read to its end (2 reads), the own folder opened and its
-    # fstatfs, cgroup.procs opened (its preads are counted by size).
-    "gc_own_cgroup": {"openat": 3, "read": 2, "statfs": 1},
     # command_cgroup::fs::open_session up to the session parent's open (Linux,
     # C3): uname (the 5.14 check, kernel_release), /proc/self/cgroup
     # through libc::open and read to its end, the own cgroup folder through
@@ -289,8 +285,6 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
     "passwd": {"openat": 1, "fd_flags": 2},
     "dup": {"dup": 1, "fd_flags": 1},
     "statm": {"openat": 1, "fstat": 1, "read": 2, "fd_flags": 1},
-    # The two libc open(O_CLOEXEC) calls (/proc/self/cgroup, the own folder).
-    "gc_own_cgroup": {"openat": 3, "read": 2, "statfs": 1, "fd_flags": 2},
     # musl's opendir does not stat the folder.
     "fd_listing": {"openat": 1, "getdents": 2, "fd_flags": 1},
     # libc::open(O_CLOEXEC) of /proc/self/cgroup and of the own cgroup folder.
@@ -433,11 +427,6 @@ class HelperPlan:
     # Session locks (`command-<digest>.lock`) in the runtime root when the GC
     # runs: the GC stats each one's name (m6-C4a7).
     session_locks: int = 0
-    # Linux: the size of cgroup.procs of the GC's own cgroup, or None when
-    # the GC finds no cgroup v2 folder holding it; the `bingsu-cmd-*`
-    # parents listed there.
-    gc_cgroup_procs: int | None = None
-    cgroup_parents: int = 0
 
 
 def read_to_end_calls(n: int) -> int:
@@ -923,28 +912,14 @@ def _collection_gc(e: dict, p: HelperPlan) -> None:
 
 
 def _session_sweep(e: dict, p: HelperPlan) -> None:
-    # command_sessions::reclaim_stale (m6-C4a7, ruling C) after the stores'
-    # own work. The lock sweep: the runtime root's listing, one block and the
-    # block that ends it (each: open ".", seek, getdents, the next position),
-    # and a stat of each session lock's name, at most EXAMINE_MAX; the
-    # fixtures have none older than a day.
+    # command_sessions::reclaim_stale (m6-C4a7, ruling D) after the stores'
+    # own work: the runtime root's listing, one block and the block that ends
+    # it (each: open ".", seek, getdents, the next position), and a stat of
+    # each session lock's name, at most EXAMINE_MAX. The fixtures have none
+    # older than a day, so no lock is taken and the GC's own cgroup is never
+    # looked up (that happens only after a stale lock is taken).
     _add(e, "session_listing", 2)
     e["fstat"] = e.get("fstat", 0) + min(p.session_locks, EXAMINE_MAX)
-    if p.gc_cgroup_procs is None:
-        return
-    # The parent sweep (Linux): the GC's own cgroup, its cgroup.procs read in
-    # 4 KiB preads to the end, then the folder's listing as above.
-    _add(e, "gc_own_cgroup")
-    e["read"] += -(-p.gc_cgroup_procs // 4096) + 1
-    _add(e, "session_listing", 2)
-    seen = min(p.cgroup_parents, EXAMINE_MAX)
-    if seen:
-        # The runtime root's stamp once, for this session's own digest; each
-        # parent at most its lock's stat (absent: another runtime root's) and
-        # the parent's own stat (made within the day: left). This session's
-        # own parent is skipped with neither; the GC terms are upper bounds,
-        # so it is counted as another (2 stats of slack).
-        e["fstat"] += 1 + 2 * seen
 
 
 # command_sessions::EXAMINE_MAX: names one sweep looks at in one GC run.

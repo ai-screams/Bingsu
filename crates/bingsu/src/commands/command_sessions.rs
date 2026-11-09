@@ -1,28 +1,25 @@
 //! Other sessions' leftovers (m6-C4a7): every shell session that ran a
 //! command round leaves its lock `command-<digest>.lock` in the runtime root
 //! and, on the Linux atomic path, its cgroup parent `bingsu-cmd-<digest>`
-//! under the shell's cgroup. The collection GC reclaims a few each run, in
-//! two sweeps that do not depend on each other (C4a7 ruling C):
+//! under the shell's cgroup. The collection GC reclaims a few each run
+//! (C4a7 ruling D), only through this runtime root's locks:
 //!
-//! - Locks, whatever cgroup made them: a lock older than [`STALE_SECS`]
-//!   that no round holds goes. A lock is only an empty file for mutual
-//!   exclusion: a round re-checks the name after its `flock`, so removing
-//!   one never breaks the exclusion. This sweep never touches a parent.
-//! - Parents, found in this process's own cgroup listing (Linux, after the
-//!   membership check), not through locks: for each `bingsu-cmd-<digest>`,
-//!   the lock of the same digest is taken without blocking (made when
-//!   missing, so a round and this sweep still exclude each other). A lock
-//!   that was there must be stale; with none, the parent itself must have
-//!   been made more than a day ago (another runtime root's session would not
-//!   be excluded by a lock made here). An empty parent is removed with its lock;
-//!   a parent still holding a unit keeps both, except a lock this sweep just
-//!   made. Another cgroup's parents are found the same way by a GC that runs
-//!   there; a cgroup where bingsu never runs again goes away with its scope.
+//! - A lock older than [`STALE_SECS`], not this session's, is taken without
+//!   blocking (a round in progress holds its own, so it stays) and checked
+//!   again on its descriptor and name.
+//! - Then the parent of the same digest in this process's own cgroup (Linux,
+//!   after the membership check): an empty one is removed, then the lock.
+//!   One with a unit left keeps both. With no parent there, only the lock
+//!   goes. Holding the lock is owning the parent: the digest covers the
+//!   session and this runtime root, and a round of that session takes the
+//!   same lock. A parent of another runtime root is never touched.
 //!
-//! Each sweep reads at most [`BLOCKS_MAX`] blocks of its folder, starts at a
-//! place that moves with the clock, looks at no more than [`EXAMINE_MAX`]
-//! names and takes no more than [`RECLAIM_MAX`] locks, so repeated runs reach
-//! every name the blocks hold without a saved cursor.
+//! A run reads at most [`BLOCKS_MAX`] blocks of the runtime root, starts at a
+//! place that a fresh seed picks each run, looks at no more than
+//! [`EXAMINE_MAX`] names and takes no more than [`RECLAIM_MAX`] locks, so
+//! repeated runs reach every name those blocks hold without a saved cursor.
+//! A live idle session that loses its lock and empty parent makes both
+//! again on its next round.
 
 use super::{snapshot_store, sys};
 use std::{
@@ -35,17 +32,16 @@ use std::{
 /// A lock unchanged this long is stale (ruling: 24 h by ctime). The lock is
 /// never written, so its ctime is when it was made.
 pub(crate) const STALE_SECS: i64 = 24 * 60 * 60;
-/// Locks taken (reclaim tried) by one sweep in one GC run. A lock a round
-/// holds is not taken and does not count.
+/// Locks taken (reclaim tried) in one GC run. A lock a round holds is not
+/// taken and does not count.
 pub(crate) const RECLAIM_MAX: usize = 4;
-/// Names one sweep looks at in one GC run.
+/// Names looked at in one GC run.
 pub(crate) const EXAMINE_MAX: usize = 32;
-/// Directory blocks (8 KiB each) one sweep reads in one GC run.
+/// Directory blocks (8 KiB each) read in one GC run.
 pub(crate) const BLOCKS_MAX: usize = 4;
 
 const LOCK_PREFIX: &str = "command-";
 const LOCK_SUFFIX: &str = ".lock";
-const PARENT_PREFIX: &str = "bingsu-cmd-";
 
 /// `command-<cgroup parent digest>.lock`.
 pub(crate) fn lock_name(session: &[u8], runtime: (u64, u64)) -> String {
@@ -53,57 +49,49 @@ pub(crate) fn lock_name(session: &[u8], runtime: (u64, u64)) -> String {
     format!("{LOCK_PREFIX}{digest}{LOCK_SUFFIX}")
 }
 
-/// 32 lowercase hex digits.
-fn is_digest(d: &str) -> bool {
-    let hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
-    d.len() == 32 && d.bytes().all(hex)
-}
-
-/// The digest of a session lock's name, or `None` for any other name.
+/// The digest of a session lock's name: 32 lowercase hex digits between
+/// the fixed prefix and suffix, or `None` for any other name.
 fn digest_of(name: &OsStr) -> Option<&str> {
     let digest = name
         .to_str()?
         .strip_prefix(LOCK_PREFIX)?
         .strip_suffix(LOCK_SUFFIX)?;
-    is_digest(digest).then_some(digest)
+    let hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
+    (digest.len() == 32 && digest.bytes().all(hex)).then_some(digest)
 }
 
-/// The digest of a cgroup parent's name, or `None` for any other name.
-fn parent_digest_of(name: &OsStr) -> Option<&str> {
-    let digest = name.to_str()?.strip_prefix(PARENT_PREFIX)?;
-    is_digest(digest).then_some(digest)
-}
-
-/// What one name came to (tests read it).
+/// What one lock came to (tests read it).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// A stale lock removed.
+    /// The lock removed, with its empty parent when there was one.
     Reclaimed(String),
-    /// A lock taken but kept (changed since its stat): counts against
-    /// [`RECLAIM_MAX`].
+    /// Taken but kept: changed since its stat, or its parent holds a unit.
+    /// Counts against [`RECLAIM_MAX`].
     Kept(String),
-    /// A lock a round holds: not taken, not counted.
+    /// A round holds it: not taken, not counted.
     Busy(String),
-    /// An empty parent removed with its lock.
-    ParentReclaimed(String),
-    /// A parent taken but kept (a unit left, or its lock changed).
-    ParentKept(String),
-    /// A parent whose lock a round holds.
-    ParentBusy(String),
 }
 
-/// Both sweeps. `now` is the wall clock in seconds; `session` is this
-/// helper's own session, whose lock and parent are never reclaimed here (its
-/// round released the lock just before the GC); `own_cgroup` opens this
-/// process's cgroup folder. Every call goes through the collection GC's
-/// meter; a refused charge ends the step. Returns what it did.
+/// Reclaims stale session locks of `runtime` and their empty parents.
+/// `now` is the wall clock in seconds and `seed` picks where the run
+/// starts; `session` is this helper's own session, whose lock is never
+/// reclaimed here (its round released it just before the GC); `own_cgroup`
+/// opens this process's cgroup folder, at most once and only after a lock
+/// was taken. Every call goes through the collection GC's meter; a refused
+/// charge ends the step. Returns what it did.
 pub(crate) fn reclaim_stale(
     runtime: &File,
     me: u32,
     now: i64,
+    seed: u64,
     session: Option<&[u8]>,
     own_cgroup: &mut dyn FnMut() -> Option<File>,
 ) -> Vec<Outcome> {
+    let mut done = Vec::new();
+    let names = listed(runtime);
+    if names.is_empty() {
+        return done;
+    }
     let mut own: Option<Option<String>> = None;
     let mut mine = |digest: &str| {
         own.get_or_insert_with(|| {
@@ -114,53 +102,9 @@ pub(crate) fn reclaim_stale(
         .as_deref()
             == Some(digest)
     };
-    let mut done = Vec::new();
-    sweep(
-        runtime,
-        now,
-        digest_of,
-        false,
-        &mut done,
-        &mut |name, digest| reclaim_lock(runtime, me, now, name, digest, &mut mine),
-    );
-    if let Some(cgroup) = own_cgroup() {
-        sweep(
-            &cgroup,
-            now,
-            parent_digest_of,
-            true,
-            &mut done,
-            &mut |name, digest| reclaim_parent(runtime, &cgroup, me, now, name, digest, &mut mine),
-        );
-    }
-    done
-}
-
-/// What one candidate came to; `None`: not a candidate.
-enum Step {
-    Reclaimed,
-    Kept,
-    Busy,
-}
-
-/// One sweep over `dir` (`parents`: the cgroup sweep's outcomes): the
-/// names `keep` accepts from at most
-/// [`BLOCKS_MAX`] blocks, in order from a start that moves with `now`, at
-/// most [`EXAMINE_MAX`] of them and until [`RECLAIM_MAX`] were taken.
-fn sweep(
-    dir: &File,
-    now: i64,
-    keep: fn(&OsStr) -> Option<&str>,
-    parents: bool,
-    done: &mut Vec<Outcome>,
-    one: &mut dyn FnMut(&OsStr, &str) -> Option<Step>,
-) {
-    let names = listed(dir, keep);
-    if names.is_empty() {
-        return;
-    }
-    // 이것을 실패시키는 것: 시작 위치를 now로 돌리지 않는 것(앞쪽 이름이 상한을 매번 채워 뒤쪽이 영영 안 보임).
-    let start = usize::try_from(now.rem_euclid(names.len() as i64)).unwrap_or(0);
+    let mut cgroup: Option<Option<File>> = None;
+    // 이것을 실패시키는 것: 시작 위치를 실행마다 돌리지 않는 것(앞쪽 이름이 상한을 매번 채워 뒤쪽이 영영 안 보임).
+    let start = usize::try_from(seed % names.len() as u64).unwrap_or(0);
     let mut taken = 0;
     // 이것을 실패시키는 것: 살펴보는 이름 수 상한을 지우는 것, 잡은 잠금 대신 결과마다(Busy 포함) 세는 것.
     for name in names
@@ -172,25 +116,42 @@ fn sweep(
         if taken >= RECLAIM_MAX {
             break;
         }
-        let digest = keep(name).expect("listed").to_owned();
-        let step = one(name, &digest);
-        if matches!(step, Some(Step::Reclaimed | Step::Kept)) {
+        let digest = digest_of(name).expect("listed").to_owned();
+        let step = reclaim_one(
+            runtime,
+            me,
+            now,
+            name,
+            &digest,
+            &mut mine,
+            &mut cgroup,
+            own_cgroup,
+        );
+        if matches!(step, Some(Outcome::Reclaimed(_) | Outcome::Kept(_))) {
             taken += 1;
         }
-        done.extend(step.map(|s| match (s, parents) {
-            (Step::Reclaimed, false) => Outcome::Reclaimed(digest),
-            (Step::Kept, false) => Outcome::Kept(digest),
-            (Step::Busy, false) => Outcome::Busy(digest),
-            (Step::Reclaimed, true) => Outcome::ParentReclaimed(digest),
-            (Step::Kept, true) => Outcome::ParentKept(digest),
-            (Step::Busy, true) => Outcome::ParentBusy(digest),
-        }));
+        done.extend(step);
     }
+    done
 }
 
-/// The names of `dir` that `keep` accepts, from at most [`BLOCKS_MAX`]
-/// blocks, sorted (a block's order is the file system's).
-fn listed(dir: &File, keep: fn(&OsStr) -> Option<&str>) -> Vec<OsString> {
+/// A seed for [`reclaim_stale`]'s start: the clock's nanoseconds mixed with
+/// the process id, so runs a fixed number of seconds apart do not repeat it.
+pub(crate) fn start_seed() -> u64 {
+    #[cfg(test)]
+    if let Some(seed) = SEED.with(std::cell::Cell::get) {
+        return seed;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()) ^ d.as_secs());
+    (nanos ^ u64::from(std::process::id()).rotate_left(32)).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        >> 16
+}
+
+/// The session lock names of `dir`, from at most [`BLOCKS_MAX`] blocks,
+/// sorted (a block's order is the file system's).
+fn listed(dir: &File) -> Vec<OsString> {
     let mut names = Vec::new();
     let mut at = 0;
     // 이것을 실패시키는 것: 첫 블록만 읽는 것, 블록 상한을 지우는 것.
@@ -198,7 +159,7 @@ fn listed(dir: &File, keep: fn(&OsStr) -> Option<&str>) -> Vec<OsString> {
         let Ok((next, block)) = sys::directory_batch(dir.as_fd(), at) else {
             break;
         };
-        names.extend(block.into_iter().filter(|n| keep(n).is_some()));
+        names.extend(block.into_iter().filter(|n| digest_of(n).is_some()));
         if next == at {
             break;
         }
@@ -208,15 +169,20 @@ fn listed(dir: &File, keep: fn(&OsStr) -> Option<&str>) -> Vec<OsString> {
     names
 }
 
-/// A stale lock that no round holds, not this session's: removed.
-fn reclaim_lock(
+/// One lock: `None` when it is not a candidate (fresh, missing, this
+/// session's own, or not a lock file).
+#[allow(clippy::too_many_arguments, reason = "one candidate's inputs")]
+fn reclaim_one(
     runtime: &File,
     me: u32,
     now: i64,
     name: &OsStr,
     digest: &str,
     mine: &mut dyn FnMut(&str) -> bool,
-) -> Option<Step> {
+    cgroup: &mut Option<Option<File>>,
+    own_cgroup: &mut dyn FnMut() -> Option<File>,
+) -> Option<Outcome> {
+    let kept = || Some(Outcome::Kept(digest.to_owned()));
     // The name's own stat first: a fresh lock (every live session's) costs
     // the GC this one call.
     let seen = sys::at_stamp(runtime.as_fd(), name).ok()?;
@@ -224,99 +190,10 @@ fn reclaim_lock(
     if now.saturating_sub(seen.ctime.0) < STALE_SECS {
         return None;
     }
-    // 이것을 실패시키는 것: 자기 세션의 잠금을 건너뛰지 않는 것(24시간 넘은 세션이 자기 잠금을 지움).
+    // 이것을 실패시키는 것: 자기 세션의 잠금을 건너뛰지 않는 것(24시간 넘은 세션이 자기 잠금과 부모를 지움).
     if mine(digest) {
         return None;
     }
-    let lock = match take(runtime, me, name, Some(&seen))? {
-        Taken::Held(lock) => lock,
-        Taken::Busy => return Some(Step::Busy),
-        Taken::Changed => return Some(Step::Kept),
-    };
-    let removed = sys::unlink_at(runtime.as_fd(), name).is_ok();
-    drop(lock);
-    Some(if removed { Step::Reclaimed } else { Step::Kept })
-}
-
-/// A parent in this process's own cgroup, not this session's: its lock is
-/// taken (made when missing); a lock that was there must be stale. Removed
-/// with its lock when empty; kept otherwise, with its lock unless this
-/// sweep made it.
-fn reclaim_parent(
-    runtime: &File,
-    cgroup: &File,
-    me: u32,
-    now: i64,
-    parent: &OsStr,
-    digest: &str,
-    mine: &mut dyn FnMut(&str) -> bool,
-) -> Option<Step> {
-    // 이것을 실패시키는 것: 자기 세션의 부모를 건너뛰지 않는 것.
-    if mine(digest) {
-        return None;
-    }
-    let name = format!("{LOCK_PREFIX}{digest}{LOCK_SUFFIX}");
-    let name = OsStr::new(&name);
-    let seen = match sys::at_stamp(runtime.as_fd(), name) {
-        Ok(seen) => Some(seen),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(_) => return None,
-    };
-    // 이것을 실패시키는 것: 원래 있던 잠금의 나이를 보지 않는 것(살아 있는 쉬는 세션의 빈 부모가 지워짐).
-    if seen
-        .as_ref()
-        .is_some_and(|s| now.saturating_sub(s.ctime.0) < STALE_SECS)
-    {
-        return None;
-    }
-    if seen.is_none() {
-        // No lock here: the parent may be another runtime root's session's
-        // (the digest covers the root too), whose round a lock made here
-        // would not exclude. Only a parent made more than a day ago is
-        // taken: cgroupfs never changes a folder's times after it is made
-        // (observed 2026-11-09: mkdir and rmdir of a child, a write to its
-        // cgroup.procs), so its ctime is when it was made.
-        // 이것을 실패시키는 것: 잠금이 없을 때 부모의 나이를 보지 않는 것(다른 runtime 뿌리의 세션 부모가 회차 사이에
-        // 지워짐).
-        let made_at = sys::at_stamp(cgroup.as_fd(), parent).ok()?;
-        if now.saturating_sub(made_at.ctime.0) < STALE_SECS {
-            return None;
-        }
-        // Made here, exclusively: a round that made it first wins and this
-        // parent waits for a later run.
-        drop(sys::create_file_at(runtime.as_fd(), name, 0o600).ok()?);
-    }
-    let made = seen.is_none();
-    let lock = match take(runtime, me, name, seen.as_ref())? {
-        Taken::Held(lock) => lock,
-        Taken::Busy => return Some(Step::Busy),
-        Taken::Changed => return Some(Step::Kept),
-    };
-    // 이것을 실패시키는 것: 비지 않은 부모(남은 단위 cgroup)를 두고 잠금을 지우는 것, 방금 만든 잠금을 남기는 것.
-    let step = match sys::remove_dir_at(cgroup.as_fd(), parent) {
-        Ok(()) => Step::Reclaimed,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Step::Reclaimed,
-        Err(_) => Step::Kept,
-    };
-    if matches!(step, Step::Reclaimed) || made {
-        let _ = sys::unlink_at(runtime.as_fd(), name);
-    }
-    drop(lock);
-    Some(step)
-}
-
-enum Taken {
-    Held(File),
-    Busy,
-    Changed,
-}
-
-/// Opens and locks `name` without blocking. With `seen`, the locked file
-/// must be exactly the one stat'ed then, so its age still holds: a file put
-/// under the name before the open (Linux may give it the freed inode
-/// number) or one changed since (chmod moves its ctime) is `Changed`. The
-/// whole stamp, ctime with nanoseconds included. `None`: not a lock file.
-fn take(runtime: &File, me: u32, name: &OsStr, seen: Option<&sys::Stamp>) -> Option<Taken> {
     #[cfg(test)]
     BEFORE_OPEN.with(|hook| {
         if let Some(mut hook) = hook.borrow_mut().take() {
@@ -325,7 +202,6 @@ fn take(runtime: &File, me: u32, name: &OsStr, seen: Option<&sys::Stamp>) -> Opt
     });
     let file = sys::open_data_at_nofollow(runtime.as_fd(), name).ok()?;
     snapshot_store::check_data(&file, 0, me).ok()?;
-    let name_str = name.to_str()?;
     #[cfg(test)]
     AFTER_OPEN.with(|hook| {
         if let Some(mut hook) = hook.borrow_mut().take() {
@@ -335,24 +211,48 @@ fn take(runtime: &File, me: u32, name: &OsStr, seen: Option<&sys::Stamp>) -> Opt
     // A round holds its lock: the non-blocking lock fails and it stays.
     // 이것을 실패시키는 것: 잠금 없이 지우는 것(회차 중인 세션의 잠금과 부모가 지워짐).
     let Ok(lock) = sys::try_lock(file) else {
-        return Some(Taken::Busy);
+        return Some(Outcome::Busy(digest.to_owned()));
     };
     let lock = lock.into_inherited_file();
+    // The locked file is exactly the one stat'ed above, so its age still
+    // holds: a file put under the name before the open (Linux may give it
+    // the freed inode number) or one changed since (chmod moves its ctime)
+    // is kept. The whole stamp, ctime with nanoseconds included.
     // 이것을 실패시키는 것: 잠근 fd의 stamp를 처음 stat과 비교하지 않는 것
     // (a_name_replaced_before_the_open_is_kept, a_lock_changed_after_its_stat_is_kept).
-    if let Some(seen) = seen
-        && sys::file_stamp(&lock).ok()? != *seen
-    {
-        return Some(Taken::Changed);
+    // A name replaced between the open and the lock needs no check of its
+    // own: unlinking or renaming over a name moves the old file's ctime, so
+    // the stamp differs then too (a_name_replaced_after_the_open_is_kept).
+    if sys::file_stamp(&lock).ok()? != seen {
+        return kept();
     }
-    // The name may have been replaced between the open and the lock (with
-    // `seen`, the stamp above already differs: unlinking a name moves the
-    // old file's ctime; a lock made here has no `seen`).
-    // 이것을 실패시키는 것: 잠근 뒤 이름 재확인을 지우는 것(a_made_lock_replaced_after_the_open_is_kept).
-    if snapshot_store::same_name(&lock, runtime.as_fd(), name_str).is_err() {
-        return Some(Taken::Changed);
+    if !remove_parent(digest, cgroup, own_cgroup) {
+        return kept();
     }
-    Some(Taken::Held(lock))
+    // A refused charge here leaves a stale lock with no parent: the next run
+    // takes it again (an_unfinished_reclaim_is_finished_by_the_next_run).
+    sys::unlink_at(runtime.as_fd(), name).ok()?;
+    drop(lock);
+    Some(Outcome::Reclaimed(digest.to_owned()))
+}
+
+/// Removes the empty cgroup parent of `digest` in this process's own
+/// cgroup; `true` when none is there now (removed, or never there, or no
+/// cgroup of ours). A parent with a unit cgroup left stays.
+fn remove_parent(
+    digest: &str,
+    cgroup: &mut Option<Option<File>>,
+    own_cgroup: &mut dyn FnMut() -> Option<File>,
+) -> bool {
+    let Some(own) = cgroup.get_or_insert_with(own_cgroup) else {
+        return true;
+    };
+    let parent = format!("bingsu-cmd-{digest}");
+    // 이것을 실패시키는 것: 비지 않은 부모(남은 단위 cgroup)를 두고 잠금을 지우는 것, 부모가 없을 때 잠금을 남기는 것.
+    match sys::remove_dir_at(own.as_fd(), OsStr::new(&parent)) {
+        Ok(()) => true,
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+    }
 }
 
 /// This process's own cgroup folder (Linux), for [`reclaim_stale`].
@@ -378,6 +278,8 @@ pub(crate) fn now_secs() -> i64 {
 thread_local! {
     /// Tests stand in a later wall clock (a lock's ctime cannot be set back).
     pub(crate) static NOW: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    /// Tests pick the start (`start_seed`).
+    pub(crate) static SEED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static BEFORE_OPEN: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_OPEN: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
 }
@@ -434,9 +336,14 @@ mod tests {
     fn run_as(s: &Scratch, now: i64, session: Option<&[u8]>) -> Vec<Outcome> {
         let runtime = File::open(s.runtime()).unwrap();
         let cgroup = s.cgroup();
-        reclaim_stale(&runtime, sys::current_uid(), now, session, &mut || {
-            File::open(&cgroup).ok()
-        })
+        reclaim_stale(
+            &runtime,
+            sys::current_uid(),
+            now,
+            start_seed(),
+            session,
+            &mut || File::open(&cgroup).ok(),
+        )
     }
 
     fn hold(s: &Scratch, d: &str) -> sys::FileLock {
@@ -509,9 +416,10 @@ mod tests {
             ctime = ctime.max(lock(&s.runtime(), &digest(i)));
         }
         let _held: Vec<_> = (0..5).map(|i| hold(&s, &digest(i))).collect();
-        // A start of 0 (now a multiple of 6): the free lock is the last name seen.
-        let now = (ctime + STALE_SECS).div_euclid(6) * 6 + 6;
-        let done = run(&s, now);
+        // A start of 0: the free lock is the last name seen.
+        SEED.with(|c| c.set(Some(0)));
+        let done = run(&s, ctime + STALE_SECS);
+        SEED.with(|c| c.set(None));
         assert_eq!(
             done.last(),
             Some(&Outcome::Reclaimed(digest(5))),
@@ -540,8 +448,8 @@ mod tests {
         );
     }
 
-    // 시작 위치가 now로 돌아, 쥔 잠금 33개 뒤(정렬 순)의 오래된 잠금 셋도 실행을 거듭하면 모두 회수된다. 이것을
-    // 실패시키는 것: 시작 위치를 now로 돌리지 않는 것(앞의 32개만 매번 봄).
+    // 시작 위치가 seed로 돌아, 쥔 잠금 33개 뒤(정렬 순)의 오래된 잠금 셋도 실행을 거듭하면 모두 회수된다. 이것을
+    // 실패시키는 것: 시작 위치를 seed로 돌리지 않는 것(앞의 32개만 매번 봄).
     #[test]
     fn repeated_runs_reach_every_lock() {
         let s = Scratch::new("rotate");
@@ -551,8 +459,10 @@ mod tests {
         }
         let _held: Vec<_> = (0..33).map(|i| hold(&s, &digest(i))).collect();
         for k in 0..36 {
-            run(&s, ctime + STALE_SECS + k);
+            SEED.with(|c| c.set(Some(k)));
+            run(&s, ctime + STALE_SECS);
         }
+        SEED.with(|c| c.set(None));
         for i in 33..36 {
             assert!(!exists(&s.runtime(), &digest(i)), "{i}");
         }
@@ -563,24 +473,26 @@ mod tests {
     #[test]
     fn the_listing_reads_at_most_four_blocks() {
         let s = Scratch::new("blocks");
-        let mut ctime = 0;
-        for i in 0..5 {
-            ctime = ctime.max(lock(&s.runtime(), &digest(i)));
-        }
-        let names: Vec<OsString> = (0..5)
-            .map(|i| format!("command-{}.lock", digest(i)).into())
+        let ctime = lock(&s.runtime(), &digest(1)).max(lock(&s.runtime(), &digest(4)));
+        // Blocks 0-4: the second holds digest 1, the fifth digest 4, the
+        // rest nothing, so the four-lock limit is never what stops the run.
+        let blocks: Vec<Vec<OsString>> = (0..5)
+            .map(|k| match k {
+                1 => vec![format!("command-{}.lock", digest(1)).into()],
+                4 => vec![format!("command-{}.lock", digest(4)).into()],
+                _ => Vec::new(),
+            })
             .collect();
         let _reader = sys::FixtureDirectoryReader::install(Box::new(move |_, at| {
             let k = usize::try_from(at).unwrap();
-            Ok(match names.get(k) {
-                Some(n) => (at + 1, vec![n.clone()]),
+            Ok(match blocks.get(k) {
+                Some(names) => (at + 1, names.clone()),
                 None => (at, Vec::new()),
             })
         }));
         let done = run(&s, ctime + STALE_SECS);
-        assert!(done.contains(&Outcome::Reclaimed(digest(1))), "{done:?}");
-        assert!(exists(&s.runtime(), &digest(4)), "{done:?}");
-        assert!(!done.iter().any(|o| *o == Outcome::Reclaimed(digest(4))));
+        assert_eq!(done, [Outcome::Reclaimed(digest(1))]);
+        assert!(exists(&s.runtime(), &digest(4)));
     }
 
     // 자기 세션의 잠금은 오래돼도 남는다(회차가 GC 전에 놓음). 양성 대조: 같은 잠금을 세션 없이 돌리면 회수된다.
@@ -672,8 +584,8 @@ mod tests {
         );
     }
 
-    // 연 뒤 이름이 다른 파일로 바뀌면 그 이름은 지우지 않는다. 이것을 실패시키는 것: 잠근 뒤 이름 재확인을 지우는
-    // 것(바뀐 파일을 지움).
+    // 연 뒤 이름이 다른 파일로 바뀌면 그 이름은 지우지 않는다(옛 파일의 unlink가 ctime을 바꿔 stamp가 다름). 이것을
+    // 실패시키는 것: 잠근 fd의 stamp를 처음 stat과 비교하지 않는 것(바뀐 파일을 지움).
     #[test]
     fn a_name_replaced_after_the_open_is_kept() {
         let s = Scratch::new("swap");
@@ -682,6 +594,9 @@ mod tests {
         let swap = path.clone();
         AFTER_OPEN.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
+                // Past the kernel's coarse timestamp tick, so the unlink moves
+                // the old file's ctime, as it always does for a day-old lock.
+                std::thread::sleep(std::time::Duration::from_millis(50));
                 std::fs::remove_file(&swap).unwrap();
                 std::fs::write(&swap, b"").unwrap();
             }))
@@ -723,129 +638,89 @@ mod tests {
         p
     }
 
-    // 부모 회수(C 판정): 자기 cgroup 목록에서 찾는다. 잠금이 없는 빈 부모는 지우고 잠금을 남기지 않는다. 단위가 남은
-    // 부모는 남고, 방금 만든 잠금은 지운다. 새 잠금(살아 있는 쉬는 세션)의 부모는 건드리지 않는다. 오래된 잠금과
-    // 빈 부모는 둘 다 간다. 잠금이 없고 하루 안에 만든 부모(다른 runtime 뿌리의 세션)는 남는다. 이것을 실패시키는 것:
-    // 부모를 지우지 않는 것, 비지 않은 부모를 지운 것으로 보는 것, 방금 만든 잠금을 남기는 것, 원래 있던 잠금의 나이를
-    // 보지 않는 것, 잠금이 없을 때 부모의 나이를 보지 않는 것.
+    // 판정 D: 부모는 이 뿌리의 오래된 잠금을 잡은 뒤에만 본다. 빈 부모는 잠금과 함께 가고, 단위가 남은 부모는
+    // 잠금과 함께 남고, 부모가 없으면 잠금만 간다. 잠금 없는 부모(다른 runtime 뿌리의 것)와 새 잠금의 부모는
+    // 건드리지 않는다. 이것을 실패시키는 것: 부모를 지우지 않는 것, 비지 않은 부모를 두고 잠금을 지우는 것, 부모가
+    // 없을 때 잠금을 남기는 것.
     #[test]
-    fn parents_are_found_in_the_cgroup_listing() {
+    fn a_parent_goes_only_through_its_stale_lock() {
         let s = Scratch::new("parents");
-        lock(&s.runtime(), &digest(3));
-        lock(&s.runtime(), &digest(4));
+        let mut ctime = 0;
+        for i in 1..=3 {
+            ctime = ctime.max(lock(&s.runtime(), &digest(i)));
+        }
         let empty = parent(&s, &digest(1), false);
         let busy = parent(&s, &digest(2), true);
-        let alive = parent(&s, &digest(3), false);
-        let old = parent(&s, &digest(4), false);
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // digest 3's lock made again, as a new round would: one second
-        // younger than the boundary while everything else is past it.
-        let young = lock_again(&s.runtime(), &digest(3));
-        let fresh = parent(&s, &digest(7), false);
-        let done = run(&s, young + STALE_SECS - 1);
-        assert!(
-            done.contains(&Outcome::ParentReclaimed(digest(1))),
-            "{done:?}"
+        let foreign = parent(&s, &digest(4), false);
+        let mut done = run(&s, ctime + STALE_SECS);
+        done.sort_by_key(|o| format!("{o:?}"));
+        assert_eq!(
+            done,
+            [
+                Outcome::Kept(digest(2)),
+                Outcome::Reclaimed(digest(1)),
+                Outcome::Reclaimed(digest(3))
+            ]
         );
         assert!(!empty.exists() && !exists(&s.runtime(), &digest(1)));
-        assert!(done.contains(&Outcome::ParentKept(digest(2))), "{done:?}");
-        assert!(busy.exists() && !exists(&s.runtime(), &digest(2)));
-        assert!(
-            alive.exists() && exists(&s.runtime(), &digest(3)),
-            "{done:?}"
-        );
-        assert!(
-            done.contains(&Outcome::ParentReclaimed(digest(4))),
-            "{done:?}"
-        );
-        assert!(!old.exists() && !exists(&s.runtime(), &digest(4)));
-        // A parent made within the day with no lock here: another root's.
-        assert!(
-            fresh.exists() && !exists(&s.runtime(), &digest(7)),
-            "{done:?}"
-        );
+        assert!(busy.exists() && exists(&s.runtime(), &digest(2)));
+        assert!(!exists(&s.runtime(), &digest(3)));
+        assert!(foreign.exists());
     }
 
-    /// The lock of `d` made again (a later ctime), as a new round would.
-    fn lock_again(at: &Path, d: &str) -> i64 {
-        std::fs::remove_file(at.join(format!("command-{d}.lock"))).unwrap();
-        lock(at, d)
-    }
-
-    // 원래 있던 오래된 잠금과 단위가 남은 부모는 둘 다 남는다(잠금 회수가 먼저 닿지 않은 경우: 부모 회수만 부름).
-    // 이것을 실패시키는 것: 부모를 지우지 못했을 때도 원래 있던 잠금을 지우는 것.
+    // rmdir과 unlink 사이에 예산이 바닥나면 오래된 잠금이 부모 없이 남고, 다음 실행이 그것을 마저 지운다. 이것을
+    // 실패시키는 것: 부모가 없을 때 잠금을 남기는 것(다음 실행이 끝내지 못함).
     #[test]
-    fn a_kept_parent_keeps_the_lock_it_found() {
-        let s = Scratch::new("parent-kept");
-        let ctime = lock(&s.runtime(), &digest(5));
-        let busy = parent(&s, &digest(5), true);
-        let runtime = File::open(s.runtime()).unwrap();
-        let cgroup = File::open(s.cgroup()).unwrap();
-        let name = format!("bingsu-cmd-{}", digest(5));
-        let step = reclaim_parent(
-            &runtime,
-            &cgroup,
-            sys::current_uid(),
-            ctime + STALE_SECS,
-            OsStr::new(&name),
-            &digest(5),
-            &mut |_| false,
-        );
-        assert!(matches!(step, Some(Step::Kept)));
-        assert!(busy.exists() && exists(&s.runtime(), &digest(5)));
+    fn an_unfinished_reclaim_is_finished_by_the_next_run() {
+        let s = Scratch::new("unfinished");
+        let ctime = lock(&s.runtime(), &digest(1));
+        let p = parent(&s, &digest(1), false);
+        // The calls of the whole reclaim, then one fewer: the unlink, the
+        // last charge, is refused.
+        let used = {
+            let probe = Scratch::new("unfinished-probe");
+            let c = lock(&probe.runtime(), &digest(1));
+            parent(&probe, &digest(1), false);
+            let meter = sys::CollectionMeter::fixture_operations(4_096);
+            assert_eq!(run(&probe, c + STALE_SECS), [Outcome::Reclaimed(digest(1))]);
+            meter.used()
+        };
+        {
+            let _meter = sys::CollectionMeter::fixture_operations(sys::CHECKPOINT_OPS + used - 1);
+            assert_eq!(run(&s, ctime + STALE_SECS), []);
+        }
+        assert!(!p.exists() && exists(&s.runtime(), &digest(1)));
+        assert_eq!(run(&s, ctime + STALE_SECS), [Outcome::Reclaimed(digest(1))]);
+        assert!(!exists(&s.runtime(), &digest(1)));
     }
 
-    // 부모 회수가 방금 만든 잠금(처음 stat이 없음)을 연 뒤 이름이 다른 파일로 바뀌면 그 파일도 부모도 지우지 않는다.
-    // 이것을 실패시키는 것: 잠근 뒤 이름 재확인을 지우는 것(바뀐 파일을 지움; 잠금 회수에서는 stamp 비교도 잡음).
+    // 단위가 남은 부모의 잠금 다섯(Kept, 상한에 셈)이 앞에 있어도, 실행마다 다른 seed로 시작하면 정렬 순 맨 뒤의
+    // 오래된 잠금에 닿는다. 이것을 실패시키는 것: 시작 위치를 seed로 돌리지 않는 것.
     #[test]
-    fn a_made_lock_replaced_after_the_open_is_kept() {
-        let s = Scratch::new("made-swap");
-        let empty = parent(&s, &digest(8), false);
-        let path = s.runtime().join(format!("command-{}.lock", digest(8)));
-        let swap = path.clone();
-        AFTER_OPEN.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                std::fs::remove_file(&swap).unwrap();
-                std::fs::write(&swap, b"").unwrap();
-            }))
-        });
-        let done = run(&s, now_secs() + STALE_SECS + 1);
-        assert!(done.contains(&Outcome::ParentKept(digest(8))), "{done:?}");
-        assert!(path.exists() && empty.exists());
-    }
-
-    // 회차가 쥔 잠금의 부모는 남는다. 자기 세션의 부모도 남는다. 이것을 실패시키는 것: 부모 회수에서 비차단 잠금
-    // 실패를 무시하는 것, 자기 세션의 부모를 건너뛰지 않는 것.
-    #[test]
-    fn held_and_own_parents_stay() {
-        use std::os::unix::fs::MetadataExt;
-        let s = Scratch::new("parent-held");
-        let root = std::fs::metadata(s.runtime()).unwrap();
-        let session = b"0123456789abcdef0123456789abcdef";
-        let own_name = lock_name(session, (root.dev(), root.ino()));
-        let own = digest_of(OsStr::new(&own_name)).unwrap().to_owned();
-        let ctime = lock(&s.runtime(), &digest(6));
-        let held = parent(&s, &digest(6), false);
-        let mine = parent(&s, &own, false);
-        let _hold = hold(&s, &digest(6));
-        let done = run_as(&s, ctime + STALE_SECS, Some(session));
-        assert!(done.contains(&Outcome::ParentBusy(digest(6))), "{done:?}");
-        assert!(held.exists() && mine.exists(), "{done:?}");
-    }
-
-    // 단위가 남은 부모 다섯이 상한(4)을 채워도 실행을 거듭하면 정렬 순 맨 뒤의 빈 부모가 회수된다. 이것을 실패시키는
-    // 것: cgroup 목록의 시작 위치를 돌리지 않는 것.
-    #[test]
-    fn repeated_runs_reach_every_parent() {
-        let s = Scratch::new("parent-rotate");
+    fn kept_locks_do_not_hide_the_rest_over_runs() {
+        let s = Scratch::new("kept-rotate");
+        let mut ctime = 0;
+        for i in 0..6 {
+            ctime = ctime.max(lock(&s.runtime(), &digest(i)));
+        }
         for i in 0..5 {
             parent(&s, &digest(i), true);
         }
-        let last = parent(&s, &digest(9), false);
-        let now = now_secs() + STALE_SECS + 1;
-        for k in 0..6 {
-            run(&s, now + k);
+        for seed in [7u64, 1 << 40, 12_345_678_901, 3, 0x9e37_79b9] {
+            SEED.with(|c| c.set(Some(seed)));
+            run(&s, ctime + STALE_SECS);
         }
-        assert!(!last.exists());
+        SEED.with(|c| c.set(None));
+        assert!(!exists(&s.runtime(), &digest(5)));
+    }
+
+    // start_seed는 같은 초 안에서도 되풀이되지 않는다(나노초와 pid를 섞음). 이것을 실패시키는 것: seed를 초로만
+    // 정하는 것.
+    #[test]
+    fn start_seeds_differ_within_a_second() {
+        let a = start_seed();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = start_seed();
+        assert_ne!(a, b);
     }
 }
