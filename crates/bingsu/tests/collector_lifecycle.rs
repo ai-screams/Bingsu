@@ -258,14 +258,122 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// A folder this process made (`create_dir`, never one that was already
+/// there), removed when the guard drops. Only what it made is removed, so a
+/// symlinked ancestor never leads to deleting someone else's folder.
+struct OwnedDir(PathBuf);
+
+impl OwnedDir {
+    /// A new folder `name` under `parent`; `name-1`, `name-2`, ... when one
+    /// by that name is already there (left by an earlier process with the
+    /// same pid, or anyone's).
+    fn create(parent: &std::path::Path, name: &str) -> OwnedDir {
+        for n in 0..1000 {
+            let path = if n == 0 {
+                parent.join(name)
+            } else {
+                parent.join(format!("{name}-{n}"))
+            };
+            match std::fs::create_dir(&path) {
+                Ok(()) => return OwnedDir(std::fs::canonicalize(path).unwrap()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("cannot make {}: {e}", path.display()),
+            }
+        }
+        panic!("no free folder name for {name} under {}", parent.display())
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn remove(&self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl Drop for OwnedDir {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+/// The environment word naming the folder of the process that spawned this
+/// one: a child makes its folder inside it, so the parent's removal takes a
+/// killed child's folder too.
+const LIFECYCLE_DIR: &str = "BINGSU_LIFECYCLE_DIR";
+
+/// This process's fixture folder: under the parent's (a child) or under
+/// `target`, removed at exit (statics are never dropped, so through atexit).
+fn owned_dir() -> &'static OwnedDir {
+    static DIR: OnceLock<OwnedDir> = OnceLock::new();
+    extern "C" fn remove_at_exit() {
+        if let Some(dir) = DIR.get() {
+            dir.remove();
+        }
+    }
+    DIR.get_or_init(|| {
+        #[expect(clippy::disallowed_methods, reason = "test-only fixture folder")]
+        let parent = std::env::var_os(LIFECYCLE_DIR).map(PathBuf::from);
+        let child = parent.is_some();
+        let parent = parent.unwrap_or_else(|| {
+            let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+            std::fs::create_dir_all(&target).unwrap();
+            target
+        });
+        let dir = OwnedDir::create(
+            &parent,
+            &format!("collector-lifecycle-{}", std::process::id()),
+        );
+        if !child {
+            // SAFETY: registers a C-ABI function with no arguments that only
+            // removes this process's own folder.
+            assert_eq!(unsafe { libc::atexit(remove_at_exit) }, 0);
+        }
+        dir
+    })
+}
+
+/// `command` with this process's folder named for its children.
+fn spawned(mut command: Command) -> Command {
+    command.env(LIFECYCLE_DIR, owned_dir().path());
+    command
+}
+
+// 이것을 실패시키는 것: 이미 있던 폴더를 받아 쓰는 것(create_dir_all, 남의 폴더를 지우게 됨), 가드가 만든
+// 폴더를 지우지 않는 것, 이름이 겹칠 때 다음 이름을 찾지 않는 것. 조상이 symlink여도 그 대상 쪽의 같은 이름
+// 폴더는 남는다.
+#[test]
+fn owned_dir_removes_only_what_it_made() {
+    let base = std::env::temp_dir().join(format!("bingsu-owned-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let real = base.join("real");
+    std::fs::create_dir_all(real.join("collector-lifecycle-7")).unwrap();
+    std::fs::write(real.join("collector-lifecycle-7/theirs"), b"x").unwrap();
+    let link = base.join("target");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let made = OwnedDir::create(&link, "collector-lifecycle-7");
+    let mine = made.path().to_owned();
+    assert_eq!(
+        mine,
+        std::fs::canonicalize(real.join("collector-lifecycle-7-1")).unwrap()
+    );
+    std::fs::write(mine.join("peer"), b"").unwrap();
+    drop(made);
+    assert!(!mine.exists(), "the guard's own folder stays");
+    assert!(
+        real.join("collector-lifecycle-7/theirs").is_file(),
+        "a folder it did not make was removed"
+    );
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
 fn peer() -> &'static PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target")
-            .join(format!("collector-lifecycle-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let dir = std::fs::canonicalize(dir).unwrap();
+        // A folder of this run's own: the create_new locks below never meet
+        // one an earlier process left.
+        let dir = owned_dir().path().to_owned();
         let exe = dir.join("peer");
         let source = dir.join("peer.c");
         std::fs::write(&source, PEER).unwrap();
@@ -823,7 +931,7 @@ fn ready_cannot_raise_the_memory_allowance() {
 }
 
 fn isolated(name: &str) -> std::process::Output {
-    Command::new(std::env::current_exe().unwrap())
+    spawned(Command::new(std::env::current_exe().unwrap()))
         .args([
             "--exact",
             name,
@@ -834,6 +942,88 @@ fn isolated(name: &str) -> std::process::Output {
         .output()
         .unwrap()
 }
+/// The exit status a child gives when it misses only a wall-clock bound a
+/// loaded host can miss. A status, not text: paths and backtraces in a
+/// failure's output never read as a missed bound. Every other failure is
+/// judged at once.
+const OVERRUN_EXIT: i32 = 86;
+const OVERRUN_TRIES: usize = 3;
+
+/// How far past `bound` it is since `started`, if it is.
+fn missed(started: Instant, bound: Duration) -> Option<Duration> {
+    let elapsed = started.elapsed();
+    (elapsed >= bound).then_some(elapsed)
+}
+
+/// In a child: exit with OVERRUN_EXIT when `started` is `bound` or more ago.
+fn within(started: Instant, bound: Duration) {
+    if let Some(elapsed) = missed(started, bound) {
+        eprintln!("timing bound exceeded: {elapsed:?} >= {bound:?}");
+        // SAFETY: _exit takes no pointers and never returns; stderr is
+        // unbuffered, so the line above is already written.
+        unsafe { libc::_exit(OVERRUN_EXIT) }
+    }
+}
+
+/// A child that exited on a missed time bound only.
+fn overran(out: &std::process::Output) -> bool {
+    out.status.code() == Some(OVERRUN_EXIT)
+}
+
+/// `run` up to `tries` times while `overran` holds; the last result is the
+/// caller's to judge.
+fn retry_overrun<T>(tries: usize, mut run: impl FnMut() -> T, overran: impl Fn(&T) -> bool) -> T {
+    for _ in 1..tries {
+        let result = run();
+        if !overran(&result) {
+            return result;
+        }
+    }
+    run()
+}
+
+// 이것을 실패시키는 것: 시간 초과 종료 코드가 아닌 실패도 재시도하는 것(출력에 표식 글자가 섞인 실패 포함),
+// 재시도하지 않는 것, tries를 넘어 도는 것, 경계 판정을 뒤집는 것.
+#[test]
+fn retry_overrun_retries_only_a_missed_time_bound() {
+    use std::os::unix::process::ExitStatusExt;
+    let out = |code: i32, text: &str| std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: text.as_bytes().to_vec(),
+        stderr: text.as_bytes().to_vec(),
+    };
+    let calls = |outs: Vec<std::process::Output>| {
+        let mut outs = outs.into_iter();
+        let mut n = 0;
+        let last = retry_overrun(
+            OVERRUN_TRIES,
+            || {
+                n += 1;
+                outs.next().unwrap()
+            },
+            overran,
+        );
+        (n, last.status.success())
+    };
+    let over = || out(OVERRUN_EXIT, "timing bound exceeded: 600ms >= 500ms");
+    assert_eq!(calls(vec![out(0, ""), over()]), (1, true));
+    assert_eq!(calls(vec![over(), over(), out(0, "")]), (3, true));
+    assert_eq!(calls(vec![over(), over(), over(), out(0, "")]), (3, false));
+    // A failed assertion whose output carries the marker text (a checkout
+    // path, a backtrace) is judged at once.
+    let mixed = "/home/timing bound exceeded/src/lib.rs: assertion failed: report.reaped";
+    assert_eq!(calls(vec![out(101, mixed), out(0, "")]), (1, false));
+    assert!(!overran(&out(0, mixed)));
+    assert_eq!(missed(Instant::now(), Duration::from_secs(60)), None);
+    assert!(
+        missed(
+            Instant::now() - Duration::from_millis(10),
+            Duration::from_millis(5)
+        )
+        .is_some()
+    );
+}
+
 fn passed(out: &std::process::Output) {
     assert!(
         out.status.success()
@@ -945,11 +1135,20 @@ fn filtered_watchdog_child() {
 fn publisher_stall_does_not_stop_watchdog() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
     use std::os::unix::process::ExitStatusExt;
-    let start = Instant::now();
-    let out = isolated("stalled_publisher_child");
-    assert_eq!(out.status.signal(), Some(libc::SIGKILL), "{out:?}");
-    assert!(String::from_utf8_lossy(&out.stdout).contains("publisher entered"));
-    assert!(start.elapsed() < Duration::from_secs(2));
+    // The kill and the stall are judged every time; only the 2 s bound,
+    // which a loaded host can miss, earns another run.
+    let elapsed = retry_overrun(
+        OVERRUN_TRIES,
+        || {
+            let start = Instant::now();
+            let out = isolated("stalled_publisher_child");
+            assert_eq!(out.status.signal(), Some(libc::SIGKILL), "{out:?}");
+            assert!(String::from_utf8_lossy(&out.stdout).contains("publisher entered"));
+            start.elapsed()
+        },
+        |elapsed| *elapsed >= Duration::from_secs(2),
+    );
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
 }
 #[test]
 #[ignore = "publisher stalls while a live collector retains its lock"]
@@ -1133,7 +1332,7 @@ fn verified_screen_spawns_once_before_helper_tsync() {
         "unsafe-context",
         "unsafe-screen",
     ] {
-        let out = Command::new(std::env::current_exe().unwrap())
+        let out = spawned(Command::new(std::env::current_exe().unwrap()))
             .args([
                 "--exact",
                 "verified_screen_child",
@@ -1153,7 +1352,7 @@ fn verified_screen_spawns_once_before_helper_tsync() {
 #[test]
 fn snapshot_lock_is_not_extended_by_collection() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
-    let out = Command::new(std::env::current_exe().unwrap())
+    let out = spawned(Command::new(std::env::current_exe().unwrap()))
         .args([
             "--exact",
             "verified_screen_child",
@@ -1384,7 +1583,7 @@ fn helper_exit_and_worker_orphan_do_not_hold_shell() {
             .unwrap();
         drop(file);
         let start = Instant::now();
-        let out = Command::new(std::env::current_exe().unwrap())
+        let out = spawned(Command::new(std::env::current_exe().unwrap()))
             .args([
                 "--exact",
                 "orphan_helper_child",
@@ -1738,7 +1937,11 @@ fn thread_failure_child() {
 #[test]
 fn interrupted_poll_preserves_absolute_deadline() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
-    passed(&isolated("interrupted_poll_child"));
+    passed(&retry_overrun(
+        OVERRUN_TRIES,
+        || isolated("interrupted_poll_child"),
+        overran,
+    ));
 }
 #[test]
 #[ignore = "isolates a non-restarting signal handler and interrupts the supervisor poll"]
@@ -1783,7 +1986,7 @@ fn interrupted_poll_child() {
             > 0,
         "the poll syscall must actually return EINTR"
     );
-    assert!(started.elapsed() < Duration::from_millis(500));
+    within(started, Duration::from_millis(500));
 }
 
 // 이것을 실패시키는 것: 정적 C peer의 payload·길이가 같은 요청 binding의 Update 인코딩과 달라지는 것.

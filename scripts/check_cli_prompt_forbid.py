@@ -81,12 +81,12 @@ TCB_SHA256 = {
     "crates/bingsu/src/prompt_io.rs": "31dc5ba3b067a86a6f3ca2b3e4c849013259ae5e3882b592115bac846cff4d2e",
     "crates/bingsu/src/prompt.rs": "6887ba8a12325f477ba2f02755a4ef505d2a9975c89403c79204d15166ade6b7",
     "crates/bingsu/src/main.rs": "012b20fb9bd130c577497c3dc8da4ccc19305c601d7aeaed35f6c7301f2e52b8",
-    "crates/bingsu/src/relay.rs": "aac26af4519aaca3d43d0c1fb2c48332d3e6611a47276378e8a490687af2556e",
+    "crates/bingsu/src/relay.rs": "68edcbba9cf5e5833a60ef35912df1c4a115d2c7455f09cb2b229ab65687b658",
     "crates/bingsu-core/src/fs_trust.rs": "cc71c39796a8fbb553ab678ada14860caa14a5f57b09591b0669e9f654575df9",
     "crates/bingsu-core/src/handoff.rs": "212b609746503fca73852e0c2f9e18d0928328adf1ba57d54d2115aa7de65b14",
     "crates/bingsu-core/src/command/response.rs": "76794b243832e39756e20e436383ad1919ac5a94b7f079b529f59db3e9d05a69",
     "crates/bingsu-core/src/command/display.rs": "e1fcbe7c243614e6cc11215504590280f6dad9ff176cd6faf278e72d0c420047",
-    "crates/bingsu-core/src/command/path.rs": "2ad44e19f8a5d9b1357a11ec84320738fbe7eec7ff9a1bf8fa38b135949eed98",
+    "crates/bingsu-core/src/command/path.rs": "37fd52810ec833f5235b11dd7d9797d496edc59290b9b1ecfcb48d49b9105177",
     # The prompt links these and they decide what it reads and draws: the
     # unit judgement and digests display.rs checks (plan.rs, wire.rs), the
     # builtin languages' environment digest (builtin.rs), the front's read

@@ -92,9 +92,9 @@ that, after one leading `v`, starts with a digit and reads as a version: `deno 2
   the files are gone, the segment hides after the next round that runs commands. With `cache` set and no other
   command or built-in language needing a round, that can wait until the cache time ends. A round whose collection
   did not answer (for example, out of time) keeps the last value.
-- At most 16 user languages are looked for, in config order. When they do not fit beside the built-in languages
-  drawn (16 together) or the rest of the collection request, none of the user languages are looked for, so none of
-  them run.
+- At most 16 user languages are looked for, in config order. The built-in languages drawn come first and count
+  toward the same 16. A user language that does not fit beside them, or in the rest of the collection request, is
+  not looked for (so it does not run); later ones that still fit are.
 - With `cwd = "untrusted-current"`, an interpreter that is a version manager's shim (mise's links, for example) lets
   the repository's files choose which version, and so which program, runs. A command carries the same risk, but a
   language segment is where this setting is likely to be chosen, to show each project's version.
@@ -145,6 +145,9 @@ The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt
   inside the repository the shell is in, so a checked-out repository cannot place a program under a command's name.
 - Scripts must name an absolute interpreter on their first line; `#!/usr/bin/env` is refused because it would look
   the interpreter up in `PATH`.
+- A program that is setuid or setgid, or on Linux carries file capabilities (for example `ping` on Debian), does not
+  run, as a command or as a built-in language's version program, on every system. `config check` names a command
+  segment's program with that reason (W411).
 - The first line of the output, at most 4 KB, is the value. A failed command (nonzero exit, timeout) shows nothing
   and is not run again for 10 seconds, unless its keys or the values its result depends on change (the passed
   variables, `TERM` aside unless `env_allow` names it).

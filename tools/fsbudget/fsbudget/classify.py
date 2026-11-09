@@ -251,6 +251,11 @@ def helper_kind(c: Call) -> str | None:
         return "unknown-fs"
     if c.name == "chdir":
         return "cwd" if args == ['"/"'] else "unknown-fs"
+    if c.name == "fgetxattr" and len(args) > 1 and args[1] == '"security.capability"':
+        # exec_path's file-capability check of a target (U-33), on its
+        # descriptor only. 이것을 실패시키는 것: fd 확인을 지우는 것(경로 없는 fd도 caps가 됨).
+        identity = fd_identity(args[0])
+        return "caps" if identity and identity.startswith("file:") else "unknown-fs"
     if c.name == "umask":
         return "umask"
     if c.name == "uname":

@@ -179,10 +179,12 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     if unsafe { libc::chdir(folder.as_ptr()) } != 0 {
         return Err(RELAY_EXEC);
     }
-    // U-17: a setuid, setgid or file-capability target runs, but without
-    // gaining anything; the flag stays for every descendant. Last of the
-    // checks, so `exec` keeps the clock read right before execveat. macOS
-    // has no such flag and refuses set-id files in `open_target` instead.
+    // U-17: a target that would run with other rights gains nothing; the
+    // flag stays for every descendant. Set-id files are refused before this
+    // on every system (`allowed`, U-33), and file capabilities are refused by
+    // the helper's lookup; this flag still holds for a capability set after
+    // that check. Last of the checks, so `exec` keeps the clock read right
+    // before execveat.
     #[cfg(target_os = "linux")]
     // SAFETY: plain prctl with integer arguments.
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
@@ -495,8 +497,8 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 /// descriptor must be the same inode. An execute-only file cannot be read
 /// and is refused: run by path, the kernel's own script loader would start
 /// whatever interpreter its `#!` line names, unchecked (C2 ruling Q4). A
-/// set-id file is refused (U-17), and so is one on a mount that is not
-/// local or ignores ownership.
+/// set-id file is refused (U-33, `allowed`), and so is one on a mount that
+/// is not local or ignores ownership.
 fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     // A relative path would name a file in the inherited working folder.
     let Some(rest) = path.strip_prefix(b"/") else {
@@ -533,6 +535,14 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
             Err(Some(())) => (path_fd, false),
             Err(None) => return Err(RELAY_TARGET),
         };
+        // U-33: no target or interpreter with file capabilities, also when
+        // the pin cannot tell (a setcap in the same coarse timestamp tick as
+        // the lookup leaves the ctime unchanged).
+        // 이것을 실패시키는 것: 이 확인을 지우는 것(root test_relay_refuses_a_capability_target,
+        // test_relay_refuses_capabilities_set_in_the_lookups_tick).
+        if !capability_free(&fd) {
+            return Err(RELAY_TARGET);
+        }
         (Exe { fd, dir, name, st }, readable)
     };
     #[cfg(target_os = "macos")]
@@ -550,9 +560,7 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
         let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY;
         let fd = open_at(dir.as_raw_fd(), last, flags).map_err(|_| RELAY_TARGET)?;
         let st = stat(&fd)?;
-        // Fails without it: test_set_id_targets_are_refused (both bits).
-        let set_id = st.st_mode & (libc::S_ISUID | libc::S_ISGID) != 0;
-        if set_id || !allowed(&st, pin, local_ownership(&fd))? {
+        if !allowed(&st, pin, local_ownership(&fd))? {
             return Err(RELAY_TARGET);
         }
         let path = CString::new(path).map_err(|_| RELAY_TARGET)?;
@@ -974,6 +982,33 @@ fn native_only(errno: i32) -> Option<()> {
     matches!(errno, libc::EACCES | libc::ENOENT).then_some(())
 }
 
+/// Linux: whether the opened target is known to carry no file capabilities,
+/// by the helper's rule (`sys::capability_free`): only ENODATA and EOPNOTSUPP
+/// mean none; an attribute of any length or another answer refuses. A
+/// path-only descriptor asks through `/proc/self/fd/N`.
+#[cfg(target_os = "linux")]
+fn capability_free(fd: &OwnedFd) -> bool {
+    let name = c"security.capability";
+    // SAFETY: `fd` is open; size 0 asks only for the length.
+    let mut n = unsafe { libc::fgetxattr(fd.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF) {
+        let Ok(p) = CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())) else {
+            return false;
+        };
+        // SAFETY: names are NUL-terminated; size 0 asks only for the length.
+        n = unsafe { libc::getxattr(p.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    }
+    capability_answer(n, std::io::Error::last_os_error().raw_os_error())
+}
+
+/// The helper's mapping (`sys::capability_answer`), kept here so the relay
+/// links nothing of the helper; `test_relay_capability_rule_is_the_helpers`
+/// holds the two equal.
+#[cfg(target_os = "linux")]
+fn capability_answer(n: libc::ssize_t, errno: Option<i32>) -> bool {
+    n < 0 && matches!(errno, Some(libc::ENODATA | libc::EOPNOTSUPP))
+}
+
 /// Only root or the user may change the file. Group write passes only with
 /// a pin, and a pin must name this file unchanged: same device, inode,
 /// group, mode and status change time as when the helper's group check
@@ -982,6 +1017,13 @@ fn native_only(errno: i32) -> Option<()> {
 /// `ownership`: whether the file's mount enforces ownership (Linux file
 /// systems do; macOS asks `local_ownership`).
 fn allowed(st: &libc::stat, pin: Option<ExecPin>, ownership: Option<bool>) -> Result<bool, u8> {
+    // U-33: no setuid or setgid target, on any system (the helper refuses
+    // them too; this holds for a bit set after its check). 이것을 실패시키는
+    // 것: 이 조건을 지우는 것, 두 비트 가운데 하나만 보는 것
+    // (test_relay_refuses_set_id_targets, macOS test_set_id_targets_are_refused).
+    if st.st_mode & (libc::S_ISUID | libc::S_ISGID) != 0 {
+        return Ok(false);
+    }
     let facts = Facts {
         #[cfg(target_os = "linux")]
         dev: st.st_dev,
@@ -1646,40 +1688,136 @@ mod tests {
         assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
     }
 
-    // U-17: setuid 대상은 실행되지만 권한을 얻지 못한다. Linux 컨테이너에서 root로 --ignored로 돌린다
-    // (root 소유 04755 사본을 nobody가 실행). 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를
-    // 지우는 것(대상의 유효 uid가 0이 됨).
+    // U-33: setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을 실패시키는
+    // 것: allowed의 set-id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
     #[test]
-    #[ignore = "root in the Linux container; the relay runs as nobody"]
-    fn test_setuid_target_gains_nothing() {
+    fn test_relay_refuses_set_id_targets() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        // SAFETY: getuid cannot fail.
-        assert_eq!(unsafe { libc::getuid() }, 0, "run as root");
-        let dir = std::fs::canonicalize(fresh_dir("setuid")).unwrap();
+        let dir = std::fs::canonicalize(fresh_dir("set-id")).unwrap();
+        for (mode, refuse) in [(0o755, false), (0o4755, true), (0o2755, true)] {
+            let exe = dir.join(format!("cat-{mode:o}"));
+            cat_copy(&exe, mode);
+            assert_eq!(pin_of(&exe).group.mode & 0o7777, mode, "{mode:o}");
+            assert_eq!(refused(&exe, None), refuse, "{mode:o}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What the helper's lookup gives for `name` in `dir` (U-33): every
+    /// target that would run carries its pin.
+    fn looked_up(dir: &Path, name: &[u8]) -> Option<ExecPin> {
+        crate::commands::exec_path::lookup(
+            name,
+            &[dir.to_path_buf()],
+            &[],
+            crate::commands::sys::current_uid(),
+            &mut bingsu_core::fs_trust::RefuseGroupWrite,
+        )
+        .unwrap()
+        .pin
+    }
+
+    // U-33: 조회한 뒤 대상이 바뀌면(이름 위로 다른 실행 파일을 옮김, chmod) relay가 조회의 pin으로 거부한다. 양성
+    // 대조: 바뀌지 않은 대상은 실행된다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운 대상에만 pin을 주는 것.
+    #[test]
+    fn test_relay_refuses_a_target_changed_after_its_lookup() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("after-lookup")).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let exe = dir.join("cat");
-        cat_copy(&exe, 0o4755);
-        assert_eq!(pin_of(&exe).group.mode & 0o7777, 0o4755);
-        let (_, input) = input(Origin::Config, LIVE, b"");
-        let child = echo(spawn_relay_with(
-            &input,
-            &args(&exe, &[b"cat"]),
-            &[],
-            Spawn {
-                uid: Some(65_534),
-                ..Spawn::default()
-            },
-        ))
-        .unwrap();
-        // Only the status file: another user's /proc/<pid>/exe needs ptrace access.
-        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
-        finish(child);
-        assert!(
-            status
-                .lines()
-                .any(|l| l == "Uid:\t65534\t65534\t65534\t65534"),
-            "{status}"
-        );
+        cat_copy(&exe, 0o755);
+        let pin = looked_up(&dir, b"cat");
+        assert!(!refused(&exe, pin), "unchanged");
+        cat_copy(&dir.join("other"), 0o755);
+        std::fs::rename(dir.join("other"), &exe).unwrap();
+        assert!(refused(&exe, pin), "replaced");
+        let pin = looked_up(&dir, b"cat");
+        assert!(!refused(&exe, pin), "looked up again");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused(&exe, pin), "chmod");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-33(root): 조회한 뒤 file capability를 붙인 대상은 relay가 거부한다(relay는 capability를 읽지 않고, setcap이
+    // 바꾼 ctime으로 잡는다). CI가 sudo로 --ignored로 돌린다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운
+    // 대상에만 pin을 주는 것.
+    #[test]
+    #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
+    fn test_relay_refuses_capabilities_set_after_the_lookup() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(crate::commands::sys::current_uid(), 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("caps-after-lookup")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o755);
+        let pin = looked_up(&dir, b"cat");
+        assert!(!refused(&exe, pin), "unchanged");
+        // Past the kernel's coarse timestamp tick, so setcap moves the ctime.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        crate::commands::sys::test_set_file_capability(&exe, true);
+        assert!(refused(&exe, pin), "setcap");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-33: relay의 capability 판정은 helper와 같다. 이것을 실패시키는 것: relay의 답 매핑을 helper와 다르게 바꾸는
+    // 것(다른 errno를 없음으로 봄, 길이 0을 없음으로 봄 등).
+    #[test]
+    fn test_relay_capability_rule_is_the_helpers() {
+        for n in [-1, 0, 20] {
+            for errno in [
+                None,
+                Some(libc::ENODATA),
+                Some(libc::EOPNOTSUPP),
+                Some(libc::EACCES),
+                Some(libc::EIO),
+                Some(libc::EBADF),
+                Some(libc::ERANGE),
+            ] {
+                assert_eq!(
+                    capability_answer(n, errno),
+                    crate::commands::sys::capability_answer(n, errno),
+                    "n={n} errno={errno:?}"
+                );
+            }
+        }
+    }
+
+    // U-33(root): file capability가 있는 대상은 pin 없이도 relay가 거부한다. 양성 대조: 속성을 지우면 돈다. CI가
+    // sudo로 --ignored로 돌린다. 이것을 실패시키는 것: relay의 capability 확인을 지우는 것.
+    #[test]
+    #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
+    fn test_relay_refuses_a_capability_target() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(crate::commands::sys::current_uid(), 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("caps-target")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o755);
+        crate::commands::sys::test_set_file_capability(&exe, true);
+        assert!(refused(&exe, None), "capabilities");
+        crate::commands::sys::test_set_file_capability(&exe, false);
+        assert!(!refused(&exe, None), "removed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-33(root): 조회와 같은 시각 tick 안에서 붙인 capability는 pin이 그대로 맞아 pin으로는 가리지 못한다. setcap 뒤
+    // 그 파일의 지금 stamp로 pin을 만들어 넘기면 정확히 그 상태가 되고, relay의 capability 확인만 거부할 수 있다.
+    // 이것을 실패시키는 것: relay의 capability 확인을 지우는 것.
+    #[test]
+    #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
+    fn test_relay_refuses_capabilities_set_in_the_lookups_tick() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(crate::commands::sys::current_uid(), 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("caps-same-tick")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o755);
+        crate::commands::sys::test_set_file_capability(&exe, true);
+        // The pin a lookup in the same tick would have made.
+        let pin = pin_of(&exe);
+        assert!(refused(&exe, Some(pin)), "setcap the pin cannot see");
+        crate::commands::sys::test_set_file_capability(&exe, false);
+        assert!(!refused(&exe, Some(pin_of(&exe))), "removed");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3139,6 +3277,14 @@ mod macos_tests {
     }
 
     fn frame_input(run_ns: i64, interpreter: Option<Interpreter>) -> Vec<u8> {
+        frame_input_pinned(run_ns, interpreter, None)
+    }
+
+    fn frame_input_pinned(
+        run_ns: i64,
+        interpreter: Option<Interpreter>,
+        pin: Option<ExecPin>,
+    ) -> Vec<u8> {
         let clock = crate::prompt_io::observe_clock().unwrap();
         let permit = Permit {
             kind: clock.kind,
@@ -3153,7 +3299,7 @@ mod macos_tests {
             origin: Origin::Config,
             run_deadline: clock.now.checked_add_signed(run_ns).unwrap(),
             environment: Vec::new(),
-            pin: None,
+            pin,
             interpreter,
             cwd: b"/".to_vec(),
         };
@@ -3397,8 +3543,8 @@ mod macos_tests {
         assert!(!String::from_utf8_lossy(&run.stdout).contains("SEEN "));
     }
 
-    // U-17(macOS): setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을 실패시키는
-    // 것: open_target의 set_id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
+    // U-17·U-33(macOS): setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을
+    // 실패시키는 것: allowed의 set-id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
     #[test]
     fn test_set_id_targets_are_refused() {
         let dir = scratch("set-id");
@@ -3408,6 +3554,38 @@ mod macos_tests {
             let run = probe(&exe, &live());
             assert_eq!(run.code, i32::from(code), "{mode:o}: {run:?}");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-33(macOS): 조회한 뒤 대상이 바뀌면(이름 위로 다른 사본을 옮김, chmod) relay가 조회의 pin으로 거부한다.
+    // 양성 대조: 바뀌지 않은 대상은 돈다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운 대상에만 pin을 주는 것.
+    #[test]
+    fn test_relay_refuses_a_target_changed_after_its_lookup() {
+        let dir = scratch("after-lookup");
+        let exe = dir.join("probe");
+        copy_mode(&me_exe(), &exe, 0o755);
+        let look = || {
+            crate::commands::exec_path::lookup(
+                b"probe",
+                std::slice::from_ref(&dir),
+                &[],
+                crate::commands::sys::current_uid(),
+                &mut bingsu_core::fs_trust::RefuseGroupWrite,
+            )
+            .unwrap()
+            .pin
+        };
+        let run = |pin| probe(&exe, &frame_input_pinned(60 * SECOND, None, pin)).code;
+        let pin = look();
+        assert_eq!(run(pin), 0, "unchanged");
+        copy_mode(&me_exe(), &dir.join("other"), 0o755);
+        std::fs::rename(dir.join("other"), &exe).unwrap();
+        assert_eq!(run(pin), i32::from(RELAY_TARGET), "replaced");
+        let pin = look();
+        assert_eq!(run(pin), 0, "looked up again");
+        std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        assert_eq!(run(pin), i32::from(RELAY_TARGET), "chmod");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

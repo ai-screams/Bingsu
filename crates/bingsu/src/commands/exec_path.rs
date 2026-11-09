@@ -38,6 +38,9 @@ pub struct Found {
     pub interpreter: Option<Interpreter>,
 }
 
+/// `S_ISUID | S_ISGID`, as `st_mode` bits (libc's are `u16` on macOS).
+const SET_ID_BITS: u32 = 0o6000;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Miss {
     /// No such name on the way, or the lookup found no executable.
@@ -45,6 +48,9 @@ pub enum Miss {
     /// A link, folder or file on the way someone else can change, or one
     /// the rules could not decide, or a name that cannot be looked up.
     Refused,
+    /// A setuid or setgid file, or one with file capabilities (U-33):
+    /// refused like `Refused`, with its own reason for `config check`.
+    SetId,
 }
 
 struct Folder {
@@ -506,6 +512,9 @@ pub enum ScriptRefusal {
     LongLine,
     /// A NUL in the line.
     Nul,
+    /// The interpreter is setuid, setgid or carries file capabilities
+    /// (U-33).
+    SetIdInterpreter,
 }
 
 impl ScriptRefusal {
@@ -517,6 +526,9 @@ impl ScriptRefusal {
             Self::Relative => "its interpreter is not an absolute path",
             Self::LongLine => "its first line is longer than 256 bytes",
             Self::Nul => "its first line holds a NUL byte",
+            Self::SetIdInterpreter => {
+                "its interpreter is setuid, setgid or has file capabilities (bingsu runs no such program)"
+            }
         }
     }
 }
@@ -533,6 +545,8 @@ pub enum Explained {
     Refused {
         file: Option<PathBuf>,
         script: Option<ScriptRefusal>,
+        /// Refused for setuid, setgid or file capabilities (U-33).
+        set_id: bool,
     },
 }
 
@@ -598,6 +612,7 @@ pub fn explain(
             return Explained::Refused {
                 file: None,
                 script: None,
+                set_id: false,
             };
         }
         Name::Absolute(p) => vec![PathBuf::from(OsStr::from_bytes(p))],
@@ -612,6 +627,24 @@ pub fn explain(
         match resolve_open(&path, repo, me, groups) {
             Err(Miss::Absent) => continue,
             Ok((found, _)) => return Explained::Runs(found),
+            Err(Miss::SetId) => {
+                // A script that itself checks out is refused for its
+                // interpreter; otherwise the file itself is set-id. Either
+                // is named by its canonical path, as a refused file is.
+                // 이것을 실패시키는 것: 인터프리터 경우를 파일 자체로 보는 것, 정규 경로 대신 찾은 이름을 쓰는 것.
+                if let Ok((found, _)) = resolve_checked(&path, repo, me, groups) {
+                    return Explained::Refused {
+                        file: Some(found.executable),
+                        script: Some(ScriptRefusal::SetIdInterpreter),
+                        set_id: false,
+                    };
+                }
+                return Explained::Refused {
+                    file: Some(std::fs::canonicalize(&path).unwrap_or(path)),
+                    script: None,
+                    set_id: true,
+                };
+            }
             Err(Miss::Refused) => {
                 let checked = resolve_checked(&path, repo, me, groups).ok();
                 let script = checked
@@ -621,6 +654,7 @@ pub fn explain(
                 return Explained::Refused {
                     file: Some(checked.map_or(path, |(found, _)| found.executable)),
                     script,
+                    set_id: false,
                 };
             }
         }
@@ -640,7 +674,13 @@ fn interpreter(
     groups: &mut dyn GroupOracle,
 ) -> Result<Interpreter, Miss> {
     let word = Path::new(OsStr::from_bytes(line.interpreter));
-    let (found, checked) = resolve_checked(word, repo, me, groups).map_err(|_| Miss::Refused)?;
+    // A missing interpreter refuses the script; a set-id one keeps its
+    // reason (U-33).
+    // 이것을 실패시키는 것: 인터프리터의 SetId를 Refused로 바꾸는 것(W411·explain 이유가 빠짐).
+    let (found, checked) = resolve_checked(word, repo, me, groups).map_err(|m| match m {
+        Miss::SetId => Miss::SetId,
+        Miss::Absent | Miss::Refused => Miss::Refused,
+    })?;
     let native = first_bytes(&checked)?.is_none_or(|first| rule::head(&first) == Head::Native);
     let path = found.executable.into_os_string().into_vec();
     if !native || path == b"/usr/bin/env" {
@@ -697,6 +737,19 @@ fn resolve_checked(
     let mut recording = Recording::new(groups);
     match rule::candidate(&facts, me, next, &mut recording) {
         Candidate::Run => {
+            // U-33: a program that would run with other rights than the
+            // user's is not run, on any system: setuid or setgid bits, or
+            // (Linux) file capabilities, also when they cannot be read.
+            // 이것을 실패시키는 것: 이 조건을 지우는 것, 두 비트 가운데 하나만 보는 것
+            // (set_id_programs_are_refused_and_end_the_lookup), capability 검사를 지우는 것
+            // (root: file_capabilities_are_refused).
+            if facts.mode & SET_ID_BITS != 0 {
+                return Err(Miss::SetId);
+            }
+            #[cfg(target_os = "linux")]
+            if !sys::capability_free(file.as_fd()) {
+                return Err(Miss::SetId);
+            }
             // macOS runs the target by path, not by descriptor: an executable
             // on a network file system (no MNT_LOCAL) is refused (spec section
             // 4, macOS executable row). Only the file itself, as that row
@@ -707,10 +760,23 @@ fn resolve_checked(
             if sys::fd_is_local(std::os::fd::AsRawFd::as_raw_fd(&file)) != Some(true) {
                 return Err(Miss::Refused);
             }
+            // Every target that would run is pinned (U-33): the relay opens
+            // it again by name and compares its device, inode, group, mode
+            // and status change time with these, so a setcap, chmod or
+            // replacement after this check (each moves the ctime or the
+            // inode) is refused there. A group-writable target's pin is
+            // also the group its write was cleared for.
+            // 이것을 실패시키는 것: 그룹 쓰기를 비운 대상에만 pin을 주는 것
+            // (relay test_relay_refuses_a_target_changed_after_its_lookup).
+            let pin = rule::target_pin(&facts, &recording.cleared, ctime).unwrap_or(ExecPin {
+                group: bingsu_core::fs_trust::GroupPin::of(&facts),
+                ctime_sec: ctime.0,
+                ctime_nsec: ctime.1,
+            });
             Ok((
                 Found {
                     executable: executable.clone(),
-                    pin: rule::target_pin(&facts, &recording.cleared, ctime),
+                    pin: Some(pin),
                     interpreter: None,
                 },
                 Checked {
@@ -1013,6 +1079,23 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    /// The pin of what sits at `path` now: every target that would run
+    /// carries one (U-33).
+    fn pin_of(path: &Path) -> Option<ExecPin> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).unwrap();
+        Some(ExecPin {
+            group: bingsu_core::fs_trust::GroupPin {
+                dev: m.dev(),
+                ino: m.ino(),
+                gid: m.gid(),
+                mode: m.mode(),
+            },
+            ctime_sec: m.ctime(),
+            ctime_nsec: u32::try_from(m.ctime_nsec()).unwrap(),
+        })
+    }
+
     fn bytes(p: &Path) -> &[u8] {
         p.as_os_str().as_bytes()
     }
@@ -1279,8 +1362,8 @@ mod tests {
         assert_eq!(
             found,
             Found {
+                pin: pin_of(&real),
                 executable: real,
-                pin: None,
                 interpreter: None,
             }
         );
@@ -1362,6 +1445,119 @@ mod tests {
             lookup(b"a/x", &folders, &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // U-33: setuid·setgid 파일은 SetId로 거부되고 조회가 거기서 끝난다(뒤 폴더의 같은 이름으로 넘어가지 않음).
+    // explain도 그 이유를 표시한다. 양성 대조: 0755 사본은 실행된다. 이것을 실패시키는 것: Candidate::Run의
+    // set-id 조건을 지우는 것, 두 비트 가운데 하나만 보는 것, SetId에서 다음 폴더로 넘어가는 것, explain이 SetId를
+    // 표시하지 않는 것.
+    #[test]
+    fn set_id_programs_are_refused_and_end_the_lookup() {
+        let t = scratch("set-id");
+        let (a, b) = (t.join("a"), t.join("b"));
+        exe(&b.join("x"), 0o755);
+        let folders = [a.clone(), b.clone()];
+        for (mode, refused) in [
+            (0o755, false),
+            (0o4755, true),
+            (0o2755, true),
+            (0o6755, true),
+        ] {
+            exe(&a.join("x"), mode);
+            let got = lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite);
+            let seen = explain(b"x", &folders, &[], me(), &mut RefuseGroupWrite);
+            if refused {
+                assert_eq!(got, Err(Miss::SetId), "{mode:o}");
+                assert_eq!(
+                    seen,
+                    Explained::Refused {
+                        file: Some(a.join("x")),
+                        script: None,
+                        set_id: true
+                    },
+                    "{mode:o}"
+                );
+            } else {
+                assert_eq!(got.unwrap().executable, a.join("x"), "{mode:o}");
+                assert!(matches!(seen, Explained::Runs(_)), "{mode:o}");
+            }
+            std::fs::remove_file(a.join("x")).unwrap();
+        }
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // U-33: set-id 인터프리터를 쓰는 script는 SetId로 거부되고, explain은 script의 정규 경로와 인터프리터 이유를
+    // 보인다. 없는 인터프리터는 그대로 Refused다. set-id 파일을 링크로 찾으면 정규 경로로 보인다. 이것을 실패시키는
+    // 것: 인터프리터의 SetId를 Refused로 바꾸는 것, 없는 인터프리터를 SetId로 두는 것, 인터프리터 경우를 파일 자체로
+    // 보는 것, explain이 정규 경로 대신 찾은 이름을 쓰는 것.
+    #[test]
+    fn set_id_interpreters_keep_their_reason() {
+        let t = scratch("set-id-interp");
+        let interp = t.join("bin/interp");
+        exe(&interp, 0o4755);
+        let s = t.join("bin/s");
+        script(&s, &format!("#!{}\n", interp.display()));
+        assert_eq!(
+            resolve(&s, &[], me(), &mut RefuseGroupWrite),
+            Err(Miss::SetId)
+        );
+        assert_eq!(
+            explain(bytes(&s), &[], &[], me(), &mut RefuseGroupWrite),
+            Explained::Refused {
+                file: Some(s.clone()),
+                script: Some(ScriptRefusal::SetIdInterpreter),
+                set_id: false,
+            }
+        );
+        script(&s, "#!/bingsu-no-such-interpreter\n");
+        assert_eq!(
+            resolve(&s, &[], me(), &mut RefuseGroupWrite),
+            Err(Miss::Refused)
+        );
+        symlink(&interp, t.join("bin/link")).unwrap();
+        assert_eq!(
+            explain(
+                bytes(&t.join("bin/link")),
+                &[],
+                &[],
+                me(),
+                &mut RefuseGroupWrite
+            ),
+            Explained::Refused {
+                file: Some(interp.clone()),
+                script: None,
+                set_id: true,
+            }
+        );
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // U-33(Linux, root): file capability가 있는 프로그램은 SetId로 거부된다. CI가 sudo로 --ignored로 돌린다
+    // (security.capability를 쓰려면 CAP_SETFCAP이 필요). 양성 대조: 속성을 지운 같은 파일은 실행된다.
+    // 이것을 실패시키는 것: Candidate::Run의 capability 검사를 지우는 것.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
+    fn file_capabilities_are_refused() {
+        assert_eq!(me(), 0, "run as root");
+        let t = scratch("caps");
+        let x = t.join("bin/x");
+        exe(&x, 0o755);
+        let folders = [t.join("bin")];
+        assert_eq!(
+            lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite)
+                .unwrap()
+                .executable,
+            x
+        );
+        sys::test_set_file_capability(&x, true);
+        assert_eq!(
+            lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite),
+            Err(Miss::SetId)
+        );
+        sys::test_set_file_capability(&x, false);
+        assert!(lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite).is_ok());
         std::fs::remove_dir_all(&t).unwrap();
     }
 
@@ -2144,7 +2340,7 @@ mod tests {
         let want = Interpreter {
             line,
             path: bytes(&cat).to_vec(),
-            pin: None,
+            pin: pin_of(&cat),
         };
         assert_eq!(interpreter_of(&s), Ok(Some(want)));
         script(&s, "#!/bin/sh\necho 1\n");

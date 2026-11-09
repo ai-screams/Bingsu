@@ -125,6 +125,8 @@ jobs:
       # test_prompt_trace_budget.py once, and the gate table steps of
       # filter-calls and shell-macos run test_gate_acceptance.py.
       - name: Fetch the pinned oh-my-zsh
+        # As the PTY step: a failed step before it must not leave the tree out.
+        if: success() || failure()
         run: |
           read -r commit < tests/shell/ohmyzsh.pin
           # The Rust cache can restore this folder from an earlier run.
@@ -837,6 +839,8 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_command_round.py::test_match_only_change_reapplies_without_exec[True-True]' "$RUNNER_TEMP/command-round.txt"
           grep -Fx 'PASSED tests/shell/test_command_round.py::test_match_size_limit_rejected_at_compile' "$RUNNER_TEMP/command-round.txt"
       - name: Fetch the pinned oh-my-zsh
+        # As the PTY step: a failed step before it must not leave the tree out.
+        if: success() || failure()
         run: |
           read -r commit < tests/shell/ohmyzsh.pin
           # The Rust cache can restore this folder from an earlier run.
@@ -902,6 +906,8 @@ jobs:
       - name: Record golden vectors
         run: SHELLS="${{ matrix.shell }}" LOCALES="en_US.UTF-8 C ko_KR.UTF-8" tests/golden/record/run-all.sh
       - name: Fetch the pinned oh-my-zsh
+        # As the PTY step: a failed step before it must not leave the tree out.
+        if: success() || failure()
         run: |
           read -r commit < tests/shell/ohmyzsh.pin
           # The Rust cache can restore this folder from an earlier run.

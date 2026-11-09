@@ -514,6 +514,7 @@
     "write": 1
    },
    "prefix": {
+    "caps": 1,
     "chmod": 5,
     "cwd": 2,
     "dup": 13,
@@ -560,6 +561,7 @@
     "write": 1
    },
    "prefix": {
+    "caps": 1,
     "chmod": 5,
     "cwd": 2,
     "dup": 13,
@@ -605,6 +607,7 @@
     "write": 1
    },
    "prefix": {
+    "caps": 1,
     "chmod": 5,
     "cwd": 2,
     "dup": 13,
@@ -651,6 +654,7 @@
     "write": 1
    },
    "prefix": {
+    "caps": 1,
     "chmod": 5,
     "cwd": 2,
     "dup": 13,
