@@ -177,3 +177,28 @@ def test_open_reuse_keeps_closed_and_duplicate_identity_checks(tail):
     got = front_observe('10 openat(AT_FDCWD, "/old", O_RDONLY) = 7</old>',
                         '10 openat(AT_FDCWD, "/new", O_RDONLY) = 7</new>', *tail)
     assert len(got.errors) == 1 and 'descriptor lifetime/identity mismatch: read' in got.errors[0], got.errors
+
+
+# A dup's returned number is installed at its return record too: another
+# thread may close that number while the dup is unfinished (a deferred
+# allowlist capture: fcntl F_DUPFD_CLOEXEC, a thread's close, the return).
+# 이것을 실패시키는 것: dup 결과를 호출 시작 자리에서 등록하는 것(다른 스레드의 close가 이름 불일치로 보임),
+# 미완 dup의 원본 설명을 잃는 것.
+@pytest.mark.parametrize("call,name", [
+    ("fcntl(48</data>, F_DUPFD_CLOEXEC, 3", "fcntl"),
+    ("dup(48</data>", "dup"),
+    ("dup3(48</data>, 47</proc/sys/kernel/random/boot_id>, O_CLOEXEC", "dup3"),
+])
+def test_dup_reuse_waits_for_return(call, name):
+    text = TRACE.replace('11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = 21',
+                         '11 openat(AT_FDCWD</>, "/data", O_RDONLY|O_CLOEXEC) = 48</data>\n'
+                         '11 clone(child_stack=NULL, flags=CLONE_VM|CLONE_FILES|CLONE_THREAD) = 21')
+    text = text.replace(OPEN, f'11 {call} <unfinished ...>').replace(RETURN, f'11 <... {name} resumed>) = 47</data>')
+    text = text.replace('11 fstat(47</>', '11 fstat(47</data>').replace('12 close(47</>)', '12 close(47</data>)')
+    text = text.replace('11 close(47</>)', '11 close(47</data>)')
+    got = observe(text)
+    assert not any("lifetime/identity mismatch" in e for e in got.errors), got.errors
+    # The installed number carries the source's description: a later use by
+    # another name is still refused.
+    bad = observe(text.replace('11 fstat(47</data>', '11 fstat(47</other>'))
+    assert any("lifetime/identity mismatch: fstat" in e for e in bad.errors), bad.errors

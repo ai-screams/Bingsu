@@ -22,6 +22,13 @@ from .strace_parse import EXIT_EVENT, UNKNOWN_SYSCALL, Call
 
 SPAWN = {"clone", "clone3", "fork", "vfork"}
 OPEN = {"open", "openat", "openat2", "creat"}
+DUPS = {"dup", "dup2", "dup3", "fcntl", "fcntl64"}
+
+
+def _new_fd_call(name: str, text: str) -> bool:
+    """A call whose result is a new descriptor: an open, or a dup (fcntl only
+    with F_DUPFD/F_DUPFD_CLOEXEC). Its result is installed at its return."""
+    return name in OPEN or name in {"dup", "dup2", "dup3"} or (name in {"fcntl", "fcntl64"} and "F_DUPFD" in text)
 MARKERS = ('PR_SET_NAME, "fsb:begin"', 'PR_SET_NAME, "fsb:end"')
 # What a process may do between a successful exec and its first fsb:begin:
 # exact (syscalls, path) pairs for the dynamic loader and the C runtime.
@@ -251,6 +258,7 @@ class _Descriptors:
         self.tables = {}
         self.closed = {}
         self.serial = defaultdict(int)
+        self.pending_dup = {}
 
     def start(self, process, parent=None):
         self.tables[process] = dict(self.tables[parent]) if parent is not None else {}
@@ -288,6 +296,11 @@ class _Descriptors:
             if match:
                 return match[1].rstrip("/") + "/" + name
         return None
+
+    def duplicated(self, c, process):
+        """A deferred dup's new fd, installed at its return record."""
+        dst = re.match(r"^\d+", c.ret)[0]
+        self.create(process, dst, None, "CLOEXEC" in c.args, self.pending_dup.pop(id(c), None))
 
     def opened(self, c, process, bad):
         match = re.match(r"^(\d+)(?:<(.+)>)?", c.ret)
@@ -344,6 +357,11 @@ class _Descriptors:
             if c.name == "dup2" and src == dst:
                 return
             source = table.get(src)
+            if defer_open:
+                # Another thread may close the returned number before the
+                # return record (m6-allowlist run-30): install it there.
+                self.pending_dup[id(c)] = source.description if source else None
+                return
             self.create(process, dst, None, "CLOEXEC" in c.args,
                         source.description if source else None)
         elif c.name == "fcntl" and len(args) >= 3 and args[1] == "F_SETFD":
@@ -713,9 +731,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         match = LINE.match(line)
         if match and (head := CALL_HEAD.match(match[2])):
             starts[int(match[1]), head[1]].append(i)
-            if head[1] in OPEN and match[2].endswith("<unfinished ...>"):
+            if _new_fd_call(head[1], match[2]) and match[2].endswith("<unfinished ...>"):
                 pending_open[int(match[1])] = i
-        elif match and (resumed := RESUMED.match(match[2])) and resumed[1] in OPEN:
+        elif match and (resumed := RESUMED.match(match[2])) and resumed[1] in OPEN | DUPS:
             if (start := pending_open.pop(int(match[1]), None)) is not None:
                 open_ends[start] = i
         elif match and UNKNOWN_HEAD.match(match[2]):
@@ -731,7 +749,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         else:
             queue = starts[c.pid, c.name]
             at = queue.popleft() if queue else len(lines)
-        deferred = c.name in OPEN and at in open_ends and bool(re.match(r"^\d+", c.ret))
+        deferred = _new_fd_call(c.name, c.args) and at in open_ends and bool(re.match(r"^\d+", c.ret))
         ordered.append((at, c, False, deferred))
         if deferred:
             ordered.append((open_ends[at], c, True, False))
@@ -773,6 +791,9 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
         errors.append(f"pid {c.pid} ({roles.get(c.pid, UNRESOLVED)}): {reason}: {c.name}({c.args})")
 
     for _, c, open_result, deferred in ordered:
+        if open_result and c.name not in OPEN:
+            descriptors.duplicated(c, owner[c.pid])
+            continue
         if open_result:
             descriptors.opened(c, owner[c.pid], bad)
             if probe := repository_probe.get(owner[c.pid]):
