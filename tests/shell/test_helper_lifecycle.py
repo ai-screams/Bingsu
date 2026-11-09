@@ -10,7 +10,9 @@ import sys
 import time
 
 import pytest
-from blocked_mount import blocked_mount
+from types import SimpleNamespace
+import blocked_mount as blocked_mount_module
+from blocked_mount import all_stopped, blocked_mount, task_states, wait_stopped
 from shell_support import Blocked, role_processes
 from snapshot_support import SnapshotSession, require_native_boot
 from test_snapshot_refresh import appearance
@@ -319,3 +321,165 @@ def test_one_blocked_helper_per_context_after_lock(tmp_path):
                 stop_helpers(a, b)
     except Blocked as error:
         fail_blocked(error)
+
+
+def _until(check, timeout=4.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if check():
+            return True
+        time.sleep(0.01)
+    return check()
+
+
+# 이것을 실패시키는 것: 스레드 하나만 멈춰도 멈췄다고 보는 것, 스레드 목록이 비면 멈췄다고 보는 것,
+# 추적 중 멈춤(t)을 멈춤으로 보지 않는 것.
+def test_blocked_mount_waits_for_every_thread_to_stop():
+    assert all_stopped(["T", "T"]) and all_stopped(["t", "T"])
+    assert not all_stopped(["T", "S"]) and not all_stopped(["R"]) and not all_stopped([])
+
+
+# 이것을 실패시키는 것: /proc의 상태 칸을 잘못 읽는 것, 스레드 일부만 읽는 것.
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
+def test_task_states_reads_every_thread():
+    code = "import threading, time; [threading.Thread(target=time.sleep, args=(30,), daemon=True).start() for _ in range(3)]; time.sleep(30)"
+    child = subprocess.Popen([sys.executable, "-c", code])
+    try:
+        assert _until(lambda: len(task_states(child.pid)) == 4), task_states(child.pid)
+        assert not all_stopped(task_states(child.pid))
+        child.send_signal(signal.SIGSTOP)
+        assert _until(lambda: all_stopped(task_states(child.pid))), task_states(child.pid)
+    finally:
+        child.kill()
+        child.wait()
+
+
+def fake_proc(root, pid, states):
+    """A /proc tree for `pid` whose threads have `states` (None: listed, no stat)."""
+    task = root / str(pid) / "task"
+    for tid, state in states.items():
+        (task / str(tid)).mkdir(parents=True, exist_ok=True)
+        if state is not None:
+            (task / str(tid) / "stat").write_text(f"{tid} (bind fs) {state} 1 2 3\n")
+    return root
+
+
+def sleeping(monkeypatch, steps):
+    """Patch the stop wait's sleep: call steps[i] on the i-th sleep."""
+    calls = []
+
+    def sleep(_):
+        if len(calls) < len(steps):
+            steps[len(calls)]()
+        calls.append(1)
+    monkeypatch.setattr(blocked_mount_module, "_sleep", sleep)
+    return calls
+
+
+# 이것을 실패시키는 것: 늦게 멈추는 스레드를 기다리지 않는 것, 사라진 스레드에서 예외로 끝나는 것,
+# 데몬이 끝난 것(폴더 없음, zombie)을 시간 초과까지 다시 시도하는 것, 시간 상한 없이 기다리는 것.
+def test_wait_stopped_resamples_until_every_thread_stops(tmp_path, monkeypatch):
+    proc = fake_proc(tmp_path / "late", 7, {7: "T", 8: "S"})
+    calls = sleeping(monkeypatch, [lambda: None, lambda: fake_proc(proc, 7, {8: "T"})])
+    wait_stopped(7, proc, timeout=5)
+    assert len(calls) == 2
+    # A worker listed without its stat (it exited): the sample starts over.
+    proc = fake_proc(tmp_path / "gone", 7, {7: "T", 9: None})
+    calls = sleeping(monkeypatch, [lambda: (proc / "7/task/9").rmdir()])
+    wait_stopped(7, proc, timeout=5)
+    assert len(calls) == 1
+    # The daemon itself gone: Blocked at once, not after the timeout.
+    proc = fake_proc(tmp_path / "exit", 7, {7: "S"})
+    sleeping(monkeypatch, [lambda: shutil.rmtree(proc / "7")])
+    start = time.monotonic()
+    with pytest.raises(Blocked, match="exited"):
+        wait_stopped(7, proc, timeout=5)
+    assert time.monotonic() - start < 1
+    proc = fake_proc(tmp_path / "zombie", 7, {7: "Z"})
+    sleeping(monkeypatch, [])
+    start = time.monotonic()
+    with pytest.raises(Blocked, match="exited"):
+        wait_stopped(7, proc, timeout=5)
+    assert time.monotonic() - start < 1
+    proc = fake_proc(tmp_path / "never", 7, {7: "S"})
+    sleeping(monkeypatch, [])
+    with pytest.raises(Blocked, match="did not stop"):
+        wait_stopped(7, proc, timeout=0.05)
+
+
+class _FakeDaemon:
+    pid = 4242
+    returncode = None
+
+    def __init__(self, events):
+        self.events = events
+        self.stdout = self.stderr = SimpleNamespace(close=lambda: None, read=lambda: b"")
+
+    def poll(self):
+        return None
+
+    def send_signal(self, sig):
+        self.events.append(signal.Signals(sig).name)
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+class _FakeProbe:
+    returncode = None
+
+    def wait(self, timeout=None):
+        if timeout == 0.3:
+            raise subprocess.TimeoutExpired("stat", timeout)
+        return -9
+
+    def kill(self):
+        pass
+
+
+def fake_fixture(tmp_path, monkeypatch, steps, timeout=5.0):
+    """blocked_mount with a fake bindfs, mount table and /proc: the events
+    it caused, in order."""
+    events, mounted = [], [True]
+    proc = fake_proc(tmp_path / "proc", _FakeDaemon.pid, {_FakeDaemon.pid: "S"})
+
+    def popen(argv, **_):
+        if argv[0] == "bindfs":
+            return _FakeDaemon(events)
+        states = task_states(_FakeDaemon.pid, proc)
+        events.append(("probe", "stopped" if all_stopped(states) else "running"))
+        return _FakeProbe()
+
+    def run(argv, **_):
+        mounted[0] = False
+        return SimpleNamespace(returncode=0)
+    exists = os.path.exists
+    monkeypatch.setattr(blocked_mount_module.sys, "platform", "linux")
+    monkeypatch.setattr(blocked_mount_module.shutil, "which", lambda tool: "/usr/bin/" + tool)
+    monkeypatch.setattr(blocked_mount_module.os.path, "exists", lambda p: p == "/dev/fuse" or exists(p))
+    monkeypatch.setattr(blocked_mount_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(blocked_mount_module.subprocess, "run", run)
+    monkeypatch.setattr(blocked_mount_module, "_mounted", lambda path: mounted[0])
+    monkeypatch.setattr(blocked_mount_module, "PROC", proc)
+    monkeypatch.setattr(blocked_mount_module, "STOP_TIMEOUT", timeout)
+    sleeping(monkeypatch, [step(proc) for step in steps])
+    return events
+
+
+# 이것을 실패시키는 것: fixture가 멈춤 대기를 건너뛰고 조회하는 것, 멈추지 않을 때 조회하는 것,
+# 시간 초과 뒤 SIGCONT를 보내지 않는 것.
+def test_blocked_mount_probes_only_after_every_thread_stopped(tmp_path, monkeypatch):
+    late = lambda proc: lambda: fake_proc(proc, _FakeDaemon.pid, {_FakeDaemon.pid: "T"})
+    events = fake_fixture(tmp_path / "late", monkeypatch, [lambda proc: lambda: None, late])
+    with blocked_mount(tmp_path / "late" / "fuse"):
+        pass
+    assert events == ["SIGSTOP", ("probe", "stopped"), "SIGCONT"], events
+    events = fake_fixture(tmp_path / "never", monkeypatch, [], timeout=0.05)
+    with pytest.raises(Blocked, match="did not stop"):
+        with blocked_mount(tmp_path / "never" / "fuse"):
+            pass
+    assert events == ["SIGSTOP", "SIGCONT"], events
+

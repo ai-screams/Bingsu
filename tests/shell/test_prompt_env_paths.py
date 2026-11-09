@@ -1693,6 +1693,64 @@ def collect_ready(store, runtime):
     return bool(stores) and bool(breakers)
 
 
+# A command stage's untraced warm-up: at most this many prompts.
+COMMAND_WARMUP_MAX = 10
+
+
+def command_ready(store):
+    """A command warm-up is done when a command response is stored."""
+    return bool(list((store / "collections-v1").glob("*/store/command")))
+
+
+def stage_warmup(stage, prompt, store, runtime):
+    """HelperStageFixture's untraced warm-up for `stage`; returns the prompts run."""
+    command, builtin = stage.startswith("command_"), stage.startswith("builtin_")
+    if stage == "collect" or builtin:
+        warm = warm_until(prompt, lambda: collect_ready(store, runtime), least=3, most=COLLECT_WARMUP_MAX)
+        print(f"collect warm-up prompts: {warm}")
+    elif command and stage != "command_not_run":
+        warm = warm_until(prompt, lambda: command_ready(store), least=2, most=COMMAND_WARMUP_MAX)
+        print(f"command warm-up prompts: {warm}")
+    else:
+        warm = warm_until(prompt, lambda: True, least=2 if command else 1, most=2 if command else 1)
+    return warm
+
+
+# 이것을 실패시키는 것: 명령 단계를 2회 고정으로 되돌리는 것, 상한 10을 지우는 것,
+# command_not_run을 응답 대기로 바꾸는 것, collect·내장 단계의 대기를 명령 응답으로 바꾸는 것.
+@pytest.mark.parametrize("stage, appears, want", [
+    ("command_miss", 4, 4), ("command_hit", 1, 2), ("command_miss", None, COMMAND_WARMUP_MAX),
+    ("command_not_run", None, 2), ("command_not_run", 1, 2), ("publish", None, 1),
+    ("collect", 5, 5), ("builtin_probe", None, COLLECT_WARMUP_MAX)])
+def test_stage_warmup_waits_per_stage(tmp_path, stage, appears, want):
+    store, runtime = tmp_path / "store", tmp_path / "runtime"
+    ran = []
+
+    def prompt():
+        ran.append(1)
+        # Each stage's own readiness only: a command response alone leaves no
+        # breaker, a collection store alone no command response.
+        if appears is not None and len(ran) == appears:
+            (store / "collections-v1/a/store").mkdir(parents=True)
+            if stage.startswith("command_"):
+                (store / "collections-v1/a/store/command").write_bytes(b"")
+            else:
+                (runtime / "collection-control-v1/sessions/s").mkdir(parents=True)
+                (runtime / "collection-control-v1/sessions/s/breaker").write_bytes(b"")
+    assert stage_warmup(stage, prompt, store, runtime) == want == len(ran)
+
+
+# 이것을 실패시키는 것: 명령 응답이 없어도 데우기가 끝났다고 보는 것, 다른 이름의 파일을 응답으로 보는 것.
+def test_command_warm_needs_a_command_response(tmp_path):
+    store = tmp_path / "store"
+    assert not command_ready(store)
+    (store / "collections-v1/a/store").mkdir(parents=True)
+    (store / "collections-v1/a/store/response").write_bytes(b"")
+    assert not command_ready(store)
+    (store / "collections-v1/a/store/command").write_bytes(b"")
+    assert command_ready(store)
+
+
 # 이것을 실패시키는 것: 저장소나 breaker 하나만 있어도 데우기가 끝났다고 보는 것.
 def test_collect_warm_needs_both_store_and_breaker(tmp_path):
     store, runtime = tmp_path / "store", tmp_path / "runtime"
@@ -1918,13 +1976,11 @@ class HelperStageFixture:
         # and on a slow runner so can an untraced one, so collect goes on past
         # its three prompts until the store and the breaker are there.
         # Command stages: the first round publishes the snapshot, the second
-        # leaves the unit's response (and the session cgroup parent). Builtin
-        # stages warm as collect does: their round needs the stored answer.
-        if stage == "collect" or builtin:
-            warm = warm_until(prompt_and_wait, lambda: collect_ready(self.store, runtime), least=3, most=COLLECT_WARMUP_MAX)
-            print(f"collect warm-up prompts: {warm}")
-        else:
-            warm_until(prompt_and_wait, lambda: True, least=2 if command else 1, most=2 if command else 1)
+        # leaves the unit's response (and the session cgroup parent); a slow
+        # runner can defer that round, so a stage that runs its unit goes on
+        # until the response is there. Builtin stages warm as collect does:
+        # their round needs the stored answer.
+        stage_warmup(stage, prompt_and_wait, self.store, runtime)
         assert (self.store / "snapshot").is_file(), "warm-up did not publish"
         self.collection = {}
         if stage == "collect" or builtin:
