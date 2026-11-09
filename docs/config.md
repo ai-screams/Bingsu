@@ -216,8 +216,12 @@ The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt
 - Scripts must name an absolute interpreter on their first line; `#!/usr/bin/env` is refused because it would look
   the interpreter up in `PATH`.
 - A program that is setuid or setgid, or on Linux carries file capabilities (for example `ping` on Debian), does not
-  run, as a command or as a built-in language's version program, on every system. `config check` names a command
-  segment's program with that reason (W411).
+  run, as a command or as a built-in language's version program, on every system. Neither does a script whose
+  interpreter is such a program. `config check` names a command segment's program with that reason (W411), and
+  `config check --explain` shows it on the `executable` line.
+- A program changed after bingsu checked it (`chmod`, `setcap`, or another file moved over its name) is refused
+  when the command starts. A change in the last instant before the start itself, by someone allowed to change that
+  folder, is not caught.
 - The first line of the output, at most 4 KB, is the value. A failed command (nonzero exit, timeout) shows nothing
   and is not run again for 10 seconds, unless its keys or the values its result depends on change (the passed
   variables, `TERM` aside unless `env_allow` names it).
@@ -276,7 +280,11 @@ the config it reads.
 - On macOS, commands do not run on a system without `AT_SYMLINK_NOFOLLOW_ANY`, and an executable you cannot read is
   not run.
 - Each shell session that runs commands leaves a small lock file in the runtime folder, and on Linux, where the
-  system allows cgroups, an empty cgroup folder; nothing removes them yet.
+  system allows cgroups, a cgroup folder. The cleanup after a later collection or command round removes, a few at a
+  time, a lock made more than a day ago that no round holds at that moment (its session makes it again on its next
+  round), with its empty cgroup folder when that folder is in the cleaning shell's own cgroup. A cgroup folder in
+  another shell's cgroup (another terminal tab, a `tmux` server) stays until that cgroup ends. When bingsu cannot
+  tell where its own cgroup is, it keeps the lock.
 - `config check` can wait on a stalled network mount while it opens the programs a command segment would run.
 
 ## Group-writable files
