@@ -26,6 +26,9 @@ left = ["dir", "git", "custom/kube", "custom/aws", "custom/tag"]
 and language segment, whether it runs, why not, and where each key came from. Editors that read JSON Schema complete
 the keys from `bingsu config schema`.
 
+Writing a command segment for other people to use? See
+[Writing a command segment for others](writing-command-segments.md).
+
 ## Kinds and keys
 
 | `kind` | Shows | Keys |
