@@ -172,24 +172,37 @@ pub(super) fn open(
     meter: &mut Meter,
 ) -> Result<Opened, ReadError> {
     let path = cstring(canonical, meter)?;
-    let flags = libc::O_RDONLY
+    let fd = openat(
+        root.fd.as_raw_fd(),
+        &path,
+        open_flags(is_dir, single_link, caps),
+        meter,
+    )?;
+    inspect(fd, meter)
+}
+
+/// `open`'s flags. A file also O_NOCTTY (walk::FILE_FLAGS says why).
+fn open_flags(is_dir: bool, single_link: bool, caps: DarwinCaps) -> i32 {
+    libc::O_RDONLY
         | libc::O_NONBLOCK
         | libc::O_CLOEXEC
         | BENEATH
+        // NOFOLLOW_ANY|NOFOLLOW is EINVAL on Darwin: select exactly one.
         | if caps.nofollow_any {
             NOFOLLOW_ANY
         } else {
             libc::O_NOFOLLOW
         }
-        | if is_dir { libc::O_DIRECTORY } else { 0 }
+        | if is_dir {
+            libc::O_DIRECTORY
+        } else {
+            libc::O_NOCTTY
+        }
         | if single_link && caps.unique {
             UNIQUE
         } else {
             0
-        };
-    // NOFOLLOW_ANY|NOFOLLOW is EINVAL on Darwin: select exactly one.
-    let fd = openat(root.fd.as_raw_fd(), &path, flags, meter)?;
-    inspect(fd, meter)
+        }
 }
 
 #[cfg(test)]
@@ -469,5 +482,83 @@ mod c3_listing_tests {
                 "field {at}={value}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod noctty_tests {
+    use super::*;
+
+    // 세션 지도자가 단말을 O_NOCTTY 없이 열면 그 단말이 제어 단말이 된다. macOS의 정본 경로 open(open_flags)은
+    // 그러지 않는다. 이것을 실패시키는 것: open_flags에서 파일의 O_NOCTTY를 빼는 것.
+    #[test]
+    fn canonical_file_open_never_takes_a_controlling_terminal() {
+        use std::os::unix::process::CommandExt;
+        fn new_session() -> std::io::Result<()> {
+            // SAFETY: setsid takes no arguments and is async-signal-safe.
+            if unsafe { libc::setsid() } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args([
+            "--exact",
+            "safe_read::macos::noctty_tests::macos_noctty_child",
+            "--ignored",
+            "--test-threads=1",
+        ]);
+        // SAFETY: the hook only calls setsid between fork and exec.
+        unsafe { child.pre_exec(new_session) };
+        let out = child.output().unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "{out:?}"
+        );
+    }
+
+    /// Whether this process has a controlling terminal: /dev/tty opens.
+    fn has_terminal() -> bool {
+        std::fs::File::open("/dev/tty").is_ok()
+    }
+
+    #[test]
+    #[ignore = "a session leader without a controlling terminal; run by canonical_file_open_never_takes_a_controlling_terminal"]
+    fn macos_noctty_child() {
+        assert!(!has_terminal(), "the child starts without a terminal");
+        // SAFETY: opens a new master pty; the result is checked.
+        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+        assert!(master >= 0);
+        // SAFETY: a live master pty descriptor.
+        assert_eq!(unsafe { libc::grantpt(master) }, 0);
+        // SAFETY: a live master pty descriptor.
+        assert_eq!(unsafe { libc::unlockpt(master) }, 0);
+        // SAFETY: a live master pty descriptor.
+        let name = unsafe { libc::ptsname(master) };
+        assert!(!name.is_null());
+        // SAFETY: ptsname returned a non-null, NUL-terminated name.
+        let slave = unsafe { std::ffi::CStr::from_ptr(name) }.to_owned();
+        let dev = std::fs::File::open("/dev").unwrap();
+        let leaf = std::ffi::CString::new(slave.to_bytes().rsplit(|&b| b == b'/').next().unwrap())
+            .unwrap();
+        let caps = DarwinCaps {
+            beneath: true,
+            nofollow_any: false,
+            unique: false,
+        };
+        // SAFETY: live dirfd, terminated relative name; the result is checked and closed.
+        let fd = unsafe {
+            libc::openat(
+                dev.as_raw_fd(),
+                leaf.as_ptr(),
+                open_flags(false, false, caps),
+            )
+        };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        assert!(!has_terminal(), "the canonical file open took the terminal");
+        // SAFETY: the descriptors opened above.
+        unsafe { libc::close(fd) };
+        // SAFETY: the master opened above.
+        unsafe { libc::close(master) };
     }
 }

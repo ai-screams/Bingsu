@@ -72,10 +72,16 @@ pub(super) fn open_nofollow(
 fn open_how(is_dir: bool) -> libc::open_how {
     // SAFETY: the UAPI requires zero initialization, including future fields.
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    // A file also O_NOCTTY (walk::FILE_FLAGS says why); a folder's flags stay
+    // as the bootstrap probe's audit expects them.
     how.flags = (libc::O_RDONLY
         | libc::O_NONBLOCK
         | libc::O_CLOEXEC
-        | if is_dir { libc::O_DIRECTORY } else { 0 }) as u64;
+        | if is_dir {
+            libc::O_DIRECTORY
+        } else {
+            libc::O_NOCTTY
+        }) as u64;
     how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_XDEV;
     how
 }
@@ -256,6 +262,108 @@ pub fn probe_for_test(meter: &mut Meter) -> Result<Resolver, ReadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tty number (field 7 of /proc/self/stat), 0 without a controlling terminal.
+    fn controlling_tty() -> u64 {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        stat.rsplit(')')
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(4)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    // 세션 지도자가 단말을 O_NOCTTY 없이 열면 그 단말이 제어 단말이 된다. 파일 open의 두 경로(walk의 openat,
+    // openat2)는 그러지 않는다. 이것을 실패시키는 것: walk::FILE_FLAGS나 open_how(false)에서 O_NOCTTY를 빼는 것.
+    #[test]
+    fn file_opens_never_take_a_controlling_terminal() {
+        use std::os::unix::process::CommandExt;
+        fn new_session() -> std::io::Result<()> {
+            // SAFETY: setsid takes no arguments and is async-signal-safe.
+            if unsafe { libc::setsid() } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args([
+            "--exact",
+            "safe_read::linux::tests::noctty_child",
+            "--ignored",
+            "--test-threads=1",
+        ]);
+        // SAFETY: the hook only calls setsid between fork and exec.
+        unsafe { child.pre_exec(new_session) };
+        let out = child.output().unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "a session leader without a controlling terminal; run by file_opens_never_take_a_controlling_terminal"]
+    fn noctty_child() {
+        assert_eq!(controlling_tty(), 0, "the child starts without a terminal");
+        // SAFETY: opens a new master pty; the result is checked.
+        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        assert!(master >= 0);
+        // SAFETY: a live master pty descriptor.
+        assert_eq!(unsafe { libc::grantpt(master) }, 0);
+        // SAFETY: a live master pty descriptor.
+        assert_eq!(unsafe { libc::unlockpt(master) }, 0);
+        let mut name = [0 as libc::c_char; 64];
+        // SAFETY: a live master pty descriptor and a writable buffer of the given size.
+        let named = unsafe { libc::ptsname_r(master, name.as_mut_ptr(), name.len()) };
+        assert_eq!(named, 0);
+        // SAFETY: ptsname_r wrote a NUL-terminated name into the buffer.
+        let slave = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_owned();
+        // The walk's openat.
+        // SAFETY: a terminated absolute path; the result is checked and closed.
+        let fd = unsafe {
+            libc::openat(
+                libc::AT_FDCWD,
+                slave.as_ptr(),
+                super::super::walk::FILE_FLAGS,
+            )
+        };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(
+            controlling_tty(),
+            0,
+            "the walk's file open took the terminal"
+        );
+        // SAFETY: the descriptor opened above.
+        unsafe { libc::close(fd) };
+        // openat2 beneath /dev/pts with the production file flags.
+        let pts = std::fs::File::open("/dev/pts").unwrap();
+        let leaf = CString::new(slave.to_bytes().rsplit(|&b| b == b'/').next().unwrap()).unwrap();
+        let how = open_how(false);
+        // SAFETY: live dirfd, terminated relative filename, valid open_how.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                pts.as_raw_fd(),
+                leaf.as_ptr(),
+                &how,
+                std::mem::size_of::<libc::open_how>(),
+            )
+        };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(
+            controlling_tty(),
+            0,
+            "the openat2 file open took the terminal"
+        );
+        // SAFETY: the descriptors opened above.
+        unsafe { libc::close(fd as i32) };
+        // SAFETY: the master opened above.
+        unsafe { libc::close(master) };
+    }
+
     // 이것을 실패시키는 것: production open_how에서 RESOLVE_NO_MAGICLINKS를 빼는 것.
     #[test]
     fn no_magiclinks_is_enforced_independently() {

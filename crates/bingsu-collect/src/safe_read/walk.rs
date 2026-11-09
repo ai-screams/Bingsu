@@ -5,7 +5,11 @@ use std::collections::VecDeque;
 
 const DIR_FLAGS: i32 =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
-const FILE_FLAGS: i32 = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+// O_NOCTTY: a file that turns into a terminal between the stat and the open
+// never becomes this process's controlling terminal (it is refused as not a
+// regular file right after).
+pub(super) const FILE_FLAGS: i32 =
+    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
 
 fn components(
     path: &[u8],
