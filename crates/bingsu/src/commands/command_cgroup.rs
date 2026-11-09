@@ -306,7 +306,8 @@ pub(crate) mod fs {
                 buf.as_mut_ptr(),
             )
         };
-        let mask = buf[0] as u32;
+        // stx_mask is the u32 at offset 0, whatever the byte order.
+        let mask = u32::from_ne_bytes(buf[0].to_ne_bytes()[..4].try_into().unwrap_or([0; 4]));
         (rc == 0 && mask & STATX_MNT_ID != 0).then_some(buf[18])
     }
 
@@ -329,9 +330,37 @@ pub(crate) mod fs {
     }
 
     /// `1` into `cgroup.kill` of `folder`: every process of the subtree gets
-    /// SIGKILL, forks in progress included.
+    /// SIGKILL, forks in progress included. The file must sit on the
+    /// folder's own mount: a `cgroup.kill` of another cgroup bind-mounted
+    /// over this one's name would kill that cgroup instead.
     pub(crate) fn kill_file(folder: &File) -> io::Result<File> {
-        open_at(folder, b"cgroup.kill", libc::O_WRONLY)
+        let kill = open_at(folder, b"cgroup.kill", libc::O_WRONLY)?;
+        kill_on(kill, mount_id(folder))
+    }
+
+    /// `kill_file` for a folder whose mount id the caller already has.
+    pub(crate) fn kill_file_on(folder: &File, mount: u64) -> io::Result<File> {
+        kill_on(
+            open_at(folder, b"cgroup.kill", libc::O_WRONLY)?,
+            Some(mount),
+        )
+    }
+
+    fn kill_on(kill: File, folder: Option<u64>) -> io::Result<File> {
+        // Fails without it: test_kill_file_refuses_a_file_bind_mounted_over_it.
+        match (folder, mount_id(&kill)) {
+            (Some(a), Some(b)) if a == b => Ok(kill),
+            _ => Err(io::Error::other("cgroup.kill on another mount")),
+        }
+    }
+
+    /// The mount id of `folder` when it is on `parent`'s mount, else `None`:
+    /// a cgroup folder bind-mounted over a name below the parent is not one
+    /// of its children (the supervisor's unit, as the reclaim's `open`).
+    pub(crate) fn on_parent_mount(parent: &File, folder: &File) -> Option<u64> {
+        let parent = mount_id(parent)?;
+        // Fails without it: test_a_folder_bound_below_the_parent_is_not_its_child.
+        (mount_id(folder)? == parent).then_some(parent)
     }
 
     pub(crate) fn write_kill(kill: &File) -> io::Result<()> {
@@ -1431,6 +1460,75 @@ pub(crate) mod cell {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(survived, "{r:?}");
+    }
+
+    // 부모 아래 단위 이름 자리에 다른 cgroup 폴더를 bind mount하면, 그 폴더는 부모와 mount가 달라 감독의 단위로
+    // 받지 않는다(mkdirat와 열기 사이에 bind하는 경쟁을 막는 비교; 경쟁 창 없이 비교 함수를 직접 본다). 이것을
+    // 실패시키는 것: on_parent_mount의 비교를 지우는 것.
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_a_folder_bound_below_the_parent_is_not_its_child() {
+        if !privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (p, _dir) = parent("unitbind");
+        let parent_fd = File::open(&p).unwrap();
+        let own = p.join(cgroup::unit_name(1));
+        std::fs::create_dir(&own).unwrap();
+        let mine = File::open(&own).unwrap();
+        assert!(fs::on_parent_mount(&parent_fd, &mine).is_some());
+        let victim = own_cgroup().join(format!("bingsu-unitvictim-{}", std::process::id()));
+        std::fs::create_dir(&victim).unwrap();
+        let unit = p.join(cgroup::unit_name(9));
+        std::fs::create_dir(&unit).unwrap();
+        bind(&victim, &unit);
+        let bound = File::open(&unit).unwrap();
+        let refused = fs::on_parent_mount(&parent_fd, &bound).is_none();
+        drop(bound);
+        unbind(&unit);
+        drop(mine);
+        let _ = std::fs::remove_dir(&unit);
+        let _ = std::fs::remove_dir(&own);
+        let _ = std::fs::remove_dir(&victim);
+        let _ = std::fs::remove_dir(&p);
+        assert!(refused);
+    }
+
+    // 단위 폴더의 cgroup.kill 자리에 다른 cgroup의 cgroup.kill을 파일 bind mount하면, 그 파일은 단위 폴더와
+    // mount id가 달라 열기를 거부한다. 거부하지 않으면 그 쓰기가 남의 cgroup을 죽인다. 이것을 실패시키는 것:
+    // kill_file의 mount id 비교를 지우는 것(victim의 sleep이 죽음).
+    #[test]
+    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]
+    fn test_kill_file_refuses_a_file_bind_mounted_over_it() {
+        if !privileged() {
+            return;
+        }
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (p, _dir) = parent("killbind");
+        let victim = own_cgroup().join(format!("bingsu-killvictim-{}", std::process::id()));
+        std::fs::create_dir(&victim).unwrap();
+        let mut sleep = Command::new("sleep").arg("60").spawn().unwrap();
+        std::fs::write(victim.join("cgroup.procs"), sleep.id().to_string()).unwrap();
+        let unit = p.join(cgroup::unit_name(9));
+        std::fs::create_dir(&unit).unwrap();
+        // Unbound, the unit's own cgroup.kill opens.
+        let folder = File::open(&unit).unwrap();
+        assert!(fs::kill_file(&folder).is_ok());
+        bind(&victim.join("cgroup.kill"), &unit.join("cgroup.kill"));
+        let refused = fs::kill_file(&folder).map(|kill| fs::write_kill(&kill));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let survived = alive(sleep.id() as i32);
+        unbind(&unit.join("cgroup.kill"));
+        let _ = sleep.kill();
+        let _ = sleep.wait();
+        drop(folder);
+        let _ = std::fs::remove_dir(&unit);
+        let _ = std::fs::remove_dir(&p);
+        while std::fs::remove_dir(&victim).is_err() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(refused.is_err() && survived, "{refused:?} {survived}");
     }
 
     // 실제 cgroupfs에서 kill → populated 0 → 후위 rmdir. 대상 프로세스는 단위 아래 깊이 2 폴더에 있다.

@@ -347,7 +347,15 @@ def supervisor_kind(c: Call) -> str | None:
         # with a path another kind, and newfstatat's path is never checked
         # against its dirfd, so it is refused here.
         "fstat": c.name in {"fstat", "statx"} and fd is not None
-                 and (fd == _SUP_BOOT_ID or bool(re.fullmatch(_SUP_PROC + "/timens_offsets", fd))),
+                 and (fd == _SUP_BOOT_ID or bool(re.fullmatch(_SUP_PROC + "/timens_offsets", fd)))
+                 # The mount id of the cgroup parent, a unit folder and its
+                 # cgroup.kill (m6-C3b): statx(fd, "", AT_EMPTY_PATH,
+                 # STATX_MNT_ID) on exactly those fds.
+                 # 이것을 실패시키는 것: 숫자 fd가 아닌 것(AT_FDCWD), 부모·단위·kill 밖 fd, 빈 이름이 아닌 것, AT_EMPTY_PATH 없는 flags,
+                 # STATX_MNT_ID가 아닌 마스크를 받는 것.
+                 or c.name == "statx" and fd is not None and args[0][:1].isdigit()
+                 and bool(re.fullmatch(_SUP_CGROUP + "(?:/u[0-9a-f]+(?:/cgroup.kill)?)?", fd))
+                 and args[1:4] == ['""', "AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH", "STATX_MNT_ID"],
         "statfs": c.name == "fstatfs" and bool(clock),
         "readlink": c.name == "readlinkat" and fd is not None and bool(re.fullmatch(_SUP_PROC + "/ns", fd))
                     and len(args) > 1 and args[1] in ('"time"', '"time_for_children"'),

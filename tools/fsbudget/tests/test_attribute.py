@@ -833,6 +833,15 @@ SUPERVISOR_SHAPES = [
     (f'1 openat(7<{SUP_UNIT}>, "cgroup.procs", O_WRONLY|O_NOFOLLOW|O_CLOEXEC) = 8<{SUP_UNIT}/cgroup.procs>', "unknown-fs"),
     (f'1 openat(6<{SUP_CG}>, "u00ad", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = 7<{SUP_UNIT}>', "openat"),
     (f'1 write(8<{SUP_UNIT}/cgroup.kill>, "1", 1) = 1', "write"),
+    # The mount ids of a unit folder and its cgroup.kill (m6-C3b); only that
+    # exact query on those two descriptors.
+    (f'1 statx(7<{SUP_UNIT}>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=0, ...}}) = 0', "fstat"),
+    (f'1 statx(8<{SUP_UNIT}/cgroup.kill>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=0, ...}}) = 0', "fstat"),
+    (f'1 statx(7<{SUP_UNIT}>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_BASIC_STATS, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=0, ...}}) = 0', "unknown-fs"),  # other mask
+    (f'1 statx(7<{SUP_UNIT}>, "cgroup.procs", AT_STATX_SYNC_AS_STAT, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS}}) = 0', "unknown-fs"),  # a name
+    (f'1 statx(7<{SUP_UNIT}>, "", AT_STATX_SYNC_AS_STAT, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID}}) = 0', "unknown-fs"),  # no AT_EMPTY_PATH
+    (f'1 statx(7<{SUP_UNIT}>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID|STATX_MODE, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID}}) = 0', "unknown-fs"),  # wider mask
+    (f'1 statx(9</sys/fs/cgroup/other>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=0, ...}}) = 0', "unknown-fs"),  # outside the units
     (f'1 write(8<{SUP_UNIT}/cgroup.procs>, "1", 1) = 1', "unknown-fs"),
     ('1 read(7</proc/sys/kernel/random/boot_id>, "", 1) = 0', "read"),
     ('1 read(7</fx/forbidden>, "", 1) = 0', "unknown-fs"),
@@ -884,6 +893,39 @@ def test_supervisor_vocabulary():
     got = [(line, supervisor_kind(call)) for line, call in zip((l for l, _ in SUPERVISOR_SHAPES),
                                                               parse("\n".join(l for l, _ in SUPERVISOR_SHAPES)))]
     assert got == SUPERVISOR_SHAPES
+
+
+# The supervisor's own statx rule (m6-C3b), judged on its own: with the base
+# classifier taking every statx as fstat, only statx(numeric fd of the cgroup
+# parent, a unit or its cgroup.kill, "", AT_EMPTY_PATH, STATX_MNT_ID) stays
+# fstat.
+# 이것을 실패시키는 것: 감독 규칙에서 숫자 fd, 빈 이름, AT_EMPTY_PATH, STATX_MNT_ID 마스크, 부모·단위·kill fd 한정 중 하나를
+# 지우는 것(바탕 분류기가 그 꼴을 거르는지와 상관없이).
+def test_supervisor_mount_id_statx_is_exact(monkeypatch):
+    from fsbudget import classify
+    from fsbudget.strace_parse import parse
+    base = classify.helper_kind
+    monkeypatch.setattr(classify, "helper_kind", lambda c: "fstat" if c.name == "statx" else base(c))
+    ok = '"", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_MNT_ID, {stx_mask=STATX_BASIC_STATS|STATX_MNT_ID}) = 0'
+    other_mask = ok.replace("STATX_MNT_ID, {", "STATX_BASIC_STATS, {")
+    no_empty_path = ok.replace("|AT_EMPTY_PATH", "")
+    named = ok.replace('"", ', '"cgroup.procs", ', 1)
+    shapes = [
+        (f"1 statx(7<{SUP_UNIT}>, {ok}", "fstat"),
+        (f"1 statx(8<{SUP_UNIT}/cgroup.kill>, {ok}", "fstat"),
+        (f"1 statx(7<{SUP_UNIT}>, {other_mask}", "unknown-fs"),
+        (f"1 statx(7<{SUP_UNIT}>, {no_empty_path}", "unknown-fs"),
+        (f"1 statx(7<{SUP_UNIT}>, {named}", "unknown-fs"),
+        (f"1 statx(6<{SUP_CG}>, {ok}", "fstat"),  # the cgroup parent
+        (f"1 statx(9<{SUP_UNIT}/cgroup.procs>, {ok}", "unknown-fs"),
+        (f"1 statx(9</sys/fs/cgroup/other>, {ok}", "unknown-fs"),
+        (f"1 statx(AT_FDCWD<{SUP_CG}>, {ok}", "unknown-fs"),
+        (f'1 statx(AT_FDCWD<{SUP_UNIT}>, "/etc/passwd", AT_STATX_SYNC_AS_STAT, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS}}) = 0',
+         "unknown-fs"),
+        (f"1 statx(AT_FDCWD</>, {ok.replace(chr(34) * 2 + ', ', chr(34) + SUP_UNIT + chr(34) + ', ', 1)}", "unknown-fs"),
+    ]
+    got = [(line, classify.supervisor_kind(call)) for (line, _), call in zip(shapes, parse("\n".join(l for l, _ in shapes)))]
+    assert got == shapes
 
 
 def test_supervisor_vocabulary_is_the_supervisors_only():

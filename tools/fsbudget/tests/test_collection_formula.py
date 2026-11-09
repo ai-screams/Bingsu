@@ -142,7 +142,8 @@ def test_supervisor_coefficients(arch, libc):
     for n in (1, 2, 12):
         atomic = supervisor_expected(n, atomic=True, arch=arch, libc=libc)
         best = supervisor_expected(n, atomic=False, arch=arch, libc=libc)
-        assert atomic == {"exec": 1, "fd_flags": 2, "fstat": clock["fstat"] * n, "statfs": clock["statfs"] * n,
+        # The atomic path's three mount id queries per unit (m6-C3b) join the clock's fstat.
+        assert atomic == {"exec": 1, "fd_flags": 2, "fstat": (clock["fstat"] + 3) * n, "statfs": clock["statfs"] * n,
                           "read": clock["read"] * n, "readlink": clock["readlink"] * n,
                           "openat": (clock["openat"] + 1 + 2) * n, "spawn": n, "cwd": n, "mkdir": n, "write": n,
                           **guard}

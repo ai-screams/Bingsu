@@ -234,9 +234,10 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     "cgroup_parent": {"fstat": 3},
     "cgroup_listing": {"seek": 1, "getdents": 2},
     # One unit cgroup reclaimed after its round: open and both mount ids,
-    # cgroup.kill open and write, cgroup.events open and one pread, the
-    # unit's own listing, then rmdir.
-    "cgroup_unit": {"openat": 3, "fstat": 2, "write": 1, "read": 1, "seek": 1, "getdents": 2, "unlinkat": 1},
+    # cgroup.kill open, the mount ids of the folder and the file (the file
+    # must be on the folder's mount, m6-C3b) and its write, cgroup.events
+    # open and one pread, the unit's own listing, then rmdir.
+    "cgroup_unit": {"openat": 3, "fstat": 4, "write": 1, "read": 1, "seek": 1, "getdents": 2, "unlinkat": 1},
     # builtin_probe::plan after exec_path::lookup_open_in: the found file's
     # canonical path (one readlinkat per name of the target folder and the
     # file), version_manager::classify (statx of the folder the lookup
@@ -268,7 +269,10 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     "supervisor_start": {"exec": 1, "fd_flags": 2},
     "supervisor_idle": {"exec": 1, "fd_flags": 1},
     "supervisor_spawn": {"spawn": 1, "openat": 1, "cwd": 1},
-    "supervisor_unit_cgroup": {"mkdir": 1, "openat": 2, "write": 1},
+    # The mount ids of the parent, the new unit folder and its cgroup.kill:
+    # the folder must be on the parent's mount and the file on the folder's
+    # (m6-C3b).
+    "supervisor_unit_cgroup": {"mkdir": 1, "openat": 2, "fstat": 3, "write": 1},
     "supervisor_own_group": {"pgroup": 1},
     # command_grant::neutral: the 0500 folder's mkdirat (EEXIST once made),
     # open and fd_facts, then its emptiness check through a cursor on a
