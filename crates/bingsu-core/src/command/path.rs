@@ -333,7 +333,7 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: name에서 '/'가 든 상대 경로 거부를 지우는 것, "."·".."·빈 이름 거부를 지우는 것,
-    // 이름의 공백 거부를 지우는 것, 공백만 보고 탭·줄바꿈을 놓치는 것, 절대 경로에도 공백 거부를 거는 것(macOS의
+    // 이름의 공백 거부를 지우는 것, 공백만 보고 탭·줄바꿈·CR·FF를 놓치는 것, 절대 경로에도 공백 거부를 거는 것(macOS의
     // `/Applications/Visual Studio Code.app/…` 같은 경로가 막힘).
     #[test]
     fn names() {
@@ -350,6 +350,8 @@ mod tests {
             b"deno --version",
             b"de\tno",
             b"deno\n",
+            b"de\rno",
+            b"de\x0cno",
         ] {
             assert_eq!(name(w), Name::Refused, "{w:?}");
         }

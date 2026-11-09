@@ -1632,6 +1632,9 @@ mod tests {
         assert_eq!(e.status, response::Status::Failed);
     }
 
+    // 감지 파일이 있는 곳에서만 사용자 language를 돌리고, 정하지 못한 회차(폴더 사실이 저장소를 확정하지 않음,
+    // 수집 답 없음)는 숨기지 않아 그리던 값이 남는다(D3c-2 판정 Q2·Q3). 이것을 실패시키는 것: 미확정을 숨김으로
+    // 보는 것, 답 없는 회차를 감지 결과로 정하는 것.
     #[test]
     fn a_language_runs_only_where_its_files_were_found() {
         use bingsu_core::collection::language::Version;
@@ -1656,6 +1659,15 @@ mod tests {
         assert!(hide.is_empty());
         let (skip, _) = gate_languages(&units, &answered(Root::Repo(2)), Some(3));
         assert_eq!(skip.len(), 3);
+        // No answer from the collection: undecided, so nothing is hidden and
+        // the shown values stay, even beside a marker result.
+        let unanswered = Languages {
+            answers: Vec::new(),
+            ..answered(Root::Outside)
+        };
+        let (skip, hide) = gate_languages(&units, &unanswered, None);
+        assert_eq!(skip, ["custom/a", "custom/b", "custom/c"]);
+        assert!(hide.is_empty());
     }
 
     #[test]
