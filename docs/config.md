@@ -124,6 +124,73 @@ the same way: once a layout from your own files draws it at some width, its valu
 it, including a theme's layout at a narrow width. Naming a segment only in a theme's layout does not run the command
 or show the variable.
 
+## Sharing a config with a team
+
+A file outside your config folder can set colors and layout only, because a command in a file that other people can
+change would run as you. A team that wants one look, and commands of its own, has two ways to share.
+
+### A shared look, your own commands
+
+Keep the shared file free of commands: icons, style, options of built-in segments, and layout lines of built-in
+segments. Everyone extends it from their own `config.toml` and adds their commands there.
+
+The team's file, for example `~/src/team-prompt/team.toml` in the team's repository:
+
+```toml
+icons = "ascii"
+
+[style]
+preset = "lean"
+
+[segment.dir]
+shorten = ["repo"]
+
+[layout.line1]
+left = ["dir", "git"]
+```
+
+Your `config.toml`:
+
+```toml
+extends = ["~/src/team-prompt/team.toml"]
+
+[segment."custom/email"]
+kind = "command"
+command = ["git", "config", "user.email"]
+cache = "60s"
+
+[layout.line1]
+right = ["custom/email"]
+```
+
+Tables merge and each array is replaced whole, so the team's `left` stays and your `right` is added to the same line.
+`bingsu config check` lists the team's file as "colors and layout only". Draw your commands in a layout line of your
+own file: a command that only the team's layout names does not run (W404).
+
+### A copy of your own
+
+When the team's file has commands, read it, then copy it into `conf.d/` (for example `conf.d/team.toml`). The copy
+is yours, and its commands run. What to read are the keys that decide what runs: `kind`, `command`, `shell`,
+`unsafe_shell`, `cwd`, `env_allow`, and a `language` segment's `detect_files`, `interpreter` and `version`.
+
+The cost: a copy does not follow the team's changes. To update it, read the change and copy the file again.
+
+`bingsu config use` on the team's file trusts it in place instead (see "Where segments come from"): its later changes
+run without another look, so use it only if you trust everyone who can change that file.
+
+### Turning a segment off
+
+To turn off one of the team's segments, set `enabled = false` in a file of your own that applies after it, for
+example `conf.d/90-mine.toml` (the `conf.d` files apply in name order):
+
+```toml
+[segment."custom/email"]
+enabled = false
+```
+
+`bingsu config check --explain` shows each file as "trusted" or "colors and layout only", and for each command
+segment, whether it runs and which file each key came from.
+
 ## How commands run
 
 The refresh helper starts with each prompt (not with a redraw, such as after a terminal resize) and runs commands,
