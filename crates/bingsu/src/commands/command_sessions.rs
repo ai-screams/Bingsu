@@ -238,7 +238,18 @@ fn reclaim_one(
     // A name replaced between the open and the lock needs no check of its
     // own: unlinking or renaming over a name moves the old file's ctime, so
     // the stamp differs then too (a_name_replaced_after_the_open_is_kept).
-    if sys::file_stamp(&lock).ok()? != seen {
+    // From here on the lock is taken: every outcome counts against
+    // RECLAIM_MAX, a failed call too.
+    // 이것을 실패시키는 것: 잡은 뒤의 실패를 None으로 돌려 상한에 세지 않는 것(a_failed_reclaim_counts_against_the_limit).
+    #[cfg(test)]
+    let held = if FAIL_STAMP.with(std::cell::Cell::get) {
+        Err(io::Error::other("test: stamp refused"))
+    } else {
+        sys::file_stamp(&lock)
+    };
+    #[cfg(not(test))]
+    let held = sys::file_stamp(&lock);
+    if held.map_or(true, |held| held != seen) {
         return kept();
     }
     if !remove_parent(digest, cgroup, own_cgroup) {
@@ -246,7 +257,17 @@ fn reclaim_one(
     }
     // A refused charge here leaves a stale lock with no parent: the next run
     // takes it again (an_unfinished_reclaim_is_finished_by_the_next_run).
-    sys::unlink_at(runtime.as_fd(), name).ok()?;
+    #[cfg(test)]
+    let unlink = if FAIL_UNLINK.with(std::cell::Cell::get) {
+        Err(io::Error::other("test: unlink refused"))
+    } else {
+        sys::unlink_at(runtime.as_fd(), name)
+    };
+    #[cfg(not(test))]
+    let unlink = sys::unlink_at(runtime.as_fd(), name);
+    if unlink.is_err() {
+        return kept();
+    }
     drop(lock);
     Some(Outcome::Reclaimed(digest.to_owned()))
 }
@@ -298,6 +319,10 @@ pub(crate) fn now_secs() -> i64 {
 thread_local! {
     /// Tests stand in a later wall clock (a lock's ctime cannot be set back).
     pub(crate) static NOW: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    /// Tests refuse every stamp read of a taken lock.
+    static FAIL_STAMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests refuse every unlink of a lock.
+    static FAIL_UNLINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Tests pick the start (`start_seed`).
     pub(crate) static SEED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static BEFORE_OPEN: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
@@ -715,25 +740,52 @@ mod tests {
         assert!(!exists(&s.runtime(), &digest(1)));
     }
 
-    // Linux: cgroup v2 mount이 없을 때(폴더 없음, 다른 파일 시스템)만 없음이고, cgroup v2인데 이 프로세스의 폴더를
-    // 못 찾으면 모름이다. 이것을 실패시키는 것: mount 확인 없이 찾기 실패를 없음으로 보는 것, 없는 mount를 모름으로
-    // 보는 것, 다른 파일 시스템을 cgroup v2로 보는 것.
+    // Linux: `/proc/self/cgroup`에 v2 줄(`0::`)이 없을 때만 없음이고, 그 밖의 찾기 실패(다른 파일 시스템, 없는
+    // 폴더, 없는 mount)는 모두 모름이다. 이것을 실패시키는 것: 찾기 실패를 없음으로 보는 것, v2 줄이 없는데 모름으로
+    // 보는 것.
     #[cfg(target_os = "linux")]
     #[test]
     fn gc_lookup_failure_is_not_absence() {
         use super::super::command_cgroup::fs::own_or_why;
         let s = Scratch::new("absence");
         let plain = s.cgroup().into_os_string().into_encoded_bytes();
-        assert!(matches!(own_or_why(&plain, b"0::/\n"), OwnCgroup::Absent));
+        let v1 = b"12:pids:/user.slice\n1:name=systemd:/user.slice\n";
+        assert!(matches!(own_or_why(&plain, v1), OwnCgroup::Absent));
+        assert!(matches!(own_or_why(&plain, b"0::/\n"), OwnCgroup::Unknown));
         assert!(matches!(
             own_or_why(b"/bingsu-no-such-mount", b"0::/\n"),
-            OwnCgroup::Absent
+            OwnCgroup::Unknown
         ));
-        // The CI runners and containers mount cgroup v2 there.
         assert!(matches!(
             own_or_why(b"/sys/fs/cgroup", b"0::/bingsu-no-such-cgroup\n"),
             OwnCgroup::Unknown
         ));
+    }
+
+    // 잠금을 잡은 뒤 회수가 실패해도(unlink 거부, 잡은 fd의 stamp 읽기 실패) 그 시도는 상한 4에 센다. 오래된 잠금
+    // 여섯이면 네 번만 시도한다. 이것을 실패시키는 것: 잡은 뒤의 실패를 None으로 돌려 상한에 세지 않는 것(여섯 모두
+    // 시도).
+    #[test]
+    fn a_failed_reclaim_counts_against_the_limit() {
+        let s = Scratch::new("failed-cap");
+        let mut ctime = 0;
+        for i in 0..6 {
+            ctime = ctime.max(lock(&s.runtime(), &digest(i)));
+        }
+        for fail in [&FAIL_UNLINK, &FAIL_STAMP] {
+            fail.with(|c| c.set(true));
+            let done = run(&s, ctime + STALE_SECS);
+            fail.with(|c| c.set(false));
+            assert_eq!(done.len(), RECLAIM_MAX, "{done:?}");
+            assert!(
+                done.iter().all(|o| matches!(o, Outcome::Kept(_))),
+                "{done:?}"
+            );
+            assert_eq!(
+                (0..6).filter(|i| exists(&s.runtime(), &digest(*i))).count(),
+                6
+            );
+        }
     }
 
     /// Probe for the fsbudget stale-lock terms (run under strace by hand,
@@ -812,7 +864,7 @@ mod tests {
         };
         {
             let _meter = sys::CollectionMeter::fixture_operations(sys::CHECKPOINT_OPS + used - 1);
-            assert_eq!(run(&s, ctime + STALE_SECS), []);
+            assert_eq!(run(&s, ctime + STALE_SECS), [Outcome::Kept(digest(1))]);
         }
         assert!(!p.exists() && exists(&s.runtime(), &digest(1)));
         assert_eq!(run(&s, ctime + STALE_SECS), [Outcome::Reclaimed(digest(1))]);

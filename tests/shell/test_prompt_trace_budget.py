@@ -2793,6 +2793,22 @@ def test_a_stale_reclaim_is_within_the_gc_bound():
                                     replace(plan, session_locks=plan.session_locks + 1))
 
 
+# m6-C4a7: this session's own lock past the age check: its name stat and the
+# runtime root's stamp (STALE_RECLAIM's first two calls), then nothing; the
+# plan counts the lock only as a session lock. 이것을 실패시키는 것: runtime
+# stamp를 오래된 잠금이 있을 때만 세는 것(자기 잠금의 stat이 상한을 넘음).
+def test_an_old_own_lock_is_within_the_gc_bound():
+    from dataclasses import replace
+    lines, collector, plan = helper_stage_case("command_miss")
+    helper = next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
+    replayed = with_stale_reclaim(lines)
+    at = next(i for i, l in enumerate(replayed) if "command-0000000000000000000000000000abc1.lock" in l)
+    own = replayed[:at + 2] + replayed[at + len(STALE_RECLAIM):]
+    assert len(own) == len(lines) + 2 and own[at].startswith(f"{helper}  newfstatat(")
+    counted = replace(plan, session_locks=plan.session_locks + 1)
+    assert budget.check_helper_capture("command_miss", own, HELPER_EXE, collector, counted) is False
+
+
 def test_collect_counted_events_preserve_all_helper_counts():
     from collections import Counter
     for stage in STAGE_NAMES + COMMAND_STAGE_NAMES:

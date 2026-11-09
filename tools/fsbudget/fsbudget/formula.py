@@ -217,11 +217,10 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # check, the parent's rmdir and the lock's unlink.
     "stale_lock_open": {"openat": 1, "fstat": 2, "statfs": 1, "flock": 1},
     "stale_lock_taken": {"fstat": 1, "unlinkat": 2},
-    # The GC's own-cgroup lookup, once a run (command_cgroup::fs::open_own),
-    # its longest path, a failure: /proc/self/cgroup opened and read (2), the
-    # own folder opened and its fstatfs, cgroup.procs opened and read in
-    # 4 KiB preads to PROCS_MAX (17), then the mount's open and fstatfs.
-    "gc_own_cgroup": {"openat": 4, "read": 2 + 17, "statfs": 2},
+    # The GC's own-cgroup lookup, once a run (command_cgroup::fs::open_own):
+    # /proc/self/cgroup opened and read (2), the own folder opened and its
+    # fstatfs, cgroup.procs opened; its preads are PROCS_PREADS.
+    "gc_own_cgroup": {"openat": 3, "read": 2, "statfs": 1},
     # command_cgroup::fs::open_session up to the session parent's open (Linux,
     # C3): uname (the 5.14 check, kernel_release), /proc/self/cgroup
     # through libc::open and read to its end, the own cgroup folder through
@@ -296,9 +295,8 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
     "passwd": {"openat": 1, "fd_flags": 2},
     "dup": {"dup": 1, "fd_flags": 1},
     "statm": {"openat": 1, "fstat": 1, "read": 2, "fd_flags": 1},
-    # Its three libc open(O_CLOEXEC) calls (/proc/self/cgroup, the own
-    # folder, the mount).
-    "gc_own_cgroup": {"openat": 4, "read": 2 + 17, "statfs": 2, "fd_flags": 3},
+    # Its two libc open(O_CLOEXEC) calls (/proc/self/cgroup, the own folder).
+    "gc_own_cgroup": {"openat": 3, "read": 2, "statfs": 1, "fd_flags": 2},
     # musl's opendir does not stat the folder.
     "fd_listing": {"openat": 1, "getdents": 2, "fd_flags": 1},
     # libc::open(O_CLOEXEC) of /proc/self/cgroup and of the own cgroup folder.
@@ -938,21 +936,35 @@ def _session_sweep(e: dict, p: HelperPlan) -> None:
     e["fstat"] = e.get("fstat", 0) + min(p.session_locks, EXAMINE_MAX)
     if p.stale_locks > p.session_locks:
         raise ValueError("stale locks are session locks")
-    # A stale lock: the runtime root's stamp once (this session's digest),
-    # each one opened and locked (a held one too: it does not count against
-    # RECLAIM_MAX), at most RECLAIM_MAX taken, and the own-cgroup lookup once.
+    # The runtime root's stamp, once a run, for this session's own digest:
+    # read for the first lock past the age check, this session's own stale
+    # lock too, which `stale_locks` leaves out; counted whenever there is a
+    # lock at all.
+    if p.session_locks:
+        e["fstat"] += 1
+    # Each stale lock opened and locked (a held one too: it does not count
+    # against RECLAIM_MAX); at most RECLAIM_MAX taken, each counted whether
+    # its reclaim then succeeds or fails; the own-cgroup lookup once.
     stale = min(p.stale_locks, EXAMINE_MAX)
     if stale:
-        e["fstat"] += 1
         _add(e, "stale_lock_open", stale)
         _add(e, "stale_lock_taken", min(stale, RECLAIM_MAX))
         _add(e, "gc_own_cgroup")
+        e["read"] += PROCS_PREADS
 
 
 # command_sessions::EXAMINE_MAX and RECLAIM_MAX: names one GC run looks at,
 # locks it takes.
 EXAMINE_MAX = 32
 RECLAIM_MAX = 4
+# command_cgroup::read_bounded on cgroup.procs: 4 KiB preads until EOF or
+# past core cgroup::PROCS_MAX (64 KiB). The kernel's seq_file stops a read
+# short only before a record that does not fit, and a record is one pid line
+# (pid_max is at most 2^22: 7 digits and the newline), so every read but
+# the last returns at least 4096 - 7 bytes: 64 KiB take ceil(65536 / 4089)
+# reads, and one more ends them (EOF, or the read past the cap).
+PROCS_MAX, PREAD_CHUNK, PID_LINE_MAX = 65_536, 4096, 8
+PROCS_PREADS = -(-PROCS_MAX // (PREAD_CHUNK - PID_LINE_MAX + 1)) + 1
 
 
 def _command_session(e: dict, p: HelperPlan) -> None:

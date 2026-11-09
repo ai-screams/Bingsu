@@ -425,9 +425,9 @@ pub(crate) mod fs {
 
     /// The process's own cgroup folder on the cgroup v2 mount, holding this
     /// process (the round's check, for the collection GC). `Absent` only when
-    /// `/sys/fs/cgroup` is no cgroup v2 mount (missing, or another file
-    /// system): there no round makes a parent (`open_session` needs it). Any
-    /// other miss is `Unknown`: a parent may be there out of sight (m6-C4a7).
+    /// `/proc/self/cgroup` has no cgroup v2 line (`0::`): no round makes a
+    /// parent then (`open_session` needs that line). Any other miss is
+    /// `Unknown`: a parent may be there out of sight (m6-C4a7).
     pub(crate) fn open_own() -> super::super::command_sessions::OwnCgroup {
         use super::super::command_sessions::OwnCgroup;
         let Ok(text) = read_small(c"/proc/self/cgroup", cgroup::PROC_CGROUP_MAX) else {
@@ -442,47 +442,18 @@ pub(crate) mod fs {
         proc_self_cgroup: &[u8],
     ) -> super::super::command_sessions::OwnCgroup {
         use super::super::command_sessions::OwnCgroup;
-        if let Some(own) = open_own_member_at(mount, proc_self_cgroup) {
-            return OwnCgroup::Folder(own);
+        // 이것을 실패시키는 것: v2 줄 없음 대신 찾기 실패를 없음으로 보는 것, v2 줄이 없는데 모름으로 보는 것
+        // (gc_lookup_failure_is_not_absence).
+        if !proc_self_cgroup
+            .split(|&b| b == b'\n')
+            .any(|l| l.starts_with(b"0::"))
+        {
+            return OwnCgroup::Absent;
         }
-        // 이것을 실패시키는 것: 찾기 실패를 cgroup 없음으로 보는 것(gc_lookup_failure_is_not_absence).
-        match mount_is_cgroup2(mount) {
-            Some(false) => OwnCgroup::Absent,
-            _ => OwnCgroup::Unknown,
+        match open_own_member_at(mount, proc_self_cgroup) {
+            Some(own) => OwnCgroup::Folder(own),
+            None => OwnCgroup::Unknown,
         }
-    }
-
-    /// Whether `mount` is a cgroup v2 mount: `Some(false)` when it is missing
-    /// or another file system, `None` when that cannot be told.
-    fn mount_is_cgroup2(mount: &[u8]) -> Option<bool> {
-        let path = std::ffi::CString::new(mount).ok()?;
-        sys::collection_ops(3).ok()?;
-        // SAFETY: NUL-terminated path; the descriptor is owned below.
-        let fd = unsafe {
-            libc::open(
-                path.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return (io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT))
-                .then_some(false);
-        }
-        use std::os::fd::FromRawFd;
-        // SAFETY: a fresh descriptor nothing else owns.
-        let dir = unsafe { File::from_raw_fd(fd) };
-        // SAFETY: zeroed writable statfs.
-        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-        // SAFETY: open descriptor and writable statfs.
-        if unsafe { libc::fstatfs(dir.as_raw_fd(), &mut st) } != 0 {
-            return None;
-        }
-        #[allow(
-            clippy::unnecessary_cast,
-            reason = "f_type's type differs between libcs"
-        )]
-        let magic = st.f_type as i64 == libc::CGROUP2_SUPER_MAGIC as i64;
-        Some(magic)
     }
 
     /// [`open_own`] from its inputs, for this process.

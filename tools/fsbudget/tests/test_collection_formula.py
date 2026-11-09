@@ -167,21 +167,23 @@ def test_gc_sweep_counts_each_session_lock():
     plan = HelperPlan(**plan)
     none = helper_command_expected(replace(plan, session_locks=0))["gc"]
     three = helper_command_expected(replace(plan, session_locks=3))["gc"]
-    assert {k: three[k] - none.get(k, 0) for k in three if three[k] != none.get(k, 0)} == {"fstat": 3}
+    # Each name's stat, and the runtime root's stamp once (this session's
+    # own lock may be past the age check).
+    assert {k: three[k] - none.get(k, 0) for k in three if three[k] != none.get(k, 0)} == {"fstat": 4}
     # At most EXAMINE_MAX (32) names a sweep.
     many = helper_command_expected(replace(plan, session_locks=40))["gc"]
-    assert many["fstat"] - none["fstat"] == 32
+    assert many["fstat"] - none["fstat"] == 33
 
 
 def _delta(a, b):
     return {k: b.get(k, 0) - a.get(k, 0) for k in set(a) | set(b) if b.get(k, 0) != a.get(k, 0)}
 
 
-# m6-C4a7(판정 D): 오래된 잠금마다 열기·check_data·flock, 잡은 것(4개까지)마다 stamp·rmdir·unlink, 실행마다
-# runtime stamp 1과 자기 cgroup 찾기(가장 긴 실패 경로)가 더해진다. 살펴보는 수 상한은 32다. musl은 libc open 셋에
-# F_SETFD가 붙는다. 오래된 잠금은 세션 잠금의 일부다. 이것을 실패시키는 것: 열기 항, 잡은 항, 잡은 수 상한, 살펴보는
-# 수 상한, runtime stamp, 찾기 항, musl 항 가운데 하나를 지우거나 바꾸는 것, 오래된 잠금이 세션 잠금보다 많은 계획을
-# 받는 것.
+# m6-C4a7(판정 D): 오래된 잠금마다 열기·check_data·flock, 잡은 것(4개까지, 성공과 실패 모두)마다 stamp·rmdir·
+# unlink, 실행마다 자기 cgroup 찾기 한 번(cgroup.procs pread 18까지)이 더해진다. 살펴보는 수 상한은 32다. musl은
+# libc open 둘에 F_SETFD가 붙는다. 오래된 잠금은 세션 잠금의 일부다. 이것을 실패시키는 것: 열기 항, 잡은 항, 잡은 수
+# 상한, 살펴보는 수 상한, 찾기 항, pread 상한, musl 항 가운데 하나를 지우거나 바꾸는 것, 오래된 잠금이 세션 잠금보다
+# 많은 계획을 받는 것.
 @pytest.mark.parametrize("libc", ["gnu", "musl"])
 def test_gc_stale_lock_terms(libc):
     import json
@@ -194,13 +196,16 @@ def test_gc_stale_lock_terms(libc):
     plan = replace(HelperPlan(**plan), libc=libc, nsswitch_reads=0 if libc == "musl" else 2,
                    passwd_seeks=1 if libc == "musl" else 0, session_locks=40)
     gc = lambda n: helper_command_expected(replace(plan, stale_locks=n))["gc"]
-    one = {"fstat": 1 + 2 + 1, "openat": 1 + 4, "statfs": 1 + 2, "flock": 1, "unlinkat": 2, "read": 19,
-           **({"fd_flags": 3} if libc == "musl" else {})}
+    one = {"fstat": 2 + 1, "openat": 1 + 3, "statfs": 1 + 1, "flock": 1, "unlinkat": 2, "read": 2 + 18,
+           **({"fd_flags": 2} if libc == "musl" else {})}
     assert _delta(gc(0), gc(1)) == one
     # Each more: opened and locked; taken up to four.
     assert _delta(gc(1), gc(4)) == {"openat": 3, "fstat": 9, "statfs": 3, "flock": 3, "unlinkat": 6}
     assert _delta(gc(4), gc(6)) == {"openat": 2, "fstat": 4, "statfs": 2, "flock": 2}
     assert gc(32) == gc(40)
+    # seq_file's shortest reads (4089 B): 64 KiB in 17, then the end.
+    from fsbudget.formula import PROCS_PREADS
+    assert PROCS_PREADS == 18
     with pytest.raises(ValueError):
         helper_command_expected(replace(plan, session_locks=2, stale_locks=3))
 
