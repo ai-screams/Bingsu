@@ -883,3 +883,42 @@ fn check_and_explain_name_set_id_programs() {
         );
     }
 }
+
+// U-33: set-id 인터프리터를 쓰는 script는 W411과 `--explain`이 인터프리터 이유를 적는다(script 자체가 set-id인 이유와
+// 다름). 이것을 실패시키는 것: 인터프리터의 SetId를 이유 없는 거부로 바꾸는 것, 인터프리터 경우를 파일 자체로 보는 것.
+#[test]
+fn check_and_explain_name_a_set_id_interpreter() {
+    let e = Env::new("cli_config", "set-id-interpreter");
+    let interp = e.put("bin/interp", "");
+    std::fs::copy("/bin/sh", &interp).unwrap();
+    chmod(&interp, 0o4755);
+    let tool = e.put("bin/tool", &format!("#!{}\necho tool\n", interp.display()));
+    chmod(&tool, 0o755);
+    e.put_config(
+        "config.toml",
+        "[segment.\"custom/a\"]\nkind = \"command\"\ncommand = [\"tool\"]\n\
+         [layout.line1]\nleft = [\"custom/a\"]\n",
+    );
+    let path = format!("{}:/usr/bin:/bin", tool.parent().unwrap().display());
+    let why =
+        "its interpreter is setuid, setgid or has file capabilities (bingsu runs no such program)";
+    let check = |extra: &[&str]| {
+        let mut a = vec!["config", "check"];
+        a.extend_from_slice(extra);
+        text(&e.cmd(&a).env("PATH", &path).output().unwrap().stdout)
+    };
+    let plain = check(&[]);
+    assert!(
+        plain.contains("W411: segment `custom/a`") && plain.contains(why),
+        "{plain}"
+    );
+    let stdout = check(&["--explain"]);
+    let executable = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("executable"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        executable.contains("/bin/tool") && executable.ends_with(why),
+        "{stdout}"
+    );
+}

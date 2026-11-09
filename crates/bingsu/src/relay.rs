@@ -1668,6 +1668,62 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// What the helper's lookup gives for `name` in `dir` (U-33): every
+    /// target that would run carries its pin.
+    fn looked_up(dir: &Path, name: &[u8]) -> Option<ExecPin> {
+        crate::commands::exec_path::lookup(
+            name,
+            &[dir.to_path_buf()],
+            &[],
+            crate::commands::sys::current_uid(),
+            &mut bingsu_core::fs_trust::RefuseGroupWrite,
+        )
+        .unwrap()
+        .pin
+    }
+
+    // U-33: 조회한 뒤 대상이 바뀌면(이름 위로 다른 실행 파일을 옮김, chmod) relay가 조회의 pin으로 거부한다. 양성
+    // 대조: 바뀌지 않은 대상은 실행된다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운 대상에만 pin을 주는 것.
+    #[test]
+    fn test_relay_refuses_a_target_changed_after_its_lookup() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let dir = std::fs::canonicalize(fresh_dir("after-lookup")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o755);
+        let pin = looked_up(&dir, b"cat");
+        assert!(!refused(&exe, pin), "unchanged");
+        cat_copy(&dir.join("other"), 0o755);
+        std::fs::rename(dir.join("other"), &exe).unwrap();
+        assert!(refused(&exe, pin), "replaced");
+        let pin = looked_up(&dir, b"cat");
+        assert!(!refused(&exe, pin), "looked up again");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused(&exe, pin), "chmod");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-33(root): 조회한 뒤 file capability를 붙인 대상은 relay가 거부한다(relay는 capability를 읽지 않고, setcap이
+    // 바꾼 ctime으로 잡는다). CI가 sudo로 --ignored로 돌린다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운
+    // 대상에만 pin을 주는 것.
+    #[test]
+    #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
+    fn test_relay_refuses_capabilities_set_after_the_lookup() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        assert_eq!(crate::commands::sys::current_uid(), 0, "run as root");
+        let dir = std::fs::canonicalize(fresh_dir("caps-after-lookup")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.join("cat");
+        cat_copy(&exe, 0o755);
+        let pin = looked_up(&dir, b"cat");
+        assert!(!refused(&exe, pin), "unchanged");
+        // Past the kernel's coarse timestamp tick, so setcap moves the ctime.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        crate::commands::sys::test_set_file_capability(&exe, true);
+        assert!(refused(&exe, pin), "setcap");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // N-078. 이것을 실패시키는 것: 중계가 마감이나 permit을 대상 envp·argv에 넣는 것.
     #[test]
     fn test_relay_no_deadline_env() {
@@ -3124,6 +3180,14 @@ mod macos_tests {
     }
 
     fn frame_input(run_ns: i64, interpreter: Option<Interpreter>) -> Vec<u8> {
+        frame_input_pinned(run_ns, interpreter, None)
+    }
+
+    fn frame_input_pinned(
+        run_ns: i64,
+        interpreter: Option<Interpreter>,
+        pin: Option<ExecPin>,
+    ) -> Vec<u8> {
         let clock = crate::prompt_io::observe_clock().unwrap();
         let permit = Permit {
             kind: clock.kind,
@@ -3138,7 +3202,7 @@ mod macos_tests {
             origin: Origin::Config,
             run_deadline: clock.now.checked_add_signed(run_ns).unwrap(),
             environment: Vec::new(),
-            pin: None,
+            pin,
             interpreter,
             cwd: b"/".to_vec(),
         };
@@ -3393,6 +3457,38 @@ mod macos_tests {
             let run = probe(&exe, &live());
             assert_eq!(run.code, i32::from(code), "{mode:o}: {run:?}");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // U-33(macOS): 조회한 뒤 대상이 바뀌면(이름 위로 다른 사본을 옮김, chmod) relay가 조회의 pin으로 거부한다.
+    // 양성 대조: 바뀌지 않은 대상은 돈다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운 대상에만 pin을 주는 것.
+    #[test]
+    fn test_relay_refuses_a_target_changed_after_its_lookup() {
+        let dir = scratch("after-lookup");
+        let exe = dir.join("probe");
+        copy_mode(&me_exe(), &exe, 0o755);
+        let look = || {
+            crate::commands::exec_path::lookup(
+                b"probe",
+                std::slice::from_ref(&dir),
+                &[],
+                crate::commands::sys::current_uid(),
+                &mut bingsu_core::fs_trust::RefuseGroupWrite,
+            )
+            .unwrap()
+            .pin
+        };
+        let run = |pin| probe(&exe, &frame_input_pinned(60 * SECOND, None, pin)).code;
+        let pin = look();
+        assert_eq!(run(pin), 0, "unchanged");
+        copy_mode(&me_exe(), &dir.join("other"), 0o755);
+        std::fs::rename(dir.join("other"), &exe).unwrap();
+        assert_eq!(run(pin), i32::from(RELAY_TARGET), "replaced");
+        let pin = look();
+        assert_eq!(run(pin), 0, "looked up again");
+        std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        assert_eq!(run(pin), i32::from(RELAY_TARGET), "chmod");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

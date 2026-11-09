@@ -823,9 +823,9 @@ jobs:
       - name: Core tests without overflow checks (release)
         if: runner.os == 'Linux'
         run: cargo test -j 2 --release -p bingsu-core -p bingsu-core-tests
-      # Writing security.capability needs CAP_SETFCAP, so this one lookup test
-      # runs as root; the grep turns a skip or a filter miss into a failure.
-      # 이것을 실패시키는 것: exec_path의 capability 검사를 지우는 것.
+      # Writing security.capability needs CAP_SETFCAP, so these two tests run
+      # as root; the greps turn a skip or a filter miss into a failure.
+      # 이것을 실패시키는 것: exec_path의 capability 검사를 지우는 것, 그룹 쓰기를 비운 대상에만 pin을 주는 것.
       - if: runner.os == 'Linux'
         name: Programs with file capabilities are refused (root)
         run: |
@@ -833,9 +833,10 @@ jobs:
           cargo test -p bingsu --bin bingsu --no-run --message-format=json > "$RUNNER_TEMP/bingsu-bin.json"
           bin=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "bingsu" and (.target.kind | index("bin")) and .profile.test) | .executable' "$RUNNER_TEMP/bingsu-bin.json")
           [ -x "$bin" ] || { echo "no test binary for bingsu" >&2; exit 1; }
-          sudo "$bin" --exact commands::exec_path::tests::file_capabilities_are_refused --ignored --test-threads=1 | tee "$RUNNER_TEMP/root-file-caps.txt"
+          sudo "$bin" --exact commands::exec_path::tests::file_capabilities_are_refused relay::tests::test_relay_refuses_capabilities_set_after_the_lookup --ignored --test-threads=1 | tee "$RUNNER_TEMP/root-file-caps.txt"
           grep -F 'test commands::exec_path::tests::file_capabilities_are_refused ... ok' "$RUNNER_TEMP/root-file-caps.txt"
-          grep -F 'test result: ok. 1 passed;' "$RUNNER_TEMP/root-file-caps.txt"
+          grep -F 'test relay::tests::test_relay_refuses_capabilities_set_after_the_lookup ... ok' "$RUNNER_TEMP/root-file-caps.txt"
+          grep -F 'test result: ok. 2 passed;' "$RUNNER_TEMP/root-file-caps.txt"
       - name: Detach the X-11 filesystem
         if: always() && runner.os == 'macOS' && env.BINGSU_X11_MOUNT != ''
         run: |
