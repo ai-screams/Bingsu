@@ -258,13 +258,41 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// `dir` exists and is empty: whatever an earlier run left there is gone.
+fn fresh_dir(dir: &std::path::Path) {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("cannot clear {}: {e}", dir.display()),
+    }
+    std::fs::create_dir_all(dir).unwrap();
+}
+
+// 이것을 실패시키는 것: 남은 폴더를 비우지 않는 것, 비운 뒤 다시 만들지 않는 것, 처음 만드는 폴더에서 실패하는 것.
+#[test]
+fn fresh_dir_clears_what_an_earlier_run_left() {
+    let base = std::env::temp_dir().join(format!("bingsu-fresh-dir-{}", std::process::id()));
+    let dir = base.join("collector-lifecycle-1");
+    let _ = std::fs::remove_dir_all(&base);
+    fresh_dir(&dir);
+    assert!(dir.is_dir());
+    std::fs::write(dir.join("interrupt-0"), b"").unwrap();
+    std::fs::create_dir(dir.join("nested")).unwrap();
+    fresh_dir(&dir);
+    assert!(dir.is_dir());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
 fn peer() -> &'static PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target")
             .join(format!("collector-lifecycle-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // A folder left by an earlier process with this pid would make the
+        // create_new locks below fail with EEXIST.
+        fresh_dir(&dir);
         let dir = std::fs::canonicalize(dir).unwrap();
         let exe = dir.join("peer");
         let source = dir.join("peer.c");
@@ -834,6 +862,87 @@ fn isolated(name: &str) -> std::process::Output {
         .output()
         .unwrap()
 }
+/// The marker a child prints when it misses only a wall-clock bound a
+/// loaded host can miss; every other failure is judged at once.
+const OVERRUN: &str = "timing bound exceeded";
+const OVERRUN_TRIES: usize = 3;
+
+/// In a child: fail with OVERRUN when `started` is `bound` or more ago.
+fn within(started: Instant, bound: Duration) {
+    let elapsed = started.elapsed();
+    assert!(elapsed < bound, "{OVERRUN}: {elapsed:?} >= {bound:?}");
+}
+
+/// A child that failed on OVERRUN only.
+fn overran(out: &std::process::Output) -> bool {
+    !out.status.success()
+        && (String::from_utf8_lossy(&out.stdout).contains(OVERRUN)
+            || String::from_utf8_lossy(&out.stderr).contains(OVERRUN))
+}
+
+/// `run` up to `tries` times while `overran` holds; the last result is the
+/// caller's to judge.
+fn retry_overrun<T>(tries: usize, mut run: impl FnMut() -> T, overran: impl Fn(&T) -> bool) -> T {
+    for _ in 1..tries {
+        let result = run();
+        if !overran(&result) {
+            return result;
+        }
+    }
+    run()
+}
+
+// 이것을 실패시키는 것: 시간 표식이 없는 실패도 재시도하는 것, 재시도하지 않는 것, tries를 넘어 도는 것,
+// 성공한 자식의 표식을 초과로 보는 것.
+#[test]
+fn retry_overrun_retries_only_a_missed_time_bound() {
+    use std::os::unix::process::ExitStatusExt;
+    let out = |code: i32, text: &str| std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: Vec::new(),
+        stderr: text.as_bytes().to_vec(),
+    };
+    let calls = |outs: Vec<std::process::Output>| {
+        let mut outs = outs.into_iter();
+        let mut n = 0;
+        let last = retry_overrun(
+            OVERRUN_TRIES,
+            || {
+                n += 1;
+                outs.next().unwrap()
+            },
+            overran,
+        );
+        (n, last.status.success())
+    };
+    let over = || out(101, &format!("panicked: {OVERRUN}: 600ms >= 500ms"));
+    assert_eq!(calls(vec![out(0, ""), over()]), (1, true));
+    assert_eq!(calls(vec![over(), over(), out(0, "")]), (3, true));
+    assert_eq!(calls(vec![over(), over(), over(), out(0, "")]), (3, false));
+    assert_eq!(
+        calls(vec![
+            out(101, "assertion failed: report.reaped"),
+            out(0, "")
+        ]),
+        (1, false)
+    );
+    assert!(!overran(&out(0, OVERRUN)));
+    let missed = std::panic::catch_unwind(|| {
+        within(
+            Instant::now() - Duration::from_millis(10),
+            Duration::from_millis(5),
+        )
+    });
+    assert!(
+        missed
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap()
+            .contains(OVERRUN)
+    );
+    within(Instant::now(), Duration::from_secs(60));
+}
+
 fn passed(out: &std::process::Output) {
     assert!(
         out.status.success()
@@ -945,11 +1054,20 @@ fn filtered_watchdog_child() {
 fn publisher_stall_does_not_stop_watchdog() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
     use std::os::unix::process::ExitStatusExt;
-    let start = Instant::now();
-    let out = isolated("stalled_publisher_child");
-    assert_eq!(out.status.signal(), Some(libc::SIGKILL), "{out:?}");
-    assert!(String::from_utf8_lossy(&out.stdout).contains("publisher entered"));
-    assert!(start.elapsed() < Duration::from_secs(2));
+    // The kill and the stall are judged every time; only the 2 s bound,
+    // which a loaded host can miss, earns another run.
+    let elapsed = retry_overrun(
+        OVERRUN_TRIES,
+        || {
+            let start = Instant::now();
+            let out = isolated("stalled_publisher_child");
+            assert_eq!(out.status.signal(), Some(libc::SIGKILL), "{out:?}");
+            assert!(String::from_utf8_lossy(&out.stdout).contains("publisher entered"));
+            start.elapsed()
+        },
+        |elapsed| *elapsed >= Duration::from_secs(2),
+    );
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
 }
 #[test]
 #[ignore = "publisher stalls while a live collector retains its lock"]
@@ -1738,7 +1856,11 @@ fn thread_failure_child() {
 #[test]
 fn interrupted_poll_preserves_absolute_deadline() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
-    passed(&isolated("interrupted_poll_child"));
+    passed(&retry_overrun(
+        OVERRUN_TRIES,
+        || isolated("interrupted_poll_child"),
+        overran,
+    ));
 }
 #[test]
 #[ignore = "isolates a non-restarting signal handler and interrupts the supervisor poll"]
@@ -1783,7 +1905,7 @@ fn interrupted_poll_child() {
             > 0,
         "the poll syscall must actually return EINTR"
     );
-    assert!(started.elapsed() < Duration::from_millis(500));
+    within(started, Duration::from_millis(500));
 }
 
 // 이것을 실패시키는 것: 정적 C peer의 payload·길이가 같은 요청 binding의 Update 인코딩과 달라지는 것.

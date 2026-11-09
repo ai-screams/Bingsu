@@ -86,7 +86,7 @@ TCB_SHA256 = {
     "crates/bingsu-core/src/handoff.rs": "212b609746503fca73852e0c2f9e18d0928328adf1ba57d54d2115aa7de65b14",
     "crates/bingsu-core/src/command/response.rs": "76794b243832e39756e20e436383ad1919ac5a94b7f079b529f59db3e9d05a69",
     "crates/bingsu-core/src/command/display.rs": "e1fcbe7c243614e6cc11215504590280f6dad9ff176cd6faf278e72d0c420047",
-    "crates/bingsu-core/src/command/path.rs": "2ad44e19f8a5d9b1357a11ec84320738fbe7eec7ff9a1bf8fa38b135949eed98",
+    "crates/bingsu-core/src/command/path.rs": "37fd52810ec833f5235b11dd7d9797d496edc59290b9b1ecfcb48d49b9105177",
     # The prompt links these and they decide what it reads and draws: the
     # unit judgement and digests display.rs checks (plan.rs, wire.rs), the
     # builtin languages' environment digest (builtin.rs), the front's read
