@@ -45,6 +45,8 @@ pub(crate) mod command_match;
 #[allow(unsafe_code)]
 pub(crate) mod command_process;
 #[cfg(unix)]
+pub(crate) mod command_sessions;
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) mod command_supervisor;
 #[cfg(unix)]

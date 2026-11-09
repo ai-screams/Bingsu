@@ -84,12 +84,20 @@ pub fn session_digest(session: &[u8]) -> String {
 /// session lock lives in: helpers that share a parent always share the
 /// lock, so a reclaim under the lock never meets a live supervisor's unit.
 pub fn parent_name(session: &[u8], runtime: (u64, u64)) -> String {
+    format!("bingsu-cmd-{}", parent_digest(session, runtime))
+}
+
+/// The digest part of [`parent_name`]: 32 lowercase hex digits. The
+/// session lock is named by it too (`command-<digest>.lock`), so a helper
+/// that holds a lock owns the parent of the same digest: the GC's parent
+/// sweep takes the lock of each parent it lists (m6-C4a7).
+pub fn parent_digest(session: &[u8], runtime: (u64, u64)) -> String {
     let mut input = alloc::vec::Vec::with_capacity(session.len() + 17);
     input.extend_from_slice(&runtime.0.to_le_bytes());
     input.extend_from_slice(&runtime.1.to_le_bytes());
     input.push(0);
     input.extend_from_slice(session);
-    format!("bingsu-cmd-{}", hex(&sha256(&input)[..16]))
+    hex(&sha256(&input)[..16])
 }
 
 /// A unit cgroup's name: `u` and 16 lowercase hex digits of `seq`.

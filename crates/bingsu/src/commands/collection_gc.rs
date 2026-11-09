@@ -481,10 +481,13 @@ pub(super) fn reserve_breaker_write(
     save(runtime, me, &catalog)
 }
 
+/// `session` is the calling helper's shell session: its own lock is never
+/// reclaimed (m6-C4a7).
 pub(crate) fn reclaim(
     runtime: &File,
     now: Clock,
     budget: GcBudget,
+    session: Option<&[u8]>,
 ) -> Result<GcReport, StoreError> {
     reclaim_inner(
         runtime,
@@ -492,6 +495,7 @@ pub(crate) fn reclaim(
         budget,
         bingsu_core::field::BUILTIN,
         budget.start(),
+        session,
     )
 }
 #[cfg(test)]
@@ -514,6 +518,7 @@ pub(crate) fn fixture_reclaim(
         budget,
         schema,
         sys::CollectionMeter::fixture_operations(budget.max_ops),
+        None,
     )
 }
 #[cfg(test)]
@@ -531,6 +536,7 @@ pub(crate) fn fixture_timed_reclaim(
         budget,
         schema,
         sys::CollectionMeter::fixture_clock(budget.max_ops, budget.max_ns, clock),
+        None,
     )
 }
 #[cfg(test)]
@@ -595,6 +601,7 @@ fn reclaim_inner(
     budget: GcBudget,
     schema: &[SegmentDecl],
     meter: sys::CollectionMeter,
+    session: Option<&[u8]>,
 ) -> Result<GcReport, StoreError> {
     let mut report = GcReport::default();
     // This is the first filesystem operation. A runtime that never collected
@@ -650,6 +657,19 @@ fn reclaim_inner(
         } else {
             evict(runtime, me, now, schema, &mut catalog, &mut report)
         };
+        // Other sessions' stale locks and cgroup parents (m6-C4a7), under the
+        // GC lock and the same meter, after the stores' own work.
+        // 이것을 실패시키는 것: GC에서 이 단계를 부르지 않는 것(남은 잠금이 그대로 쌓임).
+        if result.is_ok() {
+            let _ = super::command_sessions::reclaim_stale(
+                runtime,
+                me,
+                super::command_sessions::now_secs(),
+                super::command_sessions::start_seed(),
+                session,
+                &mut super::command_sessions::own_cgroup,
+            );
+        }
         // A reservation may precede mkdir, or a completed rmdir may precede
         // the catalog checkpoint. Rebuild counts instead of trusting either
         // stale path or permanently stranding its reserved capacity.

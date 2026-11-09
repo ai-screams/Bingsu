@@ -238,6 +238,25 @@ fn directory_count(path: &std::path::Path) -> u64 {
 }
 
 // 이것을 실패시키는 것: attach에서 실제 mkdir 수로 +3 예약을 정산하지 않는 것.
+// m6-C4a7: GC가 하루 넘은 다른 세션의 잠금을 지운다(나이·잠금·상한 규칙은 command_sessions의 단위 시험).
+// 이것을 실패시키는 것: GC에서 회수 단계를 부르지 않는 것(잠금이 쌓임).
+#[test]
+fn gc_reclaims_a_stale_session_lock() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new("stale-session");
+    f.publish(b"x");
+    let stale = f.base.join(format!("command-{}.lock", "a".repeat(32)));
+    fs::write(&stale, b"").unwrap();
+    fs::set_permissions(&stale, fs::Permissions::from_mode(0o600)).unwrap();
+    let ctime = fs::metadata(&stale).unwrap().ctime();
+    commands::command_sessions::NOW
+        .with(|now| now.set(Some(ctime + commands::command_sessions::STALE_SECS)));
+    let report = f.gc(clock());
+    commands::command_sessions::NOW.with(|now| now.set(None));
+    assert!(!report.incomplete, "{report:?}");
+    assert!(!stale.exists(), "the stale lock is reclaimed");
+}
+
 #[test]
 fn probe_node_drift() {
     let f = Fixture::new("node-drift");
@@ -1147,6 +1166,7 @@ fn gc_time_cap_stops_before_filesystem_work() {
             max_ops: u32::MAX,
             max_ns: 0,
         },
+        None,
     )
     .unwrap();
     assert!(r.incomplete);
@@ -2654,13 +2674,13 @@ fn gc_checkpoint_reserve_case(block: Option<usize>) {
         return;
     }
     let cold = std::time::Instant::now();
-    collection_gc::reclaim(&f.runtime, clock(), GcBudget::default()).unwrap();
+    collection_gc::reclaim(&f.runtime, clock(), GcBudget::default(), None).unwrap();
     let cold_ns = cold.elapsed().as_nanos();
     let mut samples = Vec::new();
     let mut max_checkpoint = 0;
     for _ in 0..200 {
         let start = std::time::Instant::now();
-        let r = collection_gc::reclaim(&f.runtime, clock(), GcBudget::default()).unwrap();
+        let r = collection_gc::reclaim(&f.runtime, clock(), GcBudget::default(), None).unwrap();
         samples.push(start.elapsed().as_nanos());
         assert!(r.ops <= 4_096 && r.checkpoint_ops <= 512);
         max_checkpoint = max_checkpoint.max(r.checkpoint_ops);

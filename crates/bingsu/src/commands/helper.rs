@@ -432,11 +432,16 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let Some(runtime) = collection_runtime
         && let Ok(now) = clock.observe()
     {
-        let outcome = collection_gc::reclaim(&runtime, now, collection_gc::GcBudget::default())
-            .map(|gc| match gc.stop {
-                collection_gc::GcStop::Complete => Ok(()),
-                stop => Err(stop),
-            });
+        let outcome = collection_gc::reclaim(
+            &runtime,
+            now,
+            collection_gc::GcBudget::default(),
+            e.session.as_deref(),
+        )
+        .map(|gc| match gc.stop {
+            collection_gc::GcStop::Complete => Ok(()),
+            stop => Err(stop),
+        });
         let (_, message) = collection_result(outcome);
         if let Some((severity, text)) = message {
             report(&mut groups, severity, text);

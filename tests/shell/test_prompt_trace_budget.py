@@ -1845,7 +1845,7 @@ def helper_stage_case(stage):
     plan["ax"] = HelperAxes(**plan["ax"])
     lines = data.decode().splitlines()
     if stage == "collect":
-        lines = with_command_stage_probe(lines)
+        lines = with_session_listing(with_command_stage_probe(lines))
     return with_capability_queries(lines), meta["collector"], HelperPlan(**plan)
 
 
@@ -1909,6 +1909,34 @@ def test_capability_query_replay(shape):
         damaged[at[0]] = damaged[at[0]].replace(CAPABILITY_RESULT, "-1 EOPNOTSUPP (Operation not supported)")
     with pytest.raises(AssertionError, match="capability query"):
         with_capability_queries(damaged)
+
+
+def with_session_listing(lines):
+    """The collect capture predates the GC's sweep of stale session locks
+    (m6-C4a7): the runtime root's listing, one block and the block that ends
+    it, just before the catalog commit (no session lock in a collect-only
+    fixture). With no stale lock, no lock is taken and the GC's own cgroup is
+    not looked up. Replay that shape on the saved capture; a product-shape
+    replay, not a new capture."""
+    import re
+    helper = next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
+    commits = [i for i, l in enumerate(lines) if l.split()[0] == helper
+               and re.search(r'openat\(\d+</fx/run-t/bingsu>, "\.collections\.catalog\.stage", O_RDONLY', l)]
+    at = commits[-1]
+    root = re.search(r"openat\((\d+)</fx/run-t/bingsu>", lines[at])[1]
+    fd = "4"
+    assert not any(re.search(rf"\b{fd}<", l) for l in lines[at - 1:at + 1] if l.split()[0] == helper and "close(" not in l)
+    listing = [f'{helper}  openat({root}</fx/run-t/bingsu>, ".", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = {fd}</fx/run-t/bingsu>',
+               f'{helper}  lseek({fd}</fx/run-t/bingsu>, 0, SEEK_SET) = 0',
+               f'{helper}  getdents64({fd}</fx/run-t/bingsu>, 0x7ffd0000 /* 12 entries */, 8192) = 432',
+               f'{helper}  lseek({fd}</fx/run-t/bingsu>, 0, SEEK_CUR) = 432',
+               f'{helper}  close({fd}</fx/run-t/bingsu>) = 0',
+               f'{helper}  openat({root}</fx/run-t/bingsu>, ".", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = {fd}</fx/run-t/bingsu>',
+               f'{helper}  lseek({fd}</fx/run-t/bingsu>, 432, SEEK_SET) = 432',
+               f'{helper}  getdents64({fd}</fx/run-t/bingsu>, 0x7ffd0000 /* 0 entries */, 8192) = 0',
+               f'{helper}  lseek({fd}</fx/run-t/bingsu>, 0, SEEK_CUR) = 432',
+               f'{helper}  close({fd}</fx/run-t/bingsu>) = 0']
+    return lines[:at] + listing + lines[at:]
 
 
 def with_command_stage_probe(lines):
@@ -2764,6 +2792,83 @@ def test_command_stage_traces_match_the_formula(stage, damage):
         return
     with pytest.raises(AssertionError):
         budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+
+
+# m6-C4a7: one stale lock reclaimed with its empty parent, as a release
+# probe under strace made it (command_sessions::stale_reclaim_probe, after
+# the GC's listing: the name stat to the lock's close). The runtime root's
+# fd, 40 here, becomes the capture's.
+STALE_RECLAIM = [
+    'newfstatat(40</fx/run-t/bingsu>, "command-0000000000000000000000000000abc1.lock", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_SYMLINK_NOFOLLOW) = 0',
+    'statx(40</fx/run-t/bingsu>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0700, stx_size=4096, ...}) = 0',
+    'openat(40</fx/run-t/bingsu>, "command-0000000000000000000000000000abc1.lock", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = 41</fx/run-t/bingsu/command-0000000000000000000000000000abc1.lock>',
+    'newfstatat(41</fx/run-t/bingsu/command-0000000000000000000000000000abc1.lock>, "", {st_mode=S_IFREG|0600, st_size=0, ...}, AT_EMPTY_PATH) = 0',
+    'statx(41</fx/run-t/bingsu/command-0000000000000000000000000000abc1.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0',
+    'fstatfs(41</fx/run-t/bingsu/command-0000000000000000000000000000abc1.lock>, {f_type=OVERLAYFS_SUPER_MAGIC, f_bsize=4096, f_blocks=25656046, f_bfree=6049294, f_bavail=4734504, f_files=6553600, f_ffree=5754197, f_fsid={val=[0x8730f84c, 0xa36b4c9f]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_RELATIME}) = 0',
+    'flock(41</fx/run-t/bingsu/command-0000000000000000000000000000abc1.lock>, LOCK_EX|LOCK_NB) = 0',
+    'statx(41</fx/run-t/bingsu/command-0000000000000000000000000000abc1.lock>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0600, stx_size=0, ...}) = 0',
+    'openat(AT_FDCWD</>, "/proc/self/cgroup", O_RDONLY|O_CLOEXEC) = 42</proc/PID/cgroup>',
+    'read(42</proc/PID/cgroup>, "0::/\\n", 4097) = 5',
+    'read(42</proc/PID/cgroup>, "", 4092) = 0',
+    'close(42</proc/PID/cgroup>)        = 0',
+    'getpid()                          = 394',
+    'openat(AT_FDCWD</>, "/sys/fs/cgroup/", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 42</sys/fs/cgroup>',
+    'fstatfs(42</sys/fs/cgroup>, {f_type=CGROUP2_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0xc1f944d7, 0xb3bee3a0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0',
+    'openat(42</sys/fs/cgroup>, "cgroup.procs", O_RDONLY|O_NOFOLLOW|O_CLOEXEC) = 43</sys/fs/cgroup/cgroup.procs>',
+    'pread64(43</sys/fs/cgroup/cgroup.procs>, "1\\n391\\n394\\n", 4096, 0) = 10',
+    'pread64(43</sys/fs/cgroup/cgroup.procs>, "", 4096, 10) = 0',
+    'close(43</sys/fs/cgroup/cgroup.procs>) = 0',
+    'unlinkat(42</sys/fs/cgroup>, "bingsu-cmd-0000000000000000000000000000abc1", AT_REMOVEDIR) = 0',
+    'unlinkat(40</fx/run-t/bingsu>, "command-0000000000000000000000000000abc1.lock", 0) = 0',
+    'close(41</fx/run-t/bingsu/command-0000000000000000000000000000abc1.lock>(deleted)) = 0',
+    'close(42</sys/fs/cgroup>)          = 0',
+]
+
+
+def with_stale_reclaim(lines):
+    """The command_miss capture with STALE_RECLAIM in its GC, after its last
+    catalog stat; `pid` is the helper's."""
+    import re
+    helper = next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
+    at = last_gc_fstat(lines) + 1
+    # The runtime root's descriptor open there: the GC's last use of it.
+    root = next(m[1] for l in reversed(lines[:at]) if l.split()[0] == helper
+                and (m := re.search(r"\((\d+)</fx/run-t/bingsu>, ", l)))
+    block = [f"{helper}  " + l.replace("/proc/PID/", f"/proc/{helper}/").replace("40</fx/run-t/bingsu>,",
+                                                                                f"{root}</fx/run-t/bingsu>,")
+             for l in STALE_RECLAIM]
+    return lines[:at] + block + lines[at:]
+
+
+# m6-C4a7(판정 D): 오래된 잠금 하나를 회수한 GC는 그 잠금을 센 계획(stale_locks=1)으로만 상한 안이다. 이것을
+# 실패시키는 것: 식에서 오래된 잠금 항을 빼는 것(잠금을 열고 flock하고 cgroup을 찾고 rmdir·unlink하는 호출이 상한을
+# 넘음), 캡처 재생이 블록을 넣지 않는 것.
+def test_a_stale_reclaim_is_within_the_gc_bound():
+    from dataclasses import replace
+    lines, collector, plan = helper_stage_case("command_miss")
+    replayed = with_stale_reclaim(lines)
+    assert len(replayed) == len(lines) + len(STALE_RECLAIM)
+    counted = replace(plan, session_locks=plan.session_locks + 1, stale_locks=1)
+    assert budget.check_helper_capture("command_miss", replayed, HELPER_EXE, collector, counted) is False
+    with pytest.raises(AssertionError):
+        budget.check_helper_capture("command_miss", replayed, HELPER_EXE, collector,
+                                    replace(plan, session_locks=plan.session_locks + 1))
+
+
+# m6-C4a7: this session's own lock past the age check: its name stat and the
+# runtime root's stamp (STALE_RECLAIM's first two calls), then nothing; the
+# plan counts the lock only as a session lock. 이것을 실패시키는 것: runtime
+# stamp를 오래된 잠금이 있을 때만 세는 것(자기 잠금의 stat이 상한을 넘음).
+def test_an_old_own_lock_is_within_the_gc_bound():
+    from dataclasses import replace
+    lines, collector, plan = helper_stage_case("command_miss")
+    helper = next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
+    replayed = with_stale_reclaim(lines)
+    at = next(i for i, l in enumerate(replayed) if "command-0000000000000000000000000000abc1.lock" in l)
+    own = replayed[:at + 2] + replayed[at + len(STALE_RECLAIM):]
+    assert len(own) == len(lines) + 2 and own[at].startswith(f"{helper}  newfstatat(")
+    counted = replace(plan, session_locks=plan.session_locks + 1)
+    assert budget.check_helper_capture("command_miss", own, HELPER_EXE, collector, counted) is False
 
 
 def test_collect_counted_events_preserve_all_helper_counts():
@@ -3846,7 +3951,9 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
             # the full round's bound.
             at = (find(helper, r"unlinkat\(.*AT_REMOVEDIR\) = 0$") if stage == "builtin_probe" else
                   find(helper, r"getdents64\(\d+</sys/fs/cgroup/bingsu-cmd-[0-9a-f]+>, .* = 0$"))
-            lines.insert(at, lines[at])
+            # Three for the listing: the GC's own runtime listing (a block and
+            # its end, m6-C4a7) gives two of slack that the capture predates.
+            lines[at:at] = [lines[at]] * (1 if stage == "builtin_probe" else 3)
         if damage == "deadline-installed-missing-stat":
             # No answer, but the probe's result installed: a decision, judged
             # exactly (GC slack must not cover a missing stat).

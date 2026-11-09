@@ -1982,6 +1982,9 @@ class HelperStageFixture:
         # their round needs the stored answer.
         stage_warmup(stage, prompt_and_wait, self.store, runtime)
         assert (self.store / "snapshot").is_file(), "warm-up did not publish"
+        # The GC stats every session lock's name (m6-C4a7); the warm-up left
+        # this session's, if its config has command units.
+        self.session_locks = len(list(runtime.glob("command-*.lock")))
         self.collection = {}
         if stage == "collect" or builtin:
             stores, breakers = collect_files(self.store, runtime)
@@ -2081,7 +2084,7 @@ class HelperStageFixture:
             exe_components=path_names(real_bin().parent),
             nsswitch_reads=nsswitch_reads, passwd_reads=passwd_reads, libc=libc,
             passwd_seeks=passwd_seeks(libc, os.getuid()),
-            arch=platform.machine(), **self.collection, **self.command)
+            arch=platform.machine(), session_locks=self.session_locks, **self.collection, **self.command)
 
 
 def folder_outside_repository(parent, prefix):
