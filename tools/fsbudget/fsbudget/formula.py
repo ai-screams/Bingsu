@@ -211,6 +211,17 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     "directory_cursor": {"openat": 1, "fstat": 1, "fd_query": 1, "fd_flags": 1, "getdents": 2},
     # sys::directory_batch of the runtime root, one 8 KiB block.
     "session_listing": {"openat": 1, "seek": 2, "getdents": 1},
+    # command_sessions::reclaim_one for a stale lock (m6-C4a7, observed in a
+    # release probe under strace): its open, check_data's fd stat, metadata
+    # stat and fstatfs, and the non-blocking flock; once taken, the stamp
+    # check, the parent's rmdir and the lock's unlink.
+    "stale_lock_open": {"openat": 1, "fstat": 2, "statfs": 1, "flock": 1},
+    "stale_lock_taken": {"fstat": 1, "unlinkat": 2},
+    # The GC's own-cgroup lookup, once a run (command_cgroup::fs::open_own),
+    # its longest path, a failure: /proc/self/cgroup opened and read (2), the
+    # own folder opened and its fstatfs, cgroup.procs opened and read in
+    # 4 KiB preads to PROCS_MAX (17), then the mount's open and fstatfs.
+    "gc_own_cgroup": {"openat": 4, "read": 2 + 17, "statfs": 2},
     # command_cgroup::fs::open_session up to the session parent's open (Linux,
     # C3): uname (the 5.14 check, kernel_release), /proc/self/cgroup
     # through libc::open and read to its end, the own cgroup folder through
@@ -285,6 +296,9 @@ MUSL_PRIMITIVES: dict[str, dict[str, int]] = {
     "passwd": {"openat": 1, "fd_flags": 2},
     "dup": {"dup": 1, "fd_flags": 1},
     "statm": {"openat": 1, "fstat": 1, "read": 2, "fd_flags": 1},
+    # Its three libc open(O_CLOEXEC) calls (/proc/self/cgroup, the own
+    # folder, the mount).
+    "gc_own_cgroup": {"openat": 4, "read": 2 + 17, "statfs": 2, "fd_flags": 3},
     # musl's opendir does not stat the folder.
     "fd_listing": {"openat": 1, "getdents": 2, "fd_flags": 1},
     # libc::open(O_CLOEXEC) of /proc/self/cgroup and of the own cgroup folder.
@@ -425,8 +439,10 @@ class HelperPlan:
     manager_homes: int = 0
     bin_links: int = 0
     # Session locks (`command-<digest>.lock`) in the runtime root when the GC
-    # runs: the GC stats each one's name (m6-C4a7).
+    # runs: the GC stats each one's name (m6-C4a7); and how many of them are
+    # older than a day and not this session's (each is opened and locked).
     session_locks: int = 0
+    stale_locks: int = 0
 
 
 def read_to_end_calls(n: int) -> int:
@@ -920,10 +936,23 @@ def _session_sweep(e: dict, p: HelperPlan) -> None:
     # looked up (that happens only after a stale lock is taken).
     _add(e, "session_listing", 2)
     e["fstat"] = e.get("fstat", 0) + min(p.session_locks, EXAMINE_MAX)
+    if p.stale_locks > p.session_locks:
+        raise ValueError("stale locks are session locks")
+    # A stale lock: the runtime root's stamp once (this session's digest),
+    # each one opened and locked (a held one too: it does not count against
+    # RECLAIM_MAX), at most RECLAIM_MAX taken, and the own-cgroup lookup once.
+    stale = min(p.stale_locks, EXAMINE_MAX)
+    if stale:
+        e["fstat"] += 1
+        _add(e, "stale_lock_open", stale)
+        _add(e, "stale_lock_taken", min(stale, RECLAIM_MAX))
+        _add(e, "gc_own_cgroup")
 
 
-# command_sessions::EXAMINE_MAX: names one sweep looks at in one GC run.
+# command_sessions::EXAMINE_MAX and RECLAIM_MAX: names one GC run looks at,
+# locks it takes.
 EXAMINE_MAX = 32
+RECLAIM_MAX = 4
 
 
 def _command_session(e: dict, p: HelperPlan) -> None:

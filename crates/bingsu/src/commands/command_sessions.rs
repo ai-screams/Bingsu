@@ -60,6 +60,21 @@ fn digest_of(name: &OsStr) -> Option<&str> {
     (digest.len() == 32 && digest.bytes().all(hex)).then_some(digest)
 }
 
+/// This process's own cgroup, as the GC sees it.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "macOS has no cgroups: only Absent")
+)]
+pub(crate) enum OwnCgroup {
+    /// The cgroup v2 folder that holds this process.
+    Folder(File),
+    /// No cgroup v2 here (macOS, or no cgroup v2 mount): no parent exists.
+    Absent,
+    /// Not found for another reason (an I/O error, a `cgroup.procs` too large,
+    /// a namespace that names another folder): a parent may exist.
+    Unknown,
+}
+
 /// What one lock came to (tests read it).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -85,7 +100,7 @@ pub(crate) fn reclaim_stale(
     now: i64,
     seed: u64,
     session: Option<&[u8]>,
-    own_cgroup: &mut dyn FnMut() -> Option<File>,
+    own_cgroup: &mut dyn FnMut() -> OwnCgroup,
 ) -> Vec<Outcome> {
     let mut done = Vec::new();
     let names = listed(runtime);
@@ -102,7 +117,7 @@ pub(crate) fn reclaim_stale(
         .as_deref()
             == Some(digest)
     };
-    let mut cgroup: Option<Option<File>> = None;
+    let mut cgroup: Option<OwnCgroup> = None;
     // 이것을 실패시키는 것: 시작 위치를 실행마다 돌리지 않는 것(앞쪽 이름이 상한을 매번 채워 뒤쪽이 영영 안 보임).
     let start = usize::try_from(seed % names.len() as u64).unwrap_or(0);
     let mut taken = 0;
@@ -179,8 +194,8 @@ fn reclaim_one(
     name: &OsStr,
     digest: &str,
     mine: &mut dyn FnMut(&str) -> bool,
-    cgroup: &mut Option<Option<File>>,
-    own_cgroup: &mut dyn FnMut() -> Option<File>,
+    cgroup: &mut Option<OwnCgroup>,
+    own_cgroup: &mut dyn FnMut() -> OwnCgroup,
 ) -> Option<Outcome> {
     let kept = || Some(Outcome::Kept(digest.to_owned()));
     // The name's own stat first: a fresh lock (every live session's) costs
@@ -237,15 +252,20 @@ fn reclaim_one(
 }
 
 /// Removes the empty cgroup parent of `digest` in this process's own
-/// cgroup; `true` when none is there now (removed, or never there, or no
-/// cgroup of ours). A parent with a unit cgroup left stays.
+/// cgroup; `true` when none is there now (removed, never there, or no
+/// cgroup v2 here). A parent with a unit cgroup left stays, and so does a
+/// lock whose cgroup could not be found: its parent may still be there and
+/// would never be found again.
 fn remove_parent(
     digest: &str,
-    cgroup: &mut Option<Option<File>>,
-    own_cgroup: &mut dyn FnMut() -> Option<File>,
+    cgroup: &mut Option<OwnCgroup>,
+    own_cgroup: &mut dyn FnMut() -> OwnCgroup,
 ) -> bool {
-    let Some(own) = cgroup.get_or_insert_with(own_cgroup) else {
-        return true;
+    let own = match cgroup.get_or_insert_with(own_cgroup) {
+        OwnCgroup::Folder(own) => own,
+        OwnCgroup::Absent => return true,
+        // 이것을 실패시키는 것: 찾지 못한 cgroup을 없음으로 보는 것(gc_lookup_failure_keeps_the_lock).
+        OwnCgroup::Unknown => return false,
     };
     let parent = format!("bingsu-cmd-{digest}");
     // 이것을 실패시키는 것: 비지 않은 부모(남은 단위 cgroup)를 두고 잠금을 지우는 것, 부모가 없을 때 잠금을 남기는 것.
@@ -256,11 +276,11 @@ fn remove_parent(
 }
 
 /// This process's own cgroup folder (Linux), for [`reclaim_stale`].
-pub(crate) fn own_cgroup() -> Option<File> {
+pub(crate) fn own_cgroup() -> OwnCgroup {
     #[cfg(target_os = "linux")]
     return super::command_cgroup::fs::open_own();
     #[cfg(not(target_os = "linux"))]
-    None
+    OwnCgroup::Absent
 }
 
 /// The wall clock in seconds, for [`reclaim_stale`].
@@ -342,7 +362,7 @@ mod tests {
             now,
             start_seed(),
             session,
-            &mut || File::open(&cgroup).ok(),
+            &mut || File::open(&cgroup).map_or(OwnCgroup::Unknown, OwnCgroup::Folder),
         )
     }
 
@@ -624,7 +644,10 @@ mod tests {
         let found = own_cgroup();
         let used = meter.used();
         drop(meter);
-        assert!(found.is_some(), "this process's cgroup v2 folder");
+        assert!(
+            matches!(found, OwnCgroup::Folder(_)),
+            "this process's cgroup v2 folder"
+        );
         let preads = procs.len().div_ceil(4096) as u32 + 1;
         assert_eq!(used, 2 + 2 + 2 + 1 + 2 + preads);
     }
@@ -666,6 +689,108 @@ mod tests {
         assert!(busy.exists() && exists(&s.runtime(), &digest(2)));
         assert!(!exists(&s.runtime(), &digest(3)));
         assert!(foreign.exists());
+    }
+
+    // 자기 cgroup을 찾지 못했으면(I/O 오류, 큰 cgroup.procs, 다른 폴더를 가리키는 namespace) 부모가 남아 있을 수
+    // 있으므로 잠금을 남긴다. cgroup v2가 아예 없으면 잠금만 지운다. 이것을 실패시키는 것: 찾기 실패를 cgroup 없음으로
+    // 보는 것, cgroup 없음을 실패로 보는 것.
+    #[test]
+    fn gc_lookup_failure_keeps_the_lock() {
+        let s = Scratch::new("lookup");
+        let ctime = lock(&s.runtime(), &digest(1));
+        let runtime = File::open(s.runtime()).unwrap();
+        let go = |own: fn() -> OwnCgroup| {
+            reclaim_stale(
+                &runtime,
+                sys::current_uid(),
+                ctime + STALE_SECS,
+                0,
+                None,
+                &mut || own(),
+            )
+        };
+        assert_eq!(go(|| OwnCgroup::Unknown), [Outcome::Kept(digest(1))]);
+        assert!(exists(&s.runtime(), &digest(1)));
+        assert_eq!(go(|| OwnCgroup::Absent), [Outcome::Reclaimed(digest(1))]);
+        assert!(!exists(&s.runtime(), &digest(1)));
+    }
+
+    // Linux: cgroup v2 mount이 없을 때(폴더 없음, 다른 파일 시스템)만 없음이고, cgroup v2인데 이 프로세스의 폴더를
+    // 못 찾으면 모름이다. 이것을 실패시키는 것: mount 확인 없이 찾기 실패를 없음으로 보는 것, 없는 mount를 모름으로
+    // 보는 것, 다른 파일 시스템을 cgroup v2로 보는 것.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gc_lookup_failure_is_not_absence() {
+        use super::super::command_cgroup::fs::own_or_why;
+        let s = Scratch::new("absence");
+        let plain = s.cgroup().into_os_string().into_encoded_bytes();
+        assert!(matches!(own_or_why(&plain, b"0::/\n"), OwnCgroup::Absent));
+        assert!(matches!(
+            own_or_why(b"/bingsu-no-such-mount", b"0::/\n"),
+            OwnCgroup::Absent
+        ));
+        // The CI runners and containers mount cgroup v2 there.
+        assert!(matches!(
+            own_or_why(b"/sys/fs/cgroup", b"0::/bingsu-no-such-cgroup\n"),
+            OwnCgroup::Unknown
+        ));
+    }
+
+    /// Probe for the fsbudget stale-lock terms (run under strace by hand,
+    /// m6-C4a7): one stale lock reclaimed in this process's real cgroup.
+    /// `BINGSU_PROBE_CASE`: `empty` (an empty parent), `busy` (a parent with a
+    /// unit), `none` (no parent), `held` (the lock held), `other` (the lookup
+    /// names a cgroup that does not hold this process).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "probe under strace, root in a privileged container"]
+    fn stale_reclaim_probe() {
+        #[expect(clippy::disallowed_methods, reason = "test-only probe input")]
+        let case = std::env::var("BINGSU_PROBE_CASE").unwrap();
+        let s = Scratch::new(&format!("probe-{case}"));
+        let ctime = lock(&s.runtime(), &digest(1));
+        let text = std::fs::read("/proc/self/cgroup").unwrap();
+        let own = PathBuf::from(format!(
+            "/sys/fs/cgroup{}",
+            String::from_utf8_lossy(bingsu_core::command::cgroup::own_path(&text).unwrap())
+                .trim_end_matches('/')
+        ));
+        let parent = own.join(format!("bingsu-cmd-{}", digest(1)));
+        let other = own.join("bingsu-probe-other");
+        if matches!(case.as_str(), "empty" | "busy" | "held") {
+            std::fs::create_dir(&parent).unwrap();
+        }
+        if case == "busy" {
+            std::fs::create_dir(parent.join("u0000000000000001")).unwrap();
+        }
+        if case == "other" {
+            std::fs::create_dir(&other).unwrap();
+        }
+        let _held = (case == "held").then(|| hold(&s, &digest(1)));
+        let fake = format!(
+            "0::/{}\n",
+            other.strip_prefix("/sys/fs/cgroup").unwrap().display()
+        );
+        let runtime = File::open(s.runtime()).unwrap();
+        eprintln!("MARK-BEGIN");
+        let done = reclaim_stale(
+            &runtime,
+            sys::current_uid(),
+            ctime + STALE_SECS,
+            0,
+            Some(b"0123456789abcdef0123456789abcdef"),
+            &mut || {
+                if case == "other" {
+                    super::super::command_cgroup::fs::own_or_why(b"/sys/fs/cgroup", fake.as_bytes())
+                } else {
+                    own_cgroup()
+                }
+            },
+        );
+        eprintln!("MARK-END {done:?}");
+        let _ = std::fs::remove_dir(parent.join("u0000000000000001"));
+        let _ = std::fs::remove_dir(&parent);
+        let _ = std::fs::remove_dir(&other);
     }
 
     // rmdir과 unlink 사이에 예산이 바닥나면 오래된 잠금이 부모 없이 남고, 다음 실행이 그것을 마저 지운다. 이것을

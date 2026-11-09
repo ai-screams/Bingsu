@@ -172,3 +172,35 @@ def test_gc_sweep_counts_each_session_lock():
     many = helper_command_expected(replace(plan, session_locks=40))["gc"]
     assert many["fstat"] - none["fstat"] == 32
 
+
+def _delta(a, b):
+    return {k: b.get(k, 0) - a.get(k, 0) for k in set(a) | set(b) if b.get(k, 0) != a.get(k, 0)}
+
+
+# m6-C4a7(판정 D): 오래된 잠금마다 열기·check_data·flock, 잡은 것(4개까지)마다 stamp·rmdir·unlink, 실행마다
+# runtime stamp 1과 자기 cgroup 찾기(가장 긴 실패 경로)가 더해진다. 살펴보는 수 상한은 32다. musl은 libc open 셋에
+# F_SETFD가 붙는다. 오래된 잠금은 세션 잠금의 일부다. 이것을 실패시키는 것: 열기 항, 잡은 항, 잡은 수 상한, 살펴보는
+# 수 상한, runtime stamp, 찾기 항, musl 항 가운데 하나를 지우거나 바꾸는 것, 오래된 잠금이 세션 잠금보다 많은 계획을
+# 받는 것.
+@pytest.mark.parametrize("libc", ["gnu", "musl"])
+def test_gc_stale_lock_terms(libc):
+    import json
+    from dataclasses import replace
+    from pathlib import Path
+    from fsbudget.formula import HelperAxes, HelperPlan, helper_command_expected
+    meta = json.loads((Path(__file__).resolve().parents[3] / "tests/shell/fixtures/helper-stage-traces.json")
+                      .read_text())["command_miss"]
+    plan = dict(meta["plan"]); plan["stages"] = tuple(plan["stages"]); plan["ax"] = HelperAxes(**plan["ax"])
+    plan = replace(HelperPlan(**plan), libc=libc, nsswitch_reads=0 if libc == "musl" else 2,
+                   passwd_seeks=1 if libc == "musl" else 0, session_locks=40)
+    gc = lambda n: helper_command_expected(replace(plan, stale_locks=n))["gc"]
+    one = {"fstat": 1 + 2 + 1, "openat": 1 + 4, "statfs": 1 + 2, "flock": 1, "unlinkat": 2, "read": 19,
+           **({"fd_flags": 3} if libc == "musl" else {})}
+    assert _delta(gc(0), gc(1)) == one
+    # Each more: opened and locked; taken up to four.
+    assert _delta(gc(1), gc(4)) == {"openat": 3, "fstat": 9, "statfs": 3, "flock": 3, "unlinkat": 6}
+    assert _delta(gc(4), gc(6)) == {"openat": 2, "fstat": 4, "statfs": 2, "flock": 2}
+    assert gc(32) == gc(40)
+    with pytest.raises(ValueError):
+        helper_command_expected(replace(plan, session_locks=2, stale_locks=3))
+
