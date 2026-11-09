@@ -34,8 +34,8 @@ jobs:
         run: |
           base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
           file="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -fsSLO "${base}/${file}"
-          curl -fsSLO "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 2 "${base}/${file}"
+          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 2 "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
           grep " ${file}\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum --check
           tar -xzf "${file}" gitleaks
       - name: Run gitleaks
