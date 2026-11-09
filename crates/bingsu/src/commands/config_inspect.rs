@@ -430,10 +430,14 @@ fn lookups(
         .collect()
 }
 
-/// W411 for each unit whose script the executor refuses by its first line
-/// (D3a/E2 ruling Q2: one code, the reason as its argument). The decision is
-/// the executor's (`exec_path::explain`, core `head`), so `config check`
-/// warns about exactly what will not run.
+/// Why the executor refuses a setuid, setgid or file-capability program
+/// (U-33), for W411 and `--explain`.
+const SET_ID_REASON: &str = "setuid, setgid or file capabilities (bingsu runs no such program)";
+
+/// W411 for each unit whose script the executor refuses by its first line,
+/// or whose program is set-id (U-33) (D3a/E2 ruling Q2: one code, the reason
+/// as its argument). The decision is the executor's (`exec_path::explain`,
+/// core `head`), so `config check` warns about exactly what will not run.
 fn env_shebang_notes(
     report: &ConfigReport,
     found: &[(String, exec_path::Explained)],
@@ -443,12 +447,18 @@ fn env_shebang_notes(
     };
     let mut out = Vec::new();
     for (id, f) in found {
-        let exec_path::Explained::Refused {
-            file: Some(file),
-            script: Some(why),
-        } = f
-        else {
-            continue;
+        let (file, why) = match f {
+            exec_path::Explained::Refused {
+                file: Some(file),
+                set_id: true,
+                ..
+            } => (file, SET_ID_REASON),
+            exec_path::Explained::Refused {
+                file: Some(file),
+                script: Some(why),
+                ..
+            } => (file, why.text()),
+            _ => continue,
         };
         let Some(u) = c.exec_units.iter().find(|u| &u.id == id) else {
             continue;
@@ -470,7 +480,7 @@ fn env_shebang_notes(
             )
             .arg("id", id.clone())
             .arg("path", ctx::show(file))
-            .arg("reason", why.text()),
+            .arg("reason", why),
         );
     }
     out
@@ -574,12 +584,20 @@ fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> S
             let line = match f {
                 exec_path::Explained::Runs(found) => ctx::show(&found.executable).to_string(),
                 exec_path::Explained::Absent => "not found on the sanitized PATH".into(),
-                exec_path::Explained::Refused { file, script } => format!(
+                exec_path::Explained::Refused {
+                    file,
+                    script,
+                    set_id,
+                } => format!(
                     "{} refused{}",
                     file.as_deref().map(ctx::show).unwrap_or_default(),
-                    script
-                        .map(|s| format!(": {}", s.text()))
-                        .unwrap_or_default()
+                    if *set_id {
+                        format!(": {SET_ID_REASON}")
+                    } else {
+                        script
+                            .map(|s| format!(": {}", s.text()))
+                            .unwrap_or_default()
+                    }
                 ),
             };
             let _ = writeln!(out, "  {:<10} {line}", "executable");

@@ -1846,7 +1846,69 @@ def helper_stage_case(stage):
     lines = data.decode().splitlines()
     if stage == "collect":
         lines = with_command_stage_probe(lines)
-    return lines, meta["collector"], HelperPlan(**plan)
+    return with_capability_queries(lines), meta["collector"], HelperPlan(**plan)
+
+
+CAPABILITY_RESULT = "-1 ENODATA (No data available)"
+
+
+def with_capability_queries(lines):
+    """The captures predate exec_path's file-capability check (U-33): a
+    target the lookup would run is asked for `security.capability` on its
+    descriptor after the walk's folders close, just before the fd stat and
+    header read (the only pread right after an fd stat of the same file).
+    The gate counts calls, so this place is the code's order, not a check.
+    Replay that call on the saved capture; a product-shape replay, not a new
+    capture."""
+    import re
+    helper = next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
+    mine = [i for i, l in enumerate(lines) if l.split()[0] == helper]
+    sites = []
+    for k, i in enumerate(mine):
+        m = re.match(rf"{helper}\s+pread64\((\d+<[^>]*>), .*\) = ", lines[i])
+        if m and k > 0 and lines[mine[k - 1]].startswith(f'{helper}  newfstatat({m[1]}, "", '):
+            sites.append((mine[k - 1], m[1]))
+    query = {fd: f'{helper}  fgetxattr({fd}, "security.capability", NULL, 0) = {CAPABILITY_RESULT}' for _, fd in sites}
+    # A capture that already has the calls keeps them; one with a call
+    # missing, elsewhere or of another shape is not this product shape.
+    # 이것을 실패시키는 것: 이미 있는 호출 위에 또 끼워 넣는 것, 일부만 있거나 다른 자리·다른 모양의 호출을 받는 것.
+    present = [i for i, l in enumerate(lines) if '"security.capability"' in l]
+    if present:
+        assert len(present) == len(sites) and all(
+            p == at - 1 and lines[p] == query[fd] for p, (at, fd) in zip(present, sites)), ("capability query", present)
+        return lines
+    out = list(lines)
+    for at, fd in reversed(sites):
+        out.insert(at, query[fd])
+    return out
+
+
+# 이것을 실패시키는 것: 재생이 이미 있는 호출을 두 번 넣는 것, 호출이 더 있거나 자리·모양이 다른 캡처를 받는 것,
+# fd stat이 바로 앞에 없는 pread(cgroup.events)에도 넣는 것.
+@pytest.mark.parametrize("shape", ["absent", "present", "extra", "moved", "different"])
+def test_capability_query_replay(shape):
+    raw = (HELPER_STAGE_TRACES.parent / "helper-stage-builtin_fast.strace").read_text().splitlines()
+    replayed = with_capability_queries(raw)
+    at = [i for i, l in enumerate(replayed) if '"security.capability"' in l]
+    assert len(replayed) == len(raw) + 1 and len(at) == 1
+    assert "pyenv/shims/python3>" in replayed[at[0]] and "pread64(" in replayed[at[0] + 2]
+    if shape == "absent":
+        command = (HELPER_STAGE_TRACES.parent / "helper-stage-command_miss.strace").read_text().splitlines()
+        added = [l for l in with_capability_queries(command) if '"security.capability"' in l]
+        assert added == ['1375  fgetxattr(6</usr/bin/true>, "security.capability", NULL, 0) = ' + CAPABILITY_RESULT]
+        return
+    if shape == "present":
+        assert with_capability_queries(replayed) == replayed
+        return
+    if shape == "extra":
+        damaged = replayed + [replayed[at[0]]]
+    elif shape == "moved":
+        damaged = replayed[:at[0]] + replayed[at[0] + 1:at[0] + 2] + [replayed[at[0]]] + replayed[at[0] + 2:]
+    else:
+        damaged = list(replayed)
+        damaged[at[0]] = damaged[at[0]].replace(CAPABILITY_RESULT, "-1 EOPNOTSUPP (Operation not supported)")
+    with pytest.raises(AssertionError, match="capability query"):
+        with_capability_queries(damaged)
 
 
 def with_command_stage_probe(lines):

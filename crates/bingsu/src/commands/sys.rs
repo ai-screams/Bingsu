@@ -518,6 +518,33 @@ pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
     posix_acl_answer(n)
 }
 
+/// Linux: whether an open file is known to carry no file capabilities
+/// (`security.capability`, U-33). An attribute of any length, or an answer
+/// that cannot be read, is `false`, so the caller refuses. A path-only
+/// descriptor asks through `/proc/self/fd/N`, as `acl_facts_fd` does.
+#[cfg(target_os = "linux")]
+pub fn capability_free(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+    use std::os::fd::AsRawFd;
+    let name = c"security.capability";
+    // SAFETY: `fd` is open; size 0 asks only for the length.
+    let mut n = unsafe { libc::fgetxattr(fd.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF) {
+        let Ok(p) = std::ffi::CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())) else {
+            return false;
+        };
+        // SAFETY: names are NUL-terminated; size 0 asks only for the length.
+        n = unsafe { libc::getxattr(p.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    }
+    capability_answer(n, std::io::Error::last_os_error().raw_os_error())
+}
+
+/// `true` only for "no such attribute" (ENODATA) and "this file system keeps
+/// none" (EOPNOTSUPP); `errno` is read only when `n` is negative.
+#[cfg(target_os = "linux")]
+fn capability_answer(n: libc::ssize_t, errno: Option<i32>) -> bool {
+    n < 0 && matches!(errno, Some(libc::ENODATA | libc::EOPNOTSUPP))
+}
+
 /// `fstat` and the ACL of an open descriptor (search-only descriptors
 /// included).
 pub fn fd_facts(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Facts> {
@@ -681,6 +708,24 @@ mod linux_boundary_tests {
             // SAFETY: libc's errno slot is local to this test thread.
             unsafe { *errno_location() = errno };
             assert_eq!(posix_acl_answer(n), want, "n={n} errno={errno}");
+        }
+    }
+
+    // U-33: file capability가 없다고 아는 것은 ENODATA·EOPNOTSUPP뿐이다. 이것을 실패시키는 것: 다른 errno(EIO,
+    // EACCES, 오래된 errno)를 없음으로 보는 것, 길이 0인 속성을 없음으로 보는 것, 길이가 있는데 errno만 보는 것.
+    #[test]
+    fn capability_errors_do_not_grant_trust() {
+        for (n, errno, want) in [
+            (20, None, false),
+            (0, None, false),
+            (20, Some(libc::ENODATA), false),
+            (-1, Some(libc::ENODATA), true),
+            (-1, Some(libc::EOPNOTSUPP), true),
+            (-1, Some(libc::EACCES), false),
+            (-1, Some(libc::EIO), false),
+            (-1, None, false),
+        ] {
+            assert_eq!(capability_answer(n, errno), want, "n={n} errno={errno:?}");
         }
     }
 
@@ -1381,6 +1426,34 @@ impl Drop for TestVolume {
             .arg(&self.mount)
             .output();
     }
+}
+
+/// Sets (`on`) or removes a file capability on `path` (root only):
+/// `vfs_cap_data` revision 2 with CAP_NET_RAW (13) permitted, not effective.
+#[cfg(all(test, target_os = "linux"))]
+pub fn test_set_file_capability(path: &std::path::Path, on: bool) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut cap = [0u8; 20];
+    cap[..4].copy_from_slice(&0x0200_0000u32.to_le_bytes());
+    cap[4..8].copy_from_slice(&(1u32 << 13).to_le_bytes());
+    let name = c"security.capability";
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    let rc = if on {
+        // SAFETY: NUL-terminated names and a buffer of the given length.
+        unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                cap.as_ptr().cast(),
+                cap.len(),
+                0,
+            )
+        }
+    } else {
+        // SAFETY: NUL-terminated names.
+        unsafe { libc::removexattr(path.as_ptr(), name.as_ptr()) }
+    };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
 }
 
 /// Serialize all child-spawning tests with fixtures owning close-only locks.

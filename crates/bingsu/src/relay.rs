@@ -179,10 +179,12 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     if unsafe { libc::chdir(folder.as_ptr()) } != 0 {
         return Err(RELAY_EXEC);
     }
-    // U-17: a setuid, setgid or file-capability target runs, but without
-    // gaining anything; the flag stays for every descendant. Last of the
-    // checks, so `exec` keeps the clock read right before execveat. macOS
-    // has no such flag and refuses set-id files in `open_target` instead.
+    // U-17: a target that would run with other rights gains nothing; the
+    // flag stays for every descendant. Set-id files are refused before this
+    // on every system (`allowed`, U-33), and file capabilities are refused by
+    // the helper's lookup; this flag still holds for a capability set after
+    // that check. Last of the checks, so `exec` keeps the clock read right
+    // before execveat.
     #[cfg(target_os = "linux")]
     // SAFETY: plain prctl with integer arguments.
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
@@ -495,8 +497,8 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 /// descriptor must be the same inode. An execute-only file cannot be read
 /// and is refused: run by path, the kernel's own script loader would start
 /// whatever interpreter its `#!` line names, unchecked (C2 ruling Q4). A
-/// set-id file is refused (U-17), and so is one on a mount that is not
-/// local or ignores ownership.
+/// set-id file is refused (U-33, `allowed`), and so is one on a mount that
+/// is not local or ignores ownership.
 fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     // A relative path would name a file in the inherited working folder.
     let Some(rest) = path.strip_prefix(b"/") else {
@@ -550,9 +552,7 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
         let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY;
         let fd = open_at(dir.as_raw_fd(), last, flags).map_err(|_| RELAY_TARGET)?;
         let st = stat(&fd)?;
-        // Fails without it: test_set_id_targets_are_refused (both bits).
-        let set_id = st.st_mode & (libc::S_ISUID | libc::S_ISGID) != 0;
-        if set_id || !allowed(&st, pin, local_ownership(&fd))? {
+        if !allowed(&st, pin, local_ownership(&fd))? {
             return Err(RELAY_TARGET);
         }
         let path = CString::new(path).map_err(|_| RELAY_TARGET)?;
@@ -982,6 +982,13 @@ fn native_only(errno: i32) -> Option<()> {
 /// `ownership`: whether the file's mount enforces ownership (Linux file
 /// systems do; macOS asks `local_ownership`).
 fn allowed(st: &libc::stat, pin: Option<ExecPin>, ownership: Option<bool>) -> Result<bool, u8> {
+    // U-33: no setuid or setgid target, on any system (the helper refuses
+    // them too; this holds for a bit set after its check). 이것을 실패시키는
+    // 것: 이 조건을 지우는 것, 두 비트 가운데 하나만 보는 것
+    // (test_relay_refuses_set_id_targets, macOS test_set_id_targets_are_refused).
+    if st.st_mode & (libc::S_ISUID | libc::S_ISGID) != 0 {
+        return Ok(false);
+    }
     let facts = Facts {
         #[cfg(target_os = "linux")]
         dev: st.st_dev,
@@ -1646,40 +1653,18 @@ mod tests {
         assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
     }
 
-    // U-17: setuid 대상은 실행되지만 권한을 얻지 못한다. Linux 컨테이너에서 root로 --ignored로 돌린다
-    // (root 소유 04755 사본을 nobody가 실행). 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를
-    // 지우는 것(대상의 유효 uid가 0이 됨).
+    // U-33: setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을 실패시키는
+    // 것: allowed의 set-id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
     #[test]
-    #[ignore = "root in the Linux container; the relay runs as nobody"]
-    fn test_setuid_target_gains_nothing() {
+    fn test_relay_refuses_set_id_targets() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
-        // SAFETY: getuid cannot fail.
-        assert_eq!(unsafe { libc::getuid() }, 0, "run as root");
-        let dir = std::fs::canonicalize(fresh_dir("setuid")).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let exe = dir.join("cat");
-        cat_copy(&exe, 0o4755);
-        assert_eq!(pin_of(&exe).group.mode & 0o7777, 0o4755);
-        let (_, input) = input(Origin::Config, LIVE, b"");
-        let child = echo(spawn_relay_with(
-            &input,
-            &args(&exe, &[b"cat"]),
-            &[],
-            Spawn {
-                uid: Some(65_534),
-                ..Spawn::default()
-            },
-        ))
-        .unwrap();
-        // Only the status file: another user's /proc/<pid>/exe needs ptrace access.
-        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
-        finish(child);
-        assert!(
-            status
-                .lines()
-                .any(|l| l == "Uid:\t65534\t65534\t65534\t65534"),
-            "{status}"
-        );
+        let dir = std::fs::canonicalize(fresh_dir("set-id")).unwrap();
+        for (mode, refuse) in [(0o755, false), (0o4755, true), (0o2755, true)] {
+            let exe = dir.join(format!("cat-{mode:o}"));
+            cat_copy(&exe, mode);
+            assert_eq!(pin_of(&exe).group.mode & 0o7777, mode, "{mode:o}");
+            assert_eq!(refused(&exe, None), refuse, "{mode:o}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3397,8 +3382,8 @@ mod macos_tests {
         assert!(!String::from_utf8_lossy(&run.stdout).contains("SEEN "));
     }
 
-    // U-17(macOS): setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을 실패시키는
-    // 것: open_target의 set_id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
+    // U-17·U-33(macOS): setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을
+    // 실패시키는 것: allowed의 set-id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
     #[test]
     fn test_set_id_targets_are_refused() {
         let dir = scratch("set-id");

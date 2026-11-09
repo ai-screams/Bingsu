@@ -145,6 +145,9 @@ The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt
   inside the repository the shell is in, so a checked-out repository cannot place a program under a command's name.
 - Scripts must name an absolute interpreter on their first line; `#!/usr/bin/env` is refused because it would look
   the interpreter up in `PATH`.
+- A program that is setuid or setgid, or on Linux carries file capabilities (for example `ping` on Debian), does not
+  run, as a command or as a built-in language's version program, on every system. `config check` names a command
+  segment's program with that reason (W411).
 - The first line of the output, at most 4 KB, is the value. A failed command (nonzero exit, timeout) shows nothing
   and is not run again for 10 seconds, unless its keys or the values its result depends on change (the passed
   variables, `TERM` aside unless `env_allow` names it).

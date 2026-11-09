@@ -38,6 +38,9 @@ pub struct Found {
     pub interpreter: Option<Interpreter>,
 }
 
+/// `S_ISUID | S_ISGID`, as `st_mode` bits (libc's are `u16` on macOS).
+const SET_ID_BITS: u32 = 0o6000;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Miss {
     /// No such name on the way, or the lookup found no executable.
@@ -45,6 +48,9 @@ pub enum Miss {
     /// A link, folder or file on the way someone else can change, or one
     /// the rules could not decide, or a name that cannot be looked up.
     Refused,
+    /// A setuid or setgid file, or one with file capabilities (U-33):
+    /// refused like `Refused`, with its own reason for `config check`.
+    SetId,
 }
 
 struct Folder {
@@ -533,6 +539,8 @@ pub enum Explained {
     Refused {
         file: Option<PathBuf>,
         script: Option<ScriptRefusal>,
+        /// Refused for setuid, setgid or file capabilities (U-33).
+        set_id: bool,
     },
 }
 
@@ -598,6 +606,7 @@ pub fn explain(
             return Explained::Refused {
                 file: None,
                 script: None,
+                set_id: false,
             };
         }
         Name::Absolute(p) => vec![PathBuf::from(OsStr::from_bytes(p))],
@@ -612,6 +621,13 @@ pub fn explain(
         match resolve_open(&path, repo, me, groups) {
             Err(Miss::Absent) => continue,
             Ok((found, _)) => return Explained::Runs(found),
+            Err(Miss::SetId) => {
+                return Explained::Refused {
+                    file: Some(path),
+                    script: None,
+                    set_id: true,
+                };
+            }
             Err(Miss::Refused) => {
                 let checked = resolve_checked(&path, repo, me, groups).ok();
                 let script = checked
@@ -621,6 +637,7 @@ pub fn explain(
                 return Explained::Refused {
                     file: Some(checked.map_or(path, |(found, _)| found.executable)),
                     script,
+                    set_id: false,
                 };
             }
         }
@@ -697,6 +714,19 @@ fn resolve_checked(
     let mut recording = Recording::new(groups);
     match rule::candidate(&facts, me, next, &mut recording) {
         Candidate::Run => {
+            // U-33: a program that would run with other rights than the
+            // user's is not run, on any system: setuid or setgid bits, or
+            // (Linux) file capabilities, also when they cannot be read.
+            // 이것을 실패시키는 것: 이 조건을 지우는 것, 두 비트 가운데 하나만 보는 것
+            // (set_id_programs_are_refused_and_end_the_lookup), capability 검사를 지우는 것
+            // (root: file_capabilities_are_refused).
+            if facts.mode & SET_ID_BITS != 0 {
+                return Err(Miss::SetId);
+            }
+            #[cfg(target_os = "linux")]
+            if !sys::capability_free(file.as_fd()) {
+                return Err(Miss::SetId);
+            }
             // macOS runs the target by path, not by descriptor: an executable
             // on a network file system (no MNT_LOCAL) is refused (spec section
             // 4, macOS executable row). Only the file itself, as that row
@@ -1362,6 +1392,73 @@ mod tests {
             lookup(b"a/x", &folders, &[], me(), &mut RefuseGroupWrite),
             Err(Miss::Refused)
         );
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // U-33: setuid·setgid 파일은 SetId로 거부되고 조회가 거기서 끝난다(뒤 폴더의 같은 이름으로 넘어가지 않음).
+    // explain도 그 이유를 표시한다. 양성 대조: 0755 사본은 실행된다. 이것을 실패시키는 것: Candidate::Run의
+    // set-id 조건을 지우는 것, 두 비트 가운데 하나만 보는 것, SetId에서 다음 폴더로 넘어가는 것, explain이 SetId를
+    // 표시하지 않는 것.
+    #[test]
+    fn set_id_programs_are_refused_and_end_the_lookup() {
+        let t = scratch("set-id");
+        let (a, b) = (t.join("a"), t.join("b"));
+        exe(&b.join("x"), 0o755);
+        let folders = [a.clone(), b.clone()];
+        for (mode, refused) in [
+            (0o755, false),
+            (0o4755, true),
+            (0o2755, true),
+            (0o6755, true),
+        ] {
+            exe(&a.join("x"), mode);
+            let got = lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite);
+            let seen = explain(b"x", &folders, &[], me(), &mut RefuseGroupWrite);
+            if refused {
+                assert_eq!(got, Err(Miss::SetId), "{mode:o}");
+                assert_eq!(
+                    seen,
+                    Explained::Refused {
+                        file: Some(a.join("x")),
+                        script: None,
+                        set_id: true
+                    },
+                    "{mode:o}"
+                );
+            } else {
+                assert_eq!(got.unwrap().executable, a.join("x"), "{mode:o}");
+                assert!(matches!(seen, Explained::Runs(_)), "{mode:o}");
+            }
+            std::fs::remove_file(a.join("x")).unwrap();
+        }
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // U-33(Linux, root): file capability가 있는 프로그램은 SetId로 거부된다. CI가 sudo로 --ignored로 돌린다
+    // (security.capability를 쓰려면 CAP_SETFCAP이 필요). 양성 대조: 속성을 지운 같은 파일은 실행된다.
+    // 이것을 실패시키는 것: Candidate::Run의 capability 검사를 지우는 것.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
+    fn file_capabilities_are_refused() {
+        assert_eq!(me(), 0, "run as root");
+        let t = scratch("caps");
+        let x = t.join("bin/x");
+        exe(&x, 0o755);
+        let folders = [t.join("bin")];
+        assert_eq!(
+            lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite)
+                .unwrap()
+                .executable,
+            x
+        );
+        sys::test_set_file_capability(&x, true);
+        assert_eq!(
+            lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite),
+            Err(Miss::SetId)
+        );
+        sys::test_set_file_capability(&x, false);
+        assert!(lookup(b"x", &folders, &[], me(), &mut RefuseGroupWrite).is_ok());
         std::fs::remove_dir_all(&t).unwrap();
     }
 
