@@ -1232,8 +1232,9 @@ PTY_ALWAYS = "success() || failure()"
 # Every condition a step of a PTY job may carry. Any other step runs in every cell.
 LINUX_CONDITIONS = {"Assert minimum versions": "matrix.versions != ''", "PTY tests": PTY_ALWAYS,
                     "Shell-independent tests": "(success() || failure()) && matrix.image == 'min-d12'",
-                    "Long folder test (AppArmor unconfined)": PTY_ALWAYS}
-MACOS_CONDITIONS = {"PTY tests": PTY_ALWAYS}
+                    "Long folder test (AppArmor unconfined)": PTY_ALWAYS,
+                    "Fetch the pinned oh-my-zsh": PTY_ALWAYS}
+MACOS_CONDITIONS = {"PTY tests": PTY_ALWAYS, "Fetch the pinned oh-my-zsh": PTY_ALWAYS}
 LONG_FOLDER_RUN = "-m pytest tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty -q"
 SHELL_FREE_STEP = "      - name: Shell-independent tests\n"
 SHELL_FREE_RUN = "-m pytest tests/shell/test_prompt_trace_budget.py -q"
@@ -1243,6 +1244,55 @@ MACOS_SHELLS_JOB = "  shell-macos-shells:\n    name: Shell PTY (macOS Homebrew $
 MACOS_MATRIX = "    strategy:\n      fail-fast: false\n      matrix:\n        shell: [bash, fish]\n"
 LINUX_CELL = re.compile(r"(?m)^          - label: (.+)\n            image: (.+)\n"
                         r"            versions: (.+)\n            shells: (.+)\n")
+
+
+OHMYZSH_FETCH = "Fetch the pinned oh-my-zsh"
+OHMYZSH_JOBS = ("shell-linux", "shell-macos", "shell-macos-shells")
+
+
+def assert_ohmyzsh_fetch(text):
+    """In each PTY job, exactly one step is the oh-my-zsh fetch, and the step
+    parsed right after it (named or not) is the PTY step, with the same
+    condition."""
+    for job in OHMYZSH_JOBS:
+        _, steps = workflow_job(text, job)
+        at = [i for i, step in enumerate(steps) if step.get("name") == OHMYZSH_FETCH]
+        assert len(at) == 1, (job, "one oh-my-zsh fetch step", at)
+        fetch, following = steps[at[0]], steps[at[0] + 1]
+        assert following.get("name") == "PTY tests", (job, following)
+        assert following.get("if") == PTY_ALWAYS and fetch.get("if") == PTY_ALWAYS, (job, fetch.get("if"), following.get("if"))
+
+
+# The oh-my-zsh tree is fetched in the step before PTY tests. The PTY step runs
+# after an earlier failure (success() || failure()); a fetch without the same
+# condition is skipped then, and the oh-my-zsh tests fail as BLOCKED with no
+# tree, hiding the first failure behind a second one.
+# 이것을 실패시키는 것: fetch 단계의 조건을 지우는 것, 다른 조건으로 바꾸는 것, PTY 단계 앞이 아닌 곳으로 옮기는 것,
+# 이름 없는 단계를 그 사이에 끼우는 것, 같은 이름의 가짜 단계를 하나 더 두는 것.
+def test_ohmyzsh_fetch_runs_whenever_its_pty_step_runs():
+    text = workflows()["shell.yml"]
+    assert_ohmyzsh_fetch(text)
+    pty = "      - name: PTY tests\n        if: success() || failure()\n"
+    assert text.count(pty) == 3
+    shapes = {
+        # An unnamed step between the fetch and the PTY step.
+        "unnamed-between": text.replace(pty, "      - run: rm -rf target/ohmyzsh\n" + pty, 1),
+        # A second step with the fetch's name, never run, before the real one.
+        "decoy-fetch": text.replace("      - run: tests/shell/containers/check-digests.sh\n",
+                                    f"      - name: {OHMYZSH_FETCH}\n        if: false\n"
+                                    "        run: tests/shell/containers/check-digests.sh\n", 1),
+        "no-condition": text.replace(f"      - name: {OHMYZSH_FETCH}\n        # As the PTY step: a failed step before it"
+                                     " must not leave the tree out.\n        if: success() || failure()\n",
+                                     f"      - name: {OHMYZSH_FETCH}\n", 1),
+    }
+    for shape, bypass in shapes.items():
+        assert bypass != text, shape
+        with pytest.raises(AssertionError):
+            assert_ohmyzsh_fetch(bypass)
+    # The decoy also fails the per-job condition table: its name repeats.
+    assert_pty_steps(text, "shell-linux", LINUX_CONDITIONS)
+    with pytest.raises(AssertionError, match="conditioned step names repeat"):
+        assert_pty_steps(shapes["decoy-fetch"], "shell-linux", LINUX_CONDITIONS)
 
 
 def job_block(text, job):
@@ -1268,6 +1318,9 @@ def assert_pty_steps(text, job, conditions):
     meta, steps = workflow_job(text, job)
     assert meta["if"][0] == "needs.detect.outputs.rust == 'true'", job
     assert not any("continue-on-error" in entry for entry in (meta, *steps)), job
+    # 이것을 실패시키는 것: 조건 붙은 단계의 이름이 겹쳐 사전이 앞 단계를 덮는 것(같은 이름의 가짜 단계).
+    named = [step.get("name") for step in steps if "if" in step]
+    assert len(named) == len(set(named)), (job, "conditioned step names repeat", named)
     found = {step.get("name"): step["if"] for step in steps if "if" in step}
     assert found == conditions, (job, found)
     assert "Record golden vectors" in [step.get("name") for step in steps], job
