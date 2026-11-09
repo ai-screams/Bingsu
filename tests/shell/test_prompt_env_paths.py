@@ -1266,17 +1266,20 @@ def judge_allowlist(cap, shape=None):
     """The whole allowlist judgment of one capture. A deadline shape waives
     only what that deadline prevents: collector-deadline the repository
     evidence; front-alarm the front's filter and record, the exact collector
-    count and both coverage checks. Every path, call and audit rule stays."""
+    count and both coverage checks; admission-deferred the repository evidence
+    and the global inputs' check, with exactly no collector. Every path, call
+    and audit rule stays."""
     assert_prompt_trace_budget(cap.lines, cap.exe, cap.pinned, global_inputs=cap.global_inputs,
                                collector_exe=cap.collector_exe,
                                # Stored captures predate bingsu-prompt: the cli entry.
                                entry=getattr(cap, "entry", "cli"), helper_exe=getattr(cap, "helper_exe", None),
-                               collectors=None if shape == "front-alarm" else cap.collectors,
+                               collectors=None if shape == "front-alarm" else 0 if shape == "admission-deferred"
+                               else cap.collectors,
                                repository_roots=cap.roots,
                                repository_evidence=() if shape else cap.evidence,
                                platform=cap.platform, front_deadline=shape == "front-alarm",
                                headers=getattr(cap, "headers", RESPONSE_HEADERS))
-    if cap.collectors and shape != "front-alarm":
+    if cap.collectors and shape not in ("front-alarm", "admission-deferred"):
         assert_global_inputs_exercised(cap.lines, cap.exe, cap.global_inputs, cap.global_present)
 
 
@@ -1287,8 +1290,10 @@ def deadline_shape(cap):
     up to exit_group(0), with no filter installed (strace can stretch its
     vfork past the deadline). collector-deadline: the collector exited 75
     before its evidence read, a non-empty read of the case's .git/HEAD (its
-    request deadline came first). The partial window is still audited in
-    full; only the missing evidence is waived.
+    request deadline came first). admission-deferred: no collector, and the
+    helper deferred the collection under load (`admission_deferred`). The
+    partial window is still audited in full; only the missing evidence (and,
+    deferred, the collector) is waived.
     """
     from fsbudget.classify import repository_path
     _, scoped = tree(cap.lines, cap.exe)
@@ -1316,7 +1321,115 @@ def deadline_shape(cap):
         # 경계를 저장소 접근 전으로 되돌리는 것(HEAD를 연 뒤 읽기 전의 마감이 즉시 실패).
         if mine[-1].endswith("+++ exited with 75 +++") and not evidenced:
             return "collector-deadline"
+    elif cap.collectors and admission_deferred(scoped, cap.collector_exe):
+        return "admission-deferred"
     return None
+
+
+# An attempt whose collection the helper deferred: at most this many retries.
+DEFERRED_ATTEMPTS = 3
+
+
+def admission_deferred(scoped, collector_exe):
+    """The helper reached the collection and deferred it under load: it
+    verified the collector pin (opened it and read its header), took the GC
+    lock, then exited 0 with no collector spawned, whether or not it had
+    opened a collection store (the admission's budget, a busy worker lock or
+    the breaker can each defer it). A helper that never reaches the
+    collection (no pin check or no GC lock) is not this shape."""
+    if any(is_root(line, collector_exe) for line in scoped):
+        return False
+    helpers = {line.split()[0] for line in scoped if '"__refresh-v1"' in line and "execve(" in line}
+    if len(helpers) != 1:
+        return False
+    pid, = helpers
+    mine = [line for line in scoped if line.split()[0] == pid]
+    name = os.path.basename(collector_exe)
+    pin = next((m[1] for line in mine
+                if (m := re.search(rf'openat\(\d+<[^>]*>, "{re.escape(name)}", O_RDONLY\|O_NONBLOCK\|O_NOFOLLOW\|O_CLOEXEC\) = (\d+)<', line))),
+               None)
+    # 이것을 실패시키는 것: pin 확인(open과 header read), GC 잠금, exit 0 중 하나를 보지 않는 것.
+    checked = pin is not None and any(re.search(rf"pread64\({pin}<[^>]*{re.escape(name)}>", line) for line in mine)
+    gc_lock = any('".collections.gc.lock"' in line and not re.search(r"= -1 ", line) for line in mine)
+    return checked and gc_lock and mine[-1].endswith("+++ exited with 0 +++")
+
+
+# A reduction of a deferred capture (Linux, CPU contention): the helper checks
+# the collector pin, takes the GC lock, commits the catalog and exits 0; in
+# other captures it also opened its collection store first.
+DEFERRED_HELPER = [
+    '7 execve("/b/bin/bingsu", ["/b/bin/bingsu", "__refresh-v1"], 0x1 /* 0 vars */) = 0',
+    '7 openat(20</t/release>, "bingsu-collect", O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC) = 21</t/release/bingsu-collect>',
+    '7 pread64(21</t/release/bingsu-collect>, "\\177ELF", 64, 0) = 64',
+    '7 openat(15</b/run-t/bingsu>, ".collections.gc.lock", O_RDONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC, 0600) = 3</b/run-t/bingsu/.collections.gc.lock>',
+    '7 renameat(15</b/run-t/bingsu>, ".collections.catalog.stage", 15</b/run-t/bingsu>, ".collections.catalog") = 0',
+    '7 exit_group(0) = ?',
+    '7 +++ exited with 0 +++',
+]
+COLLECTOR = "/t/release/bingsu-collect"
+
+
+# 이것을 실패시키는 것: admission_deferred가 collector가 뜬 회차, pin 확인이 없는 helper, GC 잠금이 없는 helper,
+# 0 아닌 종료를 미룸으로 보는 것, 수집 저장소를 연 뒤의 미룸을 놓치는 것.
+def test_admission_deferred_shape():
+    assert admission_deferred(DEFERRED_HELPER, COLLECTOR)
+    spawned = DEFERRED_HELPER[:4] + [
+        '8 execve("/t/release/bingsu-collect", ["/t/release/bingsu-collect", "__collect-v1"], 0x1 /* 0 vars */) = 0',
+        '7 openat(15</b/run-t/bingsu/contexts-v2/collections-v1>, "s", O_RDONLY|O_DIRECTORY) = 9</b/x>',
+    ] + DEFERRED_HELPER[4:]
+    assert not admission_deferred(spawned, COLLECTOR)  # the passing shape: a collector ran
+    collector_only = DEFERRED_HELPER[:4] + [spawned[4]] + DEFERRED_HELPER[4:]
+    assert not admission_deferred(collector_only, COLLECTOR)
+    no_pin = [l for l in DEFERRED_HELPER if "bingsu-collect" not in l]
+    assert not admission_deferred(no_pin, COLLECTOR)
+    no_read = [l for l in DEFERRED_HELPER if "pread64" not in l]
+    assert not admission_deferred(no_read, COLLECTOR)
+    no_gc = [l for l in DEFERRED_HELPER if "gc.lock" not in l]
+    assert not admission_deferred(no_gc, COLLECTOR)
+    failed_gc = [l.replace("= 3</b/run-t/bingsu/.collections.gc.lock>", "= -1 EAGAIN (Resource temporarily unavailable)")
+                 for l in DEFERRED_HELPER]
+    assert not admission_deferred(failed_gc, COLLECTOR)
+    # Deferred after opening its collection store: still this shape.
+    store = DEFERRED_HELPER[:4] + ['7 openat(15</b/run-t/bingsu/contexts-v2>, "collections-v1", O_RDONLY) = 9</b/c>'] + DEFERRED_HELPER[4:]
+    assert admission_deferred(store, COLLECTOR)
+    killed = DEFERRED_HELPER[:-1] + ["7 +++ exited with 75 +++"]
+    assert not admission_deferred(killed, COLLECTOR)
+    assert not admission_deferred(DEFERRED_HELPER[1:], COLLECTOR)  # no helper exec at all
+    two = DEFERRED_HELPER + [l.replace("7 ", "9 ", 1) for l in DEFERRED_HELPER]
+    assert not admission_deferred(two, COLLECTOR)  # two helpers: not one deferred round
+
+
+# deadline_shape가 미뤄진 수집 꼴을 알아본다. 이것을 실패시키는 것: deadline_shape에서 그 꼴을 빼는 것, collector를
+# 기대하지 않는 칸(no-collection)도 그 꼴로 다시 도는 것.
+def test_deadline_shape_names_a_deferred_collection():
+    from types import SimpleNamespace
+    front = ['6 execve("/b/bin/bingsu-prompt", ["/b/bin/bingsu-prompt", "prompt"], 0x1 /* 1 var */) = 0',
+             '6 vfork() = 7']
+    cap = SimpleNamespace(lines=front + DEFERRED_HELPER, exe="/b/bin/bingsu-prompt", collector_exe=COLLECTOR,
+                          collectors=1)
+    assert deadline_shape(cap) == "admission-deferred"
+    assert deadline_shape(SimpleNamespace(**{**vars(cap), "collectors": 0})) is None
+
+
+# 이것을 실패시키는 것: 미뤄진 수집을 상한 없이 다시 도는 것, 미룸이 아닌 실패를 다시 도는 것.
+def test_run_allowlist_caps_deferred_retries():
+    calls = []
+
+    def capture(attempt):
+        calls.append(attempt)
+        return attempt
+
+    def judge(cap, shape=None):
+        if shape is None:
+            raise AssertionError("collector count")
+
+    with pytest.raises(pytest.fail.Exception, match="deferred 4 times"):
+        run_allowlist(capture, judge=judge, shape_of=lambda cap: "admission-deferred", limit=12)
+    assert calls == [1, 2, 3, 4]
+    calls.clear()
+    with pytest.raises(AssertionError, match="collector count"):
+        run_allowlist(capture, judge=judge, shape_of=lambda cap: None, limit=12)
+    assert calls == [1]
 
 
 def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit=ALLOWLIST_ATTEMPTS, label="allowlist"):
@@ -1337,6 +1450,9 @@ def run_allowlist(capture, judge=judge_allowlist, shape_of=deadline_shape, limit
                     raise
                 judge(cap, shape)
                 shapes[shape] += 1
+                # 이것을 실패시키는 것: 미뤄진 수집을 DEFERRED_ATTEMPTS번 넘게 다시 도는 것(늘 미루는 회귀를 놓침).
+                if shape == "admission-deferred" and shapes[shape] > DEFERRED_ATTEMPTS:
+                    pytest.fail(f"{label}: the collection was deferred {shapes[shape]} times")
                 continue
             return attempt, shapes
         pytest.fail(f"{label}: no attempt without a deadline in {limit}; shapes {dict(shapes)}")
