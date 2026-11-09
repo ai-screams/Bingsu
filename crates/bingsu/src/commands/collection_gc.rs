@@ -650,6 +650,17 @@ fn reclaim_inner(
         } else {
             evict(runtime, me, now, schema, &mut catalog, &mut report)
         };
+        // Other sessions' stale locks and cgroup parents (m6-C4a7), under the
+        // GC lock and the same meter, after the stores' own work.
+        // 이것을 실패시키는 것: GC에서 이 단계를 부르지 않는 것(남은 잠금이 그대로 쌓임).
+        if result.is_ok() {
+            let _ = super::command_sessions::reclaim_stale(
+                runtime,
+                me,
+                super::command_sessions::now_secs(),
+                &mut super::command_sessions::own_cgroup,
+            );
+        }
         // A reservation may precede mkdir, or a completed rmdir may precede
         // the catalog checkpoint. Rebuild counts instead of trusting either
         // stale path or permanently stranding its reserved capacity.

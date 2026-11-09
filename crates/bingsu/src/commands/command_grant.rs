@@ -19,7 +19,6 @@ use super::{
 use bingsu_core::{
     command::{
         builtin::Language,
-        cgroup,
         plan::{self, Environ},
         response,
         wire::{self, Grant, Message, Outcome, Policy, Unit, policy_digest},
@@ -401,16 +400,25 @@ impl Languages {
     }
 }
 
-/// The first 16 bytes of sha256(session), hex: names the session's lock and
-/// its script copies, never the raw session value.
+/// The first 16 bytes of sha256(session), hex: names the session's script
+/// copies (macOS), never the raw session value.
+#[cfg(target_os = "macos")]
 fn session_tag(session: &[u8]) -> String {
-    cgroup::session_digest(session)
+    bingsu_core::command::cgroup::session_digest(session)
 }
 
-/// `command-<first 16 bytes of sha256(session), hex>.lock`: a fixed-length
-/// name, never the raw session value.
-fn lock_name(session: &[u8]) -> String {
-    format!("command-{}.lock", session_tag(session))
+/// The session lock's name, by the session's cgroup parent digest over the
+/// runtime root's `(dev, ino)` (command_sessions, m6-C4a7).
+fn lock_name(session: &[u8], root: (u64, u64)) -> String {
+    super::command_sessions::lock_name(session, root)
+}
+
+/// The runtime root's `(dev, ino)`: read once a round, before the session
+/// lock, for the lock's name and the cgroup parent's.
+fn root_id(i: &Inputs<'_>) -> Option<(u64, u64)> {
+    sys::fd_facts(i.runtime.as_fd())
+        .ok()
+        .map(|f| (f.dev, f.ino))
 }
 
 /// The neutral folder (spec: an empty private folder): made 0500 when
@@ -440,14 +448,13 @@ fn neutral(runtime: &File, me: u32) -> Result<bool, StoreError> {
 fn session_reclaim(
     i: &Inputs<'_>,
     session: &[u8],
+    root: (u64, u64),
 ) -> (Option<super::command_cgroup::fs::Dir>, Vec<&'static str>) {
-    let mut cgroup = sys::fd_facts(i.runtime.as_fd()).ok().and_then(|root| {
-        super::command_cgroup::fs::open_session(&super::command_cgroup::fs::Who {
-            session,
-            runtime: (root.dev, root.ino),
-            me: i.me,
-            pid: std::process::id(),
-        })
+    let mut cgroup = super::command_cgroup::fs::open_session(&super::command_cgroup::fs::Who {
+        session,
+        runtime: root,
+        me: i.me,
+        pid: std::process::id(),
     });
     let mut notes = Vec::new();
     if let Some(parent) = &mut cgroup {
@@ -553,9 +560,10 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         // one without any touches nothing. A busy lock is a live supervisor.
         #[cfg(target_os = "linux")]
         if let (false, Some(session)) = (i.config.exec_units.is_empty(), i.session)
-            && let Ok(_lock) = close_only_lock(i.runtime, &lock_name(session), i.me, true)
+            && let Some(root) = root_id(i)
+            && let Ok(_lock) = close_only_lock(i.runtime, &lock_name(session, root), i.me, true)
         {
-            let _ = session_reclaim(i, session);
+            let _ = session_reclaim(i, session, root);
         }
         // The context is duplicated only for entries to publish: a round
         // with nothing to do keeps the helper's descriptor calls (fsbudget).
@@ -594,15 +602,16 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     let (Some(session), Some(pwd)) = (i.session, i.pwd) else {
         return Err(Skip::NoSession);
     };
+    let root = root_id(i).ok_or(Skip::Failed)?;
     let lock =
-        close_only_lock(i.runtime, &lock_name(session), i.me, true).map_err(|e| match e {
+        close_only_lock(i.runtime, &lock_name(session, root), i.me, true).map_err(|e| match e {
             StoreError::Busy => Skip::Busy,
             _ => Skip::Failed,
         })?;
     // Right after the lock, before any other check can end the round: a
     // round that cannot run (no environment frame) still reclaims.
     #[cfg(target_os = "linux")]
-    let (cgroup, notes) = session_reclaim(i, session);
+    let (cgroup, notes) = session_reclaim(i, session, root);
     let body = i
         .environment
         .as_ref()
@@ -2096,13 +2105,25 @@ mod tests {
         assert_eq!(permit(&invalid).deadline, 0);
     }
 
-    // 파일 이름에는 세션 값이 아니라 고정 길이 요약값만. 이것을 실패시키는 것: lock_name이 세션 값을
-    // 그대로 쓰는 것.
+    // 파일 이름에는 세션 값이 아니라 고정 길이 요약값만, 그리고 그 요약값은 세션 cgroup 부모의 것과 같다
+    // (m6-C4a7: 잠금이 부모를 가리킴). 이것을 실패시키는 것: lock_name이 세션 값을 그대로 쓰는 것, 부모와
+    // 다른 요약값(세션만, runtime 없이)을 쓰는 것.
     #[test]
-    fn lock_name_is_a_digest() {
-        let name = lock_name(b"0123456789abcdef0123456789abcdef");
+    fn lock_name_is_the_parent_digest() {
+        let root = (7, 9);
+        let name = lock_name(b"0123456789abcdef0123456789abcdef", root);
         assert_eq!(name.len(), "command-".len() + 32 + ".lock".len());
         assert!(!name.contains("0123456789abcdef"));
-        assert_ne!(name, lock_name(b"fedcba9876543210fedcba9876543210"));
+        assert_ne!(name, lock_name(b"fedcba9876543210fedcba9876543210", root));
+        assert_ne!(
+            name,
+            lock_name(b"0123456789abcdef0123456789abcdef", (7, 10))
+        );
+        let parent =
+            bingsu_core::command::cgroup::parent_name(b"0123456789abcdef0123456789abcdef", root);
+        assert_eq!(
+            name["command-".len()..name.len() - ".lock".len()],
+            parent["bingsu-cmd-".len()..]
+        );
     }
 }

@@ -1845,8 +1845,29 @@ def helper_stage_case(stage):
     plan["ax"] = HelperAxes(**plan["ax"])
     lines = data.decode().splitlines()
     if stage == "collect":
-        lines = with_command_stage_probe(lines)
+        lines = with_session_listing(with_command_stage_probe(lines))
     return lines, meta["collector"], HelperPlan(**plan)
+
+
+def with_session_listing(lines):
+    """The collect capture predates the GC's sweep of stale session locks
+    (m6-C4a7): one block of the runtime root's listing just before the
+    catalog commit (no session lock in a collect-only fixture). Replay that
+    shape on the saved capture; a product-shape replay, not a new capture."""
+    import re
+    helper = next(l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l)
+    commits = [i for i, l in enumerate(lines) if l.split()[0] == helper
+               and re.search(r'openat\(\d+</fx/run-t/bingsu>, "\.collections\.catalog\.stage", O_RDONLY', l)]
+    at = commits[-1]
+    root = re.search(r"openat\((\d+)</fx/run-t/bingsu>", lines[at])[1]
+    fd = "4"
+    assert not any(re.search(rf"\b{fd}<", l) for l in lines[at - 1:at + 1] if l.split()[0] == helper and "close(" not in l)
+    listing = [f'{helper}  openat({root}</fx/run-t/bingsu>, ".", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_DIRECTORY) = {fd}</fx/run-t/bingsu>',
+               f'{helper}  lseek({fd}</fx/run-t/bingsu>, 0, SEEK_SET) = 0',
+               f'{helper}  getdents64({fd}</fx/run-t/bingsu>, 0x7ffd0000 /* 12 entries */, 8192) = 432',
+               f'{helper}  lseek({fd}</fx/run-t/bingsu>, 0, SEEK_CUR) = 432',
+               f'{helper}  close({fd}</fx/run-t/bingsu>) = 0']
+    return lines[:at] + listing + lines[at:]
 
 
 def with_command_stage_probe(lines):
@@ -3784,7 +3805,9 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
             # the full round's bound.
             at = (find(helper, r"unlinkat\(.*AT_REMOVEDIR\) = 0$") if stage == "builtin_probe" else
                   find(helper, r"getdents64\(\d+</sys/fs/cgroup/bingsu-cmd-[0-9a-f]+>, .* = 0$"))
-            lines.insert(at, lines[at])
+            # Two for the listing: the GC's own runtime listing gives one of
+            # slack (m6-C4a7) that the capture predates.
+            lines[at:at] = [lines[at]] * (1 if stage == "builtin_probe" else 2)
         if damage == "deadline-installed-missing-stat":
             # No answer, but the probe's result installed: a decision, judged
             # exactly (GC slack must not cover a missing stat).

@@ -152,3 +152,19 @@ def test_supervisor_coefficients(arch, libc):
     for n in (0, 13):
         with pytest.raises(ValueError):
             supervisor_expected(n, atomic=True, arch=arch, libc=libc)
+
+
+# m6-C4a7: GC는 runtime 뿌리 목록 한 블록과 세션 잠금 이름마다 stat 하나를 더 한다. 이것을 실패시키는 것: 잠금 수
+# 항을 지우는 것, 목록 항을 지우는 것.
+def test_gc_sweep_counts_each_session_lock():
+    import json
+    from dataclasses import replace
+    from pathlib import Path
+    from fsbudget.formula import HelperAxes, HelperPlan, helper_command_expected
+    meta = json.loads((Path(__file__).resolve().parents[3] / "tests/shell/fixtures/helper-stage-traces.json")
+                      .read_text())["command_miss"]
+    plan = dict(meta["plan"]); plan["stages"] = tuple(plan["stages"]); plan["ax"] = HelperAxes(**plan["ax"])
+    plan = HelperPlan(**plan)
+    none = helper_command_expected(replace(plan, session_locks=0))["gc"]
+    three = helper_command_expected(replace(plan, session_locks=3))["gc"]
+    assert {k: three[k] - none.get(k, 0) for k in three if three[k] != none.get(k, 0)} == {"fstat": 3}

@@ -209,6 +209,8 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # DirectoryCursor::open on a held folder: "." open, fd stat, flag query,
     # FD_CLOEXEC; its reads are one filled read and the EOF read.
     "directory_cursor": {"openat": 1, "fstat": 1, "fd_query": 1, "fd_flags": 1, "getdents": 2},
+    # sys::directory_batch of the runtime root, one 8 KiB block.
+    "session_listing": {"openat": 1, "seek": 2, "getdents": 1},
     # command_cgroup::fs::open_session up to the session parent's open (Linux,
     # C3): uname (the 5.14 check, kernel_release), /proc/self/cgroup
     # through libc::open and read to its end, the own cgroup folder through
@@ -422,6 +424,9 @@ class HelperPlan:
     path_folders: int = 0
     manager_homes: int = 0
     bin_links: int = 0
+    # Session locks (`command-<digest>.lock`) in the runtime root when the GC
+    # runs: the GC stats each one's name (m6-C4a7).
+    session_locks: int = 0
 
 
 def read_to_end_calls(n: int) -> int:
@@ -902,7 +907,17 @@ def _collection_gc(e: dict, p: HelperPlan) -> None:
     _add(e, "directory_cursor")
     _breaker_read(e, 0)
     _breaker_read(e, p.breaker_bytes)
+    _session_sweep(e, p)
     _catalog_commit(e, p.catalog_bytes)
+
+
+def _session_sweep(e: dict, p: HelperPlan) -> None:
+    # command_sessions::reclaim_stale (m6-C4a7) after the stores' own work:
+    # one block of the runtime root's listing (open ".", seek, getdents, the
+    # next position) and a stat of each session lock's name. A stale one is
+    # opened and locked; the fixtures have none older than a day.
+    _add(e, "session_listing")
+    e["fstat"] = e.get("fstat", 0) + p.session_locks
 
 
 def _command_session(e: dict, p: HelperPlan) -> None:
@@ -1014,6 +1029,7 @@ def _command_gc(e: dict, p: HelperPlan) -> None:
     for _ in range(3):  # .response.stage, .stage-request, .command.stage
         _add(e, "chain_recheck_name")
         _add(e, "absent_slot")
+    _session_sweep(e, p)
     _catalog_commit(e, p.catalog_bytes)
 
 

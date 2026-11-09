@@ -419,17 +419,15 @@ pub(crate) mod fs {
         open_session_at(b"/sys/fs/cgroup", release.to_bytes(), &text, who)
     }
 
-    /// [`open_session`] from its inputs: the cgroup v2 mount, `uname -r`
-    /// and `/proc/self/cgroup`.
-    pub(crate) fn open_session_at(
-        mount: &[u8],
-        release: &[u8],
-        proc_self_cgroup: &[u8],
-        who: &Who<'_>,
-    ) -> Option<Dir> {
-        if !cgroup::kernel_has_kill(release) {
-            return None;
-        }
+    /// The process's own cgroup folder on the cgroup v2 mount, or `None`.
+    pub(crate) fn open_own() -> Option<File> {
+        let text = read_small(c"/proc/self/cgroup", cgroup::PROC_CGROUP_MAX).ok()?;
+        open_own_at(b"/sys/fs/cgroup", &text)
+    }
+
+    /// [`open_own`] from its inputs: the cgroup v2 mount and
+    /// `/proc/self/cgroup`.
+    pub(crate) fn open_own_at(mount: &[u8], proc_self_cgroup: &[u8]) -> Option<File> {
         let own = cgroup::own_path(proc_self_cgroup)?;
         let own = std::ffi::CString::new([mount, own].concat()).ok()?;
         // SAFETY: NUL-terminated path; the descriptor is owned below.
@@ -445,9 +443,21 @@ pub(crate) mod fs {
         use std::os::fd::FromRawFd;
         // SAFETY: a fresh descriptor nothing else owns.
         let own = unsafe { File::from_raw_fd(fd) };
-        if !cgroup2(&own) {
+        cgroup2(&own).then_some(own)
+    }
+
+    /// [`open_session`] from its inputs: the cgroup v2 mount, `uname -r`
+    /// and `/proc/self/cgroup`.
+    pub(crate) fn open_session_at(
+        mount: &[u8],
+        release: &[u8],
+        proc_self_cgroup: &[u8],
+        who: &Who<'_>,
+    ) -> Option<Dir> {
+        if !cgroup::kernel_has_kill(release) {
             return None;
         }
+        let own = open_own_at(mount, proc_self_cgroup)?;
         let procs = open_at(&own, b"cgroup.procs", libc::O_RDONLY).ok()?;
         let text = super::read_bounded(
             &mut |buf, at| {
