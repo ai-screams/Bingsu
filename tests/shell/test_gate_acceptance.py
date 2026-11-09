@@ -1232,8 +1232,9 @@ PTY_ALWAYS = "success() || failure()"
 # Every condition a step of a PTY job may carry. Any other step runs in every cell.
 LINUX_CONDITIONS = {"Assert minimum versions": "matrix.versions != ''", "PTY tests": PTY_ALWAYS,
                     "Shell-independent tests": "(success() || failure()) && matrix.image == 'min-d12'",
-                    "Long folder test (AppArmor unconfined)": PTY_ALWAYS}
-MACOS_CONDITIONS = {"PTY tests": PTY_ALWAYS}
+                    "Long folder test (AppArmor unconfined)": PTY_ALWAYS,
+                    "Fetch the pinned oh-my-zsh": PTY_ALWAYS}
+MACOS_CONDITIONS = {"PTY tests": PTY_ALWAYS, "Fetch the pinned oh-my-zsh": PTY_ALWAYS}
 LONG_FOLDER_RUN = "-m pytest tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty -q"
 SHELL_FREE_STEP = "      - name: Shell-independent tests\n"
 SHELL_FREE_RUN = "-m pytest tests/shell/test_prompt_trace_budget.py -q"
@@ -1243,6 +1244,52 @@ MACOS_SHELLS_JOB = "  shell-macos-shells:\n    name: Shell PTY (macOS Homebrew $
 MACOS_MATRIX = "    strategy:\n      fail-fast: false\n      matrix:\n        shell: [bash, fish]\n"
 LINUX_CELL = re.compile(r"(?m)^          - label: (.+)\n            image: (.+)\n"
                         r"            versions: (.+)\n            shells: (.+)\n")
+
+
+OHMYZSH_FETCH = "      - name: Fetch the pinned oh-my-zsh\n"
+
+
+def step_condition(block, start):
+    """The `if:` of the step whose `- name:` line begins at `start`, or None."""
+    for line in block[start:].split("\n")[1:]:
+        if line.startswith("      - ") or not line.startswith("        "):
+            return None
+        if line.startswith("        if: "):
+            return line[len("        if: "):]
+    return None
+
+
+def fetch_conditions(text):
+    """(job, fetch step condition, next step's name and condition) for every
+    oh-my-zsh fetch step in shell.yml."""
+    found = []
+    for job in re.findall(r"^  ([a-z0-9-]+):\n", text, re.M):
+        block = job_block(text, job)
+        at = block.find(OHMYZSH_FETCH)
+        while at != -1:
+            following = block.index("      - name: ", at + len(OHMYZSH_FETCH))
+            name = block[following:block.index("\n", following)].removeprefix("      - name: ")
+            found.append((job, step_condition(block, at), name, step_condition(block, following)))
+            at = block.find(OHMYZSH_FETCH, at + 1)
+    return found
+
+
+# The oh-my-zsh tree is fetched in the step before PTY tests. The PTY step runs
+# after an earlier failure (success() || failure()); a fetch without the same
+# condition is skipped then, and the oh-my-zsh tests fail as BLOCKED with no
+# tree, hiding the first failure behind a second one.
+# 이것을 실패시키는 것: fetch 단계의 조건을 지우는 것, 다른 조건으로 바꾸는 것, PTY 단계 앞이 아닌 곳으로 옮기는 것.
+def test_ohmyzsh_fetch_runs_whenever_its_pty_step_runs():
+    # A step's condition is its own: an unconditioned fetch does not borrow
+    # the PTY step's.
+    block = OHMYZSH_FETCH + "        run: x\n      - name: PTY tests\n        if: success() || failure()\n"
+    assert step_condition(block, 0) is None
+    assert step_condition(block, block.index("      - name: PTY")) == "success() || failure()"
+    found = fetch_conditions(workflows()["shell.yml"])
+    assert [job for job, *_ in found] == ["shell-linux", "shell-macos", "shell-macos-shells"], found
+    for job, fetch, name, pty in found:
+        assert name == "PTY tests" and pty == "success() || failure()", (job, name, pty)
+        assert fetch == pty, (job, fetch, pty)
 
 
 def job_block(text, job):
