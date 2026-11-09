@@ -776,8 +776,12 @@ impl Cgroups {
             return Err(());
         }
         let made = (|| {
+            use super::command_cgroup::fs;
             let folder = super::sys::open_dir_at_nofollow(self.parent.as_fd(), os).ok()?;
-            let kill = super::command_cgroup::fs::kill_file(&folder).ok()?;
+            // A cgroup folder bound over the new name between mkdirat and the
+            // open is on another mount: not this unit (m6-C3b).
+            let mount = fs::on_parent_mount(&self.parent, &folder)?;
+            let kill = fs::kill_file_on(&folder, mount).ok()?;
             Some((folder, kill))
         })();
         // No test for the None arm: a folder this call just made opens, and

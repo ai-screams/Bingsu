@@ -269,9 +269,10 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     "supervisor_start": {"exec": 1, "fd_flags": 2},
     "supervisor_idle": {"exec": 1, "fd_flags": 1},
     "supervisor_spawn": {"spawn": 1, "openat": 1, "cwd": 1},
-    # The unit's folder and its cgroup.kill each report their mount id: the
-    # file must be on the folder's mount (m6-C3b).
-    "supervisor_unit_cgroup": {"mkdir": 1, "openat": 2, "fstat": 2, "write": 1},
+    # The mount ids of the parent, the new unit folder and its cgroup.kill:
+    # the folder must be on the parent's mount and the file on the folder's
+    # (m6-C3b).
+    "supervisor_unit_cgroup": {"mkdir": 1, "openat": 2, "fstat": 3, "write": 1},
     "supervisor_own_group": {"pgroup": 1},
     # command_grant::neutral: the 0500 folder's mkdirat (EEXIST once made),
     # open and fd_facts, then its emptiness check through a cursor on a

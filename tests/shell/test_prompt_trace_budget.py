@@ -1860,30 +1860,46 @@ def mount_id_query(pid, fd, mode):
 
 
 def with_mount_id_queries(lines):
-    """The captures predate the kill file's mount check (m6-C3b): right after
-    a unit's cgroup.kill opens, the supervisor and the helper's reclaim ask
-    for the mount ids of the unit folder and of the file (statx, as a live
-    capture shows them). Replay those two calls on the saved capture; a
-    product-shape replay, not a new capture."""
-    sites = [(i, m) for i, l in enumerate(lines) if (m := KILL_OPEN.match(l))]
-    queries = {i: [mount_id_query(m[1], m[2], "S_IFDIR|0700"), mount_id_query(m[1], m[3], "S_IFREG|0200")]
-               for i, m in sites}
+    """The captures predate the unit mount checks (m6-C3b). The supervisor,
+    after opening a new unit folder and before its cgroup.kill, asks for the
+    mount ids of the parent and the folder, then of the file once it opens;
+    the helper's reclaim asks for the folder's and the file's right after the
+    file opens (statx, as a live capture shows them). Replay those calls on
+    the saved capture; a product-shape replay, not a new capture."""
+    supervisor = next((l.split()[0] for l in lines if '"__command-v1"' in l and "execve(" in l), None)
+    edits = {}
+    for i, line in enumerate(lines):
+        m = KILL_OPEN.match(line)
+        if not m:
+            continue
+        pid, unit, kill = m[1], m[2], m[3]
+        folder, file = mount_id_query(pid, unit, "S_IFDIR|0700"), mount_id_query(pid, kill, "S_IFREG|0200")
+        if pid == supervisor:
+            opened = next(j for j in range(i - 1, -1, -1) if lines[j].startswith(f"{pid} ")
+                          and lines[j].endswith(f") = {unit}") and "openat(" in lines[j])
+            parent = re.match(rf"{pid}\s+openat\((\d+<[^>]*>), ", lines[opened])[1]
+            edits[i] = ([mount_id_query(pid, parent, "S_IFDIR|0700"), folder], [file])
+        else:
+            edits[i] = ([], [folder, file])
     # A capture that already has the calls keeps them; one with only some,
-    # or of another shape, is not this product shape.
+    # or of another shape or place, is not this product shape.
     # 이것을 실패시키는 것: 이미 있는 호출 위에 또 끼워 넣는 것, 일부만 있거나 다른 자리·다른 모양의 호출을 받는 것.
     def shown(i):
-        after = lines[i + 1:i + 3]
-        if after == queries[i]:
+        before, after = edits[i]
+        near = lines[i - len(before):i] + lines[i + 1:i + 1 + len(after)]
+        if near == before + after:
             return True
-        assert not any("STATX_MNT_ID" in l for l in after), ("mount id query", i, after)
+        assert not any("STATX_MNT_ID" in l for l in near), ("mount id query", i, near)
         return False
-    found = {shown(i) for i in queries}
+    found = {shown(i) for i in edits}
     assert len(found) <= 1, ("mount id query", "some sites only")
     if found == {True}:
         return lines
     out = list(lines)
-    for i in reversed(list(queries)):
-        out[i + 1:i + 1] = queries[i]
+    for i in reversed(list(edits)):
+        before, after = edits[i]
+        out[i + 1:i + 1] = after
+        out[i:i] = before
     return out
 
 
@@ -1894,10 +1910,13 @@ def test_mount_id_query_replay(shape):
     raw = (HELPER_STAGE_TRACES.parent / "helper-stage-command_miss.strace").read_text().splitlines()
     replayed = with_mount_id_queries(raw)
     opens = [i for i, l in enumerate(replayed) if KILL_OPEN.match(l)]
-    assert len(opens) == 2 and len(replayed) == len(raw) + 4
-    for i in opens:
-        assert "S_IFDIR" in replayed[i + 1] and "/cgroup.kill>" in replayed[i + 2] and "S_IFREG" in replayed[i + 2]
-        assert replayed[i + 1].split()[0] == replayed[i].split()[0] == replayed[i + 2].split()[0]
+    assert len(opens) == 2 and len(replayed) == len(raw) + 5
+    supervisor, helper = opens  # the supervisor's unit, then the helper's reclaim
+    assert [replayed[supervisor - 2].split("<")[1].split(">")[0].rsplit("/", 1)[-1].startswith("bingsu-cmd-"),
+            "/u" in replayed[supervisor - 1], "/cgroup.kill>" in replayed[supervisor + 1]] == [True, True, True]
+    assert "S_IFDIR" in replayed[helper + 1] and "/cgroup.kill>" in replayed[helper + 2]
+    for i in (supervisor - 2, supervisor - 1, supervisor + 1, helper + 1, helper + 2):
+        assert "STATX_MNT_ID" in replayed[i]
     if shape == "absent":
         return
     if shape == "present":
@@ -1905,9 +1924,9 @@ def test_mount_id_query_replay(shape):
         return
     damaged = list(replayed)
     if shape == "partial":
-        del damaged[opens[0] + 2]
+        del damaged[supervisor - 2]
     else:
-        damaged[opens[0] + 1] = damaged[opens[0] + 1].replace("STATX_MNT_ID, {", "STATX_BASIC_STATS|STATX_MNT_ID, {")
+        damaged[helper + 1] = damaged[helper + 1].replace("STATX_MNT_ID, {", "STATX_BASIC_STATS|STATX_MNT_ID, {")
     with pytest.raises(AssertionError, match="mount id query"):
         with_mount_id_queries(damaged)
 

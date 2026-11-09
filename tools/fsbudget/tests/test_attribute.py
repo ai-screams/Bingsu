@@ -896,9 +896,10 @@ def test_supervisor_vocabulary():
 
 
 # The supervisor's own statx rule (m6-C3b), judged on its own: with the base
-# classifier taking every statx as fstat, only statx(unit or its cgroup.kill,
-# "", AT_EMPTY_PATH, STATX_MNT_ID) stays fstat.
-# 이것을 실패시키는 것: 감독 규칙에서 빈 이름, AT_EMPTY_PATH, STATX_MNT_ID 마스크, 단위·kill fd 한정 중 하나를
+# classifier taking every statx as fstat, only statx(numeric fd of the cgroup
+# parent, a unit or its cgroup.kill, "", AT_EMPTY_PATH, STATX_MNT_ID) stays
+# fstat.
+# 이것을 실패시키는 것: 감독 규칙에서 숫자 fd, 빈 이름, AT_EMPTY_PATH, STATX_MNT_ID 마스크, 부모·단위·kill fd 한정 중 하나를
 # 지우는 것(바탕 분류기가 그 꼴을 거르는지와 상관없이).
 def test_supervisor_mount_id_statx_is_exact(monkeypatch):
     from fsbudget import classify
@@ -915,8 +916,13 @@ def test_supervisor_mount_id_statx_is_exact(monkeypatch):
         (f"1 statx(7<{SUP_UNIT}>, {other_mask}", "unknown-fs"),
         (f"1 statx(7<{SUP_UNIT}>, {no_empty_path}", "unknown-fs"),
         (f"1 statx(7<{SUP_UNIT}>, {named}", "unknown-fs"),
-        (f"1 statx(6<{SUP_CG}>, {ok}", "unknown-fs"),
+        (f"1 statx(6<{SUP_CG}>, {ok}", "fstat"),  # the cgroup parent
         (f"1 statx(9<{SUP_UNIT}/cgroup.procs>, {ok}", "unknown-fs"),
+        (f"1 statx(9</sys/fs/cgroup/other>, {ok}", "unknown-fs"),
+        (f"1 statx(AT_FDCWD<{SUP_CG}>, {ok}", "unknown-fs"),
+        (f'1 statx(AT_FDCWD<{SUP_UNIT}>, "/etc/passwd", AT_STATX_SYNC_AS_STAT, STATX_MNT_ID, {{stx_mask=STATX_BASIC_STATS}}) = 0',
+         "unknown-fs"),
+        (f"1 statx(AT_FDCWD</>, {ok.replace(chr(34) * 2 + ', ', chr(34) + SUP_UNIT + chr(34) + ', ', 1)}", "unknown-fs"),
     ]
     got = [(line, classify.supervisor_kind(call)) for (line, _), call in zip(shapes, parse("\n".join(l for l, _ in shapes)))]
     assert got == shapes
