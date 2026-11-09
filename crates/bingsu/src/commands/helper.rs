@@ -149,13 +149,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 // the global excludes, so queries that do not fit what the
                 // request leaves are the ones dropped, never the excludes.
                 if let Some((config, _)) = display {
-                    // After the builtin languages: a user query that does
-                    // not fit drops the user queries, never the builtins.
-                    let builtins = request.languages.len();
-                    request.languages.extend(user_queries(&config.exec_units));
-                    if request.encode_body().is_err() {
-                        request.languages.truncate(builtins);
-                    }
+                    // After the builtin languages: only a user query that
+                    // does not fit is left out, never a builtin (m6-D1e).
+                    fit_user_queries(&mut request, user_queries(&config.exec_units));
                 }
                 collection_runtime = Some(context.runtime.try_clone()?);
                 let path = e
@@ -709,6 +705,18 @@ fn drawn_builtins(
         .collect()
 }
 
+/// Adds `queries` to `request` in config order, as many as the language
+/// count cap leaves room for after the builtins (`LANGUAGES_MAX` is the
+/// request's total). Only the count can refuse valid queries: the largest
+/// request still fits the stream cap (pinned by a test).
+fn fit_user_queries(
+    request: &mut collection::wire::Request,
+    queries: Vec<collection::language::LanguageQuery>,
+) {
+    let room = collection::language::LANGUAGES_MAX.saturating_sub(request.languages.len());
+    request.languages.extend(queries.into_iter().take(room));
+}
+
 /// The user-defined languages the round asks the collection about: only
 /// units that may run (`plan::runnable`), so a language that cannot run
 /// yet costs the collection no marker lookups and no share of its time
@@ -803,6 +811,110 @@ mod query_tests {
             .map(|q| q.id)
             .collect();
         assert_eq!(ids, [b"custom/deno".to_vec()]);
+    }
+
+    use bingsu_core::collection;
+
+    fn fit_request(
+        languages: Vec<collection::language::LanguageQuery>,
+    ) -> collection::wire::Request {
+        let binding = collection::wire::Binding {
+            path_query: Default::default(),
+            build_id: collection::wire::BuildId([0; 32]),
+            snapshot: bingsu_core::snapshot::Identity {
+                boot: [0; 16],
+                epoch: [0; 16],
+                generation: 0,
+                source: [0; 4],
+                context: bingsu_core::snapshot::context_crc(b"/c", b"/s").unwrap(),
+            },
+            clock_kind: 1,
+            domain: [0; 16],
+            resume: 0,
+            config: b"/c".to_vec(),
+            state: b"/s".to_vec(),
+            cwd: b"/w".to_vec(),
+            mask: 1 << 3,
+        };
+        collection::wire::Request {
+            languages,
+            request_id: collection::wire::M3B_REQUEST_ID,
+            binding,
+            budget_ms: 50,
+            environment: vec![],
+            global_excludes_known: true,
+            global_excludes: vec![],
+        }
+    }
+
+    fn query(id: &str, markers: usize, len: usize) -> collection::language::LanguageQuery {
+        collection::language::LanguageQuery {
+            id: id.as_bytes().to_vec(),
+            markers: (0..markers)
+                .map(|i| format!("{i:02}{}", "m".repeat(len - 2)).into_bytes())
+                .collect(),
+            version_files: Vec::new(),
+        }
+    }
+
+    fn ids(request: &collection::wire::Request) -> Vec<String> {
+        request
+            .languages
+            .iter()
+            .map(|q| String::from_utf8(q.id.clone()).unwrap())
+            .collect()
+    }
+
+    // m6-D1e: 언어 수 상한(요청 전체 16)에 남은 자리만큼 사용자 질의를 설정 순서대로 넣고 나머지만 뺀다. 내장
+    // 질의는 빼지 않는다(내장 4 + 사용자 16 → 사용자 12). 이것을 실패시키는 것: 하나라도 넘치면 사용자 질의를
+    // 모두 버리는 것, 자리를 내장 질의만큼 줄이지 않는 것.
+    #[test]
+    fn only_the_user_queries_that_do_not_fit_are_left_out() {
+        let small = |i: usize| query(&format!("custom/s{i}"), 1, 8);
+        let mut r = fit_request(Vec::new());
+        super::fit_user_queries(&mut r, (0..3).map(small).collect());
+        assert_eq!(ids(&r), ["custom/s0", "custom/s1", "custom/s2"]);
+        assert!(r.encode_body().is_ok());
+
+        let builtins: Vec<_> = (0..4)
+            .map(|i| query(&format!("builtin/{i}"), 1, 8))
+            .collect();
+        let mut r = fit_request(builtins);
+        super::fit_user_queries(&mut r, (0..16).map(small).collect());
+        let got = ids(&r);
+        assert_eq!(
+            &got[..4],
+            ["builtin/0", "builtin/1", "builtin/2", "builtin/3"]
+        );
+        assert_eq!(
+            got[4..],
+            (0..12).map(|i| format!("custom/s{i}")).collect::<Vec<_>>()[..]
+        );
+        assert!(r.encode_body().is_ok());
+    }
+
+    // fit_user_queries가 개수만 보는 근거: 언어 수 상한까지 채운 가장 큰 질의(이름 16개 × 255 B)와 최대 전역
+    // 제외 목록을 함께 넣어도 요청이 stream 상한 안에 든다. 이것을 실패시키는 것: 질의·제외 상한을 키워 크기로도
+    // 넘칠 수 있게 되는 것(그때는 개수만 보는 판정이 틀림).
+    #[test]
+    fn the_largest_request_fits_the_stream() {
+        let mut r = fit_request(Vec::new());
+        r.global_excludes = vec![b'x'; collection::wire::GLOBAL_EXCLUDES_MAX];
+        let queries = (0..collection::language::LANGUAGES_MAX)
+            .map(|i| {
+                query(
+                    &format!(
+                        "custom/{i:02}{}",
+                        "l".repeat(collection::language::ID_MAX - 9)
+                    ),
+                    16,
+                    255,
+                )
+            })
+            .collect();
+        super::fit_user_queries(&mut r, queries);
+        assert_eq!(r.languages.len(), collection::language::LANGUAGES_MAX);
+        assert!(r.encode_body().is_ok());
     }
 }
 
