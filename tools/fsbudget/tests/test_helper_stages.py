@@ -92,7 +92,7 @@ def test_platform_stack_guard_is_exact_and_only_in_prefix(libc, seeks, stages):
 
 
 # 이것을 실패시키는 것: helper 어휘가 다른 모양까지 받아 넓어지는 것(경로 statx의 상대 경로, 파이프가 아닌
-# 이름 없는 fd, "/"가 아닌 chdir), 또는 각 제품 모양을 다른 종류로 세는 것.
+# 이름 없는 fd, "/"가 아닌 chdir, 이름 없는 fd의 capability 조회), 또는 각 제품 모양을 다른 종류로 세는 것.
 @pytest.mark.parametrize("c,kind", [
     (call("statx", '3</r/f>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=0}'), "fstat"),
     (call("statx", 'AT_FDCWD</>, "/r/config.local.toml", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW, STATX_ALL, 0x1'), "fstat"),
@@ -111,6 +111,11 @@ def test_platform_stack_guard_is_exact_and_only_in_prefix(libc, seeks, stages):
     (call("chdir", '"/"'), "cwd"),
     (call("chdir", '"/r"'), "unknown-fs"),
     (call("umask", "077", "022"), "umask"),
+    # U-33: a target's file-capability query, on its descriptor only; another
+    # attribute or an unnamed fd stays outside the vocabulary.
+    (call("fgetxattr", '6</usr/bin/true>, "security.capability", NULL, 0', "-1 ENODATA (No data available)"), "caps"),
+    (call("fgetxattr", '6, "security.capability", NULL, 0', "-1 ENODATA (No data available)"), "unknown-fs"),
+    (call("fgetxattr", '6</usr/bin/true>, "security.selinux", NULL, 0', "-1 ENODATA (No data available)"), "unknown-fs"),
 ])
 def test_helper_vocabulary(c, kind):
     assert helper_kind(c) == kind

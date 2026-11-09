@@ -269,9 +269,10 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # name an lstat, open and fd stat (`folder_name`).
     "folder_root": {"openat": 1, "fstat": 1},
     "folder_name": {"openat": 1, "fstat": 2},
-    # exec_path::lookup_open's target: lstat, open, statx and fd stat, and
-    # the 256-byte header pread.
-    "target_file": {"fstat": 3, "openat": 1, "read": 1},
+    # exec_path::lookup_open's target: lstat, open, statx and fd stat, the
+    # file-capability query (U-33; a readable target, so on its descriptor)
+    # and the 256-byte header pread.
+    "target_file": {"fstat": 3, "openat": 1, "caps": 1, "read": 1},
 }
 
 # musl differs only in its libc wrappers: open(O_CLOEXEC), fopen("e"),

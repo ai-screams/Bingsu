@@ -830,3 +830,95 @@ fn explain_shows_limits_cwd_shell_and_the_sanitized_lookup() {
         "{stdout}"
     );
 }
+
+// U-33: setuid·setgid 프로그램은 실행하지 않고, `config check`(W411)와 `--explain`이 그 이유를 적는다. 대조: 0755
+// 사본은 실행 파일로 보이고, 남이 쓸 수 있는 0757 사본은 이유 없이 거부된다(W411 없음). 이것을 실패시키는 것:
+// explain이 SetId를 다른 거부처럼 다루는 것(이유가 빠짐), 이유를 다른 거부에도 붙이는 것, W411에 set-id를 더하지
+// 않는 것, 상태 줄을 "will not run"으로 두지 않는 것.
+#[test]
+fn check_and_explain_name_set_id_programs() {
+    let why = "setuid, setgid or file capabilities (bingsu runs no such program)";
+    for (mode, refused, set_id) in [
+        (0o755, false, false),
+        (0o757, true, false),
+        (0o4755, true, true),
+        (0o2755, true, true),
+    ] {
+        let e = Env::new("cli_config", &format!("set-id-{mode:o}"));
+        let tool = e.put("bin/tool", "#!/bin/sh\necho tool\n");
+        chmod(&tool, mode);
+        e.put_config(
+            "config.toml",
+            "[segment.\"custom/a\"]\nkind = \"command\"\ncommand = [\"tool\"]\n\
+             [layout.line1]\nleft = [\"custom/a\"]\n",
+        );
+        let path = format!("{}:/usr/bin:/bin", tool.parent().unwrap().display());
+        let check = |extra: &[&str]| {
+            let mut a = vec!["config", "check"];
+            a.extend_from_slice(extra);
+            text(&e.cmd(&a).env("PATH", &path).output().unwrap().stdout)
+        };
+        let plain = check(&[]);
+        assert_eq!(
+            plain.contains("W411: segment `custom/a`") && plain.contains(why),
+            set_id,
+            "{mode:o}: {plain}"
+        );
+        let stdout = check(&["--explain"]);
+        let executable = stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with("executable"))
+            .unwrap_or_else(|| panic!("{mode:o}: {stdout}"));
+        assert!(executable.contains("/bin/tool"), "{mode:o}: {stdout}");
+        assert_eq!(
+            executable.ends_with(" refused"),
+            refused && !set_id,
+            "{mode:o}: {stdout}"
+        );
+        assert_eq!(executable.ends_with(why), set_id, "{mode:o}: {stdout}");
+        assert_eq!(
+            stdout.contains("custom/a  command, will not run: its file is refused"),
+            refused,
+            "{mode:o}: {stdout}"
+        );
+    }
+}
+
+// U-33: set-id 인터프리터를 쓰는 script는 W411과 `--explain`이 인터프리터 이유를 적는다(script 자체가 set-id인 이유와
+// 다름). 이것을 실패시키는 것: 인터프리터의 SetId를 이유 없는 거부로 바꾸는 것, 인터프리터 경우를 파일 자체로 보는 것.
+#[test]
+fn check_and_explain_name_a_set_id_interpreter() {
+    let e = Env::new("cli_config", "set-id-interpreter");
+    let interp = e.put("bin/interp", "");
+    std::fs::copy("/bin/sh", &interp).unwrap();
+    chmod(&interp, 0o4755);
+    let tool = e.put("bin/tool", &format!("#!{}\necho tool\n", interp.display()));
+    chmod(&tool, 0o755);
+    e.put_config(
+        "config.toml",
+        "[segment.\"custom/a\"]\nkind = \"command\"\ncommand = [\"tool\"]\n\
+         [layout.line1]\nleft = [\"custom/a\"]\n",
+    );
+    let path = format!("{}:/usr/bin:/bin", tool.parent().unwrap().display());
+    let why =
+        "its interpreter is setuid, setgid or has file capabilities (bingsu runs no such program)";
+    let check = |extra: &[&str]| {
+        let mut a = vec!["config", "check"];
+        a.extend_from_slice(extra);
+        text(&e.cmd(&a).env("PATH", &path).output().unwrap().stdout)
+    };
+    let plain = check(&[]);
+    assert!(
+        plain.contains("W411: segment `custom/a`") && plain.contains(why),
+        "{plain}"
+    );
+    let stdout = check(&["--explain"]);
+    let executable = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("executable"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        executable.contains("/bin/tool") && executable.ends_with(why),
+        "{stdout}"
+    );
+}
