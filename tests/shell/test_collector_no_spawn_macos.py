@@ -70,6 +70,16 @@ def assert_no_process_effects(code, descendants):
     assert code != 86, "forbidden process/network attempt: interposer exit 86"
 
 
+# The worker's exit status when its own stage deadline passed (DEADLINE_EXIT_CODE in
+# crates/bingsu-core/src/collection/wire.rs).
+DEADLINE_EXIT = 75
+DEADLINE_TRIES = 3
+
+
+class WorkerDeadline(Exception):
+    """The worker ended at its own deadline: a loaded runner can hold it past it."""
+
+
 def run_worker(command, dylib, tmp_path, mutation=False, cwd=None):
     read, write = os.pipe()
     lock = os.open(tmp_path / "lock", os.O_CREAT | os.O_RDWR, 0o600)
@@ -109,6 +119,8 @@ def run_worker(command, dylib, tmp_path, mutation=False, cwd=None):
             assert code == 86, (code, output)
         else:
             assert_no_process_effects(code, seen)
+            if code == DEADLINE_EXIT:
+                raise WorkerDeadline(bytes(output))
             assert code == 0 and sent, (code, output)
             wire = output[output.index(b"BNGIPC07"):]
             kinds = []
@@ -134,6 +146,42 @@ def run_worker(command, dylib, tmp_path, mutation=False, cwd=None):
             os.close(fd)
 
 
+def worker_on_time(*args, **kwargs):
+    """run_worker again after a deadline exit, DEADLINE_TRIES runs at most; every other result
+    is judged at once, and a deadline on the last run fails."""
+    for _ in range(DEADLINE_TRIES - 1):
+        try:
+            return run_worker(*args, **kwargs)
+        except WorkerDeadline:
+            continue
+    return run_worker(*args, **kwargs)
+
+
+# 이것을 실패시키는 것: 마감 종료(75)를 다른 실패처럼 단언으로 끝내는 것, 다른 종료 상태를 마감으로 보는 것,
+# 마감 뒤에 다시 돌지 않거나 세 번을 넘겨 도는 것.
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS process census in run_worker")
+def test_only_a_deadline_exit_runs_the_worker_again(tmp_path, monkeypatch):
+    with pytest.raises(WorkerDeadline):
+        run_worker(["/bin/sh", "-c", f"exit {DEADLINE_EXIT}"], None, tmp_path)
+    with pytest.raises(AssertionError):
+        run_worker(["/bin/sh", "-c", "exit 1"], None, tmp_path)
+    for ends, runs in (([b"ok"], 1), ([None, b"ok"], 2), ([None, None, b"ok"], 3), ([None, None, None, b"ok"], 3)):
+        ends, seen = iter(ends), []
+
+        def fake(*args, **kwargs):
+            seen.append(1)
+            end = next(ends)
+            if end is None:
+                raise WorkerDeadline(b"")
+            return end
+        monkeypatch.setattr(sys.modules[__name__], "run_worker", fake)
+        try:
+            assert worker_on_time() == b"ok"
+        except WorkerDeadline:
+            assert runs == 3
+        assert len(seen) == runs, (ends, seen)
+
+
 def prepared():
     path = Path(os.environ.get("BINGSU_COLLECTOR_AUDIT", ROOT / "target/collector-audit/fixture.json"))
     assert path.is_file(), "run scripts/prepare_collector_audit.py on the host first"
@@ -148,7 +196,7 @@ def test_shipped_reachable_git_has_no_process_effects(tmp_path):
     (repo / ".git/objects").mkdir()
     (repo / ".git/HEAD").write_text("ref: refs/heads/main\n")
     (repo / ".git/config").write_text("[core]\nrepositoryformatversion=0\n")
-    output = run_worker([prepared()["worker"], "__collect-v1"], prepared()["canary"], tmp_path, cwd=repo)
+    output = worker_on_time([prepared()["worker"], "__collect-v1"], prepared()["canary"], tmp_path, cwd=repo)
     assert b"main" in output
 
 

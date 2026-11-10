@@ -612,7 +612,11 @@ fn partial_survives_only_after_validated_updates() {
         ("invalid-then-valid", EndReason::Protocol, 1),
         ("trailing", EndReason::Protocol, 1),
     ] {
-        let (report, values) = run_peer(mode, true);
+        let (report, values) = retry_overrun(
+            OVERRUN_TRIES,
+            || run_peer(mode, true),
+            |(report, _)| starved(report.reason, reason),
+        );
         assert_eq!(report.reason, reason, "{mode}: {report:?}");
         assert!(report.reaped, "{mode}");
         assert_eq!(values.len(), count, "{mode}");
@@ -627,7 +631,11 @@ fn partial_survives_only_after_validated_updates() {
 #[test]
 fn accepted_complete_without_eof_keeps_deadline_in_report_and_response() {
     let _inherited_fds = commands::sys::test_inherited_fd_lock();
-    let (report, values) = run_peer("complete-open", true);
+    let (report, values) = retry_overrun(
+        OVERRUN_TRIES,
+        || run_peer("complete-open", true),
+        |(report, _)| cut_before_complete(report.lifecycle.completed.is_some(), report.reason),
+    );
     assert!(report.lifecycle.completed.is_some(), "{report:?}");
     assert_eq!(report.reason, EndReason::Deadline, "{report:?}");
     assert!(report.reaped && report.kill_requested, "{report:?}");
@@ -1022,6 +1030,34 @@ fn retry_overrun_retries_only_a_missed_time_bound() {
         )
         .is_some()
     );
+}
+
+/// A run that ended at the deadline where the test expects another end: a
+/// loaded host kept the worker past its 50/100 ms product deadline, which has
+/// its own tests. Only that earns another run; every other end is judged at once.
+fn starved(got: EndReason, expected: EndReason) -> bool {
+    got == EndReason::Deadline && expected != EndReason::Deadline
+}
+
+/// A run that reached its deadline before the worker's Complete arrived, where
+/// the test needs a Complete first.
+fn cut_before_complete(completed: bool, got: EndReason) -> bool {
+    !completed && got == EndReason::Deadline
+}
+
+// 이것을 실패시키는 것: Deadline이 아닌 끝을 재시도하는 것, 기대한 Deadline을 재시도하는 것,
+// Complete를 받은 뒤의 Deadline을 재시도하는 것.
+#[test]
+fn only_a_deadline_the_test_did_not_expect_runs_again() {
+    use EndReason::*;
+    assert!(starved(Deadline, Protocol));
+    assert!(starved(Deadline, Complete));
+    assert!(!starved(Deadline, Deadline));
+    assert!(!starved(Protocol, Complete));
+    assert!(!starved(Resource, Deadline));
+    assert!(cut_before_complete(false, Deadline));
+    assert!(!cut_before_complete(true, Deadline));
+    assert!(!cut_before_complete(false, Protocol));
 }
 
 fn passed(out: &std::process::Output) {
@@ -1813,7 +1849,11 @@ fn four_hundred_child() {
         if index % 10 == 5 {
             let kind = index / 10 % killed_modes.len();
             let (mode, reason) = killed_modes[kind];
-            let (report, _, _) = run_peer_timed(mode, true, None);
+            let (report, _, _) = retry_overrun(
+                OVERRUN_TRIES,
+                || run_peer_timed(mode, true, None),
+                |(report, _, _)| starved(report.reason, reason),
+            );
             assert_eq!(report.reason, reason, "{mode}: {report:?}");
             assert!(report.reaped && report.kill_requested, "{mode}: {report:?}");
             killed[kind] += 1;
