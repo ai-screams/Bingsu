@@ -360,6 +360,32 @@ def lingering_zombies(grace=0.25):
     return sorted(seen)
 
 
+def zombie_report(pids):
+    """Each lingering zombie with its parent's name, state and wait channel, read when the census
+    fails: a parent asleep in its reap poll is late, one stopped or blocked elsewhere never reaped."""
+    def status(pid):
+        try:
+            return dict(line.split(":", 1) for line in Path(f"/proc/{pid}/status").read_text().splitlines()
+                        if ":" in line)
+        except OSError:
+            return {}
+
+    def wchan(pid):
+        try:
+            return Path(f"/proc/{pid}/wchan").read_text()
+        except OSError:
+            return "?"
+    rows = []
+    for pid in pids:
+        zombie = status(pid)
+        parent = zombie.get("PPid", "?").strip()
+        about = status(parent)
+        rows.append({"zombie": pid, "name": zombie.get("Name", "gone").strip(), "parent": parent,
+                     "parent_name": about.get("Name", "gone").strip(), "parent_state": about.get("State", "gone").strip(),
+                     "parent_wchan": wchan(parent)})
+    return rows
+
+
 @contextlib.contextmanager
 def subreaper():
     """Make this process the subreaper of its descendants for the block.
@@ -451,7 +477,8 @@ def test_n_prompts_leave_zero_zombies_including_killed_children(tmp_path, capsys
                     # A stalled collector cannot leave the stopped mount on its own: gone means killed.
                     killed_collectors |= seen - set(collectors)
                     live_samples += bool(role_processes({"helper"}))
-                    assert not (left := lingering_zombies()), ("zombies left under a role process", index, left)
+                    assert not (left := lingering_zombies()), ("zombies left under a role process", index, left,
+                                                                zombie_report(left))
                     # 이것을 실패시키는 것: 죽인 collector만 회수하지 않고 회수했다고 보고하는 것(도우미가 끝나며 좀비가 여기로 온다).
                     assert not (orphaned := reap_orphans()), ("collectors their helper exited without reaping", index, orphaned)
                 poll(lambda: not role_processes(ROLES), helper_lifetime_s() + 1, "role processes outlived the lifetime")

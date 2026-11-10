@@ -1768,11 +1768,48 @@ def test_native_collector_trace_has_no_forbidden_effect(preparation, tmp_path):
     assert_native_trace(trace.read_text().splitlines(), fixture, response.stat().st_size - 64)
 
 
+DEADLINE_TRIES = 3
+
+
+def rerun_while(run, again, tries=DEADLINE_TRIES):
+    """`run` again while `again` holds, `tries` runs at most; the last result is the caller's to judge."""
+    for _ in range(tries - 1):
+        result = run()
+        if not again(result):
+            return result
+    return run()
+
+
+def starved(report):
+    """The exchange ended at the worker's product deadline where the test expects another end:
+    a loaded runner can hold the worker past it (the deadline has its own tests)."""
+    return report["reason"] == "Deadline"
+
+
+# 이것을 실패시키는 것: 조건이 풀려도 다시 도는 것, 세 번을 넘겨 도는 것, Deadline이 아닌 끝을 다시 돌리는 것.
+def test_only_a_deadline_runs_the_exchange_again():
+    def calls(answers):
+        answers, seen = iter(answers), []
+        last = rerun_while(lambda: seen.append(1) or next(answers), lambda late: late)
+        return len(seen), last
+    assert calls([False, True]) == (1, False)
+    assert calls([True, True, False]) == (3, False)
+    assert calls([True, True, True, False]) == (3, True)
+    assert starved({"reason": "Deadline"})
+    assert not starved({"reason": "Complete"}) and not starved({"reason": "Protocol"})
+
+
 # 이것을 실패시키는 것: 출하 실행 파일 대신 fixture를 부르거나 빈 제품 요청을 완료하지 못하는 것.
 def test_shipped_collector_empty_request_completes(preparation, tmp_path):
-    result = product.run([preparation["fixture"], "--helper-case", tmp_path, "--shipped-worker"],
-                         env={**os.environ, "TMPDIR": str(tmp_path)})
-    report = json.loads(result.stdout.splitlines()[-1])
+    runs = iter(range(DEADLINE_TRIES))
+
+    def run():
+        case = tmp_path / f"run{next(runs)}"
+        case.mkdir(mode=0o700)
+        result = product.run([preparation["fixture"], "--helper-case", case, "--shipped-worker"],
+                             env={**os.environ, "TMPDIR": str(case)})
+        return json.loads(result.stdout.splitlines()[-1])
+    report = rerun_while(run, starved)
     # Explicit mask0 remains a successful empty exchange after activation.
     assert report == {"reason": "Complete", "published": False, "reaped": True, "partial_values": 0, "probe": ""}
 

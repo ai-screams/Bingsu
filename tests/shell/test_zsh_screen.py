@@ -15,6 +15,7 @@ import pytest
 from conftest import Install, short_dir, trusted_env
 from pty_session import Session
 from screen_session import ScreenSession
+from test_runtime_root_gate import wait_refresh_helpers
 
 pytestmark = pytest.mark.skipif("zsh" not in os.environ.get("BINGSU_TEST_SHELLS", "zsh bash fish").split(),
                                 reason="zsh not under test")
@@ -408,6 +409,10 @@ def test_vi_round_trip_under_degraded_status(tmp_path):
     s, screen = start(tmp_path, cols=80)
     enter(screen, VI_KEYS)
     root = tmp_path / "run-t/bingsu"
+    # The first prompt's helper can still be writing into the root; removing it under
+    # the helper fails with ENOTEMPTY. The race is intermittent, so leaving out this
+    # wait fails only some runs.
+    wait_refresh_helpers(tmp_path)
     fd = os.open(root, os.O_RDONLY)
     try:
         shutil.rmtree(root)

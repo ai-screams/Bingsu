@@ -1130,6 +1130,63 @@ pub(crate) mod tests {
         (results(result_read), took)
     }
 
+    /// `run` again while `again` holds, `tries` runs at most; the last result
+    /// is the caller's to judge.
+    fn rerun_while<T>(tries: usize, mut run: impl FnMut() -> T, again: impl Fn(&T) -> bool) -> T {
+        for _ in 1..tries {
+            let result = run();
+            if !again(&result) {
+                return result;
+            }
+        }
+        run()
+    }
+    const LATE_TRIES: usize = 3;
+
+    /// Unit `index` ran into its own deadline: a loaded runner can hold a
+    /// 200 ms unit past it. Only that earns another round.
+    fn late(got: &[Outcome], index: usize) -> bool {
+        got.get(index).is_some_and(|o| o.reason == Reason::Timeout)
+    }
+
+    // 이것을 실패시키는 것: 조건이 풀려도 다시 도는 것, tries를 넘어 도는 것, 다른 단위나 다른 끝의
+    // 시간 초과를 보는 것.
+    #[test]
+    fn test_only_a_late_unit_runs_the_round_again() {
+        let calls = |answers: Vec<bool>| {
+            let mut answers = answers.into_iter();
+            let mut n = 0;
+            let last = rerun_while(
+                LATE_TRIES,
+                || {
+                    n += 1;
+                    answers.next().unwrap()
+                },
+                |late| *late,
+            );
+            (n, last)
+        };
+        assert_eq!(calls(vec![false, true]), (1, false));
+        assert_eq!(calls(vec![true, true, false]), (3, false));
+        assert_eq!(calls(vec![true, true, true, false]), (3, true));
+        let outcome = |reason| Outcome {
+            origin: Origin::Config,
+            index: 0,
+            reason,
+            approved_at: 0,
+            ended_at: 0,
+            stdout: Vec::new(),
+        };
+        let got = [
+            outcome(Reason::Refused(Refusal::Limit)),
+            outcome(Reason::Timeout),
+        ];
+        assert!(late(&got, 1));
+        assert!(!late(&got, 0));
+        assert!(!late(&got, 2));
+        assert!(!late(&[outcome(Reason::Exited(0))], 0));
+    }
+
     fn results(fd: OwnedFd) -> Vec<Outcome> {
         let mut bytes = Vec::new();
         File::from(fd).read_to_end(&mut bytes).unwrap_or_default();
@@ -1361,14 +1418,22 @@ pub(crate) mod tests {
     #[test]
     fn test_split_output_is_kept_whole() {
         let _inherited_fds = super::super::sys::test_inherited_fd_lock();
-        let mut lost = 0;
+        let mut lost = Vec::new();
         for _ in 0..SPLIT_ROUNDS {
-            let (got, _) = round(grant(vec![unit("split", 200 * MS)], 1_000 * MS));
+            let got = rerun_while(
+                LATE_TRIES,
+                || round(grant(vec![unit("split", 200 * MS)], 1_000 * MS)).0,
+                |got| late(got, 0),
+            );
             if !got[0].stdout.ends_with(b"ab\n") {
-                lost += 1;
+                lost.push(got[0].reason);
             }
         }
-        assert_eq!(lost, 0, "{lost} of {SPLIT_ROUNDS} rounds lost output");
+        assert!(
+            lost.is_empty(),
+            "{} of {SPLIT_ROUNDS} rounds lost output; their ends: {lost:?}",
+            lost.len()
+        );
     }
     const SPLIT_ROUNDS: usize = 50;
 
@@ -1482,7 +1547,11 @@ pub(crate) mod tests {
         big.environment = [b"X=".as_slice(), &vec![b'x'; 20 * 1024], b"\0"].concat();
         big.env_allow = vec![b"X".to_vec()];
         big.digest = policy_digest(&big.policy, big.cwd, big.timeout, &big.env_allow);
-        let (got, _) = round(grant(vec![big, unit("ok", 200 * MS)], 1_000 * MS));
+        let got = rerun_while(
+            LATE_TRIES,
+            || round(grant(vec![big.clone(), unit("ok", 200 * MS)], 1_000 * MS)).0,
+            |got| late(got, 1),
+        );
         assert_eq!(got[0].reason, Reason::Refused(Refusal::Limit), "{got:?}");
         assert!(matches!(got[1].reason, Reason::Exited(0)), "{got:?}");
     }
