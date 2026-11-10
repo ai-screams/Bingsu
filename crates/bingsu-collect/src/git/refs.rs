@@ -184,14 +184,19 @@ impl Refs {
             )?;
             Ok(scratch)
         })?;
-        let mut seen = Vec::new();
+        let mut seen = Vec::with_capacity(SYMREF_LIMIT);
         let mut current = name.to_vec();
         for _ in 0..SYMREF_LIMIT {
             validate_name(&current)?;
             if seen.contains(&current) {
                 return Err(ReadError::Symlink);
             }
-            io.metered(|meter| meter.charge_axis(Axis::RefEntries, 1))?;
+            // RepoPath::new copies the name beside `current`, whose own
+            // reservation cannot cover a second live copy.
+            io.metered(|meter| {
+                meter.charge_axis(Axis::RefEntries, 1)?;
+                scratch.reserve(current.len(), meter)
+            })?;
             // HEAD and per-worktree namespaces live in gitdir. Never interpret
             // main-worktree/worktrees pseudo paths or repository-supplied roots.
             let root = ref_root(&current);

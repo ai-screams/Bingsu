@@ -303,6 +303,12 @@ impl Meter {
         Rc::clone(&self.live)
     }
 
+    /// Bytes reserved right now, readable while the meter is lent out.
+    #[cfg(test)]
+    pub fn allocation_observer(&self) -> Rc<Cell<u64>> {
+        Rc::clone(&self.allocated)
+    }
+
     pub fn live_fds(&self) -> u32 {
         self.live.get()
     }
