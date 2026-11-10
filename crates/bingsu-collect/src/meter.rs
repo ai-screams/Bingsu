@@ -128,6 +128,13 @@ impl PathAllocation {
         self.bytes = next;
         Ok(())
     }
+
+    /// `bytes` copied under this reservation. The reservation comes first, so
+    /// a refused one allocates nothing.
+    pub fn copy(&mut self, bytes: &[u8], meter: &mut Meter) -> Result<Vec<u8>, ReadError> {
+        self.reserve(bytes.len(), meter)?;
+        Ok(bytes.to_vec())
+    }
 }
 impl Drop for PathAllocation {
     fn drop(&mut self) {

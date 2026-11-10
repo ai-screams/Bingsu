@@ -33,9 +33,11 @@ const _: () = assert!(
 );
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Target {
+pub enum Target<'a> {
     Object(ObjectId),
-    Symbolic(Vec<u8>),
+    /// Borrowed from the ref file's bytes: parsing allocates nothing, and a
+    /// caller that keeps the name copies it under its own reservation.
+    Symbolic(&'a [u8]),
 }
 
 pub struct Refs {
@@ -189,10 +191,7 @@ impl Refs {
             if seen.contains(&current) {
                 return Err(ReadError::Symlink);
             }
-            io.metered(|meter| {
-                meter.charge_axis(Axis::RefEntries, 1)?;
-                scratch.reserve(current.len(), meter)
-            })?;
+            io.metered(|meter| meter.charge_axis(Axis::RefEntries, 1))?;
             // HEAD and per-worktree namespaces live in gitdir. Never interpret
             // main-worktree/worktrees pseudo paths or repository-supplied roots.
             let root = ref_root(&current);
@@ -200,6 +199,9 @@ impl Refs {
                 Ok(bytes) => match parse_loose(&bytes)? {
                     Target::Object(id) => return Ok(Some(id)),
                     Target::Symbolic(next) => {
+                        // Reserved before the copy: a refused reservation
+                        // allocates nothing, and no hop's name is unmetered.
+                        let next = io.metered(|meter| scratch.copy(next, meter))?;
                         seen.push(current);
                         current = next;
                     }
@@ -287,7 +289,7 @@ fn validate_name(name: &[u8]) -> Result<(), ReadError> {
     Ok(())
 }
 
-pub fn parse_loose(bytes: &[u8]) -> Result<Target, ReadError> {
+pub fn parse_loose(bytes: &[u8]) -> Result<Target<'_>, ReadError> {
     if bytes.len() > SMALL_FILE_BYTES as usize {
         return Err(ReadError::Limit);
     }
@@ -295,7 +297,7 @@ pub fn parse_loose(bytes: &[u8]) -> Result<Target, ReadError> {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if let Some(name) = line.strip_prefix(b"ref: ") {
         validate_name(name)?;
-        Ok(Target::Symbolic(name.to_vec()))
+        Ok(Target::Symbolic(name))
     } else if line.len() == 40 {
         ObjectId::from_hex(line)
             .map(Target::Object)

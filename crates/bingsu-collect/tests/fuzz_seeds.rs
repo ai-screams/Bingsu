@@ -162,3 +162,24 @@ fn assert_live_rejects_unreserved_heap() {
         held.len()
     });
 }
+
+// 이것을 실패시키는 것: PathAllocation::copy가 예약보다 먼저 복사하는 것. 거부된
+// 예약이 이미 만든 64 KiB 사본을 남겨 peak가 그만큼 오른다.
+#[test]
+fn a_refused_path_copy_allocates_nothing() {
+    let name = vec![b'x'; 64 * 1024];
+    let mut meter = meter::Meter::new(std::time::Instant::now() + Duration::from_secs(2));
+    meter.allocation_limit = name.len() as u64 - 1;
+    let mut scratch = meter.path_allocation();
+    let (copied, counts) = allocation::measure(|| scratch.copy(&name, &mut meter).map(|v| v.len()));
+    assert_eq!(copied, Err(safe_read::ReadError::Limit));
+    assert!(
+        counts.peak < 1024,
+        "a refused copy allocated {} B",
+        counts.peak
+    );
+    meter.allocation_limit = name.len() as u64;
+    let (copied, _) = allocation::measure(|| scratch.copy(&name, &mut meter).map(|v| v.len()));
+    assert_eq!(copied, Ok(name.len()));
+    assert_eq!(meter.live_allocated(), name.len() as u64);
+}

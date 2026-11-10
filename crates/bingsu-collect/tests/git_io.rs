@@ -480,7 +480,7 @@ fn git_loose_refs_validate_names_cycles_and_depth() {
     }
     assert_eq!(
         refs::parse_loose(b"ref: refs/heads/main\n"),
-        Ok(Target::Symbolic(b"refs/heads/main".to_vec()))
+        Ok(Target::Symbolic(b"refs/heads/main".as_slice()))
     );
     for bad in [
         b"ref: /outside".as_slice(),
@@ -6829,4 +6829,36 @@ fn worktree_cache_depth_respects_existing_fd_cap() {
     );
     assert_eq!(m.borrow().peak_fds, budget::LIVE_FDS as u32);
     assert_eq!(m.borrow().live_allocated(), 0);
+}
+
+// 이것을 실패시키는 것: resolve가 다음 이름을 scratch.copy 없이 복사하는 것(그 이름이
+// 계량되지 않아 차이가 0이 된다), 그리고 옛 코드처럼 매 hop 머리에서 current를 다시
+// 예약하는 것(직접 해석이 이름을 두 번 계량해 차이가 0이 된다).
+#[test]
+fn every_symref_name_is_charged_once_at_its_copy() {
+    // Allocation charged to the meter by one resolve of `start`.
+    let charged = |start: &str, long: &str| {
+        let fixture = Fixture::new();
+        let access = access();
+        let mut m = meter();
+        let root = fixture.root(&mut m);
+        let m = RefCell::new(m);
+        let port = io(&root, &access, &m);
+        let refs = Refs::load(&port).unwrap();
+        fixture.write(long, format!("{A}\n"));
+        fixture.write("refs/heads/main", format!("ref: {long}\n"));
+        let before = m.borrow().counts[Phase::Content as usize].allocated;
+        let id = refs.resolve(&port, start.as_bytes()).unwrap();
+        assert_eq!(id, Some(refs::ObjectId::from_hex(A.as_bytes()).unwrap()));
+        m.borrow().counts[Phase::Content as usize].allocated - before
+    };
+    let through_main =
+        |long: &str| charged("refs/heads/main", long) as i64 - charged(long, long) as i64;
+    let short = format!("refs/heads/{}", "a".repeat(100));
+    let long = format!("refs/heads/{}", "a".repeat(200));
+    // Both resolves walk to the long name's file, which cancels. Through
+    // main the name is also in main's bytes, recorded twice (the read's
+    // reservation and its buffer), and copied once; directly it is reserved
+    // once at the start. So 100 more name bytes add 2 + 1 - 1 = 2 per byte.
+    assert_eq!(through_main(&long) - through_main(&short), 200);
 }
