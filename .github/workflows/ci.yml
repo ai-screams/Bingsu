@@ -680,45 +680,6 @@ jobs:
         name: Assert native macOS M3b security passes
         run: |
           grep -F 'PASSED tests/shell/test_collector_security.py::test_macos_first_completed_overlimit_sample' "$RUNNER_TEMP/m3b-security.txt"
-      - if: runner.os == 'Linux'
-        name: M3b native musl lifecycle security
-        env:
-          CC: musl-gcc
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-        run: |
-          set -o pipefail
-          triple="$(uname -m)-unknown-linux-musl"
-          cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect --target "$triple"
-          # 이것을 실패시키는 것: 정적 musl ELF를 빈 동적 심벌 표만으로 통과시키는 것.
-          python3 scripts/check_collector_symbols.py "target/$triple/release/bingsu-collect" --sibling "target/$triple/release/bingsu" --unstripped-dir "target/$triple/release/symbol-audit" --strip
-          python3 bench/git-product.py --prepare "target/$triple/release/bingsu" --out "$RUNNER_TEMP/measurements/musl-preparation.json"
-          python3 bench/collector-product.py --prepare "target/$triple/release/bingsu"
-          export BINGSU_BIN="$PWD/target/$triple/release/bingsu"
-          mkdir -p "$RUNNER_TEMP/m3b-traces"
-          "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/m3b-traces/musl" | tee "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_ready_has_installed_limits' "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--cpu-worker]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--nofile-worker]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--as-worker]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--exec-worker]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--ready-failure-worker]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--malformed-worker]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[cpu]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[nofile]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[as]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]" "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F 'PASSED tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence' "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F 'PASSED tests/shell/test_collector_security.py::test_native_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-musl.txt"
-          grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-musl.txt"
-      - if: runner.os == 'Linux'
-        name: Assert exact F3 musl collection passes
-        run: |
-          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[no-git]' "$RUNNER_TEMP/m3b-musl.txt"
-          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-clean]' "$RUNNER_TEMP/m3b-musl.txt"
-          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-dirty]' "$RUNNER_TEMP/m3b-musl.txt"
-          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[tracked-19000]' "$RUNNER_TEMP/m3b-musl.txt"
-          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[budget-bound]' "$RUNNER_TEMP/m3b-musl.txt"
       - name: Pack M3b raw security traces on failure
         if: failure()
         timeout-minutes: 2
@@ -746,7 +707,6 @@ jobs:
           name: m3b-security-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/m3b-security.txt
-            ${{ runner.temp }}/m3b-musl.txt
             ${{ runner.temp }}/f1-security.txt
             ${{ runner.temp }}/f1-evidence.tar.gz
             ${{ runner.temp }}/f2-seeds.txt
@@ -755,6 +715,100 @@ jobs:
             ${{ runner.temp }}/filter-native.txt
             ${{ runner.temp }}/filter-musl.txt
             target/b3-evidence/
+            ${{ runner.temp }}/measurements/
+          if-no-files-found: error
+
+  # The M3b musl lifecycle run, apart from the Dedicated collector job so each
+  # stays inside its 30 minute limit; both are required checks.
+  collector-musl:
+    name: Dedicated collector musl (${{ matrix.os }})
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # Audit the real linked binaries, then strip those same files for shipping.
+      CARGO_PROFILE_RELEASE_STRIP: "none"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install musl and trace tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends musl-tools strace
+          strace --version
+      - name: Prepare Python audit tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/collector-tests"
+          "$RUNNER_TEMP/collector-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+      - name: M3b native musl lifecycle security
+        env:
+          CC: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          set -o pipefail
+          triple="$(uname -m)-unknown-linux-musl"
+          rustup target add "$triple"
+          cargo build -j 2 --release -p bingsu -p bingsu-prompt -p bingsu-collect --target "$triple"
+          # 이것을 실패시키는 것: 정적 musl ELF를 빈 동적 심벌 표만으로 통과시키는 것.
+          python3 scripts/check_collector_symbols.py "target/$triple/release/bingsu-collect" --sibling "target/$triple/release/bingsu" --unstripped-dir "target/$triple/release/symbol-audit" --strip
+          python3 bench/git-product.py --prepare "target/$triple/release/bingsu" --out "$RUNNER_TEMP/measurements/musl-preparation.json"
+          python3 bench/collector-product.py --prepare "target/$triple/release/bingsu"
+          export BINGSU_BIN="$PWD/target/$triple/release/bingsu"
+          mkdir -p "$RUNNER_TEMP/m3b-traces"
+          "$RUNNER_TEMP/collector-tests/bin/python" -m pytest tests/shell/test_collector_security.py -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/m3b-traces/musl" | tee "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_ready_has_installed_limits' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--cpu-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--nofile-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--as-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--exec-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--ready-failure-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--malformed-worker]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[cpu]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[nofile]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[as]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F "PASSED tests/shell/test_collector_security.py::test_security_table_resource_failures_preserve_front[exec]" "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_b2_lower_bound_is_replaced_by_product_filter_evidence' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_native_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-musl.txt"
+      - name: Assert exact F3 musl collection passes
+        run: |
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[no-git]' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-clean]' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[git-dirty]' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[tracked-19000]' "$RUNNER_TEMP/m3b-musl.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_shipped_real_collection[budget-bound]' "$RUNNER_TEMP/m3b-musl.txt"
+      - name: Pack M3b raw security traces on failure
+        if: failure()
+        timeout-minutes: 2
+        run: python3 scripts/pack_collector_evidence.py "$RUNNER_TEMP/m3b-traces" "$RUNNER_TEMP/m3b-security-traces.tar.gz" --traces-only
+      - name: Preserve M3b raw security traces on failure
+        if: failure()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m3b-musl-security-traces-${{ matrix.os }}
+          path: ${{ runner.temp }}/m3b-security-traces.tar.gz
+          compression-level: 0
+          if-no-files-found: warn
+      - name: Preserve M3b native musl acceptance output
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: m3b-musl-security-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/m3b-musl.txt
             ${{ runner.temp }}/measurements/
           if-no-files-found: error
 

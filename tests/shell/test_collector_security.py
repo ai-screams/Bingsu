@@ -276,14 +276,53 @@ LINUX_SECURITY_STEPS = {
     "Final filter refuses root limit and capability changes",
     "Native musl collector probes (both architectures)",
     "Privileged capability removal (no silent skip)", "Install native M3b trace tool",
-    "Assert native Linux M3b security passes", "M3b native musl lifecycle security",
+    "Assert native Linux M3b security passes",
     "Path facts ACL and read-only mount oracles",
-    "Assert native Linux F1 collection passes", "Assert exact F3 musl collection passes",
+    "Assert native Linux F1 collection passes",
     "Assert native Linux trusted relay passes",
 }
 MACOS_SECURITY_STEPS = {"Assert native macOS M3b security passes",
                         "Assert native macOS F1 collection passes",
                         "Assert native macOS trusted relay passes"}
+
+
+# The musl lifecycle run has its own Linux-only job (a required check of its own),
+# so the Dedicated collector job stays inside its 30 minute limit.
+MUSL_JOB = "collector-musl"
+MUSL_SECURITY_STEPS = {"M3b native musl lifecycle security", "Assert exact F3 musl collection passes"}
+
+
+def musl_security_steps(text):
+    """The steps of the musl job; every step runs on each of its cells."""
+    # 이것을 실패시키는 것: musl job을 matrix에서 한 아키텍처로 줄이거나, 그 단계에 조건·continue-on-error를 붙이거나,
+    # 그 단계를 지우거나 둘로 늘리는 것.
+    meta, steps = workflow_job(text, MUSL_JOB)
+    assert "continue-on-error" not in meta
+    assert meta["if"][0] == "needs.detect.outputs.rust == 'true'"
+    assert meta["needs"][0] == "detect"
+    assert meta["timeout-minutes"][0] == "30"
+    matrix = [line.strip() for line in meta["strategy"][1] if line.strip() and not line.lstrip().startswith("#")]
+    assert matrix == ["fail-fast: false", "matrix:", "os: [ubuntu-24.04, ubuntu-24.04-arm]"], matrix
+    for name in MUSL_SECURITY_STEPS:
+        assert sum(step.get("name") == name for step in steps) == 1, ("required musl step", name)
+    for step in steps:
+        if "run" not in step:
+            continue
+        name = step.get("name", "")
+        assert "continue-on-error" not in step, name
+        condition = "failure()" if name == "Pack M3b raw security traces on failure" else None
+        assert step.get("if") == condition, (name, "skippable musl step", step.get("if"))
+        assert_run_unconditional(step)
+    return steps
+
+
+# 이것을 실패시키는 것: musl 단계를 Dedicated collector job의 것으로 세어 macOS 증거로도 받는 것.
+def test_musl_steps_are_linux_evidence_of_their_own_job():
+    steps = ci_test_evidence((ROOT / ".github/workflows/ci.yml").read_text())
+    musl = [step for step in steps if step.get("name") in MUSL_SECURITY_STEPS]
+    assert len(musl) == len(MUSL_SECURITY_STEPS), musl
+    for step in musl:
+        assert step["_job"] == ("ci.yml", MUSL_JOB) and step["_platforms"] == {"linux"}, step.get("name")
 
 
 def security_steps(text):
@@ -336,7 +375,10 @@ def security_steps(text):
                for c in seed_commands), "F2 seed replay must skip the included product unit tests"
     assert ["grep", "-Fx", "running 5 tests", "$RUNNER_TEMP/f2-seeds.txt"] in seed_commands, "F2 seed count"
     assert_f2_repository_step(next(step for step in steps if step.get("name") == F2_STEP))
-    return steps
+    musl = musl_security_steps(text)
+    for step in musl:
+        step["_job_id"] = MUSL_JOB
+    return steps + musl
 
 
 # fuzz_seeds includes product modules by #[path], so libtest also lists their unit
@@ -482,7 +524,9 @@ def ci_test_evidence(text):
             "--target", "$target", "--release", "--", "--case", "all", "|", "tee", "$RUNNER_TEMP/x14-musl.txt"] in commands
     for libc in ("gnu", "musl"):
         assert ["grep", "-Fx", "X-14 PASS", f"$RUNNER_TEMP/x14-{libc}.txt"] in commands
-    for job, entries in (("collector", steps), ("collector-probes", probes), ("collector-x14", x14)):
+    for job, entries in (("collector", [step for step in steps if "_job_id" not in step]),
+                         (MUSL_JOB, [step for step in steps if step.get("_job_id") == MUSL_JOB]),
+                         ("collector-probes", probes), ("collector-x14", x14)):
         platforms = job_platforms(job, workflow_job(text, job)[0])
         for step in entries:
             step["_job"] = ("ci.yml", job)
