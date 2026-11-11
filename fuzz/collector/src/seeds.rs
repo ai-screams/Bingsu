@@ -972,6 +972,22 @@ fn refs(seeds: &mut Vec<Seed>) {
         ),
         Invalid,
     );
+    // A loose symref naming a ref of about 11 KB: its name was copied with
+    // no reservation, so live heap went past what the Meter held.
+    let found = include_bytes!("../seeds/refs-long-symref.bin");
+    push(seeds, t, "finding-long-symref", Valid, found.to_vec(), Ok);
+    let small = bingsu_core::collection::budget::SMALL_FILE_BYTES as usize;
+    let mut longest = b"ref: refs/heads/".to_vec();
+    longest.resize(small - 1, b'x');
+    longest.push(b'\n');
+    push(
+        seeds,
+        t,
+        "loose-symref-at-cap",
+        AtCap,
+        with_flag(1, &longest),
+        Ok,
+    );
     let cap = bingsu_core::collection::budget::REF_BYTES as usize;
     let mut big = b"# x".to_vec();
     big.resize(cap + 1, b'x');
@@ -983,7 +999,6 @@ fn refs(seeds: &mut Vec<Seed>) {
         with_flag(0, &big),
         Limit,
     );
-    let small = bingsu_core::collection::budget::SMALL_FILE_BYTES as usize;
     push(
         seeds,
         t,

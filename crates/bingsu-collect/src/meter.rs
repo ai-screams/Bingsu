@@ -128,6 +128,13 @@ impl PathAllocation {
         self.bytes = next;
         Ok(())
     }
+
+    /// `bytes` copied under this reservation. The reservation comes first, so
+    /// a refused one allocates nothing.
+    pub fn copy(&mut self, bytes: &[u8], meter: &mut Meter) -> Result<Vec<u8>, ReadError> {
+        self.reserve(bytes.len(), meter)?;
+        Ok(bytes.to_vec())
+    }
 }
 impl Drop for PathAllocation {
     fn drop(&mut self) {
@@ -294,6 +301,12 @@ impl Meter {
     #[cfg(test)]
     pub fn fd_observer(&self) -> Rc<Cell<u32>> {
         Rc::clone(&self.live)
+    }
+
+    /// Bytes reserved right now, readable while the meter is lent out.
+    #[cfg(test)]
+    pub fn allocation_observer(&self) -> Rc<Cell<u64>> {
+        Rc::clone(&self.allocated)
     }
 
     pub fn live_fds(&self) -> u32 {

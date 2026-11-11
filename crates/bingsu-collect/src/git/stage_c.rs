@@ -70,7 +70,7 @@ pub(crate) fn divergence(repo: &GuardedRepository<'_>) -> Result<Option<(u32, u3
     if io.has_entry(RepoPath::new(RootId::CommonDir, b"info/grafts"))? {
         return Err(super::io::UNSUPPORTED);
     }
-    let head = repo.refs.resolve(&io, &branch)?.ok_or(ReadError::Missing)?;
+    let head = repo.refs.resolve(&io, branch)?.ok_or(ReadError::Missing)?;
     let upstream = repo
         .refs
         .resolve(&io, &upstream)?

@@ -480,7 +480,7 @@ fn git_loose_refs_validate_names_cycles_and_depth() {
     }
     assert_eq!(
         refs::parse_loose(b"ref: refs/heads/main\n"),
-        Ok(Target::Symbolic(b"refs/heads/main".to_vec()))
+        Ok(Target::Symbolic(b"refs/heads/main".as_slice()))
     );
     for bad in [
         b"ref: /outside".as_slice(),
@@ -6829,4 +6829,42 @@ fn worktree_cache_depth_respects_existing_fd_cap() {
     );
     assert_eq!(m.borrow().peak_fds, budget::LIVE_FDS as u32);
     assert_eq!(m.borrow().live_allocated(), 0);
+}
+
+// 이것을 실패시키는 것: resolve가 다음 이름을 scratch.copy 없이 복사하는 것, 잠깐 쓰고
+// 버리는 PathAllocation으로 복사하는 것(예약이 곧 풀린다), RepoPath 사본의 예약을 빼는
+// 것, 그리고 이름을 한 번 더 예약하는 것. 둘째 hop을 열 때 쥔 예약이 식과 달라진다.
+#[test]
+fn every_live_symref_name_copy_is_held_reserved() {
+    for len in [100usize, 200] {
+        let fixture = Fixture::new();
+        let access = access();
+        let mut m = meter();
+        let root = fixture.root(&mut m);
+        let held = m.allocation_observer();
+        let m = RefCell::new(m);
+        let port = io(&root, &access, &m);
+        let refs = Refs::load(&port).unwrap();
+        let start = "refs/heads/main";
+        let long = format!("refs/heads/{}", "a".repeat(len));
+        fixture.write(&long, format!("{A}\n"));
+        fixture.write(start, format!("ref: {long}\n"));
+        let base = held.get();
+        let at_open = std::rc::Rc::new(std::cell::Cell::new(None));
+        let (observer, seen, event) = (held.clone(), at_open.clone(), format!("resolve:{long}"));
+        m.borrow_mut().hook = Some(Box::new(move |name| {
+            if name == event {
+                seen.set(Some(observer.get() - base));
+            }
+        }));
+        let id = refs.resolve(&port, start.as_bytes()).unwrap();
+        assert_eq!(id, Some(refs::ObjectId::from_hex(A.as_bytes()).unwrap()));
+        // When the second hop opens the long name, resolve holds: its start
+        // reservation (the first name and room for `seen`), the first hop's
+        // path copy, and the long name twice (`current` and its path copy).
+        let start_reservation = start.len() + refs::SYMREF_LIMIT * std::mem::size_of::<Vec<u8>>();
+        let expected = start_reservation + start.len() + 2 * long.len();
+        assert_eq!(at_open.get(), Some(expected as u64), "{long}");
+        assert_eq!(held.get(), base);
+    }
 }

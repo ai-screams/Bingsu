@@ -421,9 +421,9 @@ fn run_prepared(prepared: &mut Prepared, meter: &mut Meter) -> Result<(), ReadEr
             Ok(())
         }
         Prepared::LooseRef(bytes) => {
-            let parsed = refs::parse_loose(bytes)?;
+            // Held while the oracle runs: a parse that allocates shows here.
+            let _parsed = refs::parse_loose(bytes)?;
             assert_live(meter, "loose ref");
-            drop(parsed);
             Ok(())
         }
         Prepared::Commit { compressed, id } => {

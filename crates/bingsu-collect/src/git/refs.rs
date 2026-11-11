@@ -33,9 +33,11 @@ const _: () = assert!(
 );
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Target {
+pub enum Target<'a> {
     Object(ObjectId),
-    Symbolic(Vec<u8>),
+    /// Borrowed from the ref file's bytes: parsing allocates nothing, and a
+    /// caller that keeps the name copies it under its own reservation.
+    Symbolic(&'a [u8]),
 }
 
 pub struct Refs {
@@ -182,13 +184,15 @@ impl Refs {
             )?;
             Ok(scratch)
         })?;
-        let mut seen = Vec::new();
+        let mut seen = Vec::with_capacity(SYMREF_LIMIT);
         let mut current = name.to_vec();
         for _ in 0..SYMREF_LIMIT {
             validate_name(&current)?;
             if seen.contains(&current) {
                 return Err(ReadError::Symlink);
             }
+            // RepoPath::new copies the name beside `current`, whose own
+            // reservation cannot cover a second live copy.
             io.metered(|meter| {
                 meter.charge_axis(Axis::RefEntries, 1)?;
                 scratch.reserve(current.len(), meter)
@@ -200,6 +204,9 @@ impl Refs {
                 Ok(bytes) => match parse_loose(&bytes)? {
                     Target::Object(id) => return Ok(Some(id)),
                     Target::Symbolic(next) => {
+                        // Reserved before the copy: a refused reservation
+                        // allocates nothing, and no hop's name is unmetered.
+                        let next = io.metered(|meter| scratch.copy(next, meter))?;
                         seen.push(current);
                         current = next;
                     }
@@ -287,7 +294,7 @@ fn validate_name(name: &[u8]) -> Result<(), ReadError> {
     Ok(())
 }
 
-pub fn parse_loose(bytes: &[u8]) -> Result<Target, ReadError> {
+pub fn parse_loose(bytes: &[u8]) -> Result<Target<'_>, ReadError> {
     if bytes.len() > SMALL_FILE_BYTES as usize {
         return Err(ReadError::Limit);
     }
@@ -295,7 +302,7 @@ pub fn parse_loose(bytes: &[u8]) -> Result<Target, ReadError> {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if let Some(name) = line.strip_prefix(b"ref: ") {
         validate_name(name)?;
-        Ok(Target::Symbolic(name.to_vec()))
+        Ok(Target::Symbolic(name))
     } else if line.len() == 40 {
         ObjectId::from_hex(line)
             .map(Target::Object)
