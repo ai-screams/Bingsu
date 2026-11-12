@@ -228,22 +228,29 @@ def raw_terminal(home, after=""):
     return RawTerminal(script, env)
 
 
-# 이것을 실패시키는 것: 취소(Ctrl-C) 직후에는 버리기 없이 끝내는 것(질문 뒤 25 ms 안에 오는 늦은 응답이
-# 셸 입력 줄에 남음: 뒤따른 `read`가 그 글자를 받음).
-def test_a_late_answer_after_a_cancel_is_discarded_too(home):
+def late_answer_after_a_cancel_is_discarded(home):
+    """One run. `True`: the answer came after the cancel but before the terminal was restored, and was
+    discarded: nothing was echoed and the next `read` got nothing. A run where the answer came after the
+    restore (the test slept longer than the 50 ms read) shows its bytes echoed or in `LEFT`: no evidence."""
     t = raw_terminal(home, after="read -r LEFT; echo LEFT=[$LEFT]; ")
     t.read_until(b"\x1b]11;?\x1b\\")
     os.write(t.fd, b"\x03")
     time.sleep(0.01)
     os.write(t.fd, b"\x1b]11;rgb:0000/0000/0000\x1b\\")
-    t.read_until(b"RC=")
+    if t.read_any([b"RC="], timeout=3.0) is None:
+        t.kill()
+        return False
     time.sleep(0.1)
     os.write(t.fd, b"\n")
     code, before, after, text = t.finish()
-    assert code == 130, text
-    assert "LEFT=[]" in text, text
-    assert before == after
-    assert config(home) is None
+    return (code == 130 and "LEFT=[]" in text and "rgb:0000" not in text
+            and before == after and config(home) is None)
+
+
+# 이것을 실패시키는 것: 취소(Ctrl-C) 직후에는 버리기 없이 끝내는 것(취소 뒤 10 ms에 오는 늦은 응답이 복구 뒤에
+# 도착해 echo되거나 셸 입력 줄에 남음: 뒤따른 `read`가 그 글자를 받음).
+def test_a_late_answer_after_a_cancel_is_discarded_too(home):
+    assert any(late_answer_after_a_cancel_is_discarded(attempt_home(home, n)) for n in range(TRIES))
 
 
 # 이것을 실패시키는 것: 터미널 설명자가 FD_SETSIZE(1024) 이상일 때 거르지 않는 것(`FD_SET`이 abort해 터미널이
