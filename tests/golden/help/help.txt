@@ -1,0 +1,536 @@
+E101 (error)
+
+What happened
+  The file is not valid TOML, so bingsu could not read it.
+  The place points at the first character the parser could not accept.
+
+Why
+  Nothing in a file is used until the whole file parses. A half-read file could apply some settings and drop others without telling you.
+
+How to fix
+  Fix the text at the place shown (a missing quote, bracket or `=` is the usual cause).
+  Then run `bingsu config check` to read the file again.
+
+----
+
+E102 (error)
+
+What happened
+  The file is larger than 256 KiB.
+
+Why
+  Every config file is capped at 256 KiB so that reading settings stays fast and bounded, even for a file someone else wrote.
+
+How to fix
+  Remove unused parts, or move part of the settings into a second file and list it in `extends`.
+  Then run `bingsu config check`.
+
+----
+
+E103 (error)
+
+What happened
+  The file contains bytes that are not valid UTF-8.
+
+Why
+  Config files are UTF-8 text. Reading other encodings by guessing could change what a key or a value says.
+
+How to fix
+  Save the file as UTF-8 in your editor, then run `bingsu config check`.
+
+----
+
+E104 (error)
+
+What happened
+  A whole number in the file is outside the 64-bit signed range (about 9.2 quintillion up or down).
+
+Why
+  TOML integers are 64-bit signed. A larger number cannot be stored without changing its value.
+
+How to fix
+  Write a smaller number. Most keys accept far smaller ranges; `bingsu config schema` lists the range of each key.
+
+----
+
+E105 (error)
+
+What happened
+  Tables or arrays are nested more than 32 levels deep.
+
+Why
+  The depth is capped so that reading a file can never run out of stack, whoever wrote the file.
+
+How to fix
+  Flatten the structure. The config keys are at most a handful of levels deep; `bingsu config schema` shows the shape.
+
+----
+
+E201 (error)
+
+What happened
+  A key in the file is not a bingsu key.
+
+Why
+  Unknown keys are errors, so a typo such as `colr` never passes silently and leaves you wondering why nothing changed.
+
+How to fix
+  Check the spelling against `bingsu config schema`. When a close key exists, the message suggests it.
+  A key inside a user segment is written as `segment.<id>.command`, `segment.<id>.text` and so on.
+
+----
+
+E202 (error)
+
+What happened
+  A key has a value of the wrong type, for example a number where a string is expected.
+
+Why
+  Each key has exactly one type, so bingsu never has to guess what `"5"` or `5` means.
+
+How to fix
+  Write a value of the expected type. `bingsu config schema` shows the type of each key.
+  For example `segment.<id>.timeout` takes a duration string such as "200ms".
+
+----
+
+E203 (error)
+
+What happened
+  A key has the right type but a value outside what the key accepts.
+
+Why
+  Keys with a closed list of values (a preset, a shape, a mode) or a range (a cell count) reject anything else, so a typo cannot change behavior unnoticed.
+
+How to fix
+  Use one of the accepted values listed in the message. For example `style.preset` takes a preset name and `width.ambiguous` takes 1 or 2.
+
+----
+
+E204 (error)
+
+What happened
+  A segment name is not a valid id.
+
+Why
+  An id is one part (a built-in segment) or two parts joined by one `/` (your own: `custom/<name>`).
+  Each part is 1 to 32 bytes, starts with a lowercase letter a-z, holds only a-z, 0-9, `_` and `-`, and does not end in `_` or `-`.
+  The whole id is at most 65 bytes. The namespaces `bingsu`, `topping` and `file` are reserved, and so are the prefixes `topping:` and `file:`.
+  The limits keep ids safe to use in tables, layouts and file names.
+
+How to fix
+  Rename the segment to fit these rules, in `layout.line1.left` and in its table `segment.<id>`. For example `custom/1foo`, `custom/foo-` and a 33-byte name are all refused.
+  Then run `bingsu config check`.
+
+----
+
+E205 (error)
+
+What happened
+  A layout line names a segment that does not exist.
+
+Why
+  A name without a slash is a built-in segment. Your own segments are named `custom/<name>`, so that a new built-in segment can never take the name of one of yours.
+
+How to fix
+  Check the spelling of the name in `layout.line1.left` or `layout.line1.right`.
+  For a segment of your own, define the table `segment.<id>` with a `segment.<id>.kind`.
+
+----
+
+E206 (error)
+
+What happened
+  A segment sets a key that does not apply to its kind.
+  For example `segment.<id>.command` on a segment of kind `text`.
+
+Why
+  Keys are checked against the declared `kind`, so a key that would do nothing is reported instead of being ignored.
+
+How to fix
+  Remove the key, or change `segment.<id>.kind` to a kind that uses it. `bingsu config schema` lists which kinds each key applies to.
+
+----
+
+E207 (error)
+
+What happened
+  A theme file sets a key that only a user config may set.
+
+Why
+  A theme is shared with other people and never runs commands. Keys that run something or reach the environment are accepted only from your own config.
+
+How to fix
+  Move the key into your own config file (`bingsu config path` shows where it is).
+  For a command segment, that means `segment.<id>.command`.
+
+----
+
+E208 (error)
+
+What happened
+  A table under `layout` is not an allowed line.
+  Either its name is not `line1` or `line2`, or `layout.line2` is written without `layout.line1`.
+
+Why
+  Lines are `line1` and `line2`, with no gaps: no other name can be drawn, and a second line needs a first. (A width band may write only its `line2`; it inherits the default `line1`.)
+
+How to fix
+  Rename the table to `layout.line1` or `layout.line2`.
+  If you wrote only `layout.line2`, add `layout.line1` too, or move its segments to `layout.line1`.
+
+----
+
+E209 (error)
+
+What happened
+  A segment of your own has no `kind`.
+
+Why
+  bingsu has to know whether the segment shows text, runs a command, shows an environment variable or reports a language before it can check its other keys.
+
+How to fix
+  Add `segment.<id>.kind` with one of command, text, env or language.
+
+----
+
+E210 (error)
+
+What happened
+  A text value contains a control, bidirectional or invisible character.
+
+Why
+  Such characters can move the cursor, hide text or reorder what you read. A prompt never draws them, so a value that holds one is rejected.
+
+How to fix
+  Remove the character. If you pasted the text, retype it. For the text of a segment the key is `segment.<id>.text`.
+
+----
+
+E211 (error)
+
+What happened
+  A segment sets `shell` without `unsafe_shell = true`, so it does not run.
+
+Why
+  Shell text runs whatever it says, with the shell's quoting rules. Running it only when you ask for it explicitly keeps a copied config from running a command you did not read.
+
+How to fix
+  Write the command as an array in `segment.<id>.command`, for example `command = ["tool", "arg"]`.
+  Or set `segment.<id>.unsafe_shell` to true if you need shell syntax.
+
+----
+
+E212 (error)
+
+What happened
+  A command segment does not give exactly one usable form. One of these is the case:
+  `command` and `shell` are both set; neither is set; `command` is an empty array; or `unsafe_shell = true` is set without `shell`.
+
+Why
+  The two forms run in different ways (no shell, or a shell), so bingsu will not choose one when both or neither are given, and a command with no word has nothing to run.
+
+How to fix
+  Keep one form and make it complete: `segment.<id>.command` as an array with at least one word, or `segment.<id>.shell` together with `segment.<id>.unsafe_shell` set to true.
+  Do not set `segment.<id>.unsafe_shell` without `segment.<id>.shell`.
+
+----
+
+E213 (error)
+
+What happened
+  The placeholder `{dir}` is not a whole element of `command`, or sits inside shell text.
+
+Why
+  The placeholder is replaced only as one whole element of the `command` array, and its value reaches the program as one argument that is never split or joined to other text.
+  This does not make the value safe for a program that reads its argument as code. With `command = ["/bin/sh", "-c", "{dir}"]` the shell reads the folder name as code, so a folder name with `$(...)` in it would run.
+
+How to fix
+  Make the placeholder an element of its own in `segment.<id>.command`.
+  For example ["tool", "{dir}"] and not "--dir={dir}".
+  Do not pass it to a shell or to another program that evaluates its argument as code (such as `sh -c` or `python -c`).
+
+----
+
+E301 (error)
+
+What happened
+  Files listed in `extends` lead back to a file already being read.
+
+Why
+  A cycle has no first file, so there is no order in which to apply them.
+
+How to fix
+  Remove one of the entries of `extends` on the path. `bingsu config check` prints the chain.
+
+----
+
+E302 (error)
+
+What happened
+  The chain of `extends` is more than 8 files deep.
+
+Why
+  The depth is capped so that reading settings stays bounded, however the files were written.
+
+How to fix
+  Flatten the chain: list the files directly in one `extends`, or merge some of them.
+
+----
+
+E303 (error)
+
+What happened
+  The `extends` entries reach more than 32 distinct files.
+
+Why
+  At most 32 files are read in one load, so a config cannot make every prompt read hundreds of files.
+
+How to fix
+  Merge some files, then run `bingsu config check`. The `extends` list of each file shows what it pulls in.
+
+----
+
+E304 (error)
+
+What happened
+  The files reached by `extends` are larger than 1 MiB together.
+
+Why
+  All files of one load are capped at 1 MiB together, in addition to the 256 KiB cap of each file.
+
+How to fix
+  Remove files you do not use from `extends`, or cut unused settings.
+
+----
+
+E305 (error)
+
+What happened
+  An `extends` entry cannot be used, for example a URL or a path that cannot be read.
+
+Why
+  Only local files are read, so an entry must name a file on this machine.
+
+How to fix
+  Point the entry in `extends` at a local file, for example `~/dotfiles/bingsu-team.toml`, then run `bingsu config check`.
+
+----
+
+E306 (error)
+
+What happened
+  The file asks for a newer bingsu than the one running.
+
+Why
+  `requires` says which version a file was written for. Reading it with an older bingsu could ignore or misread keys it does not know.
+
+How to fix
+  Upgrade bingsu, or lower `requires` if the file does not need the newer version.
+  Check your version with your package manager; `bingsu config check` tells you when a file needs more.
+
+----
+
+E307 (error)
+
+What happened
+  The `version` of the file is a number this bingsu does not know.
+
+Why
+  This bingsu reads config format version 1. Another number means the file was written for a different format.
+
+How to fix
+  Set `version` to 1, or upgrade bingsu if the file comes from a newer version.
+
+----
+
+W401 (warning)
+
+What happened
+  A key that runs something or reaches the environment is set in a shape-only file, so it is dropped.
+
+Why
+  A shape-only file is read for colors and layout only; it may change how the prompt looks but never what runs.
+  Themes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.
+  A file in your config folder whose own folder fails the safety check is a different case (W405).
+
+How to fix
+  Put the key in your own config file in the config folder (`bingsu config path` shows where it is).
+  Run `bingsu config check` for the details.
+
+----
+
+W402 (warning)
+
+What happened
+  A segment of kind `env` is defined in a file that is trusted for colors and layout only, so it is ignored.
+
+Why
+  Showing an environment variable can show a secret. Only your own config may decide which variable is shown.
+
+How to fix
+  Define the segment in your own config with `segment.<id>.kind` and `segment.<id>.env`.
+
+----
+
+W403 (warning)
+
+What happened
+  A segment is ignored because its `kind` comes from a file that is trusted for colors and layout only.
+
+Why
+  The kind decides whether the segment runs a command or reads the environment, so it cannot be taken from a shape-only file.
+
+How to fix
+  Define the segment in your own config, with `segment.<id>.kind` set there.
+
+----
+
+W404 (warning)
+
+What happened
+  A segment that runs a command or reads the environment (a command, env or language segment) is declared but not turned on.
+
+Why
+  It runs only when a layout from a trusted file draws it, and that layout is still the one drawn after all files are merged, at a width some band can choose. One of these fails:
+  no layout line names it; only a theme or another shape-only file names it; a shape-only file overrides the trusted layout so it no longer draws the segment; or the line is in a band that no width can choose.
+
+How to fix
+  Name the segment in a layout line of your own config, for example `layout.line1.left`, or in a band line such as `layout.when.<name>.line1.left`.
+  If another file overrides the layout, set the layout in your own config. If the line is in a band, check `layout.when.<name>.min_cols`, `layout.when.<name>.max_cols` and `layout.when.<name>.order`.
+
+----
+
+W405 (warning)
+
+What happened
+  A segment does not run because the file that sets one of its execution keys failed the safety check.
+
+Why
+  A file or folder that another user can change could be edited to run something else. The check looks at the file and each folder above it: each must be owned by you or by root and must not be writable by anyone else.
+  Group write counts only when the group has no member besides you and root, and an access list entry that grants write fails the check.
+
+How to fix
+  Find the file and folder the message names, then remove the extra write access from it, for example `chmod go-w`. Do not change the owner of system folders such as `/` or `/home`: root ownership is accepted there.
+  Run `bingsu config check` for the exact reason.
+
+----
+
+W406 (warning)
+
+What happened
+  A shape-only file did not pass the checks, so it is left out of this load. The other files are still used.
+
+Why
+  A file that is trusted for colors and layout only is dropped alone when it is broken, so one bad theme does not stop your whole prompt.
+
+How to fix
+  Fix the file named in the message, or remove it from `extends`. Then run `bingsu config check`.
+
+----
+
+W407 (warning)
+
+What happened
+  A width band is never chosen: another band wins at every width this one covers.
+
+Why
+  Bands are picked by width and then by `order`. A band that always loses does nothing, which is usually a mistake in its range.
+
+How to fix
+  Change `layout.when.<name>.min_cols`, `layout.when.<name>.max_cols` or `layout.when.<name>.order`, or remove the band.
+
+----
+
+W408 (warning)
+
+What happened
+  A layout names a segment of your own that no file declares, so it is not drawn.
+
+Why
+  A theme may have removed the segment, or the name has a typo. Drawing nothing would hide the mistake, so it is reported.
+
+How to fix
+  Declare the segment as the table `segment.<id>` with `segment.<id>.kind`, or take it out of `layout.line1.left` and the other layout keys.
+
+----
+
+W409 (warning)
+
+What happened
+  A segment runs its `shell` text through a shell.
+
+Why
+  Shell text can run anything it says, and nothing in it is quoted for you. This is allowed because you set `unsafe_shell = true`, and bingsu tells you so each time.
+
+How to fix
+  Prefer `segment.<id>.command` as an array. Keep `segment.<id>.unsafe_shell` only where you need pipes, globs or other shell syntax.
+
+----
+
+W410 (warning)
+
+What happened
+  A segment runs its command inside the current folder.
+
+Why
+  Files in a folder you did not write, such as a cloned repository, can change what a command does (a local script with the same name, a config file the tool reads).
+
+How to fix
+  Set `segment.<id>.cwd` to "neutral" (an empty private folder) and pass the folder as an element of `segment.<id>.command` if the command needs it.
+
+----
+
+W411 (warning)
+
+What happened
+  A program that a segment would run is refused. The message gives the reason, which is one of these:
+  a script whose first line starts with `#!/usr/bin/env`, or names a relative interpreter, or is longer than 256 bytes, or holds a NUL byte, or names an interpreter that is setuid, setgid or has file capabilities;
+  or the program itself is setuid, setgid or has file capabilities (a compiled program has no first line to fix).
+
+Why
+  `#!/usr/bin/env python3` does name an absolute path, but `env` then looks `python3` up in `PATH`, which a folder you work in can influence, so it is refused. A set-id program or a file with capabilities runs with rights that bingsu will not hand to a prompt segment.
+
+How to fix
+  For a script, write the absolute path of the interpreter on its first line, for example `#!/usr/bin/python3`, and keep that line under 256 bytes. Or run the interpreter itself from `segment.<id>.command`.
+  For a set-id program, use a different program in `segment.<id>.command`.
+
+----
+
+N501 (note)
+
+What happened
+  A `template` is set together with a preset or style options, and the template wins.
+
+Why
+  A template takes precedence over the style keys, so the keys next to it have no effect.
+
+How to fix
+  Remove the unused style keys, or remove `style.template`.
+
+----
+
+N502 (note, deprecated since 0.0.0)
+
+What happened
+  Deprecated since 0.0.0: bingsu no longer reports this note.
+  It used to say that a segment of your own was not drawn yet.
+
+Why
+  Every kind of segment of your own is drawn now, so no segment is left waiting for a later version.
+
+How to fix
+  Nothing to do. Run `bingsu config check` to see the notes that bingsu reports today.
+
+----
+
+N503 (note)
+
+What happened
+  A key is accepted but has no effect yet.
+
+Why
+  The key is read from a later milestone on. Until then it is accepted and left out, so a config written for the future does not fail today.
+
+How to fix
+  Keep the key, or remove it. `bingsu config schema` marks which keys are planned.
