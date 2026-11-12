@@ -2142,6 +2142,103 @@ fn map_uses_validated_fd_and_unmaps_on_error() {
     assert_eq!(m.borrow().counts, before);
 }
 
+/// RFC 1950 stored DEFLATE blocks: compressed length tracks the body.
+fn stored_zlib(bytes: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let chunks = bytes.len().max(1).div_ceil(65535);
+    for n in 0..chunks {
+        let block = &bytes[n * 65535..bytes.len().min((n + 1) * 65535)];
+        out.push(u8::from(n + 1 == chunks));
+        out.extend_from_slice(&(block.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+    out.extend_from_slice(&adler32(bytes).to_be_bytes());
+    out
+}
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for byte in bytes {
+        a = (a + u32::from(*byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+// The compressed bytes and the inflated object together stay within one
+// object's buffer, though the read's reservation, not the decoder's, charges
+// the compressed bytes. 이것을 실패시키는 것: decoder의 입력+출력 상한 검사를 지우는 것(Find 경로에서는
+// 객체 예약이 입력을 더는 세지 않으므로 그 검사만 남는다).
+#[test]
+fn a_read_loose_object_and_its_output_share_one_object_buffer() {
+    let find = |size: usize| {
+        let body = vec![b'a'; size];
+        let raw = [format!("blob {size}\0").as_bytes(), &body].concat();
+        let id = gix_object::compute_hash(Hash::Sha1, Kind::Blob, &body).unwrap();
+        let hex = id.to_string();
+        let f = Fixture::new();
+        let encoded = stored_zlib(&raw);
+        assert!(encoded.len() < objects::OBJECT_BUFFER - 1);
+        f.write(&format!("objects/{}/{}", &hex[..2], &hex[2..]), &encoded);
+        let access = access();
+        let mut m = meter();
+        let root = f.root(&mut m);
+        let m = RefCell::new(m);
+        let port = io(&root, &access, &m);
+        let mut out = Vec::new();
+        SafeObjectDb::new(&port).find(&id, &mut out).map(|_| ())
+    };
+    let half = objects::OBJECT_BUFFER / 2;
+    assert!(find(half - 1_000).is_ok());
+    assert_eq!(find(half + 1_000), Err(E::Limit));
+}
+
+// Find charges a loose object's compressed bytes once: the read keeps them
+// reserved, and the decoder counts them toward the object's cap without a
+// second live charge. Two encodings of one object differ only in compressed
+// length, so the least live limit each needs differs by exactly that much.
+// 이것을 실패시키는 것: loose가 읽은 압축 바이트(len + 1)를 다시 예약하는 것(차이가 두 배가 된다).
+#[test]
+fn a_read_loose_object_is_charged_once() {
+    let body = vec![b'a'; 200_000];
+    let raw = [format!("blob {}\0", body.len()).as_bytes(), &body].concat();
+    let id = gix_object::compute_hash(Hash::Sha1, Kind::Blob, &body).unwrap();
+    let hex = id.to_string();
+    let name = format!("objects/{}/{}", &hex[..2], &hex[2..]);
+    let least_limit = |encoded: &[u8]| -> u64 {
+        let f = Fixture::new();
+        f.write(&name, encoded);
+        let access = access();
+        let finds = |limit: u64| {
+            let mut m = meter();
+            let root = f.root(&mut m);
+            m.allocation_limit = limit;
+            let m = RefCell::new(m);
+            let port = io(&root, &access, &m);
+            let mut out = Vec::new();
+            SafeObjectDb::new(&port).find(&id, &mut out).is_ok()
+        };
+        let (mut low, mut high) = (0u64, 8_388_608u64);
+        assert!(finds(high));
+        while low + 1 < high {
+            let mid = (low + high) / 2;
+            if finds(mid) { high = mid } else { low = mid }
+        }
+        high
+    };
+    let (small, large) = (zip(&raw), stored_zlib(&raw));
+    assert!(
+        large.len() > small.len() + 100_000,
+        "{} {}",
+        large.len(),
+        small.len()
+    );
+    assert_eq!(
+        least_limit(&large) - least_limit(&small),
+        (large.len() - small.len()) as u64
+    );
+}
+
 // 이것을 실패시키는 것: loose zlib/header/length/hash 검증·Find 결과 buffer 연결을 제거하는 것.
 #[test]
 fn loose_objects_validate_all_bytes() {

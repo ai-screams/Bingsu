@@ -105,6 +105,18 @@ impl ObjectAllocation {
         self.bytes = next;
         Ok(())
     }
+
+    /// A sized read's bytes (len + 1 capacity) held by this object: only the
+    /// part `input`'s own reservation does not already charge to the live
+    /// total is reserved here (all of it for `unheld` bytes). The object's
+    /// input-plus-output cap is the decoder's to check.
+    pub fn input(&mut self, input: &Reserved, meter: &mut Meter) -> Result<(), ReadError> {
+        let need = (input.len() as u64)
+            .checked_add(1)
+            .ok_or(ReadError::Limit)?;
+        let uncovered = need - input.reserved().min(need);
+        self.reserve(uncovered as usize, meter)
+    }
 }
 impl Drop for ObjectAllocation {
     fn drop(&mut self) {
@@ -186,6 +198,12 @@ impl Reserved {
     /// one; a source test pins that.
     pub(crate) fn unheld(bytes: Vec<u8>, meter: &Meter) -> Self {
         Self::held(bytes, meter.path_allocation())
+    }
+}
+impl Reserved {
+    /// The live bytes its reservation charges (0 for `unheld`).
+    pub fn reserved(&self) -> u64 {
+        self._hold.bytes
     }
 }
 impl std::ops::Deref for Reserved {
