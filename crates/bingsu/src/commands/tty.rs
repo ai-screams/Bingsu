@@ -281,6 +281,10 @@ impl Tty {
         let guard = Raw::enter(fd)?;
         let mut f = &self.file;
         let wait = readable(fd, true);
+        // The time limit counts from before the query is written, so a late
+        // start of this process after the write (a busy machine) cannot make
+        // an answer count that came later than the limit after the query.
+        let until = Instant::now() + REPLY_TIMEOUT;
         let sent = write_checked(
             |b| {
                 // SAFETY: `fd` is open and `b` is a valid slice.
@@ -289,7 +293,6 @@ impl Tty {
             },
             b"\x1b]11;?\x1b\\",
         )?;
-        let until = Instant::now() + REPLY_TIMEOUT;
         let mut seen: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 64];
         let mut result = if sent {
