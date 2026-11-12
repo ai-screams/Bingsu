@@ -6,7 +6,8 @@ use bingsu_core::config::schema::{Which, schema};
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu config <check [--explain]|path|schema [--theme]|use PATH>";
+const USAGE: &str =
+    "usage: bingsu config <check [--explain] [--format json|text]|path|schema [--theme]|use PATH>";
 
 pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let [verb, rest @ ..] = args
@@ -16,8 +17,19 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     }
     let words: Vec<Option<&str>> = args.iter().map(|a| a.to_str()).collect();
     let which = match words.as_slice() {
-        [Some("check")] => return config_inspect::check(),
-        [Some("check"), Some("--explain")] => return config_inspect::check_explain(),
+        [Some("check"), flags @ ..] => match check_flags(flags) {
+            Some((explain, json)) => {
+                return if explain {
+                    config_inspect::check_explain(json)
+                } else {
+                    config_inspect::check(json)
+                };
+            }
+            None => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(super::ctx::EXIT_USAGE);
+            }
+        },
         [Some("path")] => return config_inspect::path(),
         [Some("schema")] => Which::Config,
         [Some("schema"), Some("--theme")] => Which::Theme,
@@ -30,4 +42,25 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         sys::WriteOutcome::Done => ExitCode::SUCCESS,
         sys::WriteOutcome::Failed => ExitCode::from(1),
     }
+}
+
+/// The flags of `config check`: `--explain` and `--format json|text`, each
+/// at most once, in any order. `(explain, json)`.
+fn check_flags(flags: &[Option<&str>]) -> Option<(bool, bool)> {
+    let (mut explain, mut format) = (false, None);
+    let mut it = flags.iter();
+    while let Some(f) = it.next() {
+        match (*f)? {
+            "--explain" if !explain => explain = true,
+            "--format" if format.is_none() => {
+                format = Some(match (*it.next()?)? {
+                    "json" => true,
+                    "text" => false,
+                    _ => return None,
+                });
+            }
+            _ => return None,
+        }
+    }
+    Some((explain, format.unwrap_or(false)))
 }

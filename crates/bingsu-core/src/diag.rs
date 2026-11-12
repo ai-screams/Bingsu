@@ -167,6 +167,34 @@ fn fill(template: &str, args: &[Arg], out: &mut String) {
     out.push_str(rest);
 }
 
+/// The three texts of a diagnostic with its arguments filled in (and
+/// sanitized): what happened, why, and how to fix it.
+pub struct Parts {
+    pub what: String,
+    pub why: String,
+    pub fix: String,
+}
+
+pub fn parts(d: &Diagnostic) -> Parts {
+    let info = d.code.info();
+    let (mut what, mut why, mut fix) = (String::new(), String::new(), String::new());
+    fill(
+        info.map_or("(unknown code)", |i| i.what),
+        &d.args,
+        &mut what,
+    );
+    fill(info.map_or("", |i| i.why), &d.args, &mut why);
+    match &d.fix {
+        Some(f) => {
+            fix.push_str("replace with `");
+            sanitize_into(f.text.as_bytes(), &mut fix);
+            fix.push('`');
+        }
+        None => fill(info.map_or("", |i| i.fix), &d.args, &mut fix),
+    }
+    Parts { what, why, fix }
+}
+
 /// The human frame, five parts in order: what (one line), where
 /// (`file:line:col`, then the `extends` chain), why, how to fix, code.
 pub fn render_human(d: &Diagnostic, files: &dyn SourceView) -> String {

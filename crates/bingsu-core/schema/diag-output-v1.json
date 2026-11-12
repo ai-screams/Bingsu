@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bingsu explain and config check --format json, version 1",
+  "description": "One JSON document per run. `code` is the stable identifier of a diagnostic; `message`, `why` and `fix` are for people and may change between versions. Strings are sanitized: no control, bidirectional or invisible characters. The format is a preview until the first stable release.",
+  "oneOf": [
+    { "$ref": "#/$defs/explain" },
+    { "$ref": "#/$defs/configCheck" }
+  ],
+  "$defs": {
+    "text": { "type": "string" },
+    "nullableText": { "type": ["string", "null"] },
+    "at": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "builtin" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "file", "line", "column"],
+          "properties": {
+            "kind": { "const": "source" },
+            "file": { "type": "string" },
+            "line": { "type": "integer", "minimum": 1 },
+            "column": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "file", "byte"],
+          "properties": {
+            "kind": { "const": "foreign" },
+            "file": { "type": "integer", "minimum": 0 },
+            "byte": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "why", "fix", "at", "via", "help"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[EWN][0-9]{3}$" },
+        "severity": { "enum": ["error", "warning", "note"] },
+        "message": { "type": "string" },
+        "why": { "type": "string" },
+        "fix": { "type": "string" },
+        "at": { "$ref": "#/$defs/at" },
+        "via": { "type": "array", "items": { "type": "string" } },
+        "help": { "type": "string" }
+      }
+    },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "runs", "reason", "code", "rows", "environment", "executable"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string" },
+        "runs": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "code": { "type": ["string", "null"], "pattern": "^[EWN][0-9]{3}$" },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "value", "from"],
+            "properties": {
+              "key": { "type": "string" },
+              "value": { "type": "string" },
+              "from": { "type": "string" }
+            }
+          }
+        },
+        "environment": {
+          "description": "Names of the variables the command receives, never their values.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "from"],
+            "properties": {
+              "name": { "type": "string" },
+              "from": { "type": "string" }
+            }
+          }
+        },
+        "executable": { "type": ["string", "null"] }
+      }
+    },
+    "units": { "type": ["array", "null"], "items": { "$ref": "#/$defs/unit" } },
+    "explain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "command", "settings", "basis", "width", "width_source", "band",
+        "lines", "diagnostics", "execution", "execution_note", "notes"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "command": { "const": "explain" },
+        "settings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "file"],
+          "properties": {
+            "source": { "enum": ["files", "file"] },
+            "file": { "type": ["string", "null"] }
+          }
+        },
+        "basis": {
+          "description": "What the decisions are made from: the published settings (the ones the prompt draws with now), whether the files have changed or have errors since, nothing published yet, or one file given with --config.",
+          "enum": ["published", "published-files-changed", "published-files-invalid", "files-only", "file"]
+        },
+        "width": { "type": "integer", "minimum": 1 },
+        "width_source": { "enum": ["flag", "default"] },
+        "band": { "type": ["string", "null"] },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["line", "steps", "hidden", "shortened"],
+            "properties": {
+              "line": { "type": "integer", "minimum": 1 },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["step", "text"],
+                  "properties": {
+                    "step": { "type": "integer", "minimum": 1, "maximum": 7 },
+                    "text": { "type": "string" }
+                  }
+                }
+              },
+              "hidden": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["segment", "reason", "reason_text"],
+                  "properties": {
+                    "segment": { "type": "string" },
+                    "reason": {
+                      "enum": ["no-value", "priority", "right-hidden", "left-optional", "minimal", "empty-group"]
+                    },
+                    "reason_text": { "type": "string" }
+                  }
+                }
+              },
+              "shortened": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["segment", "method"],
+                  "properties": {
+                    "segment": { "type": "string" },
+                    "method": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "diagnostics": { "$ref": "#/$defs/diagnostics" },
+        "execution": { "$ref": "#/$defs/units" },
+        "execution_note": { "type": ["string", "null"] },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "configCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "command", "settings_folder", "selection", "files", "diagnostics",
+        "remedies", "widths", "result", "exit_code", "execution"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "command": { "const": "config-check" },
+        "settings_folder": { "type": "string" },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path", "reason"],
+          "properties": {
+            "kind": { "enum": ["none", "chosen", "unusable", "incomplete"] },
+            "path": { "type": ["string", "null"] },
+            "reason": { "type": ["string", "null"] }
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["display", "trust", "status", "written_as", "unsafe_reason"],
+            "properties": {
+              "display": { "type": "string" },
+              "trust": { "enum": ["trusted", "shape-only", "unsafe"] },
+              "status": { "enum": ["applied", "dropped", "failed"] },
+              "written_as": { "type": ["string", "null"] },
+              "unsafe_reason": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "diagnostics": { "$ref": "#/$defs/diagnostics" },
+        "remedies": { "type": "array", "items": { "type": "string" } },
+        "widths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to", "band"],
+            "properties": {
+              "from": { "type": "integer", "minimum": 0 },
+              "to": { "description": "65535 means no upper limit.", "type": "integer", "minimum": 0 },
+              "band": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "result": { "type": "string" },
+        "exit_code": { "enum": [0, 1, 3] },
+        "execution": { "$ref": "#/$defs/units" }
+      }
+    }
+  }
+}

@@ -39,7 +39,8 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu explain [SEGMENT] [--width N] [--config FILE]";
+const USAGE: &str =
+    "usage: bingsu explain [SEGMENT] [--width N] [--config FILE] [--format json|text]";
 /// The widest file `--config` reads (the cap of one config file).
 const FILE_MAX: u64 = 256 * 1024;
 const DEFAULT_WIDTH: u16 = 80;
@@ -50,6 +51,7 @@ pub(super) struct Args {
     pub segment: Option<String>,
     pub width: Option<u16>,
     pub config: Option<OsString>,
+    pub json: bool,
 }
 
 pub(super) fn parse(args: &[OsString]) -> Option<Args> {
@@ -57,7 +59,9 @@ pub(super) fn parse(args: &[OsString]) -> Option<Args> {
         segment: None,
         width: None,
         config: None,
+        json: false,
     };
+    let mut format_seen = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.to_str()? {
@@ -69,6 +73,16 @@ pub(super) fn parse(args: &[OsString]) -> Option<Args> {
             }
             "--config" => {
                 if out.config.replace(it.next()?.clone()).is_some() {
+                    return None;
+                }
+            }
+            "--format" => {
+                out.json = match it.next()?.to_str()? {
+                    "json" => true,
+                    "text" => false,
+                    _ => return None,
+                };
+                if std::mem::replace(&mut format_seen, true) {
                     return None;
                 }
             }
@@ -208,12 +222,49 @@ pub(super) fn text(
     )
 }
 
-const BASIS_CURRENT: &str = "basis: the published settings, which are the ones in your files\n";
-const BASIS_CHANGED: &str = "basis: the published settings, which the prompt draws now; your files have changed since, and the next prompt draws the changed settings (bingsu config check shows them)\n";
-const BASIS_NONE: &str = "basis: nothing is published yet, so this is what your files give; the next prompt publishes them\n";
+/// What the decisions are made from (`basis` of the JSON output).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Basis {
+    Published,
+    PublishedFilesChanged,
+    PublishedFilesInvalid,
+    FilesOnly,
+    File,
+}
+
+impl Basis {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::PublishedFilesChanged => "published-files-changed",
+            Self::PublishedFilesInvalid => "published-files-invalid",
+            Self::FilesOnly => "files-only",
+            Self::File => "file",
+        }
+    }
+    /// The line of the text output; none for a file given with `--config`.
+    const fn line(self) -> Option<&'static str> {
+        match self {
+            Self::Published => {
+                Some("basis: the published settings, which are the ones in your files\n")
+            }
+            Self::PublishedFilesChanged => Some(
+                "basis: the published settings, which the prompt draws now; your files have changed since, and the next prompt draws the changed settings (bingsu config check shows them)\n",
+            ),
+            Self::PublishedFilesInvalid => Some(
+                "basis: the published settings, which the prompt draws now; your files have errors, so the prompt keeps drawing these until they are fixed (bingsu config check shows the errors)\n",
+            ),
+            Self::FilesOnly => Some(
+                "basis: nothing is published yet, so this is what your files give; the next prompt publishes them\n",
+            ),
+            Self::File => None,
+        }
+    }
+}
+
 const EXEC_NOT_SHOWN: &str =
-    "execution: not shown for --config; the file is not trusted, so no executable is looked up\n";
-const FOOTER: &str = "explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.\n";
+    "not shown for --config; the file is not trusted, so no executable is looked up";
+const FOOTER: &str = "explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.";
 
 pub fn run(args: &[OsString]) -> ExitCode {
     let Some(a) = parse(args) else {
@@ -227,30 +278,28 @@ pub fn run(args: &[OsString]) -> ExitCode {
     let env = TrustedEnv::capture();
     let (report, source) = match &a.config {
         Some(p) => match report_of_file(p) {
-            Ok(r) => (
-                r,
-                format!(
-                    "settings: {} (only that file)",
-                    ctx::show(std::path::Path::new(p))
-                ),
-            ),
+            Ok(r) => (r, Some(ctx::show(std::path::Path::new(p)))),
             Err(e) => {
                 eprintln!("bingsu explain: {e}");
                 return ctx::code(EXIT_FAILED);
             }
         },
         None => match inspect_config(&user, &env) {
-            Ok(i) => (
-                i.report,
-                "settings: the ones `bingsu config path` lists".to_owned(),
-            ),
+            Ok(i) => (i.report, None),
             Err((text, code)) => {
                 eprintln!("{text}");
                 return ctx::code(code);
             }
         },
     };
-    let Some(fresh) = &report.snapshot else {
+    // The prompt draws with the published snapshot, not with the files: use
+    // it when there is one, and say so when the files have moved on.
+    let published = if a.config.is_none() {
+        published(&user, &env)
+    } else {
+        None
+    };
+    let fail_with_errors = || {
         let catalog = Catalog(&report.files);
         for d in report
             .diagnostics
@@ -260,20 +309,18 @@ pub fn run(args: &[OsString]) -> ExitCode {
             eprintln!("{}", render_human(d, &catalog));
         }
         eprintln!("bingsu explain: the settings have errors; fix them first (bingsu config check)");
-        return ctx::code(EXIT_FAILED);
+        ctx::code(EXIT_FAILED)
     };
-    // The prompt draws with the published snapshot, not with the files: use
-    // it when there is one, and say so when the files have moved on.
-    let published = if a.config.is_none() {
-        published(&user, &env)
-    } else {
-        None
-    };
-    let (compiled, basis) = match &published {
-        _ if a.config.is_some() => (fresh, None),
-        Some(p) if p == fresh => (p, Some(BASIS_CURRENT)),
-        Some(p) => (p, Some(BASIS_CHANGED)),
-        None => (fresh, Some(BASIS_NONE)),
+    let (compiled, basis) = match (&report.snapshot, &published) {
+        _ if a.config.is_some() => match &report.snapshot {
+            Some(c) => (c, Basis::File),
+            None => return fail_with_errors(),
+        },
+        (Some(fresh), Some(p)) if p == fresh => (p, Basis::Published),
+        (Some(_), Some(p)) => (p, Basis::PublishedFilesChanged),
+        (None, Some(p)) => (p, Basis::PublishedFilesInvalid),
+        (Some(fresh), None) => (fresh, Basis::FilesOnly),
+        (None, None) => return fail_with_errors(),
     };
     let ids = segment_ids(compiled);
     let only = match &a.segment {
@@ -289,10 +336,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
         },
         None => None,
     };
-    let (width, width_note) = match a.width {
-        Some(w) => (w, ""),
-        None => (DEFAULT_WIDTH, " (assumed; give --width N)"),
-    };
+    let width = a.width.unwrap_or(DEFAULT_WIDTH);
     let pwd = std::env::current_dir()
         .ok()
         .map(|p| p.as_os_str().as_bytes().to_vec());
@@ -302,36 +346,161 @@ pub fn run(args: &[OsString]) -> ExitCode {
         pwd,
         Some(user.pw.home.as_os_str().as_bytes().to_vec()),
     );
-    let mut out = format!("{source}\n");
-    if let Some(b) = basis {
-        out.push_str(b);
-    }
-    let body = text(compiled, &log, width, only);
-    // `width: N cells` carries where N came from.
-    out.push_str(&body.replacen(" cells\n", &format!(" cells{width_note}\n"), 1));
-    if let Some(seg) = &a.segment
-        && compiled.exec_units.iter().any(|u| &u.id == seg)
-    {
-        if a.config.is_some() {
-            // A file given with `--config` is not yours to trust yet: its
-            // executables are not looked up, so none is opened.
-            out.push_str(EXEC_NOT_SHOWN);
-        } else {
-            let found = lookups(
-                &report,
-                env.path.as_deref(),
-                user.me,
-                &mut SystemGroups::new(&user.pw.name),
-            );
-            out.push_str(&render_explain(&report, &found, Some(seg)));
+    // The execution section: only for a command or language segment named on
+    // the command line, from the files (a `--config` file is not trusted, so
+    // nothing is looked up for it), and only when the files compile.
+    let wants_units = a
+        .segment
+        .as_ref()
+        .is_some_and(|seg| compiled.exec_units.iter().any(|u| &u.id == seg));
+    let from_config = a.config.is_some();
+    let found = if wants_units && !from_config && report.snapshot.is_some() {
+        lookups(
+            &report,
+            env.path.as_deref(),
+            user.me,
+            &mut SystemGroups::new(&user.pw.name),
+        )
+    } else {
+        Vec::new()
+    };
+    let text_out = if a.json {
+        explain_json(&Doc {
+            compiled,
+            report: &report,
+            log: &log,
+            width,
+            width_flag: a.width.is_some(),
+            basis,
+            source: source.as_deref(),
+            only,
+            segment: a.segment.as_deref(),
+            wants_units,
+            from_config,
+            found: &found,
+        })
+    } else {
+        let mut out = match &source {
+            Some(f) => format!("settings: {f} (only that file)\n"),
+            None => "settings: the ones `bingsu config path` lists\n".to_owned(),
+        };
+        if let Some(b) = basis.line() {
+            out.push_str(b);
         }
-    }
-    out.push_str(FOOTER);
-    if ctx::print(&out) {
+        let note = if a.width.is_some() {
+            ""
+        } else {
+            " (assumed; give --width N)"
+        };
+        let body = text(compiled, &log, width, only);
+        // `width: N cells` carries where N came from.
+        out.push_str(&body.replacen(" cells\n", &format!(" cells{note}\n"), 1));
+        if basis == Basis::PublishedFilesInvalid {
+            let catalog = Catalog(&report.files);
+            for d in report
+                .diagnostics
+                .iter()
+                .filter(|d| d.severity() == Severity::Error)
+            {
+                out.push_str(&render_human(d, &catalog));
+                out.push_str("\n\n");
+            }
+        }
+        if wants_units {
+            if from_config {
+                out.push_str("execution: ");
+                out.push_str(EXEC_NOT_SHOWN);
+                out.push('\n');
+            } else if let Some(seg) = &a.segment
+                && report.snapshot.is_some()
+            {
+                out.push_str(&render_explain(&report, &found, Some(seg)));
+            }
+        }
+        out.push_str(FOOTER);
+        out.push('\n');
+        out
+    };
+    if ctx::print(&text_out) {
         ExitCode::SUCCESS
     } else {
         ctx::code(EXIT_FAILED)
     }
+}
+
+/// Everything the JSON document is made of.
+struct Doc<'a> {
+    compiled: &'a CompiledConfig,
+    report: &'a ConfigReport,
+    log: &'a DecisionLog,
+    width: u16,
+    width_flag: bool,
+    basis: Basis,
+    source: Option<&'a str>,
+    only: Option<usize>,
+    segment: Option<&'a str>,
+    wants_units: bool,
+    from_config: bool,
+    found: &'a [(String, super::exec_path::Explained)],
+}
+
+fn explain_json(d: &Doc<'_>) -> String {
+    use bingsu_core::diag_json::{self as j, Writer};
+    let mut w = Writer::new();
+    w.begin_object();
+    w.key("schema").number(u64::from(j::SCHEMA));
+    w.key("command").string("explain");
+    w.key("settings").begin_object();
+    w.key("source")
+        .string(if d.source.is_some() { "file" } else { "files" });
+    w.key("file").opt_string(d.source);
+    w.end_object();
+    w.key("basis").string(d.basis.word());
+    w.key("width").number(u64::from(d.width));
+    w.key("width_source")
+        .string(if d.width_flag { "flag" } else { "default" });
+    let ids = segment_ids(d.compiled);
+    let methods: Vec<&[Method]> = d
+        .compiled
+        .setup
+        .iter()
+        .map(|s| s.methods.as_slice())
+        .collect();
+    j::decisions(
+        &mut w,
+        d.log,
+        &Names {
+            segments: &ids,
+            bands: &d.compiled.band_names,
+            methods: &methods,
+        },
+        d.only,
+    );
+    w.key("diagnostics");
+    let errors: Vec<_> = if d.basis == Basis::PublishedFilesInvalid {
+        d.report
+            .diagnostics
+            .iter()
+            .filter(|x| x.severity() == Severity::Error)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    j::diagnostics(&mut w, &errors, &Catalog(&d.report.files));
+    w.key("execution");
+    if d.wants_units && !d.from_config && d.report.snapshot.is_some() {
+        super::config_inspect::units_json(&mut w, d.report, d.found, d.segment);
+    } else {
+        w.null();
+    }
+    w.key("execution_note")
+        .opt_string((d.wants_units && d.from_config).then_some(EXEC_NOT_SHOWN));
+    w.key("notes").begin_array();
+    w.string(FOOTER);
+    w.end_array();
+    w.end_object();
+    w.finish()
 }
 
 #[cfg(test)]
@@ -349,12 +518,15 @@ mod tests {
         assert_eq!(ok.segment.as_deref(), Some("git"));
         assert_eq!(ok.width, Some(40));
         assert_eq!(ok.config.as_deref(), Some(OsStr::new("f.toml")));
+        assert!(!ok.json);
+        assert!(parse(&a(&["--format", "json"])).unwrap().json);
         assert_eq!(
             parse(&[]).unwrap(),
             Args {
                 segment: None,
                 width: None,
-                config: None
+                config: None,
+                json: false
             }
         );
         for bad in [
@@ -366,6 +538,9 @@ mod tests {
             &["--config"],
             &["--bogus"],
             &["git", "dir"],
+            &["--format", "xml"],
+            &["--format"],
+            &["--format", "json", "--format", "json"],
         ] {
             assert!(parse(&a(bad)).is_none(), "{bad:?}");
         }

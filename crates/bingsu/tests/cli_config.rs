@@ -43,7 +43,7 @@ fn prints_the_core_schemas() {
         assert_eq!((bad.status.code(), bad.stdout.is_empty()), (Some(2), true));
         assert_eq!(
             bad.stderr,
-            b"usage: bingsu config <check [--explain]|path|schema [--theme]|use PATH>\n"
+            b"usage: bingsu config <check [--explain] [--format json|text]|path|schema [--theme]|use PATH>\n"
         );
     }
     use std::os::unix::ffi::OsStringExt;
