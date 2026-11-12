@@ -1,6 +1,7 @@
 """Host-only collector dependency, import and shared manifest audit tests."""
 import importlib.util
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -118,7 +119,8 @@ def built_id(out):
 
 # 이것을 실패시키는 것: source·lock·collector 정책·feature·target·profile·flags 중 하나를 build-id에서 빼는 것,
 # bingsu-prompt의 manifest·entry 소스를 빼는 것, bingsu-match 또는 crate의 build.rs를 빼는 것,
-# rustc의 release·commit-hash를 빼거나 host·LLVM 줄까지 넣는 것, 뿌리·OUT_DIR 경로를 정체에 넣는 것.
+# rustc의 release·commit-hash를 빼거나 host·LLVM 줄까지 넣는 것, 뿌리·OUT_DIR 경로를 정체에 넣는 것,
+# 제어 문자가 든 이름이나 UTF-8이 아닌 이름을 받아들이는 것.
 def test_sibling_build_manifest_is_exact(tmp_path):
     builder, rustc = manifest_builder(tmp_path)
     answer = tmp_path / "rustc.vV"
@@ -207,6 +209,28 @@ def test_sibling_build_manifest_is_exact(tmp_path):
             identity()
     finally:
         link.unlink()
+
+    # Each hashed path is printed as a cargo directive line. A name with a
+    # newline would add a directive of its own (here one that redirects
+    # OUT_DIR, which src/lib.rs includes from), so the builder refuses control
+    # characters in file and folder names, and names that are not UTF-8.
+    bad = [(root / "crates/bingsu-match/src" / "x\ncargo:rustc-env=OUT_DIR=..", "file"),
+           (root / "crates/bingsu/src" / "dir\ncargo:warning=injected", "folder"),
+           (root / "crates/bingsu-core/src" / "tab\tname", "file"),
+           (root / "crates/bingsu-collect/src" / os.fsdecode(b"bad-\xff"), "folder")]
+    for path, kind in bad:
+        try:
+            path.mkdir() if kind == "folder" else path.write_text("baseline\n")
+        except OSError:
+            # macOS file systems refuse names that are not UTF-8 themselves.
+            assert path.name.startswith("bad-") and sys.platform == "darwin", path
+            continue
+        try:
+            with pytest.raises(subprocess.CalledProcessError):
+                identity()
+        finally:
+            path.rmdir() if kind == "folder" else path.unlink()
+        assert identity() == baseline
 
 
 def linked_workspace_packages():

@@ -73,7 +73,7 @@ PROMPT_MANIFEST = {
 # tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
     "crates/bingsu-identity/Cargo.toml": "1c6aeb48d7416df0d76252cf460c62af75c43da16cf834a227ac6cfef9ab336c",
-    "crates/bingsu-identity/build.rs": "b8ed890f34350863d3961d324fdbe5f7e12c4305d9d49d49420d9888128f22fa",
+    "crates/bingsu-identity/build.rs": "eb1a806852046b18c470f33b7141da4894672910c85d1b77569a3ea1f5b6e6ac",
     "crates/bingsu-identity/src/lib.rs": "fd944c745ea76076f1c1c5f15ed0849df0045da526ab870459ce28880d48521d",
     "crates/bingsu/src/prompt_read.rs": "c84ea1f15b273825d48f7d4f15df9d3457c275b15070d4e9dc8950360eaf3484",
     "crates/bingsu-core/src/command/env_frame.rs": "237c6cdd21b42d45f247651a923f050122ee65a1ff8b54abaa16a695b9272db6",

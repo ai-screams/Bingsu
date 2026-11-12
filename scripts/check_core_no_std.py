@@ -99,7 +99,8 @@ PINS = {"bingsu-core": CORE_GRAPH, "bingsu": BINGSU_GRAPH, "bingsu-prompt": PROM
 # Identity's hash-pinned script runs the compiler cargo passes in RUSTC once
 # (`-vV`, for its release and commit-hash) and writes only an identity
 # constant to OUT_DIR; it emits rerun directives, no linker/configuration/
-# native-code directives.
+# native-code directives. It refuses symlinks, names that are not UTF-8 and
+# names with a control character, so no source name can add a directive line.
 REVIEWED_BUILD = {("libm", "0.2.16"), ("libc", "0.2.191"), ("bingsu-identity", "0.0.0")}
 SKIP_KINDS = {"test", "bench", "example"}
 TARGETS = {

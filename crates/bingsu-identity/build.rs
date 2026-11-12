@@ -11,8 +11,18 @@ mod digest;
 use std::{env, fs, path::Path, process::Command};
 
 fn inventory(root: &Path, path: &Path, out: &mut Vec<u8>) {
-    println!("cargo:rerun-if-changed={}", path.display());
     assert!(!path.is_symlink(), "source manifest refuses symlinks");
+    // The path goes out as one cargo directive line: a control character (a
+    // newline above all) in a file or folder name would start another one.
+    // 이것을 실패시키는 것: 아래 두 거부 중 하나를 빼는 것.
+    let shown = path
+        .to_str()
+        .expect("source manifest refuses non-UTF-8 names");
+    assert!(
+        !shown.chars().any(char::is_control),
+        "source manifest refuses control characters in names"
+    );
+    println!("cargo:rerun-if-changed={shown}");
     if path.is_dir() {
         let mut entries: Vec<_> = fs::read_dir(path)
             .unwrap()
