@@ -17,6 +17,7 @@ pub mod color;
 /// Command execution contract (types and pure decisions, no executor).
 pub mod command;
 pub mod config;
+pub mod decision_text;
 pub mod default_theme;
 pub mod diag;
 pub mod diag_codes;
@@ -35,6 +36,8 @@ pub mod ident;
 pub mod layout;
 /// What the prompt front reads from a compiled config (K63 selected band).
 pub mod layout_view;
+pub mod listing;
+pub mod preview;
 pub mod record;
 pub mod recorder;
 pub mod render;

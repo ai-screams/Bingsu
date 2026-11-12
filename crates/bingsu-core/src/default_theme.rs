@@ -112,6 +112,12 @@ fn one_line(src: &str) -> Result<CompiledLine, DefaultThemeError> {
 
 impl DefaultTheme {
     pub fn new(mode: Mode) -> Result<Self, DefaultThemeError> {
+        Self::with_preset(mode, "triangle")
+    }
+
+    /// The default theme drawn with another built-in preset (the `narrow`
+    /// band and the palette are the same).
+    pub fn with_preset(mode: Mode, preset_name: &str) -> Result<Self, DefaultThemeError> {
         let bands = [NARROW];
         let band_order = match order_bands(&bands) {
             Ok(order) => order,
@@ -145,7 +151,7 @@ impl DefaultTheme {
             }
         }
         Ok(Self {
-            variants: vec![lines("triangle", &LINES)?, compile_all(NARROW_TEMPLATE)?],
+            variants: vec![lines(preset_name, &LINES)?, compile_all(NARROW_TEMPLATE)?],
             bands,
             band_order,
             transient: one_line("{char}")?,

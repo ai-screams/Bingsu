@@ -854,6 +854,14 @@ jobs:
           hdiutil create -size 8m -fs APFS -volname BingsuX11 "$RUNNER_TEMP/bingsu-x11.dmg"
           hdiutil attach -nobrowse -mountpoint "$mount_path" "$RUNNER_TEMP/bingsu-x11.dmg"
           echo "BINGSU_X11_MOUNT=$mount_path" >> "$GITHUB_ENV"
+      # `bingsu list` must start no process: the cli_list test counts execve
+      # under strace on Linux and fails, not skips, when strace is missing.
+      - if: runner.os == 'Linux'
+        name: Install strace for the list process count
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends strace
+          strace --version
       # The runners are not in a container, so clone3 must reach the kernel
       # (EINVAL) without the stub's filter; the clone3 test fails otherwise.
       # They also run as a non-root user, so the tests that skip as root must
@@ -862,6 +870,7 @@ jobs:
         env:
           BINGSU_REQUIRE_CLONE3_CONTROL: "1"
           BINGSU_REQUIRE_NONROOT_TESTS: "1"
+          BINGSU_REQUIRE_STRACE: "1"
       # Without the prompt files (no Unix), bingsu-prompt only exits 2, silently.
       # 이것을 실패시키는 것: Windows의 bingsu-prompt가 prompt를 받아 돌거나 무언가 출력하는 것.
       - name: bingsu-prompt exits 2 on Windows
