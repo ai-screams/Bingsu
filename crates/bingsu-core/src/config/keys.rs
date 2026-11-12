@@ -767,6 +767,15 @@ pub fn lookup(path: &[&str]) -> Option<&'static KeyDef> {
     best
 }
 
+/// The allowed words of an enum key (`Enum` or `EnumList`), straight from
+/// the table the schema is generated from.
+pub fn enum_values(path: &[&str]) -> Option<&'static [&'static str]> {
+    match lookup(path)?.ty {
+        Ty::Enum(v) | Ty::EnumList(v) => Some(v),
+        _ => None,
+    }
+}
+
 /// What a shape-only file may put at `path` (`merge`).
 pub fn slot(path: &[&str]) -> Slot {
     match lookup(path) {
