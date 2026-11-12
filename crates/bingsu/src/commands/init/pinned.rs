@@ -44,6 +44,21 @@ fn unframe(mut v: &[u8]) -> Option<Vec<&[u8]>> {
     (!words.is_empty() && words.len() <= 16).then_some(words)
 }
 
+/// The runtime folder the value pins, as written (nothing is opened or
+/// checked): `None` for a garbled value. `doctor` compares it with the
+/// folder now to say what changed.
+pub fn runtime_pin(var: &[u8]) -> Option<runtime_root::Pinned> {
+    let raw = unframe(var)?;
+    let words = bingsu_core::helper::words(&raw).ok()?;
+    let e = bingsu_core::helper::validate(&words).ok()?;
+    let r = e.runtime_root.as_ref()?;
+    Some(runtime_root::Pinned {
+        dev: r.dev,
+        ino: r.ino,
+        path: PathBuf::from(std::ffi::OsStr::from_bytes(&r.path)),
+    })
+}
+
 /// The pinned roots, re-checked now; `None` for a missing, garbled, forged
 /// or no longer matching value.
 /// `Roots.log` and `RuntimeRootPin.group_ok` are copied from the environment,
