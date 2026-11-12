@@ -188,6 +188,27 @@ pub fn diagnostic(w: &mut Writer, d: &Diagnostic, files: &dyn SourceView) {
     w.end_object();
 }
 
+/// The document of a run that could not give its result: `result` is
+/// `"invalid"`, `diagnostics` lists the errors found and `error` says why
+/// nothing more could be made (`null` when the diagnostics are the reason).
+pub fn failure(
+    command: &str,
+    errors: &[Diagnostic],
+    files: &dyn SourceView,
+    error: Option<&str>,
+) -> String {
+    let mut w = Writer::new();
+    w.begin_object();
+    w.key("schema").number(u64::from(SCHEMA));
+    w.key("command").string(command);
+    w.key("result").string("invalid");
+    w.key("diagnostics");
+    diagnostics(&mut w, errors, files);
+    w.key("error").opt_string(error);
+    w.end_object();
+    w.finish()
+}
+
 /// The `diagnostics` array.
 pub fn diagnostics(w: &mut Writer, list: &[Diagnostic], files: &dyn SourceView) {
     w.begin_array();

@@ -10,7 +10,7 @@
 //! `--config FILE` reads that one file in place of the selected settings
 //! (a file that uses `extends` is refused: it would read other files).
 use super::{
-    config_inspect::{inspect_config, lookups, place_of, render_explain},
+    config_inspect::{fail_json, inspect_config, lookups, place_of, render_explain},
     ctx::{self, EXIT_FAILED, EXIT_USAGE, User},
     group_policy::SystemGroups,
     init::trusted_env::TrustedEnv,
@@ -272,6 +272,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
         return ctx::code(EXIT_USAGE);
     };
     let Some(user) = User::current() else {
+        if a.json {
+            return fail_json("explain", en(MsgId::NoHome), EXIT_FAILED);
+        }
         eprintln!("{}", en(MsgId::NoHome));
         return ctx::code(EXIT_FAILED);
     };
@@ -280,6 +283,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
         Some(p) => match report_of_file(p) {
             Ok(r) => (r, Some(ctx::show(std::path::Path::new(p)))),
             Err(e) => {
+                if a.json {
+                    return fail_json("explain", &e, EXIT_FAILED);
+                }
                 eprintln!("bingsu explain: {e}");
                 return ctx::code(EXIT_FAILED);
             }
@@ -287,6 +293,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
         None => match inspect_config(&user, &env) {
             Ok(i) => (i.report, None),
             Err((text, code)) => {
+                if a.json {
+                    return fail_json("explain", &text, code);
+                }
                 eprintln!("{text}");
                 return ctx::code(code);
             }
@@ -299,28 +308,38 @@ pub fn run(args: &[OsString]) -> ExitCode {
     } else {
         None
     };
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity() == Severity::Error)
+        .cloned()
+        .collect();
     let fail_with_errors = || {
         let catalog = Catalog(&report.files);
-        for d in report
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity() == Severity::Error)
-        {
+        if a.json {
+            let doc = bingsu_core::diag_json::failure("explain", &errors, &catalog, None);
+            // The exit code is the text mode's, whether or not the write worked.
+            let _ = ctx::print(&doc);
+            return ctx::code(EXIT_FAILED);
+        }
+        for d in &errors {
             eprintln!("{}", render_human(d, &catalog));
         }
         eprintln!("bingsu explain: the settings have errors; fix them first (bingsu config check)");
         ctx::code(EXIT_FAILED)
     };
+    // With errors in the files the prompt keeps drawing the last good
+    // settings, whether or not the report kept a snapshot of its own.
     let (compiled, basis) = match (&report.snapshot, &published) {
         _ if a.config.is_some() => match &report.snapshot {
             Some(c) => (c, Basis::File),
             None => return fail_with_errors(),
         },
+        (_, Some(p)) if !errors.is_empty() => (p, Basis::PublishedFilesInvalid),
         (Some(fresh), Some(p)) if p == fresh => (p, Basis::Published),
         (Some(_), Some(p)) => (p, Basis::PublishedFilesChanged),
-        (None, Some(p)) => (p, Basis::PublishedFilesInvalid),
         (Some(fresh), None) => (fresh, Basis::FilesOnly),
-        (None, None) => return fail_with_errors(),
+        (None, _) => return fail_with_errors(),
     };
     let ids = segment_ids(compiled);
     let only = match &a.segment {
@@ -368,6 +387,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
         explain_json(&Doc {
             compiled,
             report: &report,
+            errors: &errors,
             log: &log,
             width,
             width_flag: a.width.is_some(),
@@ -395,16 +415,10 @@ pub fn run(args: &[OsString]) -> ExitCode {
         let body = text(compiled, &log, width, only);
         // `width: N cells` carries where N came from.
         out.push_str(&body.replacen(" cells\n", &format!(" cells{note}\n"), 1));
-        if basis == Basis::PublishedFilesInvalid {
-            let catalog = Catalog(&report.files);
-            for d in report
-                .diagnostics
-                .iter()
-                .filter(|d| d.severity() == Severity::Error)
-            {
-                out.push_str(&render_human(d, &catalog));
-                out.push_str("\n\n");
-            }
+        let catalog = Catalog(&report.files);
+        for d in &errors {
+            out.push_str(&render_human(d, &catalog));
+            out.push_str("\n\n");
         }
         if wants_units {
             if from_config {
@@ -432,6 +446,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
 struct Doc<'a> {
     compiled: &'a CompiledConfig,
     report: &'a ConfigReport,
+    errors: &'a [bingsu_core::diag::Diagnostic],
     log: &'a DecisionLog,
     width: u16,
     width_flag: bool,
@@ -450,6 +465,7 @@ fn explain_json(d: &Doc<'_>) -> String {
     w.begin_object();
     w.key("schema").number(u64::from(j::SCHEMA));
     w.key("command").string("explain");
+    w.key("result").string("valid");
     w.key("settings").begin_object();
     w.key("source")
         .string(if d.source.is_some() { "file" } else { "files" });
@@ -477,17 +493,7 @@ fn explain_json(d: &Doc<'_>) -> String {
         d.only,
     );
     w.key("diagnostics");
-    let errors: Vec<_> = if d.basis == Basis::PublishedFilesInvalid {
-        d.report
-            .diagnostics
-            .iter()
-            .filter(|x| x.severity() == Severity::Error)
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    };
-    j::diagnostics(&mut w, &errors, &Catalog(&d.report.files));
+    j::diagnostics(&mut w, d.errors, &Catalog(&d.report.files));
     w.key("execution");
     if d.wants_units && !d.from_config && d.report.snapshot.is_some() {
         super::config_inspect::units_json(&mut w, d.report, d.found, d.segment);

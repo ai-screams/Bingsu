@@ -168,6 +168,11 @@ fn config_check_json_matches_the_schema_and_exits_like_the_text() {
     );
     assert!(invalid.contains("\"code\":\"E201\""), "{invalid}");
     assert!(invalid.contains("\"exit_code\":1"), "{invalid}");
+    assert!(invalid.contains("\"result\":\"invalid\""), "{invalid}");
+    assert!(
+        invalid.contains("\"result_text\":\"invalid; the prompt keeps"),
+        "{invalid}"
+    );
     schema(&[&valid, &valid_x, &invalid]);
     let base = e.base.to_str().unwrap();
     golden(
@@ -226,4 +231,101 @@ fn a_wrong_format_exits_2() {
         assert_eq!(o.status.code(), Some(2), "{args:?}");
         assert!(o.stdout.is_empty(), "{args:?}");
     }
+}
+
+// When the settings cannot be compiled, JSON mode still answers with one JSON document on stdout
+// (`result: "invalid"`, the errors), and the exit code is the text mode's.
+// 이것을 실패시키는 것: JSON 모드에서 컴파일 실패 때 stdout이 비는 것(사람용 글만 stderr로 나감), 종료 코드를 바꾸는 것,
+// 설정을 읽지 못하는 경우(없는 파일)에 문서를 내지 않는 것.
+#[test]
+fn json_mode_answers_with_a_document_when_the_settings_fail() {
+    let e = Env::new("cli_json", "failure");
+    let bad = e.put("bad.toml", "version = 1\ncolr = 1\n");
+    let o = run(
+        &e,
+        &[
+            "explain",
+            "--config",
+            bad.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(quiet(&o.stderr), "");
+    let doc = text(&o.stdout);
+    assert!(
+        doc.contains("\"result\":\"invalid\"") && doc.contains("\"code\":\"E201\""),
+        "{doc}"
+    );
+    let missing = run(
+        &e,
+        &[
+            "explain",
+            "--config",
+            "/nonexistent/none.toml",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(1));
+    let gone = text(&missing.stdout);
+    assert!(
+        gone.contains("\"result\":\"invalid\"") && gone.contains("cannot open"),
+        "{gone}"
+    );
+    // The settings folder itself unusable: config check answers the same way.
+    user_env::chmod(&e.config_dir(), 0o777);
+    let c = run(&e, &["config", "check", "--format", "json"]);
+    let code = c.status.code();
+    let unusable = text(&c.stdout);
+    assert_ne!(code, Some(0), "{unusable}");
+    assert!(
+        unusable.contains("\"command\":\"config-check\""),
+        "{unusable} {}",
+        text(&c.stderr)
+    );
+    schema(&[&doc, &gone, &unusable]);
+}
+
+// A file with an error the report keeps a snapshot for (`match` that is not a regular expression) is an error
+// basis in both formats, with the error listed.
+// 이것을 실패시키는 것: 스냅샷이 유지되는 오류를 `published-files-changed`로 고르고 진단을 빼는 것(text도 오류를 빠뜨림).
+#[test]
+fn an_error_that_keeps_the_snapshot_is_still_an_error_basis() {
+    let e = Env::new("cli_json", "kept");
+    let good = "version = 1\n[segment.\"custom/c\"]\nkind = \"command\"\ncommand = [\"/bin/echo\", \"1\"]\n[layout.line2]\nleft = [\"custom/c\", \"char\"]\n";
+    e.put_config("config.toml", good);
+    assert_eq!(e.run(&["reload"]).status.code(), Some(0));
+    let broken = good.replace(
+        "command = [\"/bin/echo\", \"1\"]\n",
+        "command = [\"/bin/echo\", \"1\"]\nmatch = \"[\"\n",
+    );
+    assert_ne!(broken, good);
+    e.put_config("config.toml", &broken);
+    let j = ok(&e, &["explain", "--width", "80", "--format", "json"]);
+    assert!(j.contains("\"basis\":\"published-files-invalid\""), "{j}");
+    assert!(j.contains("\"severity\":\"error\""), "{j}");
+    let t = ok(&e, &["explain", "--width", "80"]);
+    assert!(t.contains("your files have errors"), "{t}");
+    assert!(t.contains("E203"), "{t}");
+    schema(&[&j]);
+}
+
+// `config check --explain --format json` carries the builtin language outcomes the text section has.
+// 이것을 실패시키는 것: JSON에서 내장 언어 판정을 빼는 것(`builtin_languages`가 null), text와 다른 판정을 내는 것.
+#[test]
+fn builtin_language_outcomes_are_in_the_json() {
+    let e = Env::new("cli_json", "builtin");
+    e.put_config("config.toml", "[layout.line2]\nleft = ['node','char']\n");
+    let j = ok(&e, &["config", "check", "--explain", "--format", "json"]);
+    let t = ok(&e, &["config", "check", "--explain"]);
+    assert!(t.contains("node  not decided"), "{t}");
+    assert!(
+        j.contains("\"language\":\"node\",\"outcome\":\"not-decided\""),
+        "{j}"
+    );
+    schema(&[&j]);
+    let plain = ok(&e, &["config", "check", "--format", "json"]);
+    assert!(plain.contains("\"builtin_languages\":null"), "{plain}");
 }

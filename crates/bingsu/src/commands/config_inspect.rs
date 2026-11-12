@@ -448,7 +448,11 @@ pub(super) fn units_json(
 }
 
 /// `config check --format json`: the same facts as the text, as data.
-fn check_json(i: &Inspection, units: Option<&[(String, exec_path::Explained)]>) -> String {
+fn check_json(
+    i: &Inspection,
+    units: Option<&[(String, exec_path::Explained)]>,
+    builtin: Option<(&User, &TrustedEnv)>,
+) -> String {
     use bingsu_core::diag_json::{self as j, Writer};
     use std::os::unix::ffi::OsStrExt as _;
     let mut w = Writer::new();
@@ -514,11 +518,25 @@ fn check_json(i: &Inspection, units: Option<&[(String, exec_path::Explained)]>) 
         w.end_object();
     }
     w.end_array();
-    w.key("result").string(verdict_text(i));
-    w.key("exit_code").number(u64::from(exit_for(i)));
+    // The machine-readable verdict follows the exit code; the sentence is for people.
+    let code = exit_for(i);
+    w.key("result").string(match code {
+        0 => "valid",
+        EXIT_UNFINISHED => "incomplete",
+        _ => "invalid",
+    });
+    w.key("result_text").string(verdict_text(i));
+    w.key("exit_code").number(u64::from(code));
     w.key("execution");
     match units {
         Some(found) => units_json(&mut w, &i.report, found, None),
+        None => {
+            w.null();
+        }
+    }
+    w.key("builtin_languages");
+    match builtin {
+        Some((user, env)) => builtin_json(&mut w, &i.report, user, env),
         None => {
             w.null();
         }
@@ -813,6 +831,57 @@ fn builtin_section(i: &Inspection, user: &User, env: &TrustedEnv) -> String {
     )
 }
 
+/// The builtin language outcomes of `--explain` for the JSON output: the
+/// same decisions as `builtin_section`, as data; `null` when the layout
+/// draws no builtin language (nothing is looked up then).
+fn builtin_json(
+    w: &mut bingsu_core::diag_json::Writer,
+    report: &ConfigReport,
+    user: &User,
+    env: &TrustedEnv,
+) {
+    use super::explain_builtin as b;
+    let Some(c) = &report.snapshot else {
+        w.null();
+        return;
+    };
+    if b::drawn(c).is_empty() {
+        w.null();
+        return;
+    }
+    let place = place_of(user, env);
+    let (environment, pwd) = TrustedEnv::shell();
+    let cwd = b::shell_folder(pwd.as_deref());
+    let Some(found) = b::decisions(
+        c,
+        place.as_ref(),
+        &environment,
+        cwd.as_deref(),
+        crate::prompt_io::observe_clock().ok(),
+        user.me,
+        &mut SystemGroups::new(&user.pw.name),
+    ) else {
+        w.null();
+        return;
+    };
+    w.begin_object();
+    w.key("folder_facts_age_s");
+    match found.age_s {
+        Some(n) => w.number(n),
+        None => w.null(),
+    };
+    w.key("languages").begin_array();
+    for (language, d) in &found.rows {
+        w.begin_object();
+        w.key("language").string(language.id);
+        w.key("outcome").string(b::outcome_word(d));
+        w.key("text").string(&b::line(language, d));
+        w.end_object();
+    }
+    w.end_array();
+    w.end_object();
+}
+
 /// The runtime folder and roots of the saved folder facts. The pinned
 /// roots when init exported them (asked only then: without a pin
 /// `pinned_roots` says so on stderr); else the current candidates, read
@@ -882,6 +951,9 @@ fn run_with(
     json: bool,
 ) -> ExitCode {
     let Some(user) = User::current() else {
+        if json {
+            return fail_json("config-check", en(MsgId::NoHome), EXIT_FAILED);
+        }
         eprintln!("{}", en(MsgId::NoHome));
         return ctx::code(EXIT_FAILED);
     };
@@ -901,7 +973,8 @@ fn run_with(
             i.report.diagnostics.extend(notes);
             if json {
                 let units = (extra == Extra::Explain).then_some(found.as_slice());
-                if !ctx::print(&check_json(&i, units)) {
+                let builtin = (extra == Extra::Explain).then_some((&user, &env));
+                if !ctx::print(&check_json(&i, units, builtin)) {
                     return ctx::code(EXIT_FAILED);
                 }
                 return ctx::code(exit(&i));
@@ -918,9 +991,24 @@ fn run_with(
             ctx::code(exit(&i))
         }
         Err((text, code)) => {
+            if json {
+                return fail_json("config-check", &text, code);
+            }
             eprintln!("{text}");
             ctx::code(code)
         }
+    }
+}
+
+/// The JSON output of a run that could not read the settings at all: the
+/// same `result: "invalid"` document `explain` gives, with the reason in
+/// `error`. The exit code is the text mode's.
+pub(super) fn fail_json(command: &str, error: &str, code: u8) -> ExitCode {
+    let doc = bingsu_core::diag_json::failure(command, &[], &Catalog(&[]), Some(error));
+    if ctx::print(&doc) {
+        ctx::code(code)
+    } else {
+        ctx::code(EXIT_FAILED)
     }
 }
 

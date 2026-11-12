@@ -118,7 +118,10 @@ fn the_schema_refuses_a_changed_shape() {
     let no_help = good.replacen(",\"help\":\"bingsu help E201\"", "", 1);
     let extra = good.replacen("\"code\":\"E201\"", "\"code\":\"E201\",\"extra\":1", 1);
     let severity = good.replacen("\"severity\":\"error\"", "\"severity\":\"fatal\"", 1);
+    // Python's `$` also matches before a final newline; `maxLength` closes that.
+    let newline = good.replacen("\"code\":\"E201\"", "\"code\":\"E201\\n\"", 1);
     for (name, doc) in [
+        ("code with a final newline", &newline),
         ("renamed", &first_why),
         ("dropped", &no_help),
         ("added", &extra),

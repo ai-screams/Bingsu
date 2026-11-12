@@ -217,6 +217,66 @@ impl Here<'_> {
     }
 }
 
+/// What `--explain` finds out about the builtin languages a layout draws.
+pub(crate) struct Outcome {
+    /// Seconds since the folder facts were collected; `None` without facts.
+    pub age_s: Option<u64>,
+    pub rows: Vec<(&'static Language, Decision)>,
+}
+
+/// The decisions for every builtin language the layout draws, or `None`
+/// when it draws none (nothing is looked up then).
+pub(crate) fn decisions(
+    config: &CompiledConfig,
+    place: Option<&Place>,
+    environment: &[u8],
+    cwd: Option<&[u8]>,
+    now: Option<Clock>,
+    me: u32,
+    groups: &mut SystemGroups,
+) -> Option<Outcome> {
+    let languages = drawn(config);
+    if languages.is_empty() {
+        return None;
+    }
+    let facts = match (place, cwd, now) {
+        (Some(place), Some(cwd), Some(now)) => {
+            saved_facts(place, cwd, now, me, groups).map(|c| (c, now))
+        }
+        _ => None,
+    };
+    let answers = facts.as_ref().map(|(c, _)| Languages::from_result(c));
+    let rows = languages
+        .into_iter()
+        .map(|language| {
+            let d = match (&answers, cwd) {
+                (_, None) => Decision::NotDecided(NotDecided::NoCwd),
+                (Some(a), Some(cwd)) => decide(language, a, environment, cwd, me, groups),
+                (None, Some(_)) => Decision::NotDecided(NotDecided::NoFacts),
+            };
+            (language, d)
+        })
+        .collect();
+    Some(Outcome {
+        age_s: facts
+            .as_ref()
+            .map(|(c, now)| now.now.saturating_sub(c.completed_at_ns) / 1_000_000_000),
+        rows,
+    })
+}
+
+/// The words of a decision's kind, for the JSON output.
+pub(crate) fn outcome_word(d: &Decision) -> &'static str {
+    match d {
+        Decision::NotDecided(_) => "not-decided",
+        Decision::Planned(p) => match &p.action {
+            Action::Show(_) => "shows",
+            Action::Hide(_) => "hidden",
+            Action::Run(_) => "runs",
+        },
+    }
+}
+
 /// The section, or an empty string when the layout draws no builtin
 /// language.
 pub(crate) fn section(
@@ -228,23 +288,15 @@ pub(crate) fn section(
     me: u32,
     groups: &mut SystemGroups,
 ) -> String {
-    let languages = drawn(config);
-    if languages.is_empty() {
+    let Some(found) = decisions(config, place, environment, cwd, now, me, groups) else {
         return String::new();
-    }
-    let facts = match (place, cwd, now) {
-        (Some(place), Some(cwd), Some(now)) => {
-            saved_facts(place, cwd, now, me, groups).map(|c| (c, now))
-        }
-        _ => None,
     };
     let mut out = String::from("builtin languages (--explain; ");
-    match &facts {
-        Some((c, now)) => {
+    match found.age_s {
+        Some(age) => {
             let _ = write!(
                 out,
-                "decided as a prompt in this folder would decide now, from the folder facts collected {} s ago, which may be out of date; ",
-                now.now.saturating_sub(c.completed_at_ns) / 1_000_000_000
+                "decided as a prompt in this folder would decide now, from the folder facts collected {age} s ago, which may be out of date; "
             );
         }
         None => out.push_str("no folder facts for this folder; "),
@@ -253,14 +305,8 @@ pub(crate) fn section(
         "executables as a round finds them, inside the repository rules, which can differ from the execution section; \
          shell environment entries without '=' are not seen here, so a round can differ; nothing is run):\n",
     );
-    let answers = facts.as_ref().map(|(c, _)| Languages::from_result(c));
-    for language in languages {
-        let d = match (&answers, cwd) {
-            (_, None) => Decision::NotDecided(NotDecided::NoCwd),
-            (Some(a), Some(cwd)) => decide(language, a, environment, cwd, me, groups),
-            (None, Some(_)) => Decision::NotDecided(NotDecided::NoFacts),
-        };
-        out.push_str(&line(language, &d));
+    for (language, d) in &found.rows {
+        out.push_str(&line(language, d));
         out.push('\n');
     }
     out
