@@ -411,6 +411,28 @@ def test_blocked_calibration_preserves_protocol_evidence(monkeypatch, tmp_path):
     assert got['hypotheses']['base']['ready_p50_within_hypothesis'] is None
 
 
+# 이것을 실패시키는 것: collector 결과나 n7 기록이 protocol의 resolution을 옮기지 않는 것
+# (보정 spread 1.10에서 p50 100 -> 104는 undecidable인데 저장된 결과에 판정이 없다).
+def test_experiment_resolution_survives_the_stored_results(monkeypatch, tmp_path):
+    import n7_measure
+    p = product.protocol
+    variants = {n: dict(samples=[], summary=dict(ns=p.summary([v] * 20))) for n, v in (('base', 100), ('candidate', 104))}
+    resolution = p.resolution(variants, 1.10)
+    assert resolution['ns']['verdict'] == 'undecidable'
+    paired = dict(status='BLOCKED', reason='fixture', condition={}, calibration=dict(spread=1.10), seed=1, blocks=[],
+                  order=[], variants=variants, resolution=resolution)
+    monkeypatch.setattr(product, 'prepared', lambda _: dict(hashes={}, policy={}, stripped_bytes={}))
+    monkeypatch.setattr(product, 'host', lambda: {})
+    monkeypatch.setattr(product, 'watchdog_evidence', lambda _: {})
+    monkeypatch.setattr(product, 'ROOT', tmp_path)
+    (tmp_path / 'target').mkdir()
+    monkeypatch.setattr(product.protocol, 'paired', lambda *_, **__: paired)
+    assert product.measure_pair('base', 'candidate', 200)['resolution'] == resolution
+    measured = {}
+    n7_measure.record(measured, tmp_path / 'raw', 'prompt-common', paired)
+    assert measured['prompt-common']['resolution'] == resolution
+
+
 def test_legacy_host_keeps_unknown_power_instead_of_raising(monkeypatch):
     monkeypatch.setattr(product.protocol, 'observe_host', lambda: {'power': 'unknown'})
     def unavailable(*args, **kwargs): raise OSError('pmset unavailable')

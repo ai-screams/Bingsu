@@ -411,6 +411,9 @@ def measure_pair(base: str, candidate: str, rounds: int, *, condition=None) -> d
               "host": host(), "rounds": rounds, "order": order, "cold_first_process": cold,
               "variants": {}, "missing": [], "pending": ["M3c/M3d git 19000-file RSS", "M3d formal B5-B7", "reboot-cold", "whole-prompt peak RSS"]}
     result.update({k: paired[k] for k in ("condition", "calibration", "seed", "blocks")})
+    # An experiment run's undecidable ratios (protocol.resolution, U-42) stay with the result.
+    if "resolution" in paired:
+        result["resolution"] = paired["resolution"]
     if "reason" in paired:
         result["reason"] = paired["reason"]
     for name in binaries:
