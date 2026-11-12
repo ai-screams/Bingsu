@@ -26,6 +26,11 @@ left = ["dir", "git", "custom/kube", "custom/aws", "custom/tag"]
 and language segment, whether it runs, why not, and where each key came from. Editors that read JSON Schema complete
 the keys from `bingsu config schema`.
 
+`bingsu list` prints the names a config accepts, one per line: `presets`, `segments`, `flavors`, `roles`, `shorteners`
+and `icons`. `bingsu list presets --preview` draws each preset once with your current folder (the other values are
+samples; on a terminal it uses color unless `NO_COLOR` is set; `--icons nerd|light|unicode|ascii` picks the icon set,
+`unicode` by default). It starts no command and reads no config.
+
 Writing a command segment for other people to use? See
 [Writing a command segment for others](writing-command-segments.md).
 

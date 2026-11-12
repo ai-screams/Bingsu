@@ -88,6 +88,8 @@ mod init;
 #[cfg(unix)]
 pub(crate) mod io_meter;
 #[cfg(unix)]
+mod list;
+#[cfg(unix)]
 mod log;
 #[cfg(unix)]
 mod messages;
@@ -132,13 +134,15 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
+        Some("list") => list::run(&a.args[1..]),
+        #[cfg(unix)]
         Some("reload") => reload::run(&a.argv0, &a.args[1..]),
         #[cfg(feature = "bench-stubs")]
         Some("__collect-stub") => ExitCode::from(
             u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
         ),
         _ => {
-            eprintln!("usage: bingsu <config|explain|help|init|prompt|reload> ...");
+            eprintln!("usage: bingsu <config|explain|help|init|list|prompt|reload> ...");
             ExitCode::from(2)
         }
     }
