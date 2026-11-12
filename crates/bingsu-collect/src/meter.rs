@@ -142,6 +142,92 @@ impl Drop for PathAllocation {
     }
 }
 
+/// Bytes that live under their own live reservation: dropping the buffer
+/// releases it, and the bytes cannot leave it (no `DerefMut`, no `into_vec`).
+pub struct Reserved {
+    bytes: Vec<u8>,
+    _hold: PathAllocation,
+}
+impl Reserved {
+    /// `bytes` under `hold`, which already reserved at least their capacity.
+    pub(crate) fn held(bytes: Vec<u8>, hold: PathAllocation) -> Self {
+        Self { bytes, _hold: hold }
+    }
+
+    /// A copy of `bytes`, reserved before it is made: a refused reservation
+    /// allocates nothing.
+    pub fn copy(bytes: &[u8], meter: &mut Meter) -> Result<Self, ReadError> {
+        Self::concat(&[bytes], meter)
+    }
+
+    /// `parts` joined, reserved at their total length before the join.
+    pub fn concat(parts: &[&[u8]], meter: &mut Meter) -> Result<Self, ReadError> {
+        let size = parts
+            .iter()
+            .try_fold(0usize, |sum, part| sum.checked_add(part.len()))
+            .ok_or(ReadError::Limit)?;
+        let mut hold = meter.path_allocation();
+        hold.reserve(size, meter)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(size)
+            .map_err(|_| ReadError::Limit)?;
+        for part in parts {
+            bytes.extend_from_slice(part);
+        }
+        Ok(Self::held(bytes, hold))
+    }
+
+    /// Bytes another budget already bounds, holding no live reservation, as
+    /// before `Reserved` existed: a `ReadFile::read_reserved` snapshot (its
+    /// file cap and any axis charged before the read) or worktree content
+    /// (`read_capacity` charged cap+1 to the live allocation for the whole
+    /// request). Only `RepoIo::read` and `RepoIo::read_sized_with_cap` build
+    /// one; a source test pins that.
+    pub(crate) fn unheld(bytes: Vec<u8>, meter: &Meter) -> Self {
+        Self::held(bytes, meter.path_allocation())
+    }
+}
+impl std::ops::Deref for Reserved {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+impl std::fmt::Debug for Reserved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Repository bytes never reach a product message; tests see them.
+        #[cfg(test)]
+        return f
+            .debug_tuple("Reserved")
+            .field(&self.bytes.as_slice())
+            .finish();
+        #[cfg(not(test))]
+        f.debug_tuple("Reserved").field(&self.bytes.len()).finish()
+    }
+}
+/// Equal bytes, whatever the reservation.
+impl PartialEq for Reserved {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+impl PartialEq<[u8]> for Reserved {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.bytes == other
+    }
+}
+impl PartialEq<&[u8]> for Reserved {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.bytes == *other
+    }
+}
+impl<const N: usize> PartialEq<&[u8; N]> for Reserved {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.bytes == other.as_slice()
+    }
+}
+
 impl Meter {
     pub fn new(deadline: Instant) -> Self {
         Self {
@@ -390,6 +476,7 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     // 이것을 실패시키는 것: 객체 예약의 drop 반환 또는 객체별 OBJECT_ALLOC 검사를 제거하는 것.
     #[test]
     fn object_reservations_are_live_and_individually_bounded() {

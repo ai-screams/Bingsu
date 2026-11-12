@@ -6,6 +6,7 @@ use super::{
     io::{RepoIo, RepoPath, RootId},
     refs::{self, ObjectId, Target},
 };
+use crate::meter::Reserved;
 use crate::safe_read::{ReadCap, ReadError};
 use bingsu_core::{
     collection::{
@@ -84,7 +85,7 @@ pub(crate) fn divergence(repo: &GuardedRepository<'_>) -> Result<Option<(u32, u3
     walk(&io, &objects, head, upstream).map(Some)
 }
 
-fn read_config(io: &RepoIo<'_>, root: RootId, name: &[u8]) -> Result<Vec<u8>, ReadError> {
+fn read_config(io: &RepoIo<'_>, root: RootId, name: &[u8]) -> Result<Option<Reserved>, ReadError> {
     match io.read(
         RepoPath::new(root, name),
         ReadCap {
@@ -92,24 +93,28 @@ fn read_config(io: &RepoIo<'_>, root: RootId, name: &[u8]) -> Result<Vec<u8>, Re
             single_link: true,
         },
     ) {
-        Ok(bytes) => Ok(bytes),
-        Err(ReadError::Missing) => Ok(Vec::new()),
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(ReadError::Missing) => Ok(None),
         Err(error) => Err(error),
     }
 }
 
 /// Resolve branch.merge through repository fetch refspecs. URLs, includes,
 /// push refspecs and commands are never consumed. Ambiguous mappings are unknown.
-fn upstream(io: &RepoIo<'_>, branch: &[u8]) -> Result<Option<Vec<u8>>, ReadError> {
+/// The name keeps its own reservation after the config parsers' are released,
+/// through head resolution and the graph walk.
+fn upstream(io: &RepoIo<'_>, branch: &[u8]) -> Result<Option<Reserved>, ReadError> {
     let common = read_config(io, RootId::CommonDir, b"config")?;
     let worktree = read_config(io, RootId::GitDir, b"config.worktree")?;
     io.metered(|meter| {
-        let (common, _common_allocation) = config::isolated(&common, meter)?;
+        let (common, _common_allocation) =
+            config::isolated(common.as_deref().unwrap_or(&[]), meter)?;
         let active = common
             .boolean("extensions.worktreeConfig")
             .map_err(|_| INVALID)?
             .unwrap_or(false);
-        let (worktree, _worktree_allocation) = config::isolated(&worktree, meter)?;
+        let (worktree, _worktree_allocation) =
+            config::isolated(worktree.as_deref().unwrap_or(&[]), meter)?;
         // Includes remain inert: their effective upstream cannot be inferred
         // from local bytes, even if a condition appears inactive or empty.
         for file in [&common, &worktree] {
@@ -154,7 +159,7 @@ fn upstream(io: &RepoIo<'_>, branch: &[u8]) -> Result<Option<Vec<u8>>, ReadError
         valid_ref(source)?;
         let remote = remote.expect("configured remote");
         if remote == b"." {
-            return Ok(Some(source.to_vec()));
+            return Reserved::copy(source, meter).map(Some);
         }
         if remote.is_empty() {
             return Err(INVALID);
@@ -192,15 +197,18 @@ fn upstream(io: &RepoIo<'_>, branch: &[u8]) -> Result<Option<Vec<u8>>, ReadError
                         if !from.contains(&b'*') || to[star + 1..].contains(&b'*') {
                             return Err(INVALID);
                         }
-                        [&to[..star], capture, &to[star + 1..]].concat()
+                        Reserved::concat(&[&to[..star], capture, &to[star + 1..]], meter)?
                     } else {
                         if from.contains(&b'*') {
                             return Err(INVALID);
                         }
-                        to.to_vec()
+                        Reserved::copy(to, meter)?
                     };
                     valid_ref(&mapped)?;
-                    if target.as_ref().is_some_and(|old| old != &mapped) {
+                    if target
+                        .as_ref()
+                        .is_some_and(|old: &Reserved| old[..] != mapped[..])
+                    {
                         return Err(INVALID);
                     }
                     target = Some(mapped);

@@ -83,7 +83,6 @@ impl<'a> SafeObjectDb<'a> {
             match self.io.read_sized(
                 RepoPath::new(RootId::CommonDir, &relative),
                 (OBJECT_BUFFER - 1) as u64,
-                None,
             ) {
                 Ok(bytes) => {
                     return self
@@ -123,7 +122,6 @@ impl<'a> SafeObjectDb<'a> {
         match self.io.read_sized(
             RepoPath::new(RootId::CommonDir, relative.as_bytes()),
             (OBJECT_BUFFER - 1) as u64,
-            None,
         ) {
             Ok(bytes) => self
                 .io

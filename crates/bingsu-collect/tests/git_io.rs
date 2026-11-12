@@ -6868,3 +6868,60 @@ fn every_live_symref_name_copy_is_held_reserved() {
         assert_eq!(held.get(), base);
     }
 }
+
+/// Every `.rs` file under src, CRLF normalized.
+fn sources() -> Vec<(std::path::PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("\r\n", "\n");
+                out.push((path, text));
+            }
+        }
+    }
+    out
+}
+
+// 이것을 실패시키는 것: 예약 없는 Reserved를 다른 곳에서 만드는 것(예약을 피하는 길), 두 곳 가운데
+// 하나를 다른 함수로 옮기는 것.
+#[test]
+fn unheld_bytes_come_only_from_already_charged_reads() {
+    let call = ["Reserved::", "unheld("].concat();
+    let mut found = Vec::new();
+    for (path, text) in sources() {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(&call) {
+            let before = &rest[..at];
+            let function = before
+                .rfind(" fn ")
+                .map(|start| {
+                    before[start + 1..]
+                        .split(['(', '<'])
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                })
+                .unwrap_or_default();
+            found.push((
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                function,
+            ));
+            rest = &rest[at + call.len()..];
+        }
+    }
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("io.rs".to_owned(), "fn read".to_owned()),
+            ("io.rs".to_owned(), "fn read_sized_with_cap".to_owned()),
+        ],
+    );
+}
