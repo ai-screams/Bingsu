@@ -13,7 +13,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::meter::{Lease, Meter, Op, PathAllocation, Phase, READ_CHUNK};
+use crate::meter::{Lease, Meter, Op, PathAllocation, Phase, READ_CHUNK, Reserved};
 // Compatibility spelling for B1 callers; the wire query is now the sole type.
 pub use bingsu_core::collection::path_facts::PathQuery as DiscoveryQuery;
 
@@ -190,7 +190,7 @@ pub fn read_stage_a(
     file: StageAFile,
     access: &Access,
     meter: &mut Meter,
-) -> Result<Vec<u8>, ReadError> {
+) -> Result<Reserved, ReadError> {
     let operation = match file {
         StageAFile::RebaseMergeHeadName => Some(StageADirectory::RebaseMerge),
         StageAFile::RebaseApplyHeadName => Some(StageADirectory::RebaseApply),
@@ -209,7 +209,7 @@ fn read_stage_a_component(
     root: &Root,
     name: &[u8],
     meter: &mut Meter,
-) -> Result<Vec<u8>, ReadError> {
+) -> Result<Reserved, ReadError> {
     let Opened { fd, metadata, .. } = walk::one_component(root, name, false, meter)?;
     if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(ReadError::Special);
@@ -237,7 +237,7 @@ impl StageADir<'_> {
         file: StageAFile,
         access: &Access,
         meter: &mut Meter,
-    ) -> Result<Vec<u8>, ReadError> {
+    ) -> Result<Reserved, ReadError> {
         if access.guarantee().is_some() {
             // A moved held child must never become a new confinement root.
             let prefix = match (self.kind, file) {
@@ -463,7 +463,7 @@ impl Discovery {
         file: StageAFile,
         anchor: &Root,
         meter: &mut Meter,
-    ) -> Result<Vec<u8>, ReadError> {
+    ) -> Result<Reserved, ReadError> {
         if !matches!(file, StageAFile::CommonDir | StageAFile::WorktreePointer) {
             return Err(ReadError::Denied);
         }
@@ -483,7 +483,7 @@ impl Discovery {
         anchor: &Root,
         access: &Access,
         meter: &mut Meter,
-    ) -> Result<Vec<u8>, ReadError> {
+    ) -> Result<Reserved, ReadError> {
         self.validate(&self.cwd)?;
         same_mount(self.cwd.identity, anchor.identity)?;
         if !self.logical || !self.cwd.owned(meter)? {
@@ -989,7 +989,8 @@ impl ReadFile {
     /// Metadata has its own file cap and a live read reservation. It never
     /// spends the worktree content budget. Use the same inspected fd and size;
     /// the extra byte detects growth without reserving 64 KiB for every HEAD.
-    pub(crate) fn read_metadata(self, cap: u64, meter: &mut Meter) -> Result<Vec<u8>, ReadError> {
+    /// The returned bytes keep the read's reservation until they are dropped.
+    pub(crate) fn read_metadata(self, cap: u64, meter: &mut Meter) -> Result<Reserved, ReadError> {
         let size = u64::try_from(self.metadata.st_size).map_err(|_| ReadError::Limit)?;
         if size > cap {
             return Err(ReadError::Limit);
@@ -1008,7 +1009,7 @@ impl ReadFile {
         if bytes.len() as u64 != size {
             return Err(ReadError::Changed);
         }
-        Ok(bytes)
+        Ok(Reserved::held(bytes, scratch))
     }
 
     /// Metadata of the already validated, held regular file; never reopens a path.

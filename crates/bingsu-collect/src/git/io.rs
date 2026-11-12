@@ -1,6 +1,6 @@
 //! The only filesystem port available to git parsers.
 use crate::{
-    meter::Meter,
+    meter::{Meter, Reserved},
     safe_read::{self, Access, Listing, ReadCap, ReadError, Root},
 };
 use bingsu_core::collection::budget::Axis;
@@ -59,6 +59,12 @@ pub struct RepoIo<'a> {
 /// the safe-read fd is closed before this snapshot can escape its checks.
 #[derive(Debug)]
 pub struct ReadMap(Vec<u8>);
+
+/// A sized read: under the read's own live reservation, or charged to an axis.
+enum Sized {
+    Held(Reserved),
+    Charged(Vec<u8>),
+}
 
 /// Fuzz and seed replay only: the bytes a bounded map would have returned.
 /// collector_fuzz is set by fuzz/collector's build script, never a feature.
@@ -209,24 +215,27 @@ impl<'a> RepoIo<'a> {
         result
     }
 
-    pub fn read(&self, path: RepoPath, cap: ReadCap) -> Result<Vec<u8>, ReadError> {
+    pub fn read(&self, path: RepoPath, cap: ReadCap) -> Result<Reserved, ReadError> {
         if path.root != RootId::Worktree {
-            return self.read_sized_with_cap(path, cap, None, None);
+            return self.read_sized_with_cap(path, cap);
         }
         self.metered(|meter| {
-            safe_read::read(
+            // Worktree content: read_capacity charged its cap+1 to the live
+            // allocation and the content axis for the rest of the request.
+            let bytes = safe_read::read(
                 self.root(path.root),
                 &path.relative,
                 cap,
                 self.access,
                 meter,
-            )
+            )?;
+            Ok(Reserved::unheld(bytes, meter))
         })
     }
 
     /// Reserve the inspected size before reading from that same fd. Growth is
     /// an error (cap+1 probe), never an uncharged extension of the reservation.
-    pub(super) fn read_ref(&self, path: RepoPath, cap: u64) -> Result<Vec<u8>, ReadError> {
+    pub(super) fn read_ref(&self, path: RepoPath, cap: u64) -> Result<Reserved, ReadError> {
         self.read_ref_stat(path, cap).map(|(bytes, _)| bytes)
     }
 
@@ -236,7 +245,7 @@ impl<'a> RepoIo<'a> {
         &self,
         path: RepoPath,
         cap: u64,
-    ) -> Result<(Vec<u8>, libc::stat), ReadError> {
+    ) -> Result<(Reserved, libc::stat), ReadError> {
         self.metered(|meter| {
             // Exhaustion forbids even another path lookup.
             if meter.budget.used(Axis::RefBytes) == Axis::RefBytes.limit() {
@@ -599,33 +608,7 @@ impl<'a> RepoIo<'a> {
         cap: u64,
         axis: Axis,
     ) -> Result<Vec<u8>, ReadError> {
-        self.read_sized(path, cap, Some(axis))
-    }
-
-    pub(super) fn read_patterns(
-        &self,
-        path: RepoPath,
-        files: Axis,
-        bytes: Axis,
-    ) -> Result<Vec<u8>, ReadError> {
-        self.read_sized_with_cap(
-            path,
-            ReadCap {
-                bytes: bingsu_core::collection::budget::SMALL_FILE_BYTES,
-                single_link: true,
-            },
-            Some(bytes),
-            Some(files),
-        )
-    }
-
-    pub(crate) fn read_sized(
-        &self,
-        path: RepoPath,
-        cap: u64,
-        axis: Option<Axis>,
-    ) -> Result<Vec<u8>, ReadError> {
-        self.read_sized_with_cap(
+        self.read_charged(
             path,
             ReadCap {
                 bytes: cap,
@@ -636,54 +619,102 @@ impl<'a> RepoIo<'a> {
         )
     }
 
-    fn read_sized_with_cap(
+    pub(super) fn read_patterns(
+        &self,
+        path: RepoPath,
+        files: Axis,
+        bytes: Axis,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.read_charged(
+            path,
+            ReadCap {
+                bytes: bingsu_core::collection::budget::SMALL_FILE_BYTES,
+                single_link: true,
+            },
+            bytes,
+            Some(files),
+        )
+    }
+
+    pub(crate) fn read_sized(&self, path: RepoPath, cap: u64) -> Result<Reserved, ReadError> {
+        self.read_sized_with_cap(
+            path,
+            ReadCap {
+                bytes: cap,
+                single_link: true,
+            },
+        )
+    }
+
+    /// No axis: a single-link file keeps the read's live reservation; any
+    /// other file is read as before, under no axis, and holds none.
+    fn read_sized_with_cap(&self, path: RepoPath, cap: ReadCap) -> Result<Reserved, ReadError> {
+        self.metered(|meter| match self.sized(path, cap, None, None, meter)? {
+            Sized::Held(bytes) => Ok(bytes),
+            Sized::Charged(bytes) => Ok(Reserved::unheld(bytes, meter)),
+        })
+    }
+
+    /// A byte axis (and optionally a file axis) charged before the read: the
+    /// bytes are bounded by those axes, not by the live allocation.
+    fn read_charged(
+        &self,
+        path: RepoPath,
+        cap: ReadCap,
+        axis: Axis,
+        files: Option<Axis>,
+    ) -> Result<Vec<u8>, ReadError> {
+        self.metered(
+            |meter| match self.sized(path, cap, Some(axis), files, meter)? {
+                Sized::Charged(bytes) => Ok(bytes),
+                // A charged axis never takes the reserved metadata path.
+                Sized::Held(_) => Err(ReadError::Denied),
+            },
+        )
+    }
+
+    fn sized(
         &self,
         path: RepoPath,
         cap: ReadCap,
         axis: Option<Axis>,
         files: Option<Axis>,
-    ) -> Result<Vec<u8>, ReadError> {
-        self.metered(|meter| {
-            if axis.is_some_and(|axis| meter.budget.used(axis) == axis.limit())
-                || files.is_some_and(|axis| meter.budget.used(axis) == axis.limit())
-            {
-                return Err(ReadError::Limit);
-            }
-            let file = if path.root == RootId::Worktree {
-                safe_read::resolve_nofollow(
-                    self.root(path.root),
-                    &path.relative,
-                    self.access,
-                    meter,
-                )?
-            } else {
-                safe_read::resolve_with(self.root(path.root), &path.relative, self.access, meter)?
-            };
-            let size = u64::try_from(file.metadata().st_size).map_err(|_| ReadError::Limit)?;
-            if size > cap.bytes {
-                return Err(ReadError::Limit);
-            }
-            if let Some(files) = files {
-                meter.charge_axis(files, 1)?;
-            }
-            if let Some(axis) = axis {
-                meter.charge_axis(axis, size)?;
-            }
-            if axis.is_none() && files.is_none() && cap.single_link {
-                return file.read_metadata(cap.bytes, meter);
-            }
-            let bytes = file.read_reserved(
-                ReadCap {
-                    bytes: size,
-                    single_link: cap.single_link,
-                },
-                meter,
-            )?;
-            if bytes.len() as u64 != size {
-                return Err(ReadError::Changed);
-            }
-            Ok(bytes)
-        })
+        meter: &mut Meter,
+    ) -> Result<Sized, ReadError> {
+        if axis.is_some_and(|axis| meter.budget.used(axis) == axis.limit())
+            || files.is_some_and(|axis| meter.budget.used(axis) == axis.limit())
+        {
+            return Err(ReadError::Limit);
+        }
+        let file = if path.root == RootId::Worktree {
+            safe_read::resolve_nofollow(self.root(path.root), &path.relative, self.access, meter)?
+        } else {
+            safe_read::resolve_with(self.root(path.root), &path.relative, self.access, meter)?
+        };
+        let size = u64::try_from(file.metadata().st_size).map_err(|_| ReadError::Limit)?;
+        if size > cap.bytes {
+            return Err(ReadError::Limit);
+        }
+        if let Some(files) = files {
+            meter.charge_axis(files, 1)?;
+        }
+        if let Some(axis) = axis {
+            meter.charge_axis(axis, size)?;
+        }
+        if axis.is_none() && files.is_none() && cap.single_link {
+            return file.read_metadata(cap.bytes, meter).map(Sized::Held);
+        }
+        let bytes = file.read_reserved(
+            ReadCap {
+                bytes: size,
+                single_link: cap.single_link,
+            },
+            meter,
+        )?;
+        if bytes.len() as u64 != size {
+            return Err(ReadError::Changed);
+        }
+        Ok(Sized::Charged(bytes))
     }
 
     /// Stream a stable prefix from ONE fd, with a separately charged reflog

@@ -359,6 +359,67 @@ fn divergence_matches_local_rev_list() {
     }
 }
 
+// The HEAD bytes and the upstream name keep their reservations through the
+// graph walk: a name longer by `PAD` bytes leaves exactly `PAD` more bytes live
+// at the walk's last read. 이것을 실패시키는 것: read_metadata가 돌려준 버퍼의 예약을 함수 끝에서
+// 푸는 것(HEAD 차이 0), upstream 이름을 예약 없이 복사하는 것(remote "."의 사본, `*` 매핑의 결합,
+// `*` 없는 매핑의 사본 각각에서 차이 0).
+#[test]
+fn head_and_upstream_stay_reserved_through_the_walk() {
+    const PAD: usize = 37;
+    let f = Fixture::new();
+    let (head, upstream) = f.graph();
+    let root = f.root();
+    let access = access();
+    let live_at_last_read = |branch: &str, config: &str, upstream_ref: &str| -> u64 {
+        f.write("HEAD", format!("ref: refs/heads/{branch}\n"));
+        f.write(&format!("refs/heads/{branch}"), head.to_string());
+        f.write(upstream_ref, upstream.to_string());
+        f.write("config", config.replace("BRANCH", branch));
+        let m = RefCell::new(meter());
+        let live = m.borrow().allocation_observer();
+        let last = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen = std::rc::Rc::clone(&last);
+        m.borrow_mut().hook = Some(Box::new(move |event| {
+            if event == "before_read" {
+                seen.set(Some(live.get()));
+            }
+        }));
+        let repo = repository(&root, &access, &m);
+        assert_eq!(divergence(&repo), Ok(Some((2, 1))), "{config}");
+        last.get().expect("the walk reads objects")
+    };
+    let pad = "x".repeat(PAD);
+    let dot = "[branch \"BRANCH\"]\nremote=.\nmerge=refs/heads/UP\n";
+    let star = "[branch \"BRANCH\"]\nremote=origin\nmerge=refs/heads/main\n[remote \"origin\"]\nfetch=+refs/heads/*:refs/remotes/UP/*\n";
+    let plain = "[branch \"BRANCH\"]\nremote=origin\nmerge=refs/heads/main\n[remote \"origin\"]\nfetch=refs/heads/main:refs/remotes/plain-UP\n";
+    // HEAD: a longer branch name, the same upstream.
+    let base = live_at_last_read("main", &dot.replace("UP", "up"), "refs/heads/up");
+    let longer = live_at_last_read(
+        &format!("main{pad}"),
+        &dot.replace("UP", "up"),
+        "refs/heads/up",
+    );
+    assert_eq!(longer - base, PAD as u64, "HEAD bytes");
+    for (name, config, upstream_ref) in [
+        ("remote .", dot, "refs/heads/UP"),
+        ("star mapping", star, "refs/remotes/UP/main"),
+        ("plain mapping", plain, "refs/remotes/plain-UP"),
+    ] {
+        let short = live_at_last_read(
+            "main",
+            &config.replace("UP", "up"),
+            &upstream_ref.replace("UP", "up"),
+        );
+        let long = live_at_last_read(
+            "main",
+            &config.replace("UP", &format!("up{pad}")),
+            &upstream_ref.replace("UP", &format!("up{pad}")),
+        );
+        assert_eq!(long - short, PAD as u64, "{name}");
+    }
+}
+
 // Fails if a missing branch.remote is guessed as origin, or configured errors
 // are turned into absence. Worktree overrides apply only when enabled.
 #[test]

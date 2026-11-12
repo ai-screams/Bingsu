@@ -2,7 +2,7 @@
 //! path-opening gix constructors, or ambient repository state exists here.
 use super::{ReadMap, RepoIo, RepoPath, RootId, UNSUPPORTED, index::checksum};
 use crate::{
-    meter::{Meter, ObjectAllocation},
+    meter::{Meter, ObjectAllocation, Reserved},
     safe_read::ReadError,
 };
 use bingsu_core::collection::budget::{self, Axis};
@@ -83,12 +83,11 @@ impl<'a> SafeObjectDb<'a> {
             match self.io.read_sized(
                 RepoPath::new(RootId::CommonDir, &relative),
                 (OBJECT_BUFFER - 1) as u64,
-                None,
             ) {
                 Ok(bytes) => {
                     return self
                         .io
-                        .metered(|meter| loose(&bytes, id, buffer, meter))
+                        .metered(|meter| loose_read(&bytes, id, buffer, meter))
                         .map(|decoded| self.retain(decoded));
                 }
                 Err(ReadError::Missing) => {}
@@ -123,11 +122,10 @@ impl<'a> SafeObjectDb<'a> {
         match self.io.read_sized(
             RepoPath::new(RootId::CommonDir, relative.as_bytes()),
             (OBJECT_BUFFER - 1) as u64,
-            None,
         ) {
             Ok(bytes) => self
                 .io
-                .metered(|meter| loose(&bytes, id, buffer, meter))
+                .metered(|meter| loose_read(&bytes, id, buffer, meter))
                 .map(|decoded| self.retain(decoded)),
             Err(ReadError::Missing) => Ok(None),
             Err(error) => Err(error),
@@ -357,20 +355,48 @@ fn verify(id: &oid, kind: Kind, buffer: &[u8]) -> Result<(), ReadError> {
     Ok(())
 }
 
+/// Direct bytes-parser callers (fuzz, tests): the compressed bytes are
+/// reserved here, as safe-read's cap+1 allocation would be.
 pub(crate) fn loose<'b>(
     bytes: &[u8],
     id: &oid,
     buffer: &'b mut Vec<u8>,
     meter: &mut Meter,
 ) -> Result<Decoded<'b>, ReadError> {
-    // Reserve room for safe-read's cap+1 allocation before constructing zlib.
     if bytes.len() >= OBJECT_BUFFER {
         return Err(ReadError::Limit);
     }
-    // Direct bytes-parser callers obey the same live-capacity bound as Find.
     *buffer = Vec::new();
     let mut allocation = meter.object_allocation();
     allocation.reserve(DECODER_OVERHEAD + bytes.len() + 1, meter)?;
+    inflate_loose(bytes, id, buffer, allocation, meter)
+}
+
+/// A loose object read by Find: the compressed bytes count toward the
+/// object's cap, but their read already charges them to the live total.
+pub(crate) fn loose_read<'b>(
+    bytes: &Reserved,
+    id: &oid,
+    buffer: &'b mut Vec<u8>,
+    meter: &mut Meter,
+) -> Result<Decoded<'b>, ReadError> {
+    if bytes.len() >= OBJECT_BUFFER {
+        return Err(ReadError::Limit);
+    }
+    *buffer = Vec::new();
+    let mut allocation = meter.object_allocation();
+    allocation.reserve(DECODER_OVERHEAD, meter)?;
+    allocation.input(bytes, meter)?;
+    inflate_loose(bytes, id, buffer, allocation, meter)
+}
+
+fn inflate_loose<'b>(
+    bytes: &[u8],
+    id: &oid,
+    buffer: &'b mut Vec<u8>,
+    mut allocation: ObjectAllocation,
+    meter: &mut Meter,
+) -> Result<Decoded<'b>, ReadError> {
     let mut inflate = gix_zlib::Inflate::default();
     let mut header = [0u8; 64];
     // The first probe is bounded even for a zip bomb, and its duplicated output
