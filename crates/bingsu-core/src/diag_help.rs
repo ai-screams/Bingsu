@@ -103,8 +103,8 @@ pub const HELP: &[Help] = &[
     h(
         c::BAD_SEGMENT_ID,
         "A segment name is not a valid id.",
-        "Ids are lowercase letters a-z, digits, `_` and `-`, with at most one `/`. The limit keeps ids safe to use in tables, layouts and file names.",
-        "Rename the segment in `layout.line1.left` and in its table `segment.<id>`, then run `bingsu config check`.",
+        "An id is one part (a built-in segment) or two parts joined by one `/` (your own: `custom/<name>`).\nEach part is 1 to 32 bytes, starts with a lowercase letter a-z, holds only a-z, 0-9, `_` and `-`, and does not end in `_` or `-`.\nThe whole id is at most 65 bytes. The namespaces `bingsu`, `topping` and `file` are reserved, and so are the prefixes `topping:` and `file:`.\nThe limits keep ids safe to use in tables, layouts and file names.",
+        "Rename the segment to fit these rules, in `layout.line1.left` and in its table `segment.<id>`. For example `custom/1foo`, `custom/foo-` and a 33-byte name are all refused.\nThen run `bingsu config check`.",
     ),
     h(
         c::UNKNOWN_SEGMENT,
@@ -126,9 +126,9 @@ pub const HELP: &[Help] = &[
     ),
     h(
         c::BAD_LAYOUT_LINE,
-        "A table under `layout` is not a line.",
-        "Lines are named `line1` and `line2`. Any other name could not be drawn, so it is reported.",
-        "Rename the table to `layout.line1` or `layout.line2`.",
+        "A table under `layout` is not an allowed line.\nEither its name is not `line1` or `line2`, or `layout.line2` is written without `layout.line1`.",
+        "Lines are `line1` and `line2`, with no gaps: no other name can be drawn, and a second line needs a first. (A width band may write only its `line2`; it inherits the default `line1`.)",
+        "Rename the table to `layout.line1` or `layout.line2`.\nIf you wrote only `layout.line2`, add `layout.line1` too, or move its segments to `layout.line1`.",
     ),
     h(
         c::SEGMENT_NEEDS_KIND,
@@ -150,15 +150,15 @@ pub const HELP: &[Help] = &[
     ),
     h(
         c::COMMAND_FORM_CONFLICT,
-        "A command segment does not use exactly one of the two forms: `command` or `shell` with `unsafe_shell`.",
-        "The two forms run in different ways (no shell, or a shell), so bingsu will not choose one when both or neither are given.",
-        "Keep one form: `segment.<id>.command`, or `segment.<id>.shell` together with `segment.<id>.unsafe_shell`.",
+        "A command segment does not give exactly one usable form. One of these is the case:\n`command` and `shell` are both set; neither is set; `command` is an empty array; or `unsafe_shell = true` is set without `shell`.",
+        "The two forms run in different ways (no shell, or a shell), so bingsu will not choose one when both or neither are given, and a command with no word has nothing to run.",
+        "Keep one form and make it complete: `segment.<id>.command` as an array with at least one word, or `segment.<id>.shell` together with `segment.<id>.unsafe_shell` set to true.\nDo not set `segment.<id>.unsafe_shell` without `segment.<id>.shell`.",
     ),
     h(
         c::PLACEHOLDER_NOT_WHOLE,
         "The placeholder `{dir}` is not a whole element of `command`, or sits inside shell text.",
-        "The placeholder is replaced only as one whole element of the `command` array. That way its value never joins other text and never becomes shell code, even when a folder name holds quotes or spaces.",
-        "Make the placeholder an element of its own in `segment.<id>.command`.\nFor example [\"tool\", \"{dir}\"] and not \"--dir={dir}\".",
+        "The placeholder is replaced only as one whole element of the `command` array, and its value reaches the program as one argument that is never split or joined to other text.\nThis does not make the value safe for a program that reads its argument as code. With `command = [\"/bin/sh\", \"-c\", \"{dir}\"]` the shell reads the folder name as code, so a folder name with `$(...)` in it would run.",
+        "Make the placeholder an element of its own in `segment.<id>.command`.\nFor example [\"tool\", \"{dir}\"] and not \"--dir={dir}\".\nDo not pass it to a shell or to another program that evaluates its argument as code (such as `sh -c` or `python -c`).",
     ),
     h(
         c::EXTENDS_CYCLE,
@@ -204,9 +204,9 @@ pub const HELP: &[Help] = &[
     ),
     h(
         c::EXEC_KEY_IGNORED,
-        "A key that runs something or reaches the environment is set in a file that is trusted for colors and layout only, so it is ignored.",
-        "A file trusted for colors and layout only (a theme, or a file whose folder did not pass the safety check) may change how the prompt looks but never what runs.",
-        "Put the key in a trusted config file of your own (`bingsu config path` shows which one).\nFor a folder or ownership problem, run `bingsu config check` for the details.",
+        "A key that runs something or reaches the environment is set in a shape-only file, so it is dropped.",
+        "A shape-only file is read for colors and layout only; it may change how the prompt looks but never what runs.\nThemes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.\nA file in your config folder whose own folder fails the safety check is a different case (W405).",
+        "Put the key in your own config file in the config folder (`bingsu config path` shows where it is).\nRun `bingsu config check` for the details.",
     ),
     h(
         c::ENV_SEGMENT_IGNORED,
@@ -222,15 +222,15 @@ pub const HELP: &[Help] = &[
     ),
     h(
         c::NOT_RUN_UNTRUSTED_LAYOUT,
-        "A command or env segment is declared but not turned on, because the layout line that names it comes from a file that is not your own.",
-        "Only a layout from a trusted file turns on a segment that runs a command or reads the environment. A theme cannot start one for you.",
-        "Add the segment to a layout line in your own config, for example in `layout.line1.left`.",
+        "A segment that runs a command or reads the environment (a command, env or language segment) is declared but not turned on.",
+        "It runs only when a layout from a trusted file draws it, and that layout is still the one drawn after all files are merged, at a width some band can choose. One of these fails:\nno layout line names it; only a theme or another shape-only file names it; a shape-only file overrides the trusted layout so it no longer draws the segment; or the line is in a band that no width can choose.",
+        "Name the segment in a layout line of your own config, for example `layout.line1.left`, or in a band line such as `layout.when.<name>.line1.left`.\nIf another file overrides the layout, set the layout in your own config. If the line is in a band, check `layout.when.<name>.min_cols`, `layout.when.<name>.max_cols` and `layout.when.<name>.order`.",
     ),
     h(
         c::NOT_RUN_UNSAFE_FILE,
-        "A segment does not run because the file that sets its command failed the safety check.",
-        "A file or folder that another user can change could be edited to run something else. The check looks at ownership, write permission and access lists.",
-        "Check the file and the folders above it: they should belong to you and not be writable by others. Run `bingsu config check` for the exact reason.",
+        "A segment does not run because the file that sets one of its execution keys failed the safety check.",
+        "A file or folder that another user can change could be edited to run something else. The check looks at the file and each folder above it: each must be owned by you or by root and must not be writable by anyone else.\nGroup write counts only when the group has no member besides you and root, and an access list entry that grants write fails the check.",
+        "Find the file and folder the message names, then remove the extra write access from it, for example `chmod go-w`. Do not change the owner of system folders such as `/` or `/home`: root ownership is accepted there.\nRun `bingsu config check` for the exact reason.",
     ),
     h(
         c::SHAPE_FILE_DROPPED,
@@ -264,9 +264,9 @@ pub const HELP: &[Help] = &[
     ),
     h(
         c::ENV_SHEBANG,
-        "A script that a segment runs will not run, because its first line does not name an absolute interpreter.",
-        "The first line must be at most 256 bytes, hold no NUL, and name an absolute path that passes the same checks. `/usr/bin/env` would pick the interpreter from `PATH`, which a folder you work in can influence.",
-        "Write the absolute path of the interpreter on the first line of the script, for example `#!/usr/bin/python3`.\nOr run the interpreter itself from `segment.<id>.command`.",
+        "A program that a segment would run is refused. The message gives the reason, which is one of these:\na script whose first line starts with `#!/usr/bin/env`, or names a relative interpreter, or is longer than 256 bytes, or holds a NUL byte, or names an interpreter that is setuid, setgid or has file capabilities;\nor the program itself is setuid, setgid or has file capabilities (a compiled program has no first line to fix).",
+        "`#!/usr/bin/env python3` does name an absolute path, but `env` then looks `python3` up in `PATH`, which a folder you work in can influence, so it is refused. A set-id program or a file with capabilities runs with rights that bingsu will not hand to a prompt segment.",
+        "For a script, write the absolute path of the interpreter on its first line, for example `#!/usr/bin/python3`, and keep that line under 256 bytes. Or run the interpreter itself from `segment.<id>.command`.\nFor a set-id program, use a different program in `segment.<id>.command`.",
     ),
     h(
         c::TEMPLATE_REPLACES_STYLE,

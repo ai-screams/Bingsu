@@ -1,6 +1,6 @@
 //! `bingsu help` text, byte for byte (BINGSU_UPDATE_GOLDEN=1 rewrites the
 //! file; review the diff). One golden holds every code, so the wording of
-//! each severity and each security reason (E207, E211-E213, W401-W405,
+//! each severity and each security reason (E207, E210-E213, W401-W405,
 //! W409-W411) is reviewed in one place.
 use bingsu_core::diag_codes::CODES;
 use bingsu_core::diag_help::render;
@@ -42,8 +42,8 @@ fn help_text_matches_the_golden() {
 fn golden_holds_every_security_reason_code() {
     let got = all();
     for code in [
-        "E207", "E211", "E212", "E213", "W401", "W402", "W403", "W404", "W405", "W409", "W410",
-        "W411",
+        "E207", "E210", "E211", "E212", "E213", "W401", "W402", "W403", "W404", "W405", "W409",
+        "W410", "W411",
     ] {
         assert!(
             got.contains(&format!("\n{code} (")) || got.starts_with(&format!("{code} (")),
