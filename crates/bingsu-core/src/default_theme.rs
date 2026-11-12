@@ -1,7 +1,8 @@
 //! The built-in default theme (ADR-0008: two lines, blocks, transient
-//! `char`), used while there is no compiled config snapshot. The values
-//! are provisional: the seven presets of the first release are M7. Built
-//! from the same parts a config would give (preset, layout lines, band,
+//! `char`), used while there is no compiled config snapshot. It draws the
+//! `triangle` preset, and the `narrow` band below is final (M7 preset
+//! definition: all seven presets fall back to the lean one-line shape under
+//! 60 columns). Built from the same parts a config would give (preset, layout lines, band,
 //! palette), so the snapshot path later renders through the same code.
 use crate::bands::{Band, BandError, order_bands};
 use crate::color::palette::{

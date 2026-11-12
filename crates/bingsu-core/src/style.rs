@@ -13,6 +13,10 @@ use alloc::vec::Vec;
 pub enum Cap {
     None,
     Shape(Shape),
+    /// Literal `[` before and `]` after a segment, drawn without a block
+    /// background (preset `bracket`). One ASCII cell each, so every icon
+    /// set draws it the same.
+    Bracket,
 }
 
 /// How neighboring blocks meet (ADR-0022 "블록 연결").
@@ -64,7 +68,8 @@ pub struct Preset {
     pub options: StyleOptions,
 }
 
-/// Test fixtures for M2. The seven first-release presets are M7.
+/// The seven first-release presets (ADR-0022, the style playground's seven):
+/// each is a combination of the option keys, no renderer code of its own.
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "lean",
@@ -86,6 +91,66 @@ pub const PRESETS: &[Preset] = &[
             head: Some(Cap::None),
             tail: Some(Cap::Shape(Shape::Triangle)),
             joining: Some(Joining::Attached),
+            fill: Some(FillKind::Space),
+            frame: Some(false),
+        },
+    },
+    Preset {
+        name: "pill",
+        options: StyleOptions {
+            background: Some(true),
+            separator: Some(Shape::Round),
+            head: Some(Cap::Shape(Shape::Round)),
+            tail: Some(Cap::Shape(Shape::Round)),
+            joining: Some(Joining::Spaced),
+            fill: Some(FillKind::Space),
+            frame: Some(false),
+        },
+    },
+    Preset {
+        name: "slant",
+        options: StyleOptions {
+            background: Some(true),
+            separator: Some(Shape::Slant),
+            head: Some(Cap::None),
+            tail: Some(Cap::Shape(Shape::Slant)),
+            joining: Some(Joining::Attached),
+            fill: Some(FillKind::Space),
+            frame: Some(false),
+        },
+    },
+    Preset {
+        name: "diamond",
+        options: StyleOptions {
+            background: Some(true),
+            separator: Some(Shape::Triangle),
+            head: Some(Cap::Shape(Shape::Triangle)),
+            tail: Some(Cap::Shape(Shape::Triangle)),
+            joining: Some(Joining::Spaced),
+            fill: Some(FillKind::Space),
+            frame: Some(false),
+        },
+    },
+    Preset {
+        name: "block",
+        options: StyleOptions {
+            background: Some(true),
+            separator: Some(Shape::Flat),
+            head: Some(Cap::Shape(Shape::Flat)),
+            tail: Some(Cap::Shape(Shape::Flat)),
+            joining: Some(Joining::Spaced),
+            fill: Some(FillKind::Space),
+            frame: Some(false),
+        },
+    },
+    Preset {
+        name: "bracket",
+        options: StyleOptions {
+            background: Some(false),
+            separator: Some(Shape::Flat),
+            head: Some(Cap::Bracket),
+            tail: Some(Cap::Bracket),
+            joining: Some(Joining::Spaced),
             fill: Some(FillKind::Space),
             frame: Some(false),
         },
@@ -177,12 +242,21 @@ fn run(out: &mut String, ids: &[&str], o: &StyleOptions, right: bool) {
         if block && (first || joining == Joining::Spaced) {
             cap(out, "head", head);
         }
+        // A group drops the brackets with a segment that has no value. The
+        // input marker `char` stays bare: it is not a fact about the shell.
+        let bracket = !block && head == Cap::Bracket && *id != "char";
+        if bracket {
+            out.push_str("{@group}[");
+        }
         out.push('{');
         out.push_str(id);
         if block {
             out.push_str(":block");
         }
         out.push('}');
+        if bracket {
+            out.push_str("]{@end}");
+        }
         if block && (last || joining == Joining::Spaced) {
             cap(out, "tail", tail);
         }
@@ -316,6 +390,37 @@ mod tests {
         );
         for t in [tri, lean] {
             assert!(compile(&t, BUILTIN).is_ok(), "{t}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 새 프리셋 다섯의 머리·꼬리·구분자·연결이 바뀌는 것, `bracket`이 `char`를 감싸거나
+    // 괄호를 그룹 밖에 두는 것(값 없는 세그먼트에 `[]`가 남음), 프리셋 이름 목록(`config` 키 enum)과 표가 갈라지는 것.
+    #[test]
+    fn first_release_presets() {
+        let g = |n| generate(preset(n).unwrap(), &StyleOptions::default(), &TWO).unwrap();
+        assert_eq!(
+            g("pill"),
+            "{@head:round}{dir:block}{@tail:round} {@head:round}{git:block}{@tail:round}{@fill:space}{@head:round}{status:block}{@tail:round} {@head:round}{time:block}{@tail:round}{@nl}{@head:round}{char:block}{@tail:round}"
+        );
+        assert_eq!(
+            g("slant"),
+            "{dir:block}{@sep:slant}{git:block}{@tail:slant}{@fill:space}{@head:slant}{status:block}{@sep:slant}{time:block}{@nl}{char:block}{@tail:slant}"
+        );
+        assert_eq!(g("diamond"), g("pill").replace("round", "triangle"));
+        assert_eq!(g("block"), g("pill").replace("round", "flat"));
+        assert_eq!(
+            g("bracket"),
+            "{@group}[{dir}]{@end}{@sep:flat}{@group}[{git}]{@end}{@fill:space}{@group}[{status}]{@end}{@sep:flat}{@group}[{time}]{@end}{@nl}{char}"
+        );
+        let names: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
+        assert_eq!(
+            names,
+            [
+                "lean", "triangle", "pill", "slant", "diamond", "block", "bracket"
+            ]
+        );
+        for n in names {
+            assert!(compile(&g(n), BUILTIN).is_ok(), "{n}");
         }
     }
 
