@@ -264,7 +264,7 @@ def controlled_protocol(monkeypatch):
     # Product tests exercise real pairing; host probes have dedicated negative controls.
     p = git.M3B.protocol
     calibration = dict(stable=True, p95_of_medians=100, **p.identity())
-    monkeypatch.setattr(p, 'calibrate', lambda _: calibration)
+    monkeypatch.setattr(p, 'calibrate', lambda *_, **__: calibration)
     monkeypatch.setattr(p, 'snapshot', lambda _: dict(**p.identity(), power='ac',
         thermal='normal', load_1m=1., reference=p.summary([100] * 20)))
 

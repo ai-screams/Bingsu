@@ -223,7 +223,8 @@ def record(measured, out, label, result, **extra):
     raw = protocol.persist_raw(out, result)
     measured[label] = dict(status=result['status'], raw=str(raw), **extra,
                            variants={n: v['summary'] for n, v in result['variants'].items()},
-                           **({'reason': result['reason']} if 'reason' in result else {}))
+                           **({'reason': result['reason']} if 'reason' in result else {}),
+                           **({'resolution': result['resolution']} if 'resolution' in result else {}))
 
 
 def measure_prompt(args, out, binary, measured, front=None, test_binary=None):

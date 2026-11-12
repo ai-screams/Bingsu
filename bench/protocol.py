@@ -56,6 +56,12 @@ DEFAULT = Condition(mode='gate', power='ac', load_range=None, synthetic_load=0, 
 CI_R2_OUTSIDE = 'ci-r2 requested outside GitHub Actions'
 CI_R2_OVER_CAP = 'reference over the 1.10 cap'
 CI_R2_UNSTABLE = 'reference unstable within the block'
+# Calibration spread (largest / smallest of the kept block medians) allowed
+# before measuring. Gate runs (CI) keep 1.05 and no condition changes it;
+# record-only experiment runs take condition `calibration_spread_max`, at
+# most EXPERIMENT_SPREAD_MAX.
+GATE_SPREAD_MAX = 1.05
+EXPERIMENT_SPREAD_MAX = 1.15
 
 
 def summary(values):
@@ -111,15 +117,32 @@ def reference_block(reference: Path):
     return summary(values)
 
 
-def calibrate(reference: Path, blocks: int = 5) -> Calibration:
+def spread_limit(condition: Condition) -> float:
+    """The calibration spread limit of `condition`: fixed for gate runs."""
+    if condition.get('mode') != 'experiment':
+        if 'calibration_spread_max' in condition:
+            raise ValueError('calibration_spread_max applies only to experiment mode')
+        return GATE_SPREAD_MAX
+    limit = condition.get('calibration_spread_max', EXPERIMENT_SPREAD_MAX)
+    if type(limit) not in (int, float) or not 1 <= limit <= EXPERIMENT_SPREAD_MAX:
+        raise ValueError(f'calibration_spread_max must be within 1..{EXPERIMENT_SPREAD_MAX}')
+    return float(limit)
+
+
+def spread(medians) -> float | None:
+    return max(medians) / min(medians) if min(medians) > 0 else None
+
+
+def calibrate(reference: Path, blocks: int = 5, spread_max: float = GATE_SPREAD_MAX) -> Calibration:
     if blocks != 5:
         raise ValueError('calibration requires 5 blocks')
     rows = [reference_block(reference) for _ in range(blocks)]
     medians = [r['p50'] for r in rows[1:]]  # D0: first block is discarded.
+    got = spread(medians)
     return dict(reference_binary=str(reference), reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
                 blocks=rows, discarded=[0], p95_of_medians=summary(medians)['p95'],
-                median_of_medians=statistics.median(medians),
-                stable=min(medians) > 0 and max(medians) / min(medians) <= 1.05, **identity())
+                median_of_medians=statistics.median(medians), spread=got, spread_max=spread_max,
+                stable=got is not None and got <= spread_max, **identity())
 
 
 def complete_summary(row, n):
@@ -255,14 +278,15 @@ def _paired(base, candidate, rounds, condition, observe, *, required_metrics=(),
         result['reason'] = CI_R2_OUTSIDE
         return result
     try:
+        limit = spread_limit(condition)
         reference = Path(base).resolve()
-        calibration = calibrate(reference)
+        calibration = calibrate(reference, spread_max=limit)
         result['calibration'] = calibration
         if not calibration['stable']:
             result['reason'] = 'unstable calibration'
             return result
         if condition['mode'] == 'experiment':
-            result['transition'] = settle(reference)
+            result['transition'] = settle(reference, spread_max=limit)
         binaries = dict(base=base, candidate=candidate)
         result['cold_first_process'] = {n: observe(n, b) for n, b in binaries.items()}
         indices = list(range(math.ceil(rounds / 20)))
@@ -300,9 +324,24 @@ def _paired(base, candidate, rounds, condition, observe, *, required_metrics=(),
             if not all(complete_summary(row, rounds) for row in variant['summary'].values()):
                 raise ValueError('incomplete metric summary')
         result['status'] = 'OBSERVED'
+        if condition['mode'] == 'experiment':
+            result['resolution'] = resolution(result['variants'], calibration.get('spread'))
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         result['reason'] = str(error)
     return result
+
+
+def resolution(variants, calibration_spread):
+    """Per metric: the candidate/base p50 ratio, and `undecidable` when it
+    lies closer to 1 than this run's calibration spread."""
+    out = {}
+    for metric, base in variants['base']['summary'].items():
+        ratio = variants['candidate']['summary'][metric]['p50'] / base['p50'] if base['p50'] > 0 else None
+        decidable = (ratio is not None and calibration_spread is not None
+                     and abs(ratio - 1) >= calibration_spread - 1)
+        out[metric] = dict(ratio_p50=ratio, calibration_spread=calibration_spread,
+                           verdict='decidable' if decidable else 'undecidable')
+    return out
 
 
 def validate_output(out_dir: Path):
@@ -328,8 +367,8 @@ def write_output(path, payload):
     path.write_text(json.dumps(payload, indent=2, allow_nan=False) + '\n')
 
 
-def settle(reference):
-    """Bounded transition polling: normal heat and 3 reference medians within 5%."""
+def settle(reference, spread_max: float = GATE_SPREAD_MAX):
+    """Bounded transition polling: normal heat and 3 reference medians within `spread_max`."""
     rows = []
     for _ in range(15):
         h = snapshot(reference)
@@ -337,7 +376,7 @@ def settle(reference):
         recent = rows[-3:]
         if len(recent) == 3 and all(r['thermal'] == 'normal' for r in recent):
             medians = [r['reference']['p50'] for r in recent]
-            if min(medians) > 0 and max(medians) / min(medians) <= 1.05:
+            if (got := spread(medians)) is not None and got <= spread_max:
                 return rows
     raise ValueError('experiment transition not thermally/reference stable')
 
