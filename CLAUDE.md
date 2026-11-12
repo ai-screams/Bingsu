@@ -11,9 +11,13 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 - **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 - **Stage**: M3a (config, snapshot, refresh helper), M3b (collector process protocol, supervision, publication) and
-  M3c (git, path facts, safe reads), M3d (performance and process gates, measured budgets) and M4 (zsh integration) are done;
-  M6 (running user-defined commands) is in progress; M5 (bash and fish integration) is deferred until after M7. M4 is closed with open items: the shell time gate runs on Linux only and records its
+  M3c (git, path facts, safe reads), M3d (performance and process gates, measured budgets), M4 (zsh integration) and
+  M6 (running user-defined commands) are done; M7 is planned, and M5 (bash and fish integration) is deferred until after M7. M4 is closed with open items: the shell time gate runs on Linux only and records its
   verdict without failing the job, some of its runs can end BLOCKED, and the redraw time has no recorded value on Linux or macOS.
+  M6 is closed with open items: on macOS the helper's `PATH` folder check takes about 20 ms per round (p50 measured on
+  one Mac; first command value only; the prompt does not wait); macOS prompt time is a record-only run, not a verdict
+  (outside a git repository p50 about 0.98 times M4's, inside that run's noise of about 6.4%; other cases not yet
+  measured; raw command share about 0.5–0.6 ms p50), and the Linux CI prompt gate gives the verdict.
   `bingsu prompt` renders the built-in default
   theme or the user's TOML config through a snapshot the refresh helper publishes; the helper runs the pinned
   `bingsu-collect` worker under its sandbox for screens that show `dir` or `git`, and the prompt shows the collected git
