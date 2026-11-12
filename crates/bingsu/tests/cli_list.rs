@@ -8,8 +8,18 @@ fn bingsu() -> Command {
     c
 }
 
+// 이것을 실패시키는 것: Windows에서 `list`가 사용법 오류(2) 대신 동작하는 것(그 분기는 unix에만 컴파일됨).
+#[cfg(not(unix))]
+#[test]
+fn list_is_a_usage_error_without_unix() {
+    let o = bingsu().args(["list", "presets"]).output().unwrap();
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+    assert!(o.stdout.is_empty());
+}
+
 // 이것을 실패시키는 것: `list` 분기를 지우는 것(사용법 오류 2), 종류 이름 하나를 받지 않는 것,
 // 행을 stderr에 쓰는 것, 알 수 없는 종류나 남는 인자에 0으로 끝나는 것.
+#[cfg(unix)]
 #[test]
 fn every_kind_prints_rows_and_a_bad_word_is_a_usage_error() {
     for kind in [
@@ -46,6 +56,7 @@ fn every_kind_prints_rows_and_a_bad_word_is_a_usage_error() {
 
 // 이것을 실패시키는 것: 미리보기가 현재 폴더를 쓰지 않는 것, 터미널이 아닌데 escape를 내는 것,
 // 프리셋 줄 수가 일곱이 아닌 것.
+#[cfg(unix)]
 #[test]
 fn preview_draws_one_plain_line_per_preset_for_the_current_folder() {
     let dir = std::env::temp_dir().join("bingsu-list-preview-dir");
