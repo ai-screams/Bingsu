@@ -165,3 +165,21 @@ fn an_existing_config_is_never_touched_and_only_differences_are_shown() {
     // The startup line is still given.
     assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
 }
+
+// 이것을 실패시키는 것: 이미 있는 설정 폴더에 새 파일을 만들 때 폴더 `fsync`가 실패하는 것(Linux에서 폴더를
+// 검색 전용 `O_PATH`로 연 채 `sync_all`하면 EBADF: 파일은 만들어지는데 종료가 실패하고 시작 줄이 안 나옴).
+#[test]
+fn a_config_folder_that_is_already_there_gets_the_file() {
+    let h = Home::new("folder");
+    let dir = h.config().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let o = h.run(&["--yes", "--icons", "nerd", "--mode", "auto"]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
+    assert!(text(&o.stderr).contains("wrote "), "{}", text(&o.stderr));
+    assert_eq!(
+        std::fs::metadata(h.config()).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+}

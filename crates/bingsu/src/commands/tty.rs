@@ -4,17 +4,19 @@
 //! prompt path.
 //!
 //! The query needs the terminal in a mode where the answer is not echoed and
-//! is read without a newline. The terminal is left as it was found on every
-//! way out: the answer arrived, the time ran out, Ctrl-C (read as the byte
-//! 0x03 because `ISIG` is off), SIGTERM, SIGHUP or SIGINT from outside (a
-//! handler sets a flag and `select` returns early), and a panic (the guard's
-//! `Drop`). SIGKILL cannot be caught: it leaves the terminal raw until
-//! `stty sane` or `reset`.
+//! is read without a newline. The terminal is put back on these ways out: the
+//! answer arrived, the time ran out, Ctrl-C (read as the byte 0x03 because
+//! `ISIG` is off), SIGTERM, SIGHUP or SIGINT from outside (a handler sets a
+//! flag and `select` returns early), and a panic (the guard's `Drop`). Other
+//! fatal signals (SIGQUIT, SIGKILL, SIGSEGV...) are not handled: they leave
+//! the terminal raw until `stty sane` or `reset`.
 //!
 //! A reply that comes after the time limit would otherwise land on the shell's
 //! command line as typed text. So when no reply came, the terminal is read for
-//! a little longer before it is restored, and restoring discards what is still
-//! queued (`tcsetattr(TCSAFLUSH)`, then `tcflush(TCIFLUSH)`).
+//! a little longer before it is restored. Restoring is `tcsetattr(TCSANOW)`
+//! first, then `tcflush(TCIFLUSH)` for what is still queued: `TCSAFLUSH`
+//! would wait for the output to drain, which never ends when the output is
+//! stopped (Ctrl-S) and `ISIG` is off.
 use super::sys;
 use bingsu_core::color::osc11::{REPLY_MAX, find_reply};
 use std::fs::{File, OpenOptions};
@@ -105,13 +107,50 @@ impl Raw {
     }
 }
 
+/// How often an interrupted call is tried again.
+const RESTORE_TRIES: usize = 8;
+
+/// Puts the saved settings back with `set`. A signal can interrupt the call
+/// (EINTR), so it is tried again. `true`: restored.
+fn restore_with(mut set: impl FnMut() -> std::io::Result<()>) -> bool {
+    for _ in 0..RESTORE_TRIES {
+        match set() {
+            Ok(()) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// The answer to give once the wait and the discard are over: a stop request
+/// wins over everything, an answer included.
+fn settle(result: Reply, stop: bool) -> Reply {
+    if stop { Reply::Cancelled } else { result }
+}
+
 impl Drop for Raw {
     fn drop(&mut self) {
-        // SAFETY: `fd` is the open terminal this was made for; `saved` came
-        // from tcgetattr. TCSAFLUSH also discards input not yet read.
-        unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.saved) };
-        // SAFETY: as above. A second discard of what arrived meanwhile.
-        unsafe { libc::tcflush(self.fd, libc::TCIFLUSH) };
+        let (fd, saved) = (self.fd, &self.saved);
+        // TCSANOW, not TCSAFLUSH: that one waits for the output to drain.
+        restore_with(|| {
+            // SAFETY: `fd` is the open terminal this was made for; `saved`
+            // came from tcgetattr.
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, saved) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+        for _ in 0..RESTORE_TRIES {
+            // SAFETY: as above. A second discard of what arrived meanwhile.
+            if unsafe { libc::tcflush(fd, libc::TCIFLUSH) } == 0
+                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                break;
+            }
+        }
+        // The handlers go back after the terminal does.
         for (old, sig) in self.old.iter().zip(SIGNALS) {
             // SAFETY: `old` is the action `sigaction` returned for `sig`.
             unsafe { libc::sigaction(sig, old, std::ptr::null_mut()) };
@@ -119,12 +158,38 @@ impl Drop for Raw {
     }
 }
 
+/// Writes all of `buf` through `write`. A write that a signal interrupted
+/// (EINTR) is not simply tried again: if the signal asked to stop, `false`.
+fn write_checked(
+    mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
+    mut buf: &[u8],
+) -> std::io::Result<bool> {
+    while !buf.is_empty() {
+        match write(buf) {
+            Ok(0) => return Err(std::io::Error::other("the terminal took no bytes")),
+            Ok(n) => buf = &buf[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                if STOP.load(Ordering::SeqCst) {
+                    return Ok(false);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
 /// Waits until `fd` can be read or `until` passes. `false`: time ran out or
-/// a signal asked to stop. `select`, not `select`: macOS `select` does not
-/// support `/dev/tty` (it reports the descriptor invalid at once).
-fn readable(fd: RawFd) -> impl Fn(Instant) -> bool {
+/// a signal asked to stop (only when `stoppable`). `select`, not `poll`: macOS
+/// `poll` does not support `/dev/tty` (it reports the descriptor invalid at
+/// once).
+#[allow(
+    clippy::unnecessary_fallible_conversions,
+    reason = "`tv_usec` is 32 bits on macOS and 64 on Linux; one spelling for both"
+)]
+fn readable(fd: RawFd, stoppable: bool) -> impl Fn(Instant) -> bool {
     move |until| loop {
-        if STOP.load(Ordering::SeqCst) {
+        if stoppable && STOP.load(Ordering::SeqCst) {
             return false;
         }
         let left = until.saturating_duration_since(Instant::now());
@@ -140,8 +205,8 @@ fn readable(fd: RawFd) -> impl Fn(Instant) -> bool {
         unsafe { libc::FD_ZERO(set.as_mut_ptr()) };
         // SAFETY: FD_ZERO above initialised `set`.
         let mut set = unsafe { set.assume_init() };
-        // SAFETY: `fd` is a small open descriptor below FD_SETSIZE (the
-        // terminal opened right after start-up) and `set` is initialised.
+        // SAFETY: `Tty::open` refuses a descriptor at or above FD_SETSIZE, so
+        // `fd` fits the set, and `set` is initialised.
         unsafe { libc::FD_SET(fd, &mut set) };
         // SAFETY: `set` and `tv` are valid for the call; no write or error sets.
         let n = unsafe {
@@ -171,6 +236,11 @@ impl Tty {
             .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
             .open("/dev/tty")
             .ok()?;
+        // `select` cannot take a descriptor at or above FD_SETSIZE (it would
+        // abort with the terminal raw): such a terminal is not used.
+        if file.as_raw_fd() >= RawFd::try_from(libc::FD_SETSIZE).unwrap_or(RawFd::MAX) {
+            return None;
+        }
         // A device that is not a terminal (or a stale node) is no terminal.
         let mut t = std::mem::MaybeUninit::<libc::termios>::uninit();
         // SAFETY: the descriptor is open and `t` is writable memory.
@@ -202,51 +272,159 @@ impl Tty {
     }
 
     /// Sends `OSC 11 ; ?` and waits up to `REPLY_TIMEOUT` for the answer.
+    /// After anything but an answer the terminal is read for
+    /// `LATE_REPLY_DRAIN` more and what comes is thrown away, whether the
+    /// wait ended in silence or in a cancel; a cancel that arrives during
+    /// that time still counts.
     pub fn ask_background(&self) -> std::io::Result<Reply> {
         let fd = self.file.as_raw_fd();
         let guard = Raw::enter(fd)?;
         let mut f = &self.file;
-        if sys::write_fd(fd, b"\x1b]11;?\x1b\\") != sys::WriteOutcome::Done {
-            return Err(std::io::Error::other("the terminal did not take the query"));
-        }
-        let wait = readable(fd);
+        let wait = readable(fd, true);
+        let sent = write_checked(
+            |b| {
+                // SAFETY: `fd` is open and `b` is a valid slice.
+                let n = unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) };
+                usize::try_from(n).map_err(|_| std::io::Error::last_os_error())
+            },
+            b"\x1b]11;?\x1b\\",
+        )?;
         let until = Instant::now() + REPLY_TIMEOUT;
         let mut seen: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 64];
-        let result = loop {
-            if !wait(until) {
-                break if STOP.load(Ordering::SeqCst) {
-                    Reply::Cancelled
-                } else {
-                    Reply::Silent
+        let mut result = if sent {
+            loop {
+                if !wait(until) {
+                    break if STOP.load(Ordering::SeqCst) {
+                        Reply::Cancelled
+                    } else {
+                        Reply::Silent
+                    };
+                }
+                let n = match f.read(&mut chunk) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break Reply::Silent,
                 };
+                if chunk[..n].contains(&0x03) {
+                    break Reply::Cancelled;
+                }
+                if seen.len() + n > INPUT_CAP {
+                    break Reply::Silent;
+                }
+                seen.extend_from_slice(&chunk[..n]);
+                if let Some(reply) = find_reply(&seen) {
+                    break Reply::Bytes(reply.to_vec());
+                }
             }
-            let n = match f.read(&mut chunk) {
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break Reply::Silent,
-            };
-            if chunk[..n].contains(&0x03) {
-                break Reply::Cancelled;
-            }
-            if seen.len() + n > INPUT_CAP {
-                break Reply::Silent;
-            }
-            seen.extend_from_slice(&chunk[..n]);
-            if let Some(reply) = find_reply(&seen) {
-                break Reply::Bytes(reply.to_vec());
-            }
+        } else {
+            Reply::Cancelled
         };
-        if result != Reply::Cancelled && !matches!(result, Reply::Bytes(_)) {
-            // A reply may still be on its way: read and drop it.
+        if !matches!(result, Reply::Bytes(_)) {
+            // A reply may still be on its way: read and drop it. The wait
+            // here ignores the stop flag so that a cancel still reads it all.
+            let drain = readable(fd, false);
             let until = Instant::now() + LATE_REPLY_DRAIN;
-            while wait(until) {
-                if !matches!(f.read(&mut chunk), Ok(n) if n > 0) {
-                    break;
+            while drain(until) {
+                match f.read(&mut chunk) {
+                    Ok(n) if n > 0 => {
+                        if chunk[..n].contains(&0x03) {
+                            result = Reply::Cancelled;
+                        }
+                    }
+                    _ => break,
                 }
             }
         }
+        let result = settle(result, STOP.load(Ordering::SeqCst));
         drop(guard);
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    // 이것을 실패시키는 것: `tcsetattr`가 EINTR로 끊겼을 때 다시 시도하지 않는 것(터미널이 raw로 남음), 다른
+    // 오류에서 계속 시도하는 것, 계속 끊기면 끝없이 시도하는 것, 성공을 실패로 알리는 것.
+    #[test]
+    fn restoring_retries_an_interrupted_call() {
+        let mut n = 0;
+        assert!(restore_with(|| {
+            n += 1;
+            if n < 3 {
+                Err(Error::from(ErrorKind::Interrupted))
+            } else {
+                Ok(())
+            }
+        }));
+        assert_eq!(n, 3);
+        let mut n = 0;
+        assert!(!restore_with(|| {
+            n += 1;
+            Err(Error::from_raw_os_error(libc::EINVAL))
+        }));
+        assert_eq!(n, 1);
+        let mut n = 0;
+        assert!(!restore_with(|| {
+            n += 1;
+            Err(Error::from(ErrorKind::Interrupted))
+        }));
+        assert_eq!(n, RESTORE_TRIES);
+    }
+
+    // 이것을 실패시키는 것: 응답을 받은 뒤에 온 정지 요청(신호)을 무시하고 응답을 쓰는 것.
+    #[test]
+    fn a_stop_request_wins_over_an_answer() {
+        let answer = || Reply::Bytes(b"x".to_vec());
+        assert_eq!(settle(answer(), true), Reply::Cancelled);
+        assert_eq!(settle(Reply::Silent, true), Reply::Cancelled);
+        assert_eq!(settle(answer(), false), answer());
+        assert_eq!(settle(Reply::Silent, false), Reply::Silent);
+    }
+
+    // 이것을 실패시키는 것: EINTR을 받고 정지 표시를 보지 않고 막힌 쓰기를 다시 하는 것, 부분 쓰기 뒤 나머지를
+    // 쓰지 않는 것, 정지 표시가 없는데 EINTR에서 그만두는 것.
+    #[test]
+    fn an_interrupted_write_checks_the_stop_flag() {
+        // The flag is process-wide: this test is the only one that sets it.
+        STOP.store(false, Ordering::SeqCst);
+        let mut calls = 0;
+        let got = write_checked(
+            |b| {
+                calls += 1;
+                match calls {
+                    1 => Ok(b.len() - 2),
+                    2 => Err(Error::from(ErrorKind::Interrupted)),
+                    _ => {
+                        assert_eq!(b.len(), 2, "only the rest is written");
+                        Ok(b.len())
+                    }
+                }
+            },
+            b"abcdef",
+        );
+        assert!(matches!(got, Ok(true)));
+        assert_eq!(calls, 3);
+        // A stop request during an interrupted write ends it.
+        let mut calls = 0;
+        let got = write_checked(
+            |_| {
+                calls += 1;
+                STOP.store(true, Ordering::SeqCst);
+                // Bounded, so that a loop that ignores the flag ends in an error.
+                if calls > 3 {
+                    return Err(Error::from_raw_os_error(libc::EIO));
+                }
+                Err(Error::from(ErrorKind::Interrupted))
+            },
+            b"abc",
+        );
+        STOP.store(false, Ordering::SeqCst);
+        assert!(matches!(got, Ok(false)));
+        assert_eq!(calls, 1);
+        assert!(write_checked(|_| Err(Error::from_raw_os_error(libc::EIO)), b"x").is_err());
     }
 }

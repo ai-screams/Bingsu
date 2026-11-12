@@ -9,9 +9,11 @@ import io
 import os
 import pty
 import re
+import resource
 import select
 import shutil
 import signal
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -38,10 +40,27 @@ def home():
     shutil.rmtree(root, ignore_errors=True)
 
 
-def spawn(home, *args, background=False):
+# Opens every descriptor from 3 to 1099 and then becomes `bingsu`, so that its
+# `/dev/tty` opens above FD_SETSIZE (1024). Python's own descriptors are
+# closed on exec; the dup2 copies are not.
+HIGH_DESCRIPTORS = (
+    "import os,resource,sys;"
+    "s,h=resource.getrlimit(resource.RLIMIT_NOFILE);"
+    "resource.setrlimit(resource.RLIMIT_NOFILE,(min(max(s,2048),h),h));"
+    "z=os.open(\"/dev/null\",os.O_RDWR);"
+    "os.set_inheritable(z,True);"
+    "[os.dup2(z,n) for n in range(3,1100)];"
+    "os.close(z) if z>=1100 else None;"
+    "os.execv(sys.argv[1],sys.argv[1:])"
+)
+
+
+def spawn(home, *args, background=False, high_fds=False):
     env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     run = f'"{real_bin()}" setup {" ".join(args)}'
+    if high_fds:
+        run = f"'{sys.executable}' -c '{HIGH_DESCRIPTORS}' {run}"
     # In the background `$!` names bingsu itself (not a shell around it), for a signal.
     run = f"{run} & echo BPID=$!; wait $!" if background else run
     script = f"echo BEFORE=$(stty -g); {run}; echo RC=$?; echo AFTER=$(stty -g)"
@@ -138,12 +157,15 @@ class RawTerminal:
         if pid == 0:
             os.execve("/bin/sh", ["/bin/sh", "-c", script], env)
         self.pid, self.fd, self.log = pid, fd, b""
+        self.script_env = env
 
     def read_until(self, pattern, timeout=5.0):
         """Reads until `pattern` (bytes) is in the log; returns the time it was seen."""
         end = time.monotonic() + timeout
         while pattern not in self.log:
             left = end - time.monotonic()
+            if left <= 0:
+                self.kill()
             assert left > 0, (pattern, self.log)
             if select.select([self.fd], [], [], left)[0]:
                 try:
@@ -155,6 +177,13 @@ class RawTerminal:
                 self.log += chunk
         assert pattern in self.log, (pattern, self.log)
         return time.perf_counter()
+
+    def kill(self):
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+            os.waitpid(self.pid, 0)
+        except OSError:
+            pass
 
     def finish(self):
         end = time.monotonic() + 5
@@ -196,3 +225,59 @@ def test_a_late_answer_does_not_reach_the_next_question(home):
     assert code == 0, text
     assert before == after, (before, after)
     assert 'mode = "light"' in config(home), config(home)
+
+
+def raw_terminal(home, after=""):
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+           "PATH": os.environ["PATH"], "TERM": "xterm"}
+    script = (f'echo BEFORE=$(stty -g); "{real_bin()}" setup --icons nerd; echo RC=$?; {after}'
+              'echo AFTER=$(stty -g)')
+    return RawTerminal(script, env)
+
+
+# 이것을 실패시키는 것: 취소(Ctrl-C) 직후에는 버리기 없이 끝내는 것(질문 뒤 25 ms 안에 오는 늦은 응답이
+# 셸 입력 줄에 남음: 뒤따른 `read`가 그 글자를 받음).
+def test_a_late_answer_after_a_cancel_is_discarded_too(home):
+    t = raw_terminal(home, after="read -r LEFT; echo LEFT=[$LEFT]; ")
+    t.read_until(b"\x1b]11;?\x1b\\")
+    os.write(t.fd, b"\x03")
+    time.sleep(0.01)
+    os.write(t.fd, b"\x1b]11;rgb:0000/0000/0000\x1b\\")
+    t.read_until(b"RC=")
+    time.sleep(0.1)
+    os.write(t.fd, b"\n")
+    code, before, after, text = t.finish()
+    assert code == 130, text
+    assert "LEFT=[]" in text, text
+    assert before == after
+    assert config(home) is None
+
+
+# 이것을 실패시키는 것: 시간 초과 뒤 버리기 읽기 중 온 Ctrl-C(0x03)를 무시하고 질문으로 넘어가는 것.
+def test_ctrl_c_while_the_late_answer_is_being_discarded_cancels(home):
+    t = raw_terminal(home)
+    seen = t.read_until(b"\x1b]11;?\x1b\\")
+    # 225 ms after the query: past the 200 ms limit, inside the 50 ms read.
+    while time.perf_counter() < seen + LATE_WINDOW_MIDDLE:
+        time.sleep(0.001)
+    os.write(t.fd, b"\x03")
+    t.read_until(b"cancelled")
+    code, before, after, text = t.finish()
+    assert code == 130, text
+    assert "Color mode" not in text, text
+    assert before == after
+    assert config(home) is None
+
+
+# 이것을 실패시키는 것: 터미널 설명자가 FD_SETSIZE(1024) 이상일 때 거르지 않는 것(`FD_SET`이 abort해 터미널이
+# raw로 남음). 거르면 터미널이 없는 것으로 보아 인자를 요구하고, 터미널은 그대로다.
+def test_a_terminal_on_a_high_descriptor_is_not_used(home):
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard < 1200:
+        pytest.skip("the hard descriptor limit is below 1200")
+    child = spawn(home, "--icons", "nerd", high_fds=True)
+    code, before, after, text = finish(child)
+    assert code == 2, text
+    assert "no terminal to ask" in text, text
+    assert before == after
+    assert config(home) is None

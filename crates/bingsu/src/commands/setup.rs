@@ -165,8 +165,25 @@ fn unique_name() -> OsString {
     format!(".{FILE}.setup-{}-{nanos}", std::process::id()).into()
 }
 
+/// `fsync` of the folder `chain` ends in. Opened again by its name with
+/// `O_RDONLY | O_DIRECTORY`: on Linux a folder kept open as a search-only
+/// (`O_PATH`) descriptor, as `open_chain` keeps it, cannot be synced
+/// (EBADF). The folder found must be the one in the chain.
+fn sync_folder(chain: &Chain, dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let folder = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)?;
+    let (a, b) = (folder.metadata()?, chain.last().metadata()?);
+    if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
+        return Err(std::io::Error::other("the settings folder changed"));
+    }
+    folder.sync_all()
+}
+
 /// Temporary file, data and folder flushed, then `linkat`.
-fn create(chain: &Chain, text: &str) -> std::io::Result<Created> {
+fn create(chain: &Chain, dir_path: &Path, text: &str) -> std::io::Result<Created> {
     let dir = chain.last();
     let tmp = unique_name();
     let file = sys::create_file_at(dir.as_fd(), &tmp, 0o600)?;
@@ -183,7 +200,7 @@ fn create(chain: &Chain, text: &str) -> std::io::Result<Created> {
     })();
     let _ = sys::unlink_at(dir.as_fd(), &tmp);
     let made = made?;
-    dir.sync_all()?;
+    sync_folder(chain, dir_path)?;
     Ok(made)
 }
 
@@ -352,7 +369,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
             Err(_) => return refuse(&format!("{} cannot be made", ctx::show(&dir))),
         },
     };
-    match create(&chain, &starter(choices)) {
+    match create(&chain, &dir, &starter(choices)) {
         Ok(Created::Wrote) => eprintln!("bingsu: wrote {}", ctx::show(&path)),
         Ok(Created::Exists) => report_existing(&path, existing(&chain), choices),
         Err(_) => return refuse(&format!("{} could not be written", ctx::show(&path))),
@@ -489,7 +506,7 @@ mod tests {
         let chain = runtime_root::open_chain(&dir).unwrap();
         // The fixture makes the file after the caller's check, before the link.
         std::fs::write(dir.join(FILE), b"theirs\n").unwrap();
-        let got = create(&chain, "ours\n").unwrap();
+        let got = create(&chain, &dir, "ours\n").unwrap();
         assert!(matches!(got, Created::Exists));
         assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"theirs\n");
         let names: Vec<_> = std::fs::read_dir(&dir)
@@ -499,7 +516,10 @@ mod tests {
         assert_eq!(names, [OsString::from(FILE)], "a temporary file was left");
         // Without a rival the file is made, private, and no temporary stays.
         std::fs::remove_file(dir.join(FILE)).unwrap();
-        assert!(matches!(create(&chain, "ours\n").unwrap(), Created::Wrote));
+        assert!(matches!(
+            create(&chain, &dir, "ours\n").unwrap(),
+            Created::Wrote
+        ));
         let meta = std::fs::metadata(dir.join(FILE)).unwrap();
         assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
         assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"ours\n");
