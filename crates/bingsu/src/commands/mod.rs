@@ -96,6 +96,8 @@ mod reload;
 #[cfg(unix)]
 pub(crate) mod runtime_root;
 #[cfg(unix)]
+mod setup;
+#[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
 pub(crate) mod snapshot_store;
 #[cfg(unix)]
@@ -105,6 +107,9 @@ mod source_path;
 pub(crate) mod sys;
 #[cfg(unix)]
 mod trust_record;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) mod tty;
 #[cfg(unix)]
 pub(crate) mod version_manager;
 
@@ -127,6 +132,8 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         Some("help") => help::run(&a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
+        #[cfg(unix)]
+        Some("setup") => setup::run(&a.args[1..]),
         #[cfg(unix)]
         Some("reload") => reload::run(&a.argv0, &a.args[1..]),
         #[cfg(feature = "bench-stubs")]

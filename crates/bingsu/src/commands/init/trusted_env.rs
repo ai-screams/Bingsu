@@ -93,6 +93,15 @@ impl TrustedEnv {
         (body, std::env::var_os("PWD"))
     }
 
+    /// `$SHELL`, to name the shell whose startup line `setup` prints.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the user's own command names the shell they run it from"
+    )]
+    pub fn login_shell() -> Option<OsString> {
+        std::env::var_os("SHELL")
+    }
+
     /// The roots variable the init script exported (see `pinned`).
     #[expect(
         clippy::disallowed_methods,
