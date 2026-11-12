@@ -58,8 +58,8 @@ CI_R2_OVER_CAP = 'reference over the 1.10 cap'
 CI_R2_UNSTABLE = 'reference unstable within the block'
 # Calibration spread (largest / smallest of the kept block medians) allowed
 # before measuring. Gate runs (CI) keep 1.05 and no condition changes it;
-# experiment (record) runs take condition `calibration_spread_max`, at most
-# EXPERIMENT_SPREAD_MAX (U-42).
+# record-only experiment runs take condition `calibration_spread_max`, at
+# most EXPERIMENT_SPREAD_MAX.
 GATE_SPREAD_MAX = 1.05
 EXPERIMENT_SPREAD_MAX = 1.15
 
@@ -333,7 +333,7 @@ def _paired(base, candidate, rounds, condition, observe, *, required_metrics=(),
 
 def resolution(variants, calibration_spread):
     """Per metric: the candidate/base p50 ratio, and `undecidable` when it
-    lies closer to 1 than this run's calibration spread (U-42)."""
+    lies closer to 1 than this run's calibration spread."""
     out = {}
     for metric, base in variants['base']['summary'].items():
         ratio = variants['candidate']['summary'][metric]['p50'] / base['p50'] if base['p50'] > 0 else None
