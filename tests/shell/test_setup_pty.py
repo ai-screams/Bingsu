@@ -334,3 +334,60 @@ def ctrl_c_in_the_discard_cancels(home):
 # 이것을 실패시키는 것: 시간 초과 뒤 버리기 읽기 중 온 Ctrl-C(0x03)를 무시하고 질문으로 넘어가는 것.
 def test_ctrl_c_while_the_late_answer_is_being_discarded_cancels(home):
     assert any(ctrl_c_in_the_discard_cancels(attempt_home(home, n)) for n in range(TRIES))
+
+
+# Becomes its own process group (so it is not the terminal's foreground job), ignores SIGTTOU (so a change of
+# the terminal mode would not stop it) and becomes `bingsu`.
+BACKGROUND_JOB = (
+    "import os,signal,sys;"
+    "signal.signal(signal.SIGTTOU,signal.SIG_IGN);"
+    "os.setpgid(0,0);"
+    "os.execv(sys.argv[1],sys.argv[1:])"
+)
+
+
+# 이것을 실패시키는 것: 전경 작업인지 확인하지 않는 것(SIGTTOU를 무시한 배경 작업이 전경 셸 밑에서 터미널 모드를
+# 바꾸고, 복구의 `tcflush`가 사용자가 미리 친 글자를 버림). 확인하면 터미널이 없는 것으로 보아 질문 없이 인자를 요구한다.
+def test_a_background_job_does_not_touch_the_terminal(home):
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+           "PATH": os.environ["PATH"], "TERM": "xterm"}
+    script = (f"echo BEFORE=$(stty -g); '{sys.executable}' -c '{BACKGROUND_JOB}' \"{real_bin()}\" setup --icons nerd; "
+              "echo RC=$?; read -r LEFT; echo LEFT=[$LEFT]; echo AFTER=$(stty -g)")
+    t = RawTerminal(script, env)
+    os.write(t.fd, b"typed\n")
+    if t.read_any([b"RC="], timeout=3.0) is None:
+        t.kill()
+    code, before, after, text = t.finish()
+    assert code == 2, text
+    assert "no terminal to ask" in text, text
+    assert b"\x1b]11;?" not in t.log
+    assert "LEFT=[typed]" in text, text
+    assert before == after
+
+
+# 이것을 실패시키는 것: 터미널이 끊긴 뒤(복구 `tcsetattr`이 실패함) 복구 실패를 panic으로 다루는 것(종료 코드 101),
+# 끊긴 터미널에서 끝나지 않고 기다리는 것. 끊기면 SIGHUP 처리기가 취소로 끝낸다. 0바이트 읽기 처리 자체는 단위
+# 시험(`reading_a_reply_ends_on_hang_up…`)이 잡는다: 끊김에는 SIGHUP이 먼저 와서 이 시험으로는 가려지지 않는다.
+def test_a_hung_up_terminal_ends_without_a_panic(home):
+    err, rc = home / "stderr", home / "rc"
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+           "PATH": os.environ["PATH"], "TERM": "xterm"}
+    # The shell ignores SIGHUP so that it outlives the hang-up and records how bingsu ended.
+    script = f'trap "" HUP; "{real_bin()}" setup --icons nerd 2>"{err}"; echo $? > "{rc}"'
+    t = RawTerminal(script, env)
+    t.read_until(b"\x1b]11;?\x1b\\")
+    os.close(t.fd)
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        done, _ = os.waitpid(t.pid, os.WNOHANG)
+        if done:
+            break
+        time.sleep(0.01)
+    else:
+        os.kill(t.pid, signal.SIGKILL)
+        os.waitpid(t.pid, 0)
+        pytest.fail("bingsu did not end after the terminal hung up")
+    text = err.read_text()
+    assert "panicked" not in text, text
+    assert int(rc.read_text()) != 101, text
+    assert config(home) is None

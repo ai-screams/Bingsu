@@ -227,6 +227,43 @@ fn readable(fd: RawFd, stoppable: bool) -> impl Fn(Instant) -> bool {
     }
 }
 
+/// Reads what the terminal sends until a reply is complete. `ready()` waits
+/// for something to read (`false`: time ran out, or a stop was asked for);
+/// `read` reads it.
+fn read_reply(
+    mut ready: impl FnMut() -> bool,
+    mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+) -> Reply {
+    let mut seen: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 64];
+    loop {
+        if !ready() {
+            return if STOP.load(Ordering::SeqCst) {
+                Reply::Cancelled
+            } else {
+                Reply::Silent
+            };
+        }
+        let n = match read(&mut chunk) {
+            // Readable but nothing to read: the terminal went away.
+            Ok(0) => return Reply::Silent,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Reply::Silent,
+        };
+        if chunk[..n].contains(&0x03) {
+            return Reply::Cancelled;
+        }
+        if seen.len() + n > INPUT_CAP {
+            return Reply::Silent;
+        }
+        seen.extend_from_slice(&chunk[..n]);
+        if let Some(reply) = find_reply(&seen) {
+            return Reply::Bytes(reply.to_vec());
+        }
+    }
+}
+
 impl Tty {
     /// `None`: there is no controlling terminal (a pipe, CI, `setsid`).
     pub fn open() -> Option<Self> {
@@ -244,7 +281,17 @@ impl Tty {
         // A device that is not a terminal (or a stale node) is no terminal.
         let mut t = std::mem::MaybeUninit::<libc::termios>::uninit();
         // SAFETY: the descriptor is open and `t` is writable memory.
-        (unsafe { libc::tcgetattr(file.as_raw_fd(), t.as_mut_ptr()) } == 0).then_some(Self { file })
+        if unsafe { libc::tcgetattr(file.as_raw_fd(), t.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // Only the foreground job may change the terminal or read from it. A
+        // background job that ignores SIGTTOU could change the mode under the
+        // foreground shell, and restoring would throw away what the user typed.
+        // SAFETY: the descriptor is open; the call reads the terminal's group.
+        let foreground = unsafe { libc::tcgetpgrp(file.as_raw_fd()) };
+        // SAFETY: getpgrp takes no arguments and cannot fail.
+        let own = unsafe { libc::getpgrp() };
+        (foreground == own).then_some(Self { file })
     }
 
     pub fn say(&self, text: &str) {
@@ -293,33 +340,9 @@ impl Tty {
             },
             b"\x1b]11;?\x1b\\",
         )?;
-        let mut seen: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 64];
         let mut result = if sent {
-            loop {
-                if !wait(until) {
-                    break if STOP.load(Ordering::SeqCst) {
-                        Reply::Cancelled
-                    } else {
-                        Reply::Silent
-                    };
-                }
-                let n = match f.read(&mut chunk) {
-                    Ok(n) => n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break Reply::Silent,
-                };
-                if chunk[..n].contains(&0x03) {
-                    break Reply::Cancelled;
-                }
-                if seen.len() + n > INPUT_CAP {
-                    break Reply::Silent;
-                }
-                seen.extend_from_slice(&chunk[..n]);
-                if let Some(reply) = find_reply(&seen) {
-                    break Reply::Bytes(reply.to_vec());
-                }
-            }
+            read_reply(|| wait(until), |b| f.read(b))
         } else {
             Reply::Cancelled
         };
@@ -386,6 +409,68 @@ mod tests {
         assert_eq!(settle(Reply::Silent, true), Reply::Cancelled);
         assert_eq!(settle(answer(), false), answer());
         assert_eq!(settle(Reply::Silent, false), Reply::Silent);
+    }
+
+    // 이것을 실패시키는 것: 읽을 수 있다는데 0바이트(끊긴 터미널)를 끝으로 보지 않고 마감까지 되풀이하는 것,
+    // 응답 앞에 친 글자 속에서 응답을 못 찾는 것, 0x03을 취소로 치지 않는 것, 입력 상한을 넘겨도 계속 읽는 것.
+    #[test]
+    fn reading_a_reply_ends_on_hang_up_cancel_answer_and_flood() {
+        // A hung-up terminal is readable and gives nothing: one read, then silence.
+        let mut reads = 0;
+        let mut waits = 0;
+        let got = read_reply(
+            || {
+                waits += 1;
+                waits < 6
+            },
+            |_| {
+                reads += 1;
+                Ok(0)
+            },
+        );
+        assert_eq!(got, Reply::Silent);
+        assert_eq!(reads, 1);
+        // Typed-ahead input, then the answer in two pieces.
+        let mut pieces: Vec<&[u8]> = vec![b"ls\r\x1b]11;rgb:00", b"00/0000/0000\x07"];
+        let got = read_reply(
+            || true,
+            |b| {
+                let p = pieces.remove(0);
+                b[..p.len()].copy_from_slice(p);
+                Ok(p.len())
+            },
+        );
+        assert_eq!(
+            got,
+            Reply::Bytes(b"\x1b]11;rgb:0000/0000/0000\x07".to_vec())
+        );
+        // Ctrl-C.
+        let got = read_reply(
+            || true,
+            |b| {
+                b[0] = 0x03;
+                Ok(1)
+            },
+        );
+        assert_eq!(got, Reply::Cancelled);
+        // Input that never makes an answer stops at the cap.
+        let mut total = 0;
+        let got = read_reply(
+            || true,
+            |b| {
+                b.fill(b'x');
+                total += b.len();
+                // Bounded, so that a loop without the cap ends in an error.
+                if total > 100 * INPUT_CAP {
+                    return Err(Error::from_raw_os_error(libc::EIO));
+                }
+                Ok(b.len())
+            },
+        );
+        assert_eq!(got, Reply::Silent);
+        assert!(total <= INPUT_CAP + 64, "{total}");
+        // Time ran out.
+        assert_eq!(read_reply(|| false, |_| Ok(0)), Reply::Silent);
     }
 
     // 이것을 실패시키는 것: EINTR을 받고 정지 표시를 보지 않고 막힌 쓰기를 다시 하는 것, 부분 쓰기 뒤 나머지를
