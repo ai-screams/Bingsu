@@ -1,12 +1,14 @@
 //! Shared sibling identity. No git queries, timestamps, absolute paths in the
 //! manifest, linker options or build dependencies. Cargo watches the inventory
-//! directories too, so adding a source changes the identity.
+//! directories too, so adding a source changes the identity. The compiler's
+//! release and commit-hash join it: the same sources built by another rustc
+//! are another build.
 extern crate alloc;
 #[allow(dead_code)]
 #[path = "../bingsu-core/src/collection/cwd_hash.rs"]
 mod digest;
 
-use std::{env, fs, path::Path};
+use std::{env, fs, path::Path, process::Command};
 
 fn inventory(root: &Path, path: &Path, out: &mut Vec<u8>) {
     println!("cargo:rerun-if-changed={}", path.display());
@@ -47,6 +49,13 @@ fn main() {
     ] {
         inventory(root, &root.join(name), &mut manifest);
     }
+    // Every workspace crate the three binaries link: normal and build edges,
+    // optional ones included, dev edges left out. Reading the graph here would
+    // need a TOML or JSON parser in this build script, so the list is written
+    // out and scripts/test_collector_audits.py compares it with cargo metadata.
+    // A build script that appears later is picked up on the next clean build;
+    // watching a missing file would rerun this script on every build.
+    // 이것을 실패시키는 것: crate 하나나 crate의 build.rs를 identity 입력에서 빼는 것.
     for package in [
         "bingsu",
         "bingsu-prompt",
@@ -54,16 +63,35 @@ fn main() {
         "bingsu-collect",
         "bingsu-bench",
         "bingsu-identity",
+        "bingsu-match",
     ] {
         let package = root.join("crates").join(package);
         inventory(root, &package.join("Cargo.toml"), &mut manifest);
         inventory(root, &package.join("src"), &mut manifest);
+        let script = package.join("build.rs");
+        if script.exists() {
+            inventory(root, &script, &mut manifest);
+        }
     }
-    inventory(
-        root,
-        &root.join("crates/bingsu-identity/build.rs"),
-        &mut manifest,
-    );
+    // Release and commit-hash only: host, binary and LLVM lines stay out, so a
+    // cross build of the same sources by the same compiler from another host
+    // gives the same identity. Cargo passes the real compiler in RUSTC, also
+    // under RUSTC_WRAPPER.
+    // 이것을 실패시키는 것: release·commit-hash 줄을 빼는 것, 실패한 rustc를 넘기는 것.
+    println!("cargo:rerun-if-env-changed=RUSTC");
+    let rustc = Command::new(env::var_os("RUSTC").expect("RUSTC"))
+        .arg("-vV")
+        .output()
+        .expect("rustc -vV");
+    assert!(rustc.status.success(), "rustc -vV failed");
+    let rustc = String::from_utf8(rustc.stdout).unwrap();
+    for key in ["release: ", "commit-hash: "] {
+        let value = rustc
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or_else(|| panic!("rustc -vV has no {key:?} line"));
+        append(&mut manifest, key.as_bytes(), value.as_bytes());
+    }
     let mut settings: Vec<_> = env::vars()
         .filter(|(key, _)| {
             key.starts_with("CARGO_FEATURE_")

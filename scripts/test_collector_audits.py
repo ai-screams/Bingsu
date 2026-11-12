@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -85,43 +86,77 @@ def test_collector_dependency_allowlist_rejects_new_edges(monkeypatch):
 
 
 
-# 이것을 실패시키는 것: source·lock·collector 정책·feature·target·profile·flags 중 하나를 build-id에서 빼는 것,
-# bingsu-prompt의 manifest·entry 소스를 빼는 것.
-def test_sibling_build_manifest_is_exact(tmp_path):
+RUSTC_VV = ("rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c3d0e4a1b\n"
+            "commit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 21.1.2\n")
+
+
+def manifest_builder(tmp_path):
+    """The identity build script compiled on its own, and a stand-in compiler
+    whose `-vV` answer is the file next to it and whose exit status is
+    FAKE_RUSTC_EXIT (shell builtins only: the builder runs with no PATH)."""
     builder = tmp_path / "manifest-builder"
     subprocess.run(["rustc", "--edition=2024", str(ROOT / "crates/bingsu-identity/build.rs"),
                     "-o", str(builder)], check=True, capture_output=True)
+    rustc = tmp_path / "rustc"
+    rustc.write_text('#!/bin/sh\n[ "$1" = -vV ] || exit 3\n'
+                     'while IFS= read -r line; do printf \'%s\\n\' "$line"; done < "$0.vV"\n'
+                     'exit "${FAKE_RUSTC_EXIT:-0}"\n')
+    rustc.chmod(0o755)
+    (tmp_path / "rustc.vV").write_text(RUSTC_VV)
+    return builder, rustc
+
+
+def built_id(out):
+    """All 32 bytes of the identity the builder wrote, not a prefix."""
+    text = (out / "build_id.rs").read_text()
+    found = re.findall(r"BuildId\(\[([0-9, ]+)\]\)", text)
+    assert len(found) == 1, text
+    value = bytes(int(x) for x in found[0].split(","))
+    assert len(value) == 32
+    return value
+
+
+# 이것을 실패시키는 것: source·lock·collector 정책·feature·target·profile·flags 중 하나를 build-id에서 빼는 것,
+# bingsu-prompt의 manifest·entry 소스를 빼는 것, bingsu-match 또는 crate의 build.rs를 빼는 것,
+# rustc의 release·commit-hash를 빼거나 host·LLVM 줄까지 넣는 것, 뿌리·OUT_DIR 경로를 정체에 넣는 것.
+def test_sibling_build_manifest_is_exact(tmp_path):
+    builder, rustc = manifest_builder(tmp_path)
+    answer = tmp_path / "rustc.vV"
     root = tmp_path / "source"
     root.mkdir()
     for name in ("Cargo.toml", "Cargo.lock"):
         (root / name).write_text("baseline\n")
-    for package in ("bingsu", "bingsu-prompt", "bingsu-core", "bingsu-collect", "bingsu-bench", "bingsu-identity"):
+    for package in ("bingsu", "bingsu-prompt", "bingsu-core", "bingsu-collect", "bingsu-bench", "bingsu-identity",
+                    "bingsu-match"):
         path = root / "crates" / package
         (path / "src").mkdir(parents=True)
         (path / "Cargo.toml").write_text("baseline\n")
         (path / "src/lib.rs").write_text("baseline\n")
-    (root / "crates/bingsu-identity/build.rs").write_text("baseline\n")
+    for package in ("bingsu-identity", "bingsu-collect"):
+        (root / "crates" / package / "build.rs").write_text("baseline\n")
     policies = ("crates/bingsu-collect/dependencies.allowlist.tsv",
                 "crates/bingsu-collect/collector-syscalls.tsv")
     for relative in policies:
         (root / relative).write_text("baseline policy\n")
     out = tmp_path / "out"
     out.mkdir()
-    settings = {"CARGO_MANIFEST_DIR": str(root / "crates/bingsu-identity"), "OUT_DIR": str(out),
+    settings = {"CARGO_MANIFEST_DIR": str(root / "crates/bingsu-identity"), "OUT_DIR": str(out), "RUSTC": str(rustc),
                 "TARGET": "aarch64-apple-darwin", "PROFILE": "release", "OPT_LEVEL": "3", "DEBUG": "false"}
     def identity(extra=None):
         subprocess.run([str(builder)], env=settings | (extra or {}), check=True, capture_output=True)
-        return (out / "build_id.rs").read_bytes()
+        return built_id(out)
     baseline = identity()
     assert identity() == baseline
     for relative in ("Cargo.toml", "Cargo.lock", "crates/bingsu-collect/Cargo.toml", "crates/bingsu/src/lib.rs", "crates/bingsu-core/src/lib.rs",
                      "crates/bingsu-prompt/Cargo.toml", "crates/bingsu-prompt/src/lib.rs",
                      "crates/bingsu-collect/src/lib.rs", "crates/bingsu-bench/src/lib.rs", "crates/bingsu-identity/src/lib.rs",
-                     "crates/bingsu-identity/Cargo.toml", "crates/bingsu-identity/build.rs", *policies):
+                     "crates/bingsu-identity/Cargo.toml", "crates/bingsu-identity/build.rs",
+                     "crates/bingsu-match/Cargo.toml", "crates/bingsu-match/src/lib.rs", "crates/bingsu-collect/build.rs",
+                     *policies):
         file = root / relative
         saved = file.read_bytes()
         try:
-            file.write_bytes(b"changed!\n")
+            file.write_bytes(bytes([saved[0] ^ 1]) + saved[1:])  # one byte
             assert identity() != baseline, relative
         finally:
             file.write_bytes(saved)
@@ -131,6 +166,40 @@ def test_sibling_build_manifest_is_exact(tmp_path):
                        ("CARGO_CFG_TARGET_FEATURE", "sse2"), ("CARGO_PROFILE_RELEASE_LTO", "false")):
         assert identity({key: value}) != baseline, key
 
+    # The compiler: its release and commit-hash lines, and nothing about the host
+    # it runs on, so a cross build from another host can match.
+    for before, after, changes in (("release: 1.99.1", "release: 1.99.2", True),
+                                   ("commit-hash: 58cf8f9c3d0e4a1b", "commit-hash: 58cf8f9c3d0e4a1c", True),
+                                   ("host: aarch64-apple-darwin", "host: x86_64-unknown-linux-gnu", False),
+                                   ("LLVM version: 21.1.2", "LLVM version: 21.1.3", False),
+                                   ("rustc 1.99.1 (58cf8f9c3 2026-10-13)", "rustc 1.99.1 (other)", False)):
+        try:
+            answer.write_text(RUSTC_VV.replace(before, after))
+            assert (identity() != baseline) == changes, after
+        finally:
+            answer.write_text(RUSTC_VV)
+    for broken in (RUSTC_VV.replace("release: 1.99.1\n", ""), RUSTC_VV.replace("commit-hash: 58cf8f9c3d0e4a1b\n", "")):
+        try:
+            answer.write_text(broken)
+            with pytest.raises(subprocess.CalledProcessError):
+                identity()
+        finally:
+            answer.write_text(RUSTC_VV)
+    # A compiler that cannot run, and one that answers but fails.
+    for extra in ({"RUSTC": str(tmp_path / "missing-rustc")}, {"FAKE_RUSTC_EXIT": "1"}):
+        with pytest.raises(subprocess.CalledProcessError):
+            identity(extra)
+    assert identity() == baseline
+
+    # Another checkout path and another OUT_DIR (target folder) give the same identity.
+    moved = tmp_path / "elsewhere" / "checkout"
+    shutil.copytree(root, moved, symlinks=True)
+    other = tmp_path / "other-target" / "out"
+    other.mkdir(parents=True)
+    subprocess.run([str(builder)], env=settings | {"CARGO_MANIFEST_DIR": str(moved / "crates/bingsu-identity"),
+                                                   "OUT_DIR": str(other)}, check=True, capture_output=True)
+    assert built_id(other) == baseline
+
     link = root / "crates/bingsu/src/linked.rs"
     link.symlink_to(root / "Cargo.lock")
     try:
@@ -138,6 +207,54 @@ def test_sibling_build_manifest_is_exact(tmp_path):
             identity()
     finally:
         link.unlink()
+
+
+def linked_workspace_packages():
+    """Workspace packages the three binaries link, from cargo's own reading of
+    the manifests: normal and build edges for every target, optional ones
+    included (bingsu-bench under bench-stubs), dev edges left out."""
+    metadata = json.loads(subprocess.run(["cargo", "metadata", "--no-deps", "--format-version=1", "--offline"],
+                                         cwd=ROOT, capture_output=True, text=True, check=True).stdout)
+    by_dir = {pathlib.Path(p["manifest_path"]).resolve().parent: p for p in metadata["packages"]}
+    by_name = {p["name"]: p for p in metadata["packages"]}
+    linked = {}
+    todo = [by_name[name] for name in ("bingsu", "bingsu-prompt", "bingsu-collect")]
+    while todo:
+        package = todo.pop()
+        directory = pathlib.Path(package["manifest_path"]).resolve().parent
+        if directory in linked:
+            continue
+        linked[directory] = package
+        for dependency in package["dependencies"]:
+            if dependency.get("path") and dependency["kind"] != "dev":
+                # A path dependency outside the workspace members is a KeyError here.
+                todo.append(by_dir[pathlib.Path(dependency["path"]).resolve()])
+    return linked
+
+
+# 이것을 실패시키는 것: build.rs 목록에서 crate 하나를 빼는 것, 제품 crate에 새 path 의존을 더하고 목록에
+# 넣지 않는 것, crate의 build script나 lib·bin 진입 파일을 정체 입력에서 빼는 것, RUSTC 감시 줄을 빼는 것.
+def test_sibling_build_inputs_are_the_linked_workspace_crates(tmp_path):
+    builder, rustc = manifest_builder(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    run = subprocess.run([str(builder)], env={"CARGO_MANIFEST_DIR": str(ROOT / "crates/bingsu-identity"),
+                                              "OUT_DIR": str(out), "RUSTC": str(rustc), "TARGET": "x86_64-unknown-linux-gnu",
+                                              "PROFILE": "debug", "OPT_LEVEL": "0", "DEBUG": "true"},
+                         check=True, capture_output=True, text=True)
+    # Cargo reruns the script when the compiler it is handed changes.
+    assert "cargo:rerun-if-env-changed=RUSTC" in run.stdout.splitlines()
+    prefix = "cargo:rerun-if-changed="
+    hashed = {pathlib.Path(line[len(prefix):]).resolve() for line in run.stdout.splitlines() if line.startswith(prefix)}
+    linked = linked_workspace_packages()
+    assert {"bingsu-match", "bingsu-identity", "bingsu-bench"} <= {p["name"] for p in linked.values()}
+    inventoried = {path.parent for path in hashed if path.name == "Cargo.toml" and path.parent != ROOT}
+    assert inventoried == set(linked), (sorted(map(str, inventoried ^ set(linked))))
+    for directory, package in linked.items():
+        assert directory / "src" in hashed, package["name"]
+        for target in package["targets"]:
+            if set(target["kind"]) & {"lib", "rlib", "bin", "custom-build", "proc-macro"}:
+                assert pathlib.Path(target["src_path"]).resolve() in hashed, (package["name"], target["name"])
 
 
 # 이것을 실패시키는 것: 동일 build-id인 다른 역할, 역할 없음, 중복 역할을 허용하는 것.
