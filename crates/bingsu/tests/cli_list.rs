@@ -86,6 +86,10 @@ fn preview_draws_one_plain_line_per_preset_for_the_current_folder() {
 // BINGSU_REQUIRE_STRACE=1이면 실패한다.
 #[cfg(target_os = "linux")]
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test harness switch, not the prompt path"
+)]
 fn list_starts_no_process() {
     let strace = ["/usr/bin/strace", "/bin/strace", "/usr/local/bin/strace"]
         .into_iter()
