@@ -66,6 +66,8 @@ mod evidence;
 #[allow(dead_code, reason = "C2 connects the resolver")]
 pub(crate) mod exec_path;
 #[cfg(unix)]
+mod explain;
+#[cfg(unix)]
 mod explain_builtin;
 #[cfg(unix)]
 mod git_global;
@@ -124,6 +126,8 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         Some(command_supervisor::ENTRY) => command_supervisor::run(&a.argv0),
         #[cfg(unix)]
         Some("config") => config::run(&a.argv0, &a.args[1..]),
+        #[cfg(unix)]
+        Some("explain") => explain::run(&a.args[1..]),
         Some("help") => help::run(&a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
@@ -134,7 +138,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
             u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
         ),
         _ => {
-            eprintln!("usage: bingsu <config|help|init|prompt|reload> ...");
+            eprintln!("usage: bingsu <config|explain|help|init|prompt|reload> ...");
             ExitCode::from(2)
         }
     }

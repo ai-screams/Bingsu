@@ -1,0 +1,77 @@
+== width 120 ==
+settings: <file> (only that file)
+width: 120 cells
+layout: the default layout (no band matches)
+line 1:
+  hidden: duration [no-value] (the segment sent no value)
+  hidden: git [no-value] (the segment sent no value)
+  hidden: host [no-value] (the segment sent no value)
+  hidden: jobs [no-value] (the segment sent no value)
+  hidden: status [no-value] (the segment sent no value)
+  hidden: time [no-value] (the segment sent no value)
+  hidden: venv [no-value] (the segment sent no value)
+explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.
+== width 60 ==
+settings: <file> (only that file)
+width: 60 cells
+layout: the default layout (no band matches)
+line 1:
+  hidden: duration [no-value] (the segment sent no value)
+  hidden: git [no-value] (the segment sent no value)
+  hidden: host [no-value] (the segment sent no value)
+  hidden: jobs [no-value] (the segment sent no value)
+  hidden: status [no-value] (the segment sent no value)
+  hidden: time [no-value] (the segment sent no value)
+  hidden: venv [no-value] (the segment sent no value)
+explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.
+== width 41 ==
+settings: <file> (only that file)
+width: 41 cells
+layout: the default layout (no band matches)
+line 1:
+  hidden: duration [no-value] (the segment sent no value)
+  hidden: git [no-value] (the segment sent no value)
+  hidden: host [no-value] (the segment sent no value)
+  hidden: jobs [no-value] (the segment sent no value)
+  hidden: status [no-value] (the segment sent no value)
+  hidden: time [no-value] (the segment sent no value)
+  hidden: venv [no-value] (the segment sent no value)
+line 2:
+  overflow step 1: shortened names
+  overflow step 2: hid right-side segments by priority
+  hidden: custom/b [priority] (step 2: lower priority than what fits)
+  shortened: dir with abbrev 1
+explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.
+== width 40 ==
+settings: <file> (only that file)
+width: 40 cells
+layout: band `narrow`
+line 1:
+  hidden: git [no-value] (the segment sent no value)
+  hidden: host [no-value] (the segment sent no value)
+line 2:
+  hidden: duration [no-value] (the segment sent no value)
+explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.
+== width 20 ==
+settings: <file> (only that file)
+width: 20 cells
+layout: band `narrow`
+line 1:
+  hidden: git [no-value] (the segment sent no value)
+  hidden: host [no-value] (the segment sent no value)
+line 2:
+  hidden: duration [no-value] (the segment sent no value)
+explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.
+== width 1 ==
+settings: <file> (only that file)
+width: 1 cells
+layout: band `narrow`
+line 1:
+  overflow step 7: kept only the prompt character
+  hidden: host [no-value] (the segment sent no value)
+  hidden: dir [minimal] (step 7: only the prompt character is left)
+  hidden: git [no-value] (the segment sent no value)
+line 2:
+  overflow step 7: kept only the prompt character
+  hidden: duration [no-value] (the segment sent no value)
+explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.

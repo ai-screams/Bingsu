@@ -99,7 +99,7 @@ pub fn render_selected_with_values<L: LayoutView>(
     commands: &[Option<&str>],
     out: &mut Vec<u8>,
 ) {
-    render_selected_with_catalog(
+    render_selected_inner(
         parsed,
         shell,
         status,
@@ -110,6 +110,41 @@ pub fn render_selected_with_values<L: LayoutView>(
         &crate::collection::selection::PRODUCT,
         commands,
         &[],
+        &mut NoopRecorder,
+        out,
+    );
+}
+
+/// The same render as `render_selected_with_values` (one function body), with
+/// the decisions of the main layout going to `recorder`. `explain` uses it,
+/// so what it reports is what the prompt decides. No collection response:
+/// values a collector would bring are pending.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the prompt's fixed renderer inputs plus the recorder"
+)]
+pub fn render_selected_recorded<L: LayoutView, R: crate::recorder::Recorder>(
+    parsed: &Envelope,
+    shell: Shell,
+    status: Status,
+    compiled: Option<&L>,
+    mode: Mode,
+    commands: &[Option<&str>],
+    recorder: &mut R,
+    out: &mut Vec<u8>,
+) {
+    render_selected_inner(
+        parsed,
+        shell,
+        status,
+        compiled,
+        mode,
+        None,
+        None,
+        &crate::collection::selection::PRODUCT,
+        commands,
+        &[],
+        recorder,
         out,
     );
 }
@@ -118,6 +153,7 @@ pub fn render_selected_with_values<L: LayoutView>(
     clippy::too_many_arguments,
     reason = "fixed pure renderer inputs and adapter catalog"
 )]
+#[inline(always)]
 fn render_selected_with_catalog<L: LayoutView>(
     parsed: &Envelope,
     shell: Shell,
@@ -129,6 +165,40 @@ fn render_selected_with_catalog<L: LayoutView>(
     catalog: &crate::collection::selection::Catalog<'_>,
     commands: &[Option<&str>],
     languages: &[(usize, &str)],
+    out: &mut Vec<u8>,
+) {
+    render_selected_inner(
+        parsed,
+        shell,
+        status,
+        compiled,
+        mode,
+        collection,
+        expected,
+        catalog,
+        commands,
+        languages,
+        &mut NoopRecorder,
+        out,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "fixed pure renderer inputs and adapter catalog"
+)]
+fn render_selected_inner<L: LayoutView, R: crate::recorder::Recorder>(
+    parsed: &Envelope,
+    shell: Shell,
+    status: Status,
+    compiled: Option<&L>,
+    mode: Mode,
+    collection: Option<&crate::collection::response::Completed>,
+    expected: Option<&crate::collection::wire::Binding>,
+    catalog: &crate::collection::selection::Catalog<'_>,
+    commands: &[Option<&str>],
+    languages: &[(usize, &str)],
+    recorder: &mut R,
     out: &mut Vec<u8>,
 ) {
     let default;
@@ -272,13 +342,8 @@ fn render_selected_with_catalog<L: LayoutView>(
         options,
     };
     let notice = (status != Status::OK_NONE).then_some(crate::render::Notice::Warning);
-    let rendered = crate::render::render_prompt_with_notice(
-        &theme,
-        &inputs,
-        &target,
-        notice,
-        &mut NoopRecorder,
-    );
+    let rendered =
+        crate::render::render_prompt_with_notice(&theme, &inputs, &target, notice, recorder);
     let vi = crate::render::render_vi_variants(
         &theme,
         crate::render::ViInputs {
