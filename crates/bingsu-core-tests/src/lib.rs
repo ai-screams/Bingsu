@@ -93,4 +93,5 @@ pub fn parse_readline(b: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+pub mod json_schema;
 pub mod snapshot_fixture;

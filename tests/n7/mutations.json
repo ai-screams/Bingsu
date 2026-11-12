@@ -2848,8 +2848,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/config.rs",
-        "before": "[Some(\"check\")] => return config_inspect::check(),",
-        "after": "[Some(\"check\")] => { let _ = super::reload::run(&[]); return config_inspect::check(); },",
+        "before": "Some((explain, json)) => {",
+        "after": "Some((explain, json)) => { let _ = super::reload::run(exe, &[]);",
         "count": 1
       }
     ]
@@ -2876,7 +2876,7 @@
       {
         "file": "crates/bingsu/src/commands/config.rs",
         "before": "[Some(\"path\")] => return config_inspect::path(),",
-        "after": "[Some(\"path\")] => { let _ = super::reload::run(&[]); return config_inspect::path(); },",
+        "after": "[Some(\"path\")] => { let _ = super::reload::run(exe, &[]); return config_inspect::path(); },",
         "count": 1
       }
     ]
