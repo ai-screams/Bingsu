@@ -135,7 +135,9 @@ impl KeyDef {
 
 use Level::{Advanced, Basic, Expert};
 
-const PRESETS: &[&str] = &["lean", "triangle"];
+const PRESETS: &[&str] = &[
+    "lean", "triangle", "pill", "slant", "diamond", "block", "bracket",
+];
 const SHAPES: &[&str] = &["triangle", "round", "slant", "flat"];
 const SHORTEN: &[&str] = &["none", "repo", "abbrev", "depth", "unique"];
 const CMD: &[&str] = &["command"];
@@ -870,6 +872,16 @@ mod tests {
 
     // 모양 키(실행 키가 아닌 값 키)의 전수 목록. 표에서 키를 지우거나 분류를 바꾸면 이 목록과 달라지고,
     // 실패 메시지가 그 키 이름을 보인다. 새 모양 키는 근거와 함께 여기에 더한다.
+    // 이것을 실패시키는 것: `style.preset`의 값 목록이 `style::PRESETS`와 이름·순서가 갈라지는 것
+    // (스키마에 없는 프리셋이 있거나, 스키마에 있는데 만들어지지 않는 이름이 생김).
+    #[test]
+    fn preset_enum_is_the_preset_table() {
+        let names: Vec<&str> = crate::style::PRESETS.iter().map(|p| p.name).collect();
+        let want: Vec<&str> = PRESETS.to_vec();
+        assert_eq!(names, want);
+        assert_eq!(lookup(&["style", "preset"]).unwrap().ty, Ty::Enum(PRESETS));
+    }
+
     // 이것을 실패시키는 것: 모양 키 하나를 표에서 지우는 것(그 키는 실행 키로 다뤄짐), 실행 키를 모양 키로 바꾸는 것.
     #[test]
     fn shape_keys_are_pinned() {

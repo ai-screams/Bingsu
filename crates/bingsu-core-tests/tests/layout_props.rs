@@ -6,7 +6,7 @@ use bingsu_core::icons::IconSet;
 use bingsu_core::layout::{Inputs, Options, SegmentSetup, When, layout, runs_width, target};
 use bingsu_core::recorder::NoopRecorder;
 use bingsu_core::shorten::{Anchor, Keep, Method, PathFacts};
-use bingsu_core::style::{LineLayout, StyleOptions, generate, preset};
+use bingsu_core::style::{LineLayout, PRESETS, StyleOptions, generate};
 use bingsu_core::template::compile::compile;
 use bingsu_core::width::{WidthProfile, str_width};
 use proptest::prelude::*;
@@ -91,7 +91,7 @@ fn no_line_overflows() {
         name(),
         1u8..=2,
         1u8..=2,
-        0usize..4,
+        0usize..3,
         0usize..4,
     );
     let mut runner = TestRunner::new(Config {
@@ -119,12 +119,19 @@ fn no_line_overflows() {
             // The `#` and `⌚` templates get a branch that starts with the
             // selector that widens what is drawn before it.
             let branch = match style {
-                2 => ["\u{FE0F}".as_bytes(), &branch].concat(),
-                3 => ["\u{FE0E}".as_bytes(), &branch].concat(),
+                1 => ["\u{FE0F}".as_bytes(), &branch].concat(),
+                2 => ["\u{FE0E}".as_bytes(), &branch].concat(),
                 _ => branch,
             };
             values[i("git")] = value("git", &branch);
             values[i("time")] = value("time", b"12:34:56");
+            // On the right `status` (first) is always empty and `jobs` (last) has a
+            // value for half the inputs: the right side shows time alone or
+            // two segments with an empty one in front or behind, and must
+            // still end on the target cell (a gap that does not go with its segment fails).
+            if steps.len() % 2 == 0 {
+                values[i("jobs")] = value("jobs", b"j");
+            }
             setup[i("char")].required = true;
             setup[i("dir")] = SegmentSetup {
                 priority: 100,
@@ -139,68 +146,76 @@ fn no_line_overflows() {
                 facts: &facts,
                 setup: &setup,
             };
-            // Two presets, and templates that put the branch right after `#`
-            // (U+FE0F makes a keycap emoji, 2 cells when `emoji = 2`) or `⌚`
-            // (U+FE0E makes it the 2-cell text form when `emoji = 1`).
-            let t = match style {
-                0 | 1 => generate(
-                    preset(if style == 0 { "lean" } else { "triangle" }).unwrap(),
-                    &StyleOptions::default(),
-                    &[
-                        LineLayout {
-                            left: &["dir", "git"],
-                            right: &["time"],
-                        },
-                        LineLayout {
-                            left: &["char"],
-                            right: &[],
-                        },
-                    ],
-                )
-                .unwrap(),
-                2 => String::from("{dir} #{git}{@fill}{time}{@nl}{char}"),
-                _ => String::from("{dir} \u{231A}{git}{@fill}{time}{@nl}{char}"),
+            // Every built-in preset (style 0), and templates that put the
+            // branch right after `#` (U+FE0F makes a keycap emoji, 2 cells
+            // when `emoji = 2`) or `⌚` (U+FE0E makes it the 2-cell text form
+            // when `emoji = 1`).
+            let templates: Vec<String> = match style {
+                0 => PRESETS
+                    .iter()
+                    .map(|p| {
+                        generate(
+                            p,
+                            &StyleOptions::default(),
+                            &[
+                                LineLayout {
+                                    left: &["dir", "git"],
+                                    right: &["status", "time", "jobs"],
+                                },
+                                LineLayout {
+                                    left: &["char"],
+                                    right: &[],
+                                },
+                            ],
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+                1 => vec![String::from("{dir} #{git}{@fill}{time}{@nl}{char}")],
+                _ => vec![String::from("{dir} \u{231A}{git}{@fill}{time}{@nl}{char}")],
             };
-            let lines = compile(&t, BUILTIN).unwrap();
-            let profile = WidthProfile::new(amb, emoji).unwrap();
-            for w in 0..=200u16 {
-                let o = Options {
-                    width: w,
-                    profile,
-                    icons: SETS[set],
-                    use_last_column: false,
-                };
-                for (n, l) in layout(
-                    std::slice::from_ref(&lines),
-                    &[],
-                    &[],
-                    &inputs,
-                    &o,
-                    &mut NoopRecorder,
-                )
-                .into_iter()
-                .enumerate()
-                {
-                    let lw = runs_width(&l.left, profile);
-                    prop_assert!(
-                        lw + runs_width(&l.right, profile) <= target(&o),
-                        "w={w} {l:?}"
-                    );
-                    let s: String = l.left.iter().map(|r| r.text.as_str()).collect();
-                    // An upper line that still shows its right part (the
-                    // time; names have no digits) ends on the target cell:
-                    // no join is counted that the terminal does not draw.
-                    if n == 0 && !l.minimal && s.contains("12:34:56") {
-                        prop_assert_eq!(lw, target(&o), "w={} {:?}", w, s);
+            for t in &templates {
+                let lines = compile(t, BUILTIN).unwrap();
+                let profile = WidthProfile::new(amb, emoji).unwrap();
+                for w in 0..=200u16 {
+                    let o = Options {
+                        width: w,
+                        profile,
+                        icons: SETS[set],
+                        use_last_column: false,
+                    };
+                    for (n, l) in layout(
+                        std::slice::from_ref(&lines),
+                        &[],
+                        &[],
+                        &inputs,
+                        &o,
+                        &mut NoopRecorder,
+                    )
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let lw = runs_width(&l.left, profile);
+                        prop_assert!(
+                            lw + runs_width(&l.right, profile) <= target(&o),
+                            "w={w} {l:?}"
+                        );
+                        let s: String = l.left.iter().map(|r| r.text.as_str()).collect();
+                        // An upper line that still shows its right part (the
+                        // time; names have no digits) ends on the target cell:
+                        // no join is counted that the terminal does not draw.
+                        if n == 0 && !l.minimal && s.contains("12:34:56") {
+                            prop_assert_eq!(lw, target(&o), "w={} {:?}", w, s);
+                        }
+                        bump(&reached.minimal, l.minimal && w >= 2);
+                        bump(&reached.dot, amb == 2 && s.contains('.'));
+                        bump(&reached.tight, w >= 2 && lw == target(&o));
+                        let cut = s.contains('\u{2026}') || (amb == 2 && s.contains('.'));
+                        let wide = s
+                            .chars()
+                            .any(|c| str_width(c.encode_utf8(&mut [0; 4]), profile) == 2);
+                        bump(&reached.wide_cut, cut && wide);
                     }
-                    bump(&reached.minimal, l.minimal && w >= 2);
-                    bump(&reached.dot, amb == 2 && s.contains('.'));
-                    bump(&reached.tight, w >= 2 && lw == target(&o));
-                    let cut = s.contains('\u{2026}') || (amb == 2 && s.contains('.'));
-                    let wide = s
-                        .chars()
-                        .any(|c| str_width(c.encode_utf8(&mut [0; 4]), profile) == 2);
-                    bump(&reached.wide_cut, cut && wide);
                 }
             }
             Ok(())

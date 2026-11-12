@@ -260,7 +260,9 @@ fn render_cases(out: &mut String) {
     };
     let tr = compile("{char}", BUILTIN).expect("transient").remove(0);
     let mut vi_values = values.clone();
-    for preset_name in ["lean", "triangle"] {
+    for preset_name in [
+        "lean", "triangle", "pill", "slant", "diamond", "block", "bracket",
+    ] {
         let t = generate(
             preset(preset_name).expect("preset"),
             &StyleOptions::default(),
