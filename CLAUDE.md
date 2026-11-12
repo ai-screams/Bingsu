@@ -17,8 +17,9 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
   M6 is closed with open items: on macOS the helper's `PATH` folder check takes about 20 ms per round (p50 measured on
   one Mac; first command value only; the prompt does not wait); macOS prompt time is a record-only run on one Mac, not
   a verdict (p50 against M4 0.94–1.00 times in three cases, inside that run's noise of about 6–8%; 32 commands add
-  about 0.5–0.7 ms p50, inside noise; five cases have no number; the macOS method will be fixed in the next
-  milestone), and the Linux CI prompt gate gives the verdict.
+  about 0.5–0.7 ms p50, inside noise; six cases have no number (five passed the record-only noise limit; the env
+  segment case could not be compared because the M4 build does not know its config key); the macOS method will be
+  fixed in the next milestone), and the Linux CI prompt gate gives the verdict.
   `bingsu prompt` renders the built-in default
   theme or the user's TOML config through a snapshot the refresh helper publishes; the helper runs the pinned
   `bingsu-collect` worker under its sandbox for screens that show `dir` or `git`, and the prompt shows the collected git
