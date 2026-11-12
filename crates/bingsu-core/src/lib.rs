@@ -20,6 +20,7 @@ pub mod config;
 pub mod default_theme;
 pub mod diag;
 pub mod diag_codes;
+pub mod diag_help;
 pub mod diag_suggest;
 pub mod diag_widths;
 pub mod emit;

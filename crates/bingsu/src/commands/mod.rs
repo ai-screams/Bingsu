@@ -71,6 +71,7 @@ mod explain_builtin;
 mod git_global;
 #[cfg(unix)]
 mod group_policy;
+mod help;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) mod helper;
@@ -123,6 +124,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         Some(command_supervisor::ENTRY) => command_supervisor::run(&a.argv0),
         #[cfg(unix)]
         Some("config") => config::run(&a.argv0, &a.args[1..]),
+        Some("help") => help::run(&a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
@@ -132,7 +134,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
             u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
         ),
         _ => {
-            eprintln!("usage: bingsu <config|init|prompt|reload> ...");
+            eprintln!("usage: bingsu <config|help|init|prompt|reload> ...");
             ExitCode::from(2)
         }
     }
