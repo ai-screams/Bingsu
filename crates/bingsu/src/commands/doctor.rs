@@ -11,7 +11,7 @@
 //! feed with good and bad facts.
 use super::{
     collector::Sibling,
-    config_inspect::{Inspection, exit_for, inspect_config},
+    config_inspect::{Inspection, exit_for, inspect_config, refusal_text},
     ctx::{self, EXIT_FAILED, EXIT_UNFINISHED, EXIT_USAGE, User},
     group_policy::SystemGroups,
     init::{
@@ -19,12 +19,13 @@ use super::{
         pinned,
         trusted_env::TrustedEnv,
     },
+    runtime_root::{self, RootError},
     sys::{self, SeccompKernel},
 };
 use bingsu_core::{
     diag::{DiagCode, Severity},
     diag_codes as codes,
-    fs_trust::Verdict,
+    fs_trust::{Last, Verdict, walk_verdict},
     sanitize::sanitize,
 };
 use std::ffi::{OsStr, OsString};
@@ -130,7 +131,19 @@ pub(super) const ITEMS: &[Item] = &[
 
 // ---- executable ----------------------------------------------------------
 
-fn judge_executable(path: &Path, verdict: Verdict) -> Finding {
+/// The worst verdict over every path the executable can be reached by, and
+/// the path that earned it: the running file (links resolved) and the path
+/// the user ran or `PATH` finds (its link and the folders above the link),
+/// since a link in a folder others can write is the way in, whatever the
+/// target is.
+fn judge_executable(paths: &[(PathBuf, Verdict)]) -> Finding {
+    let Some((path, verdict)) = paths.iter().max_by_key(|(_, v)| *v) else {
+        return finding(
+            Status::Unknown,
+            "the path of the running executable could not be read",
+            None,
+        );
+    };
     let shown = ctx::show(path);
     match verdict {
         Verdict::Safe => finding(
@@ -145,21 +158,51 @@ fn judge_executable(path: &Path, verdict: Verdict) -> Finding {
         ),
         Verdict::Tamperable => finding(
             Status::Warn,
-            format!("{shown}: it or a folder above it can be changed by another user"),
+            format!(
+                "{shown}: it, a link to it or a folder above it can be changed by another user"
+            ),
             Some(codes::EXE_FOLDER_CHANGEABLE),
         ),
     }
 }
 
-fn run_executable(c: &Ctx) -> Finding {
-    match &c.exe {
-        None => finding(
-            Status::Unknown,
-            "the path of the running executable could not be read",
-            None,
-        ),
-        Some(exe) => judge_executable(exe, exe_path::check_path(exe, c.user.me, &c.user.pw.name)),
+/// Every path to check: the running file, the path this process was started
+/// by, and the `bingsu` that `PATH` finds when it is this file.
+fn executable_paths(c: &Ctx) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut add = |p: PathBuf| {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return c.exe.iter().cloned().collect();
+    };
+    if let Some(exe) = &c.exe {
+        add(exe.clone());
+        if let Some(argv0) = std::env::args_os().next()
+            && let Some(p) = invocation_path(&argv0, c.env.path.as_deref(), &cwd)
+        {
+            add(p);
+        }
+        if let Some(p) = invocation_path(OsStr::new("bingsu"), c.env.path.as_deref(), &cwd)
+            && same_file(&p, exe)
+        {
+            add(p);
+        }
     }
+    out
+}
+
+fn run_executable(c: &Ctx) -> Finding {
+    let paths: Vec<(PathBuf, Verdict)> = executable_paths(c)
+        .into_iter()
+        .map(|p| {
+            let v = exe_path::check_path(&p, c.user.me, &c.user.pw.name);
+            (p, v)
+        })
+        .collect();
+    judge_executable(&paths)
 }
 
 // ---- bingsu on PATH --------------------------------------------------------
@@ -237,6 +280,12 @@ pub(super) enum Pin {
     },
     /// The runtime folder is the same; another pinned folder or a check failed.
     OtherChanged,
+    /// The state or log folder fails the same checks the helper makes of it.
+    FolderRefused {
+        which: &'static str,
+        path: PathBuf,
+        why: String,
+    },
 }
 
 fn judge_roots_pin(pin: &Pin) -> Finding {
@@ -278,6 +327,14 @@ fn judge_roots_pin(pin: &Pin) -> Finding {
             "a pinned folder no longer passes its checks",
             Some(codes::ROOTS_NO_LONGER_MATCH),
         ),
+        Pin::FolderRefused { which, path, why } => finding(
+            Status::Fail,
+            format!(
+                "the {which} folder {} fails its checks: {why}",
+                ctx::show(path)
+            ),
+            Some(codes::ROOTS_NO_LONGER_MATCH),
+        ),
     }
 }
 
@@ -287,6 +344,28 @@ fn read_pin(c: &Ctx) -> Pin {
     };
     let bytes = value.as_bytes();
     if let Some(roots) = pinned::decode(bytes, c.user.me, &c.user.pw.name, &c.user.pw.home) {
+        // `decode` re-checked the runtime and settings folders; the state and
+        // log folders it only copies, so they get the helper's own checks here.
+        let mut groups = SystemGroups::new(&c.user.pw.name);
+        if let Some(state) = &roots.state
+            && let Folder::Refused(why) = check_folder(state, Last::Mine, c.user.me, &mut groups)
+        {
+            return Pin::FolderRefused {
+                which: "state",
+                path: state.clone(),
+                why,
+            };
+        }
+        if let Some(log) = &roots.log
+            && let Folder::Refused(why) =
+                check_folder(log, Last::PrivateFolder, c.user.me, &mut groups)
+        {
+            return Pin::FolderRefused {
+                which: "log",
+                path: log.clone(),
+                why,
+            };
+        }
         let path = roots.runtime.map(|r| r.path).unwrap_or_default();
         return Pin::Matches(path);
     }
@@ -301,6 +380,39 @@ fn read_pin(c: &Ctx) -> Pin {
             path: pin.path,
         },
         Ok(_) => Pin::OtherChanged,
+    }
+}
+
+/// A folder the helper uses, looked at without making or changing anything.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Folder {
+    Fine,
+    /// It does not exist (yet): the helper makes it when it first needs it.
+    NotMade,
+    Refused(String),
+}
+
+fn check_folder(
+    path: &Path,
+    last: Last,
+    me: u32,
+    groups: &mut dyn bingsu_core::fs_trust::GroupOracle,
+) -> Folder {
+    use std::os::fd::AsRawFd as _;
+    let chain = match runtime_root::open_chain(path) {
+        Ok(chain) => chain,
+        Err(RootError::Open { errno, .. }) if errno == libc::ENOENT => return Folder::NotMade,
+        Err(RootError::Open { errno, .. }) => {
+            return Folder::Refused(format!(
+                "it cannot be opened without following a link (error {errno})"
+            ));
+        }
+        Err(e) => return Folder::Refused(format!("{e:?}")),
+    };
+    let local = sys::fd_is_local(chain.last().as_raw_fd());
+    match walk_verdict(&chain.facts, me, last, local, groups) {
+        Ok(()) => Folder::Fine,
+        Err(r) => Folder::Refused(refusal_text(r).to_owned()),
     }
 }
 
@@ -433,6 +545,17 @@ fn judge_settings(code: u8, errors: usize, warnings: usize) -> Finding {
     }
 }
 
+/// The settings could not be opened at all: a confirmed refusal (a folder
+/// that fails its checks, a missing one) is a failure, as `config check`
+/// exits 1 for it; anything else is not known.
+fn judge_settings_unread(code: u8, text: &str) -> Finding {
+    if code == EXIT_FAILED {
+        finding(Status::Fail, text, Some(codes::SETTINGS_INVALID))
+    } else {
+        finding(Status::Unknown, text, None)
+    }
+}
+
 fn judge_inspection(i: &Inspection) -> Finding {
     let count = |s: Severity| {
         i.report
@@ -451,7 +574,7 @@ fn judge_inspection(i: &Inspection) -> Finding {
 fn run_settings(c: &Ctx) -> Finding {
     match inspect_config(&c.user, &c.env) {
         Ok(i) => judge_inspection(&i),
-        Err((text, _)) => finding(Status::Unknown, text, None),
+        Err((text, code)) => judge_settings_unread(code, &text),
     }
 }
 
@@ -523,21 +646,33 @@ mod tests {
         assert!(!f.text.is_empty());
     }
 
-    // 이것을 실패시키는 것: 안전 판정을 경고로, 바꿀 수 있음을 정상으로 매기는 것, 경고에서 진단 코드를 빼는 것.
+    // 이것을 실패시키는 것: 안전 판정을 경고로, 바꿀 수 있음을 정상으로 매기는 것, 경고에서 진단 코드를 빼는 것,
+    // 안전한 대상이 남이 바꿀 수 있는 폴더의 링크를 덮게 하는 것(가장 나쁜 경로가 정해야 한다).
     #[test]
-    fn executable_follows_the_path_verdict() {
-        let p = Path::new("/opt/bingsu/bingsu");
-        is(&judge_executable(p, Verdict::Safe), Status::Ok, None);
+    fn executable_follows_the_worst_path_verdict() {
+        let p = |name: &str, v| (PathBuf::from(name), v);
+        is(&judge_executable(&[]), Status::Unknown, None);
         is(
-            &judge_executable(p, Verdict::Unknown),
+            &judge_executable(&[p("/opt/bingsu/bingsu", Verdict::Safe)]),
+            Status::Ok,
+            None,
+        );
+        is(
+            &judge_executable(&[p("/opt/bingsu/bingsu", Verdict::Unknown)]),
             Status::Unknown,
             None,
         );
         is(
-            &judge_executable(p, Verdict::Tamperable),
+            &judge_executable(&[p("/opt/bingsu/bingsu", Verdict::Tamperable)]),
             Status::Warn,
             Some(codes::EXE_FOLDER_CHANGEABLE),
         );
+        let f = judge_executable(&[
+            p("/opt/bingsu/bingsu", Verdict::Safe),
+            p("/shared/bin/bingsu", Verdict::Tamperable),
+        ]);
+        is(&f, Status::Warn, Some(codes::EXE_FOLDER_CHANGEABLE));
+        assert!(f.text.contains("/shared/bin/bingsu"), "{}", f.text);
     }
 
     // 이것을 실패시키는 것: 다른 bingsu를 정상으로, 못 찾음을 경고로 매기는 것.
@@ -567,7 +702,16 @@ mod tests {
             Some(codes::NO_PINNED_ROOTS),
         );
         is(&judge_roots_pin(&Pin::Matches(p.clone())), Status::Ok, None);
-        for pin in [Pin::Garbled, Pin::RuntimeGone(p.clone()), Pin::OtherChanged] {
+        for pin in [
+            Pin::Garbled,
+            Pin::RuntimeGone(p.clone()),
+            Pin::OtherChanged,
+            Pin::FolderRefused {
+                which: "log",
+                path: p.clone(),
+                why: "x".into(),
+            },
+        ] {
             is(
                 &judge_roots_pin(&pin),
                 Status::Fail,
@@ -643,6 +787,16 @@ mod tests {
         );
         is(
             &judge_settings(EXIT_UNFINISHED, 0, 0),
+            Status::Unknown,
+            None,
+        );
+        is(
+            &judge_settings_unread(EXIT_FAILED, "the settings folder fails its checks"),
+            Status::Fail,
+            Some(codes::SETTINGS_INVALID),
+        );
+        is(
+            &judge_settings_unread(EXIT_UNFINISHED, "could not read"),
             Status::Unknown,
             None,
         );
