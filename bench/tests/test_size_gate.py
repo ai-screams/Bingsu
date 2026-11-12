@@ -3,6 +3,7 @@ import importlib.util
 import json
 import math
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -367,3 +368,80 @@ def test_enforced_pass_and_empty_evidence(tmp_path, capsys):
 # 이것을 실패시키는 것: aggregate에서 `not statuses`(증거 0건)를 PASS로 떨어뜨리기.
 def test_aggregate_of_no_results_is_blocked():
     assert gate.aggregate([]) == "BLOCKED"
+
+
+# Release build sizes at 7cbe991 on macOS arm64 (front, collector, cli).
+RELEASE = {"front": 768_240, "collector": 1_280_544, "cli": 2_939_584, "combined": 2_048_784, "installed": 4_988_368}
+
+
+# 릴리스 크기는 세 파일과 그 합을 기록만 한다. 이것을 실패시키는 것: installed에서 bingsu(cli)를 빼거나 다른 합을
+# 받아들이는 것, 차이 방향을 뒤집는 것, 파일 하나를 기록에서 빼는 것, 기록이 판정이나 상한에 끼어드는 것.
+def test_release_size_records_each_file_and_their_sum():
+    bigger = {**RELEASE, "cli": RELEASE["cli"] + 1_048_576, "installed": RELEASE["installed"] + 1_048_576}
+    record = gate.release_size(RELEASE, bigger)
+    assert record["status"] == "RECORDED" and "reason" not in record
+    assert record["base"] == {"files": {"bingsu": 2_939_584, "bingsu-prompt": 768_240, "bingsu-collect": 1_280_544},
+                              "installed": 4_988_368}
+    assert record["delta"] == {"bingsu": 1_048_576, "bingsu-prompt": 0, "bingsu-collect": 0, "installed": 1_048_576}
+    # The cap still reads front + collector only.
+    assert gate.size_gate(RELEASE, bigger, 2_048_784) == {**gate.size_gate(RELEASE, RELEASE, 2_048_784), "candidate": bigger}
+    for bad in ({**RELEASE, "installed": RELEASE["combined"]},  # a tree without bingsu-prompt
+                {**RELEASE, "installed": RELEASE["installed"] + 1}, {**RELEASE, "installed": float(RELEASE["installed"])},
+                {k: v for k, v in RELEASE.items() if k != "installed"}, {k: v for k, v in RELEASE.items() if k != "cli"},
+                {**RELEASE, "cli": True}, {**RELEASE, "cli": float(RELEASE["cli"])}, None):
+        for record in (gate.release_size(bad, RELEASE), gate.release_size(RELEASE, bad)):
+            assert record["status"] == "RECORDED" and "delta" not in record, bad
+            assert "missing or inconsistent release size" in record["reason"], bad
+
+
+# 이것을 실패시키는 것: 릴리스 크기를 보고서나 요약에서 빼는 것, 그 기록이 판정을 바꾸는 것(빠진 기록이 BLOCKED를 만듦).
+def test_cli_reports_the_release_size_without_judging_it(tmp_path, capsys):
+    base, cand = tmp_path / "b.json", tmp_path / "c.json"
+    base.write_text(json.dumps({"stripped_bytes": RELEASE}))
+    huge = {**RELEASE, "cli": 50_000_000, "installed": RELEASE["combined"] + 50_000_000}
+    cand.write_text(json.dumps({"stripped_bytes": huge}))
+    meas = tmp_path / "m.json"
+    meas.write_text(json.dumps({"cases": {"no-git": paired((8e6, 9e6), (8e6, 9e6))}}))
+    common = ["--measurement", str(meas), "--base-preparation", str(base), "--out", str(tmp_path / "v.json"),
+              "--ratio-p50", "1.03", "--ratio-p95", "1.10", "--cap-bytes", "6000000", "--enforce"]
+    capsys.readouterr()
+    assert gate.main([*common, "--candidate-preparation", str(cand)]) == 0
+    report = json.loads((tmp_path / "v.json").read_text())
+    assert report["status"] == "PASS" and report["release_size"]["delta"]["installed"] == 50_000_000 - 2_939_584
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "PASS" and out["blocked_by"] == []
+    assert out["release_size"]["candidate"]["installed"] == 52_048_784
+    # A preparation without the three files records why and still passes.
+    cand.write_text(json.dumps({"stripped_bytes": {k: v for k, v in RELEASE.items() if k != "installed"}}))
+    assert gate.main([*common, "--candidate-preparation", str(cand)]) == 0
+    report = json.loads((tmp_path / "v.json").read_text())
+    assert report["status"] == "PASS" and "missing" in report["release_size"]["reason"]
+    assert json.loads(capsys.readouterr().out)["blocked_by"] == []
+
+
+# 진짜 strip을 거친 크기: bingsu에만 1 MiB 정적 배열을 링크하면 기록된 installed가 그만큼 늘고 combined는 그대로다.
+# 이것을 실패시키는 것: installed를 combined만으로 세는 것(dedicated일 때 cli를 빼는 것), cli 대신 다른 파일을 재는 것.
+def test_release_size_follows_a_bigger_bingsu_only(tmp_path):
+    spec = importlib.util.spec_from_file_location("git_product_sizes", ROOT / "bench/git-product.py")
+    product = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(product)
+    plain = "fn main() { std::hint::black_box(1); }\n"
+    padded = ("static PAD: [u8; 1 << 20] = [7; 1 << 20];\n"
+              "fn main() { std::hint::black_box(&PAD); }\n")
+    sizes = {}
+    for side, cli in (("base", plain), ("candidate", padded)):
+        folder = tmp_path / side
+        folder.mkdir()
+        for name, source in (("bingsu", cli), ("bingsu-prompt", plain), ("bingsu-collect", plain)):
+            (folder / (name + ".rs")).write_text(source)
+            subprocess.run(["rustc", "-O", "-o", str(folder / name), str(folder / (name + ".rs"))],
+                           check=True, capture_output=True)
+        out = tmp_path / (side + "-stripped")
+        out.mkdir()
+        sizes[side] = product.stripped_sizes(folder / "bingsu", folder / "bingsu-prompt", out, True)
+    record = gate.release_size(sizes["base"], sizes["candidate"])
+    grown = record["delta"]["bingsu"]
+    assert 1 << 20 <= grown <= (1 << 20) + (64 << 10), record
+    assert record["delta"]["installed"] == grown
+    assert record["delta"]["bingsu-prompt"] == record["delta"]["bingsu-collect"] == 0
+    assert sizes["candidate"]["combined"] == sizes["base"]["combined"]
