@@ -385,7 +385,7 @@ pub fn exit_for(i: &Inspection) -> u8 {
 /// (the explain section says so). Only `config check` asks; the files are opened and read,
 /// so a stopped mount on the way can hold the command (it never holds a
 /// prompt or a refresh, which do not come here).
-fn lookups(
+pub(super) fn lookups(
     report: &ConfigReport,
     path: Option<&std::ffi::OsStr>,
     me: u32,
@@ -489,20 +489,27 @@ fn env_shebang_notes(
 /// `config check --explain`: for each command and language segment, whether
 /// it runs and why not, what it runs, and each value with its origin
 /// (`file:line`). Environment names only: the model holds no value.
-fn render_explain(i: &Inspection, found: &[(String, exec_path::Explained)]) -> String {
+pub(super) fn render_explain(
+    report: &ConfigReport,
+    found: &[(String, exec_path::Explained)],
+    only: Option<&str>,
+) -> String {
     use bingsu_core::config::explain::{self, From};
     let mut out = String::from(
         "execution (--explain; executables as found outside any repository, which a prompt inside one may leave out):\n",
     );
-    let Some(c) = &i.report.snapshot else {
+    let Some(c) = &report.snapshot else {
         out.push_str("  (not available while an error remains)\n");
         return out;
     };
-    let units = explain::units(c);
+    let mut units = explain::units(c);
+    if let Some(only) = only {
+        units.retain(|u| u.id == only);
+    }
     if units.is_empty() {
         out.push_str("  no command or language segments\n");
     }
-    let catalog = Catalog(&i.report.files);
+    let catalog = Catalog(&report.files);
     let clean = |t: &str| bingsu_core::sanitize::sanitize(t.as_bytes());
     let place = |f: &From| -> String {
         use bingsu_core::diag::SourceView as _;
@@ -640,7 +647,7 @@ fn builtin_section(i: &Inspection, user: &User, env: &TrustedEnv) -> String {
 /// `pinned_roots` says so on stderr); else the current candidates, read
 /// only: `roots::resolve` would make the runtime folder or fix its mode,
 /// which a check must not do. Fails without it: explain_writes_nothing.
-fn place_of(user: &User, env: &TrustedEnv) -> Option<super::explain_builtin::Place> {
+pub(super) fn place_of(user: &User, env: &TrustedEnv) -> Option<super::explain_builtin::Place> {
     use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
     let pinned = TrustedEnv::pinned_roots()
         .is_some()
@@ -723,7 +730,7 @@ fn run_with(
             let mut text = render(&i);
             // Fails without it: explain_shows_not_run_reason.
             if extra == Extra::Explain {
-                text.push_str(&render_explain(&i, &found));
+                text.push_str(&render_explain(&i.report, &found, None));
                 text.push_str(&builtin_section(&i, &user, &env));
             }
             if !ctx::print(&text) {
