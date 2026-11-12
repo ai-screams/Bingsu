@@ -125,6 +125,13 @@ fn no_line_overflows() {
             };
             values[i("git")] = value("git", &branch);
             values[i("time")] = value("time", b"12:34:56");
+            // On the right `status` (first) is always empty and `jobs` (last) has a
+            // value for half the inputs: the right side shows time alone or
+            // two segments with an empty one in front or behind, and must
+            // still end on the target cell (a gap that does not go with its segment fails).
+            if steps.len() % 2 == 0 {
+                values[i("jobs")] = value("jobs", b"j");
+            }
             setup[i("char")].required = true;
             setup[i("dir")] = SegmentSetup {
                 priority: 100,
@@ -153,7 +160,7 @@ fn no_line_overflows() {
                             &[
                                 LineLayout {
                                     left: &["dir", "git"],
-                                    right: &["time"],
+                                    right: &["status", "time", "jobs"],
                                 },
                                 LineLayout {
                                     left: &["char"],

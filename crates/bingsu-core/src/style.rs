@@ -236,7 +236,20 @@ fn run(out: &mut String, ids: &[&str], o: &StyleOptions, right: bool) {
                 }
                 (_, Joining::Adjacent) => {}
                 (false, Joining::Spaced | Joining::Attached) => out.push_str("{@sep:flat}"),
-                (true, Joining::Spaced) => out.push(' '),
+                // The gap rides in the segment's group below.
+                (true, Joining::Spaced) => {}
+            }
+        }
+        // Spaced blocks: the gap and the caps go with the segment, so one
+        // without a value leaves no gap. A gap sits on the side away from
+        // the screen edge (after a left block, before a right one): when the
+        // last segment of a run is empty, a stray space then lands next to
+        // the fill, not on the last cell.
+        let spaced = block && joining == Joining::Spaced && ids.len() > 1;
+        if spaced {
+            out.push_str("{@group}");
+            if right && !first {
+                out.push(' ');
             }
         }
         if block && (first || joining == Joining::Spaced) {
@@ -259,6 +272,12 @@ fn run(out: &mut String, ids: &[&str], o: &StyleOptions, right: bool) {
         }
         if block && (last || joining == Joining::Spaced) {
             cap(out, "tail", tail);
+        }
+        if spaced {
+            if !right && !last {
+                out.push(' ');
+            }
+            out.push_str("{@end}");
         }
     }
 }
@@ -400,7 +419,7 @@ mod tests {
         let g = |n| generate(preset(n).unwrap(), &StyleOptions::default(), &TWO).unwrap();
         assert_eq!(
             g("pill"),
-            "{@head:round}{dir:block}{@tail:round} {@head:round}{git:block}{@tail:round}{@fill:space}{@head:round}{status:block}{@tail:round} {@head:round}{time:block}{@tail:round}{@nl}{@head:round}{char:block}{@tail:round}"
+            "{@group}{@head:round}{dir:block}{@tail:round} {@end}{@group}{@head:round}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@tail:round}{@end}{@group} {@head:round}{time:block}{@tail:round}{@end}{@nl}{@head:round}{char:block}{@tail:round}"
         );
         assert_eq!(
             g("slant"),
@@ -454,7 +473,7 @@ mod tests {
         assert_eq!(n, [StyleNotice::TemplateReplaces { options: false }]);
     }
 
-    // 이것을 실패시키는 것: Spaced에서 블록마다 머리·꼬리를 두지 않는 것.
+    // 이것을 실패시키는 것: Spaced에서 블록마다 머리·꼬리를 두지 않는 것, 간격 공백을 세그먼트 그룹 밖에 두는 것.
     #[test]
     fn spaced_blocks_get_caps() {
         let o = StyleOptions {
@@ -475,7 +494,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             t,
-            "{@head:round}{dir:block}{@tail:round} {@head:round}{git:block}{@tail:round}"
+            "{@group}{@head:round}{dir:block}{@tail:round} {@end}{@group}{@head:round}{git:block}{@tail:round}{@end}"
         );
     }
 
