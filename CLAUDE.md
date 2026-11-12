@@ -11,9 +11,15 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 - **Language**: Rust workspace: product crates `bingsu-core` and `bingsu`; the rest are test, bench and tool crates. Windows is checked in CI; macOS and Linux are first-class.
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 - **Stage**: M3a (config, snapshot, refresh helper), M3b (collector process protocol, supervision, publication) and
-  M3c (git, path facts, safe reads), M3d (performance and process gates, measured budgets) and M4 (zsh integration) are done;
-  M6 (running user-defined commands) is in progress; M5 (bash and fish integration) is deferred until after M7. M4 is closed with open items: the shell time gate runs on Linux only and records its
+  M3c (git, path facts, safe reads), M3d (performance and process gates, measured budgets), M4 (zsh integration) and
+  M6 (running user-defined commands) are done; M7 is planned, and M5 (bash and fish integration) is deferred until after M7. M4 is closed with open items: the shell time gate runs on Linux only and records its
   verdict without failing the job, some of its runs can end BLOCKED, and the redraw time has no recorded value on Linux or macOS.
+  M6 is closed with open items: on macOS the helper's `PATH` folder check takes about 20 ms per round (p50 measured on
+  one Mac; first command value only; the prompt does not wait); macOS prompt time is a record-only run on one Mac, not
+  a verdict (p50 against M4 0.94–1.00 times in three cases, inside that run's noise of about 6–8%; 32 commands add
+  about 0.5–0.7 ms p50, inside noise; six cases have no number (five passed the record-only noise limit; the env
+  segment case could not be compared because the M4 build does not know its config key); the macOS method will be
+  fixed in the next milestone), and the Linux CI prompt gate gives the verdict.
   `bingsu prompt` renders the built-in default
   theme or the user's TOML config through a snapshot the refresh helper publishes; the helper runs the pinned
   `bingsu-collect` worker under its sandbox for screens that show `dir` or `git`, and the prompt shows the collected git
