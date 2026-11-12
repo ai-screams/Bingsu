@@ -394,7 +394,7 @@ def controlled_protocol(monkeypatch):
     # Product tests exercise real pairing; host probes have dedicated negative controls.
     p = product.protocol
     calibration = dict(stable=True, p95_of_medians=100, **p.identity())
-    monkeypatch.setattr(p, 'calibrate', lambda _: calibration)
+    monkeypatch.setattr(p, 'calibrate', lambda *_, **__: calibration)
     monkeypatch.setattr(p, 'snapshot', lambda _: dict(**p.identity(), power='ac',
         thermal='normal', load_1m=1., reference=p.summary([100] * 20)))
 
@@ -405,7 +405,7 @@ def test_blocked_calibration_preserves_protocol_evidence(monkeypatch, tmp_path):
     monkeypatch.setattr(product, 'watchdog_evidence', lambda _: {})
     monkeypatch.setattr(product, 'ROOT', tmp_path)
     (tmp_path / 'target').mkdir()
-    monkeypatch.setattr(product.protocol, 'calibrate', lambda _: dict(stable=False))
+    monkeypatch.setattr(product.protocol, 'calibrate', lambda *_, **__: dict(stable=False))
     got = product.measure_pair('base', 'candidate', 200)
     assert got['status'] == 'BLOCKED' and got['calibration'] == dict(stable=False)
     assert got['hypotheses']['base']['ready_p50_within_hypothesis'] is None

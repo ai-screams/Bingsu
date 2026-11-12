@@ -40,7 +40,7 @@ def block(**kwargs):
 
 @pytest.fixture
 def controlled(monkeypatch):
-    monkeypatch.setattr(p, 'calibrate', lambda _: calibration())
+    monkeypatch.setattr(p, 'calibrate', lambda *_, **__: calibration())
     monkeypatch.setattr(p, 'snapshot', lambda _: host())
 
 
@@ -299,6 +299,76 @@ def test_calibration_drops_first_block(monkeypatch, tmp_path):
     assert got['p95_of_medians'] == 103 and got['median_of_medians'] == 101.5 and got['stable']
     rows = iter([p.summary([v]*20) for v in [1000, 100, 100, 100, 200]])
     assert not p.calibrate(binary)['stable']
+
+
+EXPERIMENT = dict(mode='experiment', power='ac', load_range=(0, 8), synthetic_load=0)
+
+
+def medians_run(monkeypatch, tmp_path, medians, condition):
+    """A paired run whose calibration medians are `medians` (first block dropped)."""
+    binary = tmp_path / 'base'; binary.write_bytes(b'base')
+    rows = iter([p.summary([v] * 20) for v in [1, *medians]])
+    monkeypatch.setattr(p, 'reference_block', lambda _: next(rows))
+    monkeypatch.setattr(p, 'snapshot', lambda _: host())
+    return p.paired(str(binary), str(binary), 200, condition, lambda *_: dict(ns=1), required_metrics=('ns',), seed=1)
+
+
+# 이것을 실패시키는 것: gate의 보정 상한을 1.05보다 넓히는 것(1.06 spread가 측정까지 간다),
+# 또는 보정 결과에 spread를 남기지 않는 것.
+def test_gate_calibration_stays_at_five_percent(monkeypatch, tmp_path):
+    got = medians_run(monkeypatch, tmp_path, [100, 100, 100, 106], None)
+    assert got['reason'] == 'unstable calibration' and got['calibration']['spread'] == 1.06
+    assert got['calibration']['spread_max'] == p.GATE_SPREAD_MAX == 1.05
+    assert medians_run(monkeypatch, tmp_path, [100, 100, 100, 105], None)['status'] == 'OBSERVED'
+
+
+# 이것을 실패시키는 것: gate 조건의 calibration_spread_max를 받아들이는 것(1.20으로 1.10 spread가 통과한다).
+def test_gate_refuses_a_spread_condition(monkeypatch, tmp_path):
+    got = medians_run(monkeypatch, tmp_path, [100, 100, 100, 110], {**p.DEFAULT, 'calibration_spread_max': 1.20})
+    assert got['status'] == 'BLOCKED' and got['reason'] == 'calibration_spread_max applies only to experiment mode'
+    assert got['calibration'] == {}
+
+
+# 이것을 실패시키는 것: experiment에 gate 상한을 쓰는 것(1.10이 막힌다), 기본 1.15를 넘는 spread를 받는 것,
+# 조건 값이 1.15를 넘는데 받는 것, 또는 조건 값을 무시하는 것(1.08 상한에서 1.10이 통과한다).
+def test_experiment_calibration_limit(monkeypatch, tmp_path):
+    assert medians_run(monkeypatch, tmp_path, [100, 100, 100, 110], EXPERIMENT)['status'] == 'OBSERVED'
+    assert medians_run(monkeypatch, tmp_path, [100, 100, 100, 115], EXPERIMENT)['status'] == 'OBSERVED'
+    got = medians_run(monkeypatch, tmp_path, [100, 100, 100, 116], EXPERIMENT)
+    assert got['reason'] == 'unstable calibration' and got['calibration']['spread_max'] == 1.15
+    got = medians_run(monkeypatch, tmp_path, [100, 100, 100, 110], {**EXPERIMENT, 'calibration_spread_max': 1.08})
+    assert got['reason'] == 'unstable calibration'
+    got = medians_run(monkeypatch, tmp_path, [100, 100, 100, 110], {**EXPERIMENT, 'calibration_spread_max': 1.5})
+    assert got['status'] == 'BLOCKED' and 'calibration_spread_max must be within' in got['reason']
+
+
+# 이것을 실패시키는 것: experiment 전이를 1.05로 두는 것, 또는 측정이 전이에 그 run의 상한을 넘기지 않는 것
+# (기준이 100과 110을 오가면 전이에서 막힌다).
+def test_experiment_transition_uses_the_run_limit(monkeypatch, tmp_path):
+    import itertools
+    swing = itertools.cycle([100, 110])
+    binary = tmp_path / 'base'; binary.write_bytes(b'base')
+    rows = iter([p.summary([v] * 20) for v in [1, 100, 100, 100, 100]])
+    monkeypatch.setattr(p, 'reference_block', lambda _: next(rows))
+    monkeypatch.setattr(p, 'snapshot', lambda _: host(reference=p.summary([next(swing)] * 20)))
+    got = p.paired(str(binary), str(binary), 200, EXPERIMENT, lambda *_: dict(ns=1), required_metrics=('ns',), seed=1)
+    assert got['status'] == 'OBSERVED' and len(got['transition']) == 3
+    with pytest.raises(ValueError, match='transition'):
+        p.settle(Path('b'))
+
+
+# 이것을 실패시키는 것: 차이가 보정 spread보다 작은데 decidable로 적는 것, 또는 큰데 undecidable로 적는 것.
+@pytest.mark.parametrize('candidate, verdict', [(104, 'undecidable'), (96, 'undecidable'), (106, 'decidable'), (94, 'decidable')])
+def test_experiment_marks_differences_inside_the_spread(monkeypatch, tmp_path, candidate, verdict):
+    binary = tmp_path / 'base'; binary.write_bytes(b'base')
+    rows = iter([p.summary([v] * 20) for v in [1, 100, 100, 100, 105]])
+    monkeypatch.setattr(p, 'reference_block', lambda _: next(rows))
+    monkeypatch.setattr(p, 'snapshot', lambda _: host())
+    other = tmp_path / 'candidate'; other.write_bytes(b'candidate')
+    observe = lambda name, _: dict(ns=100 if name == 'base' else candidate)
+    got = p.paired(str(binary), str(other), 200, EXPERIMENT, observe, required_metrics=('ns',), seed=1)
+    assert got['status'] == 'OBSERVED'
+    assert got['resolution']['ns'] == dict(ratio_p50=candidate / 100, calibration_spread=1.05, verdict=verdict)
 
 
 # 이것을 실패시키는 것: 위반 블록을 유지하거나 warm-up을 표본에 넣거나 순서를 고정한다.

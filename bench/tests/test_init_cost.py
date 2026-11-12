@@ -19,7 +19,7 @@ COLD = (b"bingsu: reading your settings did not finish in time; the prompt start
 
 @pytest.fixture
 def controlled(monkeypatch, tmp_path):
-    monkeypatch.setattr(p, "calibrate", lambda _: dict(stable=True, p95_of_medians=100, **p.identity()))
+    monkeypatch.setattr(p, "calibrate", lambda *_, **__: dict(stable=True, p95_of_medians=100, **p.identity()))
     monkeypatch.setattr(p, "snapshot", lambda _: {**p.identity(), "power": "ac", "load_1m": 1.0,
                                                   "thermal": "normal", "reference": p.summary([100] * 20)})
     monkeypatch.setattr(init_cost, "ROOT", tmp_path)

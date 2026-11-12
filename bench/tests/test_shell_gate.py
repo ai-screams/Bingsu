@@ -41,7 +41,7 @@ def test_short_rounds_block():
 
 # 이것을 실패시키는 것: 불안정한 기준을 표본 없이 PASS로 세는 것.
 def test_unstable_reference_blocks(monkeypatch, tmp_path):
-    monkeypatch.setattr(p, "calibrate", lambda _: dict(stable=False))
+    monkeypatch.setattr(p, "calibrate", lambda *_, **__: dict(stable=False))
     exe = tmp_path / "bingsu"
     exe.write_text("x")
     got = p.paired(str(exe), str(exe), 200, None, lambda *_: {g.METRIC: 1}, required_metrics=(g.METRIC,))
@@ -82,7 +82,7 @@ def test_cli_exit_code(tmp_path, enforce, candidate, code):
 def controlled(monkeypatch):
     identity = p.identity()
     reference = dict(n=20, p50=100.0, p95=100.0, variance=0.0, min=100.0, max=100.0)
-    monkeypatch.setattr(p, "calibrate", lambda _: dict(stable=True, p95_of_medians=100.0, median_of_medians=100.0,
+    monkeypatch.setattr(p, "calibrate", lambda *_, **__: dict(stable=True, p95_of_medians=100.0, median_of_medians=100.0,
                                                        **identity))
     monkeypatch.setattr(p, "snapshot", lambda _: dict(power="ac", load_1m=0.1, thermal="normal", reference=reference,
                                                       host=identity["host"], kernel=identity["kernel"], arch=identity["arch"]))

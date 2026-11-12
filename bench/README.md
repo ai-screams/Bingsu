@@ -271,8 +271,15 @@ rather than widening or being ignored, and every other admission check stays.
 Each gate block records `admission_basis`; the result records
 `admission_requested` and `admission_applied`. Calibration is
 bound to host, kernel, architecture and session. The implementation conservatively
-requires calibration median spread to be within 5%; this operational stability
-check does not raise any product limit.
+requires calibration median spread (largest over smallest of the four kept block
+medians) to be within 5% in gate mode, the mode every CI job uses; a gate
+condition carrying `calibration_spread_max` is refused. Experiment (record) runs
+take `calibration_spread_max` from the condition, default and at most 1.15, for
+the calibration and the transition. The result records the run's `spread` and
+`spread_max` under `calibration`, and an experiment result marks each metric's
+candidate/base p50 ratio `undecidable` under `resolution` when it lies closer to
+1 than that spread. This operational stability check does not raise any product
+limit.
 
 Each binary's first invocation is retained separately and excluded from warm
 samples. Each row requires at least 200 samples per binary. Measurement blocks
@@ -282,7 +289,7 @@ conditions and reasons remain in raw evidence; only accepted blocks contribute
 to summaries. A block has at most 3 attempts before the session becomes BLOCKED.
 
 Experiment transitions poll at most 15 reference blocks for normal heat and
-3 consecutive medians within 5%. Nonzero synthetic load must equal half the
+3 consecutive medians within the run's calibration spread limit. Nonzero synthetic load must equal half the
 logical cores (integer division): single-thread CPU processes run with nice 19,
 plus `taskpolicy -b` on macOS, for at most 60 seconds, and are cleaned up on exit.
 If this administrative duration expires, the cell is BLOCKED. Cell selection is
