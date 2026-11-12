@@ -647,7 +647,7 @@ fn builtin_section(i: &Inspection, user: &User, env: &TrustedEnv) -> String {
 /// `pinned_roots` says so on stderr); else the current candidates, read
 /// only: `roots::resolve` would make the runtime folder or fix its mode,
 /// which a check must not do. Fails without it: explain_writes_nothing.
-fn place_of(user: &User, env: &TrustedEnv) -> Option<super::explain_builtin::Place> {
+pub(super) fn place_of(user: &User, env: &TrustedEnv) -> Option<super::explain_builtin::Place> {
     use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
     let pinned = TrustedEnv::pinned_roots()
         .is_some()

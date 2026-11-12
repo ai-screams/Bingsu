@@ -108,6 +108,11 @@ fn name<'a>(names: &Names<'a>, i: usize) -> &'a str {
         .unwrap_or("(unknown segment)")
 }
 
+/// Names come from the settings: nothing in them reaches the terminal raw.
+fn clean(text: &str) -> String {
+    crate::sanitize::sanitize(text.as_bytes())
+}
+
 /// The decisions at `width`, one block per line. `only` keeps the hide and
 /// shorten records of one segment (its catalog index).
 pub fn render(log: &DecisionLog, names: &Names<'_>, width: u16, only: Option<usize>) -> String {
@@ -116,7 +121,7 @@ pub fn render(log: &DecisionLog, names: &Names<'_>, width: u16, only: Option<usi
     match log.band {
         Some(b) => {
             let n = names.bands.get(b).map_or("(unnamed)", |x| x.as_str());
-            let _ = writeln!(out, "layout: band `{n}`");
+            let _ = writeln!(out, "layout: band `{}`", clean(n));
         }
         None => out.push_str("layout: the default layout (no band matches)\n"),
     }
@@ -146,7 +151,7 @@ pub fn render(log: &DecisionLog, names: &Names<'_>, width: u16, only: Option<usi
             let _ = writeln!(
                 out,
                 "  hidden: {} [{}] ({})",
-                name(names, *seg),
+                clean(name(names, *seg)),
                 reason_word(*r),
                 reason_text(*r)
             );
@@ -156,7 +161,7 @@ pub fn render(log: &DecisionLog, names: &Names<'_>, width: u16, only: Option<usi
                 continue;
             }
             any = true;
-            let _ = write!(out, "  shortened: {} with ", name(names, *seg));
+            let _ = write!(out, "  shortened: {} with ", clean(name(names, *seg)));
             method_text(names.methods.get(*seg).and_then(|l| l.get(*m)), &mut out);
             out.push('\n');
         }
@@ -208,6 +213,27 @@ mod tests {
         assert_eq!(
             none,
             "width: 120 cells\nlayout: the default layout (no band matches)\noverflow: none; every segment with a value fits\n"
+        );
+    }
+
+    // 이것을 실패시키는 것: 구간 이름·세그먼트 이름을 정제 없이 글에 넣는 것(ESC·bidi가 터미널로 나간다).
+    #[test]
+    fn names_from_the_settings_are_sanitized() {
+        let log = DecisionLog {
+            band: Some(0),
+            steps: vec![],
+            hidden: vec![(0, 0, HideReason::NoValue)],
+            shortened: vec![(0, 0, 0)],
+        };
+        let bands = vec![String::from("a\u{1b}[2Jb\u{202e}c")];
+        let m: [&[Method]; 1] = [&[Method::Unique]];
+        let n = names(&["x\u{1b}[31my"], &bands, &m);
+        let t = render(&log, &n, 10, None);
+        assert!(!t.chars().any(|c| c.is_control() && c != '\n'), "{t:?}");
+        assert!(!t.contains('\u{202e}'), "{t:?}");
+        assert!(
+            t.contains("band `a[2Jbc`") && t.contains("hidden: x[31my"),
+            "{t:?}"
         );
     }
 

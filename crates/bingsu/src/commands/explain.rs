@@ -10,11 +10,12 @@
 //! `--config FILE` reads that one file in place of the selected settings
 //! (a file that uses `extends` is refused: it would read other files).
 use super::{
-    config_inspect::{inspect_config, lookups, render_explain},
+    config_inspect::{inspect_config, lookups, place_of, render_explain},
     ctx::{self, EXIT_FAILED, EXIT_USAGE, User},
     group_policy::SystemGroups,
     init::trusted_env::TrustedEnv,
     messages::{MsgId, en},
+    snapshot_store::{CheckedContextFd, DataFile},
 };
 use bingsu_core::{
     color::palette::Mode,
@@ -30,6 +31,7 @@ use bingsu_core::{
     recorder::DecisionLog,
     shell_word::Shell,
     shorten::Method,
+    snapshot::{self, Snapshot},
 };
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
@@ -133,6 +135,28 @@ fn report_of_file(path: &OsStr) -> Result<ConfigReport, String> {
     Ok(report)
 }
 
+/// The settings the prompt draws with now: the snapshot the helper last
+/// published for this boot and these roots, read through the store's own
+/// checked reads. `None` when there is none (nothing published yet, another
+/// boot, or a folder that fails the store's checks).
+fn published(user: &User, env: &TrustedEnv) -> Option<CompiledConfig> {
+    let place = place_of(user, env)?;
+    let mut groups = SystemGroups::new(&user.pw.name);
+    let store = CheckedContextFd::open(
+        &place.runtime,
+        &place.config,
+        &place.state,
+        user.me,
+        &mut groups,
+        false,
+    )
+    .ok()?;
+    let context = snapshot::context_crc(&place.config, &place.state).ok()?;
+    let boot = crate::prompt_io::observe_clock().ok()?.boot;
+    let found = Snapshot::decode(&store.read(DataFile::Snapshot).ok()?).ok()?;
+    snapshot::same_boot(found.id, Some(boot), context).then_some(found.config)
+}
+
 /// The decisions of `compiled` at `width`, with the prompt's own render.
 pub(super) fn decide(
     compiled: &CompiledConfig,
@@ -184,6 +208,11 @@ pub(super) fn text(
     )
 }
 
+const BASIS_CURRENT: &str = "basis: the published settings, which are the ones in your files\n";
+const BASIS_CHANGED: &str = "basis: the published settings, which the prompt draws now; your files have changed since, and the next prompt draws the changed settings (bingsu config check shows them)\n";
+const BASIS_NONE: &str = "basis: nothing is published yet, so this is what your files give; the next prompt publishes them\n";
+const EXEC_NOT_SHOWN: &str =
+    "execution: not shown for --config; the file is not trusted, so no executable is looked up\n";
 const FOOTER: &str = "explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.\n";
 
 pub fn run(args: &[OsString]) -> ExitCode {
@@ -221,7 +250,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
             }
         },
     };
-    let Some(compiled) = &report.snapshot else {
+    let Some(fresh) = &report.snapshot else {
         let catalog = Catalog(&report.files);
         for d in report
             .diagnostics
@@ -232,6 +261,19 @@ pub fn run(args: &[OsString]) -> ExitCode {
         }
         eprintln!("bingsu explain: the settings have errors; fix them first (bingsu config check)");
         return ctx::code(EXIT_FAILED);
+    };
+    // The prompt draws with the published snapshot, not with the files: use
+    // it when there is one, and say so when the files have moved on.
+    let published = if a.config.is_none() {
+        published(&user, &env)
+    } else {
+        None
+    };
+    let (compiled, basis) = match &published {
+        _ if a.config.is_some() => (fresh, None),
+        Some(p) if p == fresh => (p, Some(BASIS_CURRENT)),
+        Some(p) => (p, Some(BASIS_CHANGED)),
+        None => (fresh, Some(BASIS_NONE)),
     };
     let ids = segment_ids(compiled);
     let only = match &a.segment {
@@ -261,19 +303,28 @@ pub fn run(args: &[OsString]) -> ExitCode {
         Some(user.pw.home.as_os_str().as_bytes().to_vec()),
     );
     let mut out = format!("{source}\n");
+    if let Some(b) = basis {
+        out.push_str(b);
+    }
     let body = text(compiled, &log, width, only);
     // `width: N cells` carries where N came from.
     out.push_str(&body.replacen(" cells\n", &format!(" cells{width_note}\n"), 1));
     if let Some(seg) = &a.segment
         && compiled.exec_units.iter().any(|u| &u.id == seg)
     {
-        let found = lookups(
-            &report,
-            env.path.as_deref(),
-            user.me,
-            &mut SystemGroups::new(&user.pw.name),
-        );
-        out.push_str(&render_explain(&report, &found, Some(seg)));
+        if a.config.is_some() {
+            // A file given with `--config` is not yours to trust yet: its
+            // executables are not looked up, so none is opened.
+            out.push_str(EXEC_NOT_SHOWN);
+        } else {
+            let found = lookups(
+                &report,
+                env.path.as_deref(),
+                user.me,
+                &mut SystemGroups::new(&user.pw.name),
+            );
+            out.push_str(&render_explain(&report, &found, Some(seg)));
+        }
     }
     out.push_str(FOOTER);
     if ctx::print(&out) {

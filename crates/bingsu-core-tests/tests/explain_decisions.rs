@@ -106,10 +106,11 @@ fn explain_decides_what_the_prompt_draws() {
                             | HideReason::Minimal
                     )
             });
-            // Inside the band the lines come from the band (its own
-            // `line2` is not what is drawn there), so the text is checked
-            // outside it, where the layout above is the one in use.
+            // Inside the band the lines are the band's: it does not list
+            // the two user segments, so neither is drawn there. (This fails
+            // when `lines_at` hands back the default variant.)
             if want.is_some() {
+                assert!(!drawn.contains(letter), "{id} at {width}: {drawn:?}");
                 continue;
             }
             if hidden {
