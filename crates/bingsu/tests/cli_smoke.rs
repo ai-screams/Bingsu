@@ -10,7 +10,7 @@ fn no_args_prints_usage_to_stderr_and_exits_2() {
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
         err.starts_with(
-            "usage: bingsu <config|explain|help|init|list|prompt|reload|setup|--version>"
+            "usage: bingsu <config|doctor|explain|help|init|list|prompt|reload|setup|--version>"
         ),
         "{err}"
     );

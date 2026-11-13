@@ -44,12 +44,10 @@ fn unframe(mut v: &[u8]) -> Option<Vec<&[u8]>> {
     (!words.is_empty() && words.len() <= 16).then_some(words)
 }
 
-/// The pinned roots, re-checked now; `None` for a missing, garbled, forged
-/// or no longer matching value.
-/// `Roots.log` and `RuntimeRootPin.group_ok` are copied from the environment,
-/// not verified evidence. Any later consumer must re-check the log root and
-/// group policy before using them (including before writing logs).
-pub fn decode(var: &[u8], me: u32, user: &[u8], home: &Path) -> Option<Roots> {
+/// Every check of a pinned value that needs no folder: the framing, the
+/// words init writes and no others, and this user's home. `decode` and
+/// `runtime_pin` both start here, so a value one refuses the other refuses.
+fn checked(var: &[u8], home: &Path) -> Option<bingsu_core::envelope::Envelope> {
     let raw = unframe(var)?;
     if raw
         .iter()
@@ -68,6 +66,30 @@ pub fn decode(var: &[u8], me: u32, user: &[u8], home: &Path) -> Option<Roots> {
     if path(e.home.as_deref()?) != home {
         return None;
     }
+    Some(e)
+}
+
+/// The runtime folder a value pins, as written (nothing is opened): `None`
+/// unless the whole value passes `checked`. `doctor` compares it with the
+/// folder now to say what changed; a value that is not init's gives no path.
+pub fn runtime_pin(var: &[u8], home: &Path) -> Option<runtime_root::Pinned> {
+    let e = checked(var, home)?;
+    let r = e.runtime_root.as_ref()?;
+    Some(runtime_root::Pinned {
+        dev: r.dev,
+        ino: r.ino,
+        path: PathBuf::from(std::ffi::OsStr::from_bytes(&r.path)),
+    })
+}
+
+/// The pinned roots, re-checked now; `None` for a missing, garbled, forged
+/// or no longer matching value.
+/// `Roots.log` and `RuntimeRootPin.group_ok` are copied from the environment,
+/// not verified evidence. Any later consumer must re-check the log root and
+/// group policy before using them (including before writing logs).
+pub fn decode(var: &[u8], me: u32, user: &[u8], home: &Path) -> Option<Roots> {
+    let e = checked(var, home)?;
+    let path = |b: &[u8]| PathBuf::from(std::ffi::OsStr::from_bytes(b));
     let r = e.runtime_root.as_ref()?;
     let pin = runtime_root::Pinned {
         dev: r.dev,

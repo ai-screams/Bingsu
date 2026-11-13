@@ -60,6 +60,8 @@ mod config_use;
 #[cfg(unix)]
 mod ctx;
 #[cfg(unix)]
+mod doctor;
+#[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]
 mod evidence;
 #[cfg(unix)]
@@ -102,6 +104,13 @@ pub(crate) mod runtime_root;
 #[cfg(unix)]
 mod setup;
 #[cfg(unix)]
+#[allow(unsafe_code)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "config edit calls it in the next change")
+)]
+mod signal_guard;
+#[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
 pub(crate) mod snapshot_store;
 #[cfg(unix)]
@@ -135,6 +144,8 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("config") => config::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
+        Some("doctor") => doctor::run(&a.args[1..]),
+        #[cfg(unix)]
         Some("explain") => explain::run(&a.args[1..]),
         Some("help") => help::run(&a.args[1..]),
         Some("--version") => version::run(&a.args[1..]),
@@ -152,7 +163,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         ),
         _ => {
             eprintln!(
-                "usage: bingsu <config|explain|help|init|list|prompt|reload|setup|--version> ..."
+                "usage: bingsu <config|doctor|explain|help|init|list|prompt|reload|setup|--version> ..."
             );
             ExitCode::from(2)
         }

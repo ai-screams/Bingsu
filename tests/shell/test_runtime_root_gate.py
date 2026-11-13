@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import time
 
-from shell_support import ROOT, Install, real_bin, run_shell_script, trusted_env
+from shell_support import ROOT, Install, cargo_test_binaries, real_bin, run_shell_script, trusted_env
 
 
 def refresh_helpers(base):
@@ -113,8 +113,7 @@ def test_init_again_recovers_runtime_root(tmp_path):
 # 이것을 실패시키는 것: 실제 제품 walk_verdict의 sticky 의무·소유권·로컬 규칙 제거.
 def test_runtime_root_path_examples():
     # Prebuilt by the workflow, same profile/target as the shipped front.
-    candidates = list((real_bin().parent / "deps").glob("cli_prompt-*"))
-    binaries = [p for p in candidates if p.is_file() and os.access(p, os.X_OK) and not p.suffix]
+    binaries = cargo_test_binaries(real_bin().parent, "bingsu", "cli_prompt")
     assert binaries, "build cargo test -p bingsu --test cli_prompt --no-run first"
     binary = max(binaries, key=lambda p: p.stat().st_mtime_ns)
     result = subprocess.run([str(binary), "runtime_root_path_examples", "--exact", "--nocapture"],

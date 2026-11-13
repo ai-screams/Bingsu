@@ -259,7 +259,8 @@ def prepare(binary):
     rust.write_text(HELPER.replace("@MODULES@", "\n".join(modules)).replace("@COLLECTOR@", json.dumps(str(binary.with_name("bingsu-collect"))))
                     .replace("@MARKER@", M3B.broker_marker(source)))
     fixture = directory / "git-product"
-    command = ["rustc", "--edition=2024", "--cfg", "test", "-O", "-C", "lto=fat", "-C", "embed-bitcode=yes", str(rust), "-o", str(fixture), "-L", f"dependency={binary.parent / 'deps'}"]
+    search = M3B.dependency_search(artifacts)
+    command = ["rustc", "--edition=2024", "--cfg", "test", "-O", "-C", "lto=fat", "-C", "embed-bitcode=yes", str(rust), "-o", str(fixture), *search]
     for name in ("bingsu_core", "bingsu_identity", "libc", *M3B.cli_libraries(source)):
         command += ["--extern", f"{name}={deps[name]}"]
     if cross:
@@ -278,7 +279,7 @@ def prepare(binary):
     if dedicated and identity != audit.build_id(front, 3):
         raise ValueError("prompt sibling build mismatch")
     sizes = stripped_sizes(binary, front, directory, dedicated)
-    diagnostic = prepare_diagnostic(source, directory, binary, deps, cross, triple)
+    diagnostic = prepare_diagnostic(source, directory, binary, deps, search, cross, triple)
     value = {"diagnostic": str(diagnostic), "source": str(source), "profile": "release", "product_mask": 10, "fixture": str(fixture),
              "front": str(front),
              "hashes": {"front": M3B.digest(front), "cli": M3B.digest(binary), "collector": M3B.digest(binary.with_name("bingsu-collect")), "fixture": M3B.digest(fixture), "diagnostic": M3B.digest(diagnostic)},
@@ -304,7 +305,7 @@ def stripped_sizes(binary, front, directory, dedicated):
     return sizes
 
 
-def prepare_diagnostic(source, directory, binary, deps, cross, triple):
+def prepare_diagnostic(source, directory, binary, deps, search, cross, triple):
     """Separate stage-local observations; never substituted for shipped samples."""
     corpus = module("f3_stage_source", stage_harness(source))
     copied = directory / "collector"
@@ -327,7 +328,7 @@ def prepare_diagnostic(source, directory, binary, deps, cross, triple):
     rust.write_text(corpus.RUST.replace("@MODULES@", declarations).replace("@MUTATION@", ""))
     diagnostic = directory / "git-stages"
     command = ["rustc", "--edition=2024", "--cfg", "test", "-O", "-C", "lto=fat", "-C", "embed-bitcode=yes",
-               str(rust), "-o", str(diagnostic), "-L", f"dependency={binary.parent / 'deps'}"]
+               str(rust), "-o", str(diagnostic), *search]
     for name in ("bingsu_core", "bingsu_identity", "libc", "gix_config", "gix_ref", "gix_index", "gix_object", "gix_pack", "gix_error", "gix_zlib", "gix_ignore", "gix_attributes", "gix_utils", "gix_revwalk"):
         command += ["--extern", f"{name}={deps[name]}"]
     if cross:

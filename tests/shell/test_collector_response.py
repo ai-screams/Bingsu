@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from conftest import ROOT, Install, real_bin, trusted_env, short_dir
+from shell_support import cargo_test_binaries
 from pty_session import Session, visible
 from test_prompt_deadline import is_static
 import test_prompt_env_paths as budget
@@ -21,7 +22,7 @@ def reader_binary():
     if not supplied and sys.platform == "linux" and is_static(real_bin()):
         pytest.skip("native collection fixture runs on the GNU host")
     candidates = [Path(supplied)] if supplied else sorted(
-        (ROOT / "target/debug/deps").glob("bingsu-*"),
+        cargo_test_binaries(ROOT / "target/debug", "bingsu", "bingsu"),
         key=lambda p: p.stat().st_mtime_ns, reverse=True)
     for binary in candidates:
         if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -38,7 +39,7 @@ def trace_binary(reader_binary):
     # target runs the traced reader on main, without allocator tuning.
     supplied = os.environ.get("BINGSU_COLLECTION_TRACE_READER")
     candidates = [Path(supplied)] if supplied else sorted(
-        (ROOT / "target/debug/deps").glob("collection_reader-*"),
+        cargo_test_binaries(ROOT / "target/debug", "bingsu", "collection_reader"),
         key=lambda p: p.stat().st_mtime_ns, reverse=True)
     for binary in candidates:
         if not binary.is_file() or not os.access(binary, os.X_OK):

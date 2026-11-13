@@ -15,6 +15,16 @@ def real_bin():
     return pathlib.Path(os.environ.get("BINGSU_BIN", ROOT / "target/debug/bingsu")).resolve()
 
 
+def cargo_test_binaries(profile_dir, package, name):
+    """Executables cargo built for the target `name` of `package` under
+    `profile_dir` (target/debug, target/<triple>/release). Cargo up to 1.99
+    puts them in `deps/`; Cargo 1.100 gives each unit its own
+    `build/<package>/<hash>/out/`, beside its object and dep-info files,
+    which are not executable."""
+    found = [*profile_dir.glob(f"deps/{name}-*"), *profile_dir.glob(f"build/{package}/*/out/{name}-*")]
+    return [p for p in found if p.is_file() and os.access(p, os.X_OK)]
+
+
 def real_prompt():
     return pathlib.Path(os.environ.get("BINGSU_PROMPT_BIN", real_bin().with_name("bingsu-prompt"))).resolve()
 

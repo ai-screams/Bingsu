@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - run: cargo build --release -p bingsu --features bench-stubs
       - run: cargo build --release -p bingsu-prompt -p bingsu-collect -p bingsu-bench
       # Runs without --cgroup-dir, as the plan records the CI matrix: the cgroup
@@ -65,7 +65,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       # Preparation is explicit and host-only. A base without instrumentation
       # is BLOCKED, rather than reusing B2 lower-bound numbers as product data.
       - name: Build both sibling pairs and main-thread fixtures
@@ -111,7 +111,7 @@ jobs:
         run: python3 bench/prompt_memory.py --kernel-gate
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       # The tracer starts the shell with PTRACE_TRACEME and follows only its own
       # descendants, which Yama scope 0 or 1 allows without privileges. Scope 2
       # or 3 needs CAP_SYS_PTRACE; the job fails closed instead of raising it.
