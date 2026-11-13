@@ -1115,6 +1115,15 @@ mod tests {
         }
     }
 
+    // 길이 255바이트부터는 모양의 u8 칸에 들어가지 않고 마지막 이름 길이가 STAR와 겹칠 수 있다. 이것을 실패시키는 것:
+    // 상한을 `<=`로 늦추거나 지우는 것.
+    #[test]
+    #[should_panic(expected = "too long for its shape")]
+    fn a_path_of_255_bytes_has_no_shape() {
+        let _ = shape(&"a".repeat(254));
+        let _ = shape(&"a".repeat(255));
+    }
+
     // 거르기가 실제로 행을 버리는지 본다(빼도 결과는 같고 느려지기만 하는 변이를 잡는다). 이것을 실패시키는 것:
     // 이름 수, 첫 이름 길이, 마지막 이름 길이 비교 가운데 하나를 빼는 것.
     #[test]
