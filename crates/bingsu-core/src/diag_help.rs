@@ -360,6 +360,18 @@ pub const HELP: &[Help] = &[
         "Use zsh 5.8 or newer, then run `bingsu init` again in it.",
     ),
     h(
+        c::TERMINAL_WIDTH_DIFFERS,
+        "The terminal moved the cursor by another number of cells than the settings assume for some probe characters (ambiguous-width characters, emoji, a joined emoji, a flag, a combining mark or an icon).\nThe check names which ones and how many cells each took.",
+        "The prompt counts the width of every piece in cells to place the right side and to wrap lines. A count that differs from the terminal's by one cell shifts the right edge, or breaks a line at the wrong place.\nThe check asks the terminal where its cursor is after each probe character, so it measures what is drawn, not what a table says.",
+        "Set `width.ambiguous` and `width.emoji` to the values the check reports for this terminal.\nOr change the terminal's own setting for ambiguous-width characters, then run the check again.\nA result of unknown means the terminal did not answer in time; that is not a mismatch.",
+    ),
+    h(
+        c::TERMINAL_BACKGROUND_DIFFERS,
+        "The terminal's background is light where the prompt draws for dark, or the other way round.\nThe prompt decides this from a hint in the environment; the terminal itself was asked for its background color.",
+        "With `colors.mode` set to auto, the prompt cannot ask the terminal on every line, so it uses a hint that some terminals do not set and a shell inside tmux or ssh may not pass on.\nText drawn for the wrong brightness can fall below the contrast the themes are checked for.",
+        "Set `colors.mode` to dark or light to match the terminal.\nThe check runs only when `colors.mode` is auto.",
+    ),
+    h(
         c::TEMPLATE_REPLACES_STYLE,
         "A `template` is set together with a preset or style options, and the template wins.",
         "A template takes precedence over the style keys, so the keys next to it have no effect.",

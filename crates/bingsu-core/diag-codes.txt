@@ -51,6 +51,8 @@ W606 stable
 W609 stable
 W610 stable
 W611 stable
+W613 stable
+W614 stable
 N501 stable
 N502 deprecated 0.0.0
 N503 stable

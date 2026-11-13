@@ -2,9 +2,12 @@
 //! setup, each with a status, one line and (when there is something to do)
 //! a diagnostic code that `bingsu help <code>` explains. It only reads: it
 //! runs no other executable (no version query, no shell, no helper), writes
-//! nothing and starts no process, and it never guesses a version from a path
+//! no file and starts no process, and it never guesses a version from a path
 //! or a folder name; a fact only a shell can give is `unknown` until the
-//! shell says it.
+//! shell says it. The one thing it does besides reading is to ask the
+//! terminal (`terminal-width`, `terminal-background`): a few characters are
+//! written to the screen and the answers read back, only when standard
+//! output is a terminal or `--terminal` is given.
 //!
 //! The checks are rows of `ITEMS`: a later change adds a row. Each row reads
 //! its facts and hands them to a pure `judge_*` function, which the tests
@@ -22,12 +25,18 @@ use super::{
     },
     runtime_root::{self, RootError},
     sys::{self, SeccompKernel},
+    terminal::{self, BackgroundOutcome, Why, WidthOutcome},
+    tty::{Terminal, Tty},
 };
 use bingsu_core::{
+    color::palette::Mode,
     diag::{DiagCode, Severity},
     diag_codes as codes,
+    envelope::{colorfgbg_mode, display_mode},
     fs_trust::{Last, Verdict, walk_verdict},
     sanitize::sanitize,
+    terminal_width::{self as width, Cells, Mismatch, PROBES},
+    width::WidthProfile,
 };
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt as _;
@@ -35,7 +44,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu doctor [--format json|text] [--evidence-stdin]";
+const USAGE: &str = "usage: bingsu doctor [--format json|text] [--terminal] [--evidence-stdin]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Status {
@@ -67,6 +76,23 @@ pub(super) struct Finding {
     pub status: Status,
     pub text: String,
     pub fix: Option<DiagCode>,
+    /// What a measurement saw, for the JSON only (the two terminal rows).
+    pub details: Option<Details>,
+}
+
+/// The numbers behind a terminal row. Only measured values and fixed words:
+/// nothing the terminal answered is kept as text.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Details {
+    Width {
+        cells: Cells,
+        recommended: width::Recommended,
+        inside_tmux: bool,
+    },
+    Background {
+        terminal: Mode,
+        prompt: Mode,
+    },
 }
 
 fn finding(status: Status, text: impl Into<String>, fix: Option<DiagCode>) -> Finding {
@@ -74,6 +100,7 @@ fn finding(status: Status, text: impl Into<String>, fix: Option<DiagCode>) -> Fi
         status,
         text: text.into(),
         fix,
+        details: None,
     }
 }
 
@@ -83,6 +110,33 @@ pub(super) struct Ctx {
     pub user: User,
     pub env: TrustedEnv,
     pub exe: Option<PathBuf>,
+    pub terminal: TerminalCtx,
+}
+
+/// The facts for the two terminal rows. Asking the terminal is the one thing
+/// `doctor` does besides reading (it writes a few characters to the screen
+/// and reads the answers back, and writes no file).
+pub(super) struct TerminalCtx {
+    /// Measure through the terminal: standard output is one, or `--terminal`.
+    pub measure: bool,
+    /// Opens the controlling terminal; `None`: there is none, or this
+    /// process is not its foreground job.
+    pub open: fn() -> Option<Box<dyn Controlling>>,
+    /// `COLORFGBG`, as the prompt's envelope reads it.
+    pub colorfgbg: Option<OsString>,
+    pub tmux: bool,
+    /// The settings the terminal is compared with; read once, by the first
+    /// terminal row that needs it.
+    pub settings: std::cell::OnceCell<Option<TerminalSettings>>,
+    /// A Ctrl-C ended a measurement: the run stops with 130.
+    pub cancelled: std::cell::Cell<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TerminalSettings {
+    pub profile: WidthProfile,
+    /// `colors.mode = "auto"`: the prompt picks light or dark by itself.
+    pub auto: bool,
 }
 
 pub(super) struct Item {
@@ -142,6 +196,16 @@ pub(super) const ITEMS: &[Item] = &[
         id: "settings",
         title: "settings",
         run: run_settings,
+    },
+    Item {
+        id: "terminal-width",
+        title: "terminal width",
+        run: run_terminal_width,
+    },
+    Item {
+        id: "terminal-background",
+        title: "background",
+        run: run_terminal_background,
     },
 ];
 
@@ -581,6 +645,301 @@ fn run_settings(c: &Ctx) -> Finding {
     }
 }
 
+// ---- terminal -------------------------------------------------------------------
+
+/// Exit code of a run ended by Ctrl-C (128 + SIGINT).
+const EXIT_CANCELLED: u8 = 130;
+
+fn terminal_settings(c: &Ctx) -> Option<TerminalSettings> {
+    *c.terminal.settings.get_or_init(|| {
+        let i = inspect_config(&c.user, &c.env).ok()?;
+        let snap = i.report.snapshot?;
+        // An explicit `colors.mode` makes both palettes the same one.
+        Some(TerminalSettings {
+            profile: snap.profile,
+            auto: snap.palette != snap.light_palette,
+        })
+    })
+}
+
+/// The row for a run that asks no terminal: a Ctrl-C ended an earlier
+/// question, or standard output is not a terminal and `--terminal` is not
+/// given.
+fn no_question(c: &Ctx) -> Option<Finding> {
+    let skipped = |text: &str| finding(Status::Skipped, text, None);
+    if c.terminal.cancelled.get() {
+        return Some(skipped("stopped"));
+    }
+    (!c.terminal.measure).then(|| {
+        skipped(
+            "standard output is not a terminal; `--terminal` asks the controlling terminal anyway",
+        )
+    })
+}
+
+/// Runs `measure` on the controlling terminal in raw mode, or gives the row
+/// that says why there is none. The terminal is back in its mode when this
+/// returns; each row asks on a guard of its own.
+fn with_terminal<T>(c: &Ctx, measure: impl FnOnce(&mut dyn Terminal) -> T) -> Result<T, Finding> {
+    if let Some(f) = no_question(c) {
+        return Err(f);
+    }
+    let skipped = |text: &str| finding(Status::Skipped, text, None);
+    let Some(tty) = (c.terminal.open)() else {
+        return Err(skipped(
+            "there is no terminal to ask (none is attached, or this is not its foreground job)",
+        ));
+    };
+    let Ok(mut guard) = tty.raw_terminal() else {
+        return Err(finding(
+            Status::Unknown,
+            "the terminal could not be put in the mode the questions need",
+            None,
+        ));
+    };
+    Ok(measure(&mut *guard))
+}
+
+/// A controlling terminal that can be put in raw mode for the questions.
+/// `Tty` is the real one; the tests put another in its place.
+pub(super) trait Controlling {
+    fn raw_terminal(&self) -> std::io::Result<Box<dyn Terminal + '_>>;
+}
+
+impl Controlling for Tty {
+    fn raw_terminal(&self) -> std::io::Result<Box<dyn Terminal + '_>> {
+        Ok(Box::new(self.raw()?))
+    }
+}
+
+/// The controlling terminal, when this process may ask it.
+fn open_controlling_terminal() -> Option<Box<dyn Controlling>> {
+    Tty::open().map(|t| Box::new(t) as Box<dyn Controlling>)
+}
+
+fn why_text(why: Why) -> &'static str {
+    match why {
+        Why::Silent => "the terminal did not answer in time",
+        Why::Garbled => "the terminal answered with something that is not a cursor position",
+        Why::Moved => "the cursor left the line while measuring",
+    }
+}
+
+fn mismatch_text(m: &Mismatch) -> String {
+    match *m {
+        Mismatch::AmbiguousWidth {
+            measured,
+            configured,
+        } => format!(
+            "ambiguous-width characters take {measured} cell(s), the settings say {configured}"
+        ),
+        Mismatch::AmbiguousMixed => {
+            "ambiguous-width characters do not all take the same number of cells".into()
+        }
+        Mismatch::EmojiWidth {
+            measured,
+            configured,
+        } => format!("emoji take {measured} cell(s), the settings say {configured}"),
+        Mismatch::Vs16Differs { plain, vs16 } => {
+            format!("an emoji made by U+FE0F takes {vs16} cell(s), a plain one {plain}")
+        }
+        Mismatch::ZwjCells { cells, expected } => {
+            format!("a joined emoji takes {cells} cell(s), bingsu counts {expected}")
+        }
+        Mismatch::FlagCells { cells, expected } => {
+            format!("a flag takes {cells} cell(s), bingsu counts {expected}")
+        }
+        Mismatch::CombiningCells { cells } => {
+            format!("a letter with a combining mark takes {cells} cell(s), bingsu counts 1")
+        }
+        Mismatch::NerdCells { cells } => {
+            format!("an icon takes {cells} cell(s), bingsu counts 1")
+        }
+    }
+}
+
+fn judge_width(outcome: &WidthOutcome, profile: WidthProfile, tmux: bool) -> Finding {
+    let cells = match outcome {
+        WidthOutcome::Measured(cells) => cells,
+        WidthOutcome::TooNarrow(c) => {
+            return finding(
+                Status::Skipped,
+                format!(
+                    "the terminal is {c} columns wide; the measurement needs {} or more",
+                    width::MIN_COLUMNS
+                ),
+                None,
+            );
+        }
+        WidthOutcome::NoAnswer(why) => return finding(Status::Unknown, why_text(*why), None),
+        WidthOutcome::Cancelled => return finding(Status::Skipped, "stopped", None),
+        WidthOutcome::Failed => {
+            return finding(
+                Status::Unknown,
+                "the terminal could not be written to",
+                None,
+            );
+        }
+    };
+    let recommended = width::recommended(cells);
+    let details = Some(Details::Width {
+        cells: *cells,
+        recommended,
+        inside_tmux: tmux,
+    });
+    let via = if tmux {
+        " (inside tmux, which answers for its own pane)"
+    } else {
+        ""
+    };
+    let mut f = if !width::reliable(cells) {
+        finding(
+            Status::Unknown,
+            format!(
+                "the control characters moved the cursor by {} and {} cell(s), not 1 and 2, so the measurement is not trusted{via}",
+                cells[0], cells[1]
+            ),
+            None,
+        )
+    } else {
+        let bad = width::mismatches(cells, profile);
+        if bad.is_empty() {
+            finding(
+                Status::Ok,
+                format!(
+                    "{} probe characters moved the cursor as the settings say (ambiguous {}, emoji {}){via}",
+                    PROBES.len(),
+                    profile.ambiguous(),
+                    profile.emoji()
+                ),
+                None,
+            )
+        } else {
+            let list: Vec<String> = bad.iter().map(mismatch_text).collect();
+            let set = match (recommended.ambiguous, recommended.emoji) {
+                (Some(a), Some(e)) => {
+                    format!("; this terminal fits `width.ambiguous = {a}` and `width.emoji = {e}`")
+                }
+                (Some(a), None) => format!("; this terminal fits `width.ambiguous = {a}`"),
+                (None, Some(e)) => format!("; this terminal fits `width.emoji = {e}`"),
+                (None, None) => String::new(),
+            };
+            finding(
+                Status::Warn,
+                format!("{}{set}{via}", list.join("; ")),
+                Some(codes::TERMINAL_WIDTH_DIFFERS),
+            )
+        }
+    };
+    f.details = details;
+    f
+}
+
+fn mode_word(m: Mode) -> &'static str {
+    match m {
+        Mode::Dark => "dark",
+        Mode::Light => "light",
+    }
+}
+
+fn judge_background(outcome: &BackgroundOutcome, prompt: Mode, hint_set: bool) -> Finding {
+    let terminal = match outcome {
+        BackgroundOutcome::Dark => Mode::Dark,
+        BackgroundOutcome::Light => Mode::Light,
+        BackgroundOutcome::NoAnswer(why) => {
+            return finding(Status::Unknown, why_text(*why), None);
+        }
+        BackgroundOutcome::Cancelled => return finding(Status::Skipped, "stopped", None),
+        BackgroundOutcome::Failed => {
+            return finding(
+                Status::Unknown,
+                "the terminal could not be written to",
+                None,
+            );
+        }
+    };
+    let hint = if hint_set {
+        "from COLORFGBG"
+    } else {
+        "COLORFGBG is not set"
+    };
+    let mut f = if terminal == prompt {
+        finding(
+            Status::Ok,
+            format!(
+                "the terminal is {} and the prompt draws for {} ({hint})",
+                mode_word(terminal),
+                mode_word(prompt)
+            ),
+            None,
+        )
+    } else {
+        finding(
+            Status::Warn,
+            format!(
+                "the terminal is {} but the prompt draws for {} ({hint})",
+                mode_word(terminal),
+                mode_word(prompt)
+            ),
+            Some(codes::TERMINAL_BACKGROUND_DIFFERS),
+        )
+    };
+    f.details = Some(Details::Background { terminal, prompt });
+    f
+}
+
+fn run_terminal_width(c: &Ctx) -> Finding {
+    if let Some(f) = no_question(c) {
+        return f;
+    }
+    let Some(settings) = terminal_settings(c) else {
+        return finding(
+            Status::Unknown,
+            "the settings could not be read, so there is nothing to compare with",
+            None,
+        );
+    };
+    let outcome = match with_terminal(c, |t| terminal::measure_widths(t)) {
+        Ok(o) => o,
+        Err(f) => return f,
+    };
+    if outcome == WidthOutcome::Cancelled {
+        c.terminal.cancelled.set(true);
+    }
+    judge_width(&outcome, settings.profile, c.terminal.tmux)
+}
+
+fn run_terminal_background(c: &Ctx) -> Finding {
+    let Some(settings) = terminal_settings(c) else {
+        return finding(
+            Status::Unknown,
+            "the settings could not be read, so there is nothing to compare with",
+            None,
+        );
+    };
+    if !settings.auto {
+        return finding(
+            Status::Skipped,
+            "`colors.mode` is not auto, so the prompt does not guess the background",
+            None,
+        );
+    }
+    let outcome = match with_terminal(c, |t| terminal::measure_background(t)) {
+        Ok(o) => o,
+        Err(f) => return f,
+    };
+    if outcome == BackgroundOutcome::Cancelled {
+        c.terminal.cancelled.set(true);
+    }
+    // The prompt draws by what its envelope carries: the same two functions.
+    let hint = c
+        .terminal
+        .colorfgbg
+        .as_deref()
+        .and_then(|v| colorfgbg_mode(v.as_bytes()));
+    judge_background(&outcome, display_mode(hint), hint.is_some())
+}
+
 // ---- output ----------------------------------------------------------------------
 
 /// The text of a run: one line per check and a summary line.
@@ -625,18 +984,24 @@ struct Opts {
     json: bool,
     /// The shell function hands its evidence on standard input.
     evidence: bool,
+    /// `--terminal`: ask the controlling terminal even when standard output
+    /// is not one.
+    terminal: bool,
 }
 
-/// `--format json|text` and `--evidence-stdin`, each at most once, in any order.
+/// `--format json|text`, `--terminal` and `--evidence-stdin`, each at most
+/// once, in any order.
 fn parse(args: &[OsString]) -> Option<Opts> {
     let mut o = Opts {
         json: false,
         evidence: false,
+        terminal: false,
     };
     let (mut format_seen, mut it) = (false, args.iter());
     while let Some(a) = it.next() {
         match a.to_str()? {
             "--evidence-stdin" if !o.evidence => o.evidence = true,
+            "--terminal" if !o.terminal => o.terminal = true,
             "--format" if !format_seen => {
                 format_seen = true;
                 o.json = match it.next()?.to_str()? {
@@ -665,6 +1030,45 @@ fn read_evidence() -> Given {
     }
 }
 
+fn write_details(w: &mut bingsu_core::diag_json::Writer, d: &Details) {
+    w.key("details").begin_object();
+    match d {
+        Details::Width {
+            cells,
+            recommended,
+            inside_tmux,
+        } => {
+            w.key("probes").begin_array();
+            for (p, c) in PROBES.iter().zip(cells) {
+                w.begin_object();
+                w.key("name").string(p.name);
+                w.key("cells").number(u64::from(*c));
+                w.end_object();
+            }
+            w.end_array();
+            w.key("recommended").begin_object();
+            for (k, v) in [
+                ("ambiguous", recommended.ambiguous),
+                ("emoji", recommended.emoji),
+            ] {
+                w.key(k);
+                match v {
+                    Some(n) => w.number(u64::from(n)),
+                    None => w.null(),
+                };
+            }
+            w.end_object();
+            w.key("inside_tmux").boolean(*inside_tmux);
+        }
+        Details::Background { terminal, prompt } => {
+            w.key("terminal").string(mode_word(*terminal));
+            w.key("prompt").string(mode_word(*prompt));
+            w.key("colors_mode").string("auto");
+        }
+    }
+    w.end_object();
+}
+
 /// The JSON document of a run: the same rows as the text, as data. A
 /// finding's `fix` is its diagnostic code. No value of the environment is in
 /// a `Finding`, so none can be here.
@@ -687,6 +1091,9 @@ pub(super) fn render_json(rows: &[(&Item, Finding)], error: Option<&str>) -> Str
         w.key("text").string(&f.text);
         w.key("fix")
             .opt_string(f.fix.map(|c| c.to_string()).as_deref());
+        if let Some(d) = &f.details {
+            write_details(&mut w, d);
+        }
         w.end_object();
     }
     w.end_array();
@@ -725,13 +1132,26 @@ pub fn run(args: &[OsString]) -> ExitCode {
         eprintln!("bingsu doctor: the account or its home folder cannot be read");
         return ctx::code(EXIT_FAILED);
     };
+    let (colorfgbg, tmux) = TrustedEnv::terminal_hints();
     let c = Ctx {
         evidence,
         user,
         env: TrustedEnv::capture(),
         exe: std::env::current_exe().ok(),
+        terminal: TerminalCtx {
+            measure: opts.terminal || std::io::IsTerminal::is_terminal(&std::io::stdout()),
+            open: open_controlling_terminal,
+            colorfgbg,
+            tmux,
+            settings: std::cell::OnceCell::new(),
+            cancelled: std::cell::Cell::new(false),
+        },
     };
     let rows: Vec<(&Item, Finding)> = ITEMS.iter().map(|i| (i, (i.run)(&c))).collect();
+    if c.terminal.cancelled.get() {
+        // Ctrl-C: the terminal is restored; the table is not printed.
+        return ctx::code(EXIT_CANCELLED);
+    }
     let out = if json {
         render_json(&rows, None)
     } else {
@@ -949,6 +1369,222 @@ mod tests {
         assert_eq!(
             doc,
             "{\"schema\":1,\"command\":\"doctor\",\"result\":\"invalid\",\"items\":[],\"exit_code\":1,\"error\":\"cannot read the account\"}\n"
+        );
+    }
+
+    const NORMAL: Cells = [1, 2, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1];
+
+    // 이것을 실패시키는 것: 설정과 같은 터미널을 경고로, 다른 터미널을 정상으로 매기는 것, 경고에서 W613이나 권장 값을 빼는 것,
+    // 통제 글자(a, 한)가 어긋난 측정을 믿는 것, 시간 초과·잘못된 응답·줄 이동을 불일치로 읽는 것, 좁은 터미널을 모름으로 매기는 것.
+    #[test]
+    fn the_width_row_follows_the_measurement() {
+        let p = WidthProfile::DEFAULT;
+        let f = judge_width(&WidthOutcome::Measured(NORMAL), p, false);
+        is(&f, Status::Ok, None);
+        assert!(f.details.is_some());
+        // ambiguous characters take 2 cells here.
+        let wide = [1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1];
+        let f = judge_width(&WidthOutcome::Measured(wide), p, false);
+        is(&f, Status::Warn, Some(codes::TERMINAL_WIDTH_DIFFERS));
+        assert!(f.text.contains("`width.ambiguous = 2`"), "{}", f.text);
+        // The settings that match it are fine.
+        let two = WidthProfile::new(2, 2).unwrap();
+        is(
+            &judge_width(&WidthOutcome::Measured(wide), two, false),
+            Status::Ok,
+            None,
+        );
+        // A control that moved the wrong way: no verdict at all.
+        let mut bad = NORMAL;
+        bad[1] = 1;
+        let f = judge_width(&WidthOutcome::Measured(bad), p, false);
+        is(&f, Status::Unknown, None);
+        for why in [Why::Silent, Why::Garbled, Why::Moved] {
+            let f = judge_width(&WidthOutcome::NoAnswer(why), p, false);
+            is(&f, Status::Unknown, None);
+            assert!(f.details.is_none());
+        }
+        is(
+            &judge_width(&WidthOutcome::TooNarrow(30), p, false),
+            Status::Skipped,
+            None,
+        );
+        is(
+            &judge_width(&WidthOutcome::Failed, p, false),
+            Status::Unknown,
+            None,
+        );
+        let f = judge_width(&WidthOutcome::Measured(wide), p, true);
+        assert!(f.text.contains("tmux"), "{}", f.text);
+    }
+
+    // 이것을 실패시키는 것: 밝기가 같은데 경고, 다른데 정상으로 매기는 것, 힌트가 없을 때 그 사실을 문구에서 빼는 것,
+    // 응답이 없는데 비교하는 것.
+    #[test]
+    fn the_background_row_compares_the_two_brightnesses() {
+        let (d, l) = (BackgroundOutcome::Dark, BackgroundOutcome::Light);
+        is(&judge_background(&d, Mode::Dark, true), Status::Ok, None);
+        is(&judge_background(&l, Mode::Light, true), Status::Ok, None);
+        let f = judge_background(&l, Mode::Dark, false);
+        is(&f, Status::Warn, Some(codes::TERMINAL_BACKGROUND_DIFFERS));
+        assert!(f.text.contains("COLORFGBG is not set"), "{}", f.text);
+        assert_eq!(
+            f.details,
+            Some(Details::Background {
+                terminal: Mode::Light,
+                prompt: Mode::Dark
+            })
+        );
+        let f = judge_background(&BackgroundOutcome::NoAnswer(Why::Silent), Mode::Dark, true);
+        is(&f, Status::Unknown, None);
+        assert!(f.details.is_none());
+    }
+
+    // 이것을 실패시키는 것: `--terminal`을 받지 않는 것, 같은 플래그나 모르는 플래그를 받는 것, 순서를 고정하는 것.
+    #[test]
+    fn the_command_line_takes_format_and_terminal_once_in_any_order() {
+        let a = |v: &[&str]| parse(&v.iter().map(OsString::from).collect::<Vec<_>>());
+        let o = |json, terminal| {
+            Some(Opts {
+                json,
+                evidence: false,
+                terminal,
+            })
+        };
+        assert_eq!(a(&[]), o(false, false));
+        assert_eq!(a(&["--terminal"]), o(false, true));
+        assert_eq!(a(&["--format", "json", "--terminal"]), o(true, true));
+        assert_eq!(a(&["--terminal", "--format", "text"]), o(false, true));
+        for bad in [
+            &["--terminal", "--terminal"][..],
+            &["--evidence-stdin", "--evidence-stdin"],
+            &["--format"],
+            &["--format", "yaml"],
+            &["--format", "json", "--format", "text"],
+            &["--probe"],
+        ] {
+            assert_eq!(a(bad), None, "{bad:?}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 두 터미널 행의 details를 JSON에서 빼는 것, 다른 행에 details를 붙이는 것,
+    // 측정하지 않은 행에 details를 붙이는 것, 시험 글자 이름·칸 수를 순서대로 싣지 않는 것.
+    #[test]
+    fn only_a_measured_terminal_row_has_details_in_the_json() {
+        let item = |id: &str| ITEMS.iter().find(|i| i.id == id).unwrap();
+        let rows = [
+            (item("settings"), finding(Status::Ok, "fine", None)),
+            (
+                item("terminal-width"),
+                judge_width(&WidthOutcome::Measured(NORMAL), WidthProfile::DEFAULT, true),
+            ),
+            (
+                item("terminal-background"),
+                judge_background(&BackgroundOutcome::Light, Mode::Dark, true),
+            ),
+            (
+                item("executable"),
+                judge_width(
+                    &WidthOutcome::NoAnswer(Why::Silent),
+                    WidthProfile::DEFAULT,
+                    false,
+                ),
+            ),
+        ];
+        let doc = render_json(&rows, None);
+        assert_eq!(doc.matches("\"details\"").count(), 2, "{doc}");
+        assert!(
+            doc.contains("\"probes\":[{\"name\":\"control-narrow\",\"cells\":1},{\"name\":\"control-wide\",\"cells\":2}"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("\"recommended\":{\"ambiguous\":1,\"emoji\":2},\"inside_tmux\":true"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(
+                "\"details\":{\"terminal\":\"light\",\"prompt\":\"dark\",\"colors_mode\":\"auto\"}"
+            ),
+            "{doc}"
+        );
+    }
+
+    struct Fake {
+        raw_fails: bool,
+    }
+    impl Controlling for Fake {
+        fn raw_terminal(&self) -> std::io::Result<Box<dyn Terminal + '_>> {
+            if self.raw_fails {
+                return Err(std::io::Error::other("no raw mode"));
+            }
+            Ok(Box::new(super::super::terminal::fake::Fake::new([
+                1, 2, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1,
+            ])))
+        }
+    }
+
+    fn context(measure: bool, open: fn() -> Option<Box<dyn Controlling>>) -> Ctx {
+        Ctx {
+            evidence: Given::No,
+            user: User::current().unwrap(),
+            env: TrustedEnv::capture(),
+            exe: None,
+            terminal: TerminalCtx {
+                measure,
+                open,
+                colorfgbg: None,
+                tmux: false,
+                settings: std::cell::OnceCell::new(),
+                cancelled: std::cell::Cell::new(false),
+            },
+        }
+    }
+
+    fn asked(c: &Ctx) -> Result<u16, Finding> {
+        with_terminal(c, |t| t.columns().unwrap_or(0))
+    }
+
+    // 이것을 실패시키는 것: raw 모드를 못 켰는데 질문을 계속하는 것(Ok가 돌아옴), 그 경우를 건너뜀이나 실패로 매기는 것
+    // (모름이어야 함), 제어 터미널이 없을 때(`open`이 None) 건너뜀이 아닌 상태를 내는 것, 표준 출력이 터미널이 아닌데
+    // `open`을 부르는 것, 취소 뒤에도 묻는 것.
+    #[test]
+    fn a_terminal_that_cannot_be_asked_gives_the_row_that_says_why() {
+        fn none() -> Option<Box<dyn Controlling>> {
+            None
+        }
+        fn raw_fails() -> Option<Box<dyn Controlling>> {
+            Some(Box::new(Fake { raw_fails: true }))
+        }
+        fn works() -> Option<Box<dyn Controlling>> {
+            Some(Box::new(Fake { raw_fails: false }))
+        }
+        fn never() -> Option<Box<dyn Controlling>> {
+            panic!("opened the terminal when it must not")
+        }
+        assert_eq!(asked(&context(true, works)).unwrap(), 80);
+        let f = asked(&context(true, none)).unwrap_err();
+        is(&f, Status::Skipped, None);
+        assert!(f.text.contains("no terminal to ask"), "{}", f.text);
+        let f = asked(&context(true, raw_fails)).unwrap_err();
+        is(&f, Status::Unknown, None);
+        assert!(f.text.contains("mode the questions need"), "{}", f.text);
+        let f = asked(&context(false, never)).unwrap_err();
+        is(&f, Status::Skipped, None);
+        assert!(f.text.contains("not a terminal"), "{}", f.text);
+        let c = context(true, never);
+        c.terminal.cancelled.set(true);
+        let f = asked(&c).unwrap_err();
+        is(&f, Status::Skipped, None);
+        assert_eq!(f.text, "stopped");
+    }
+
+    // 이것을 실패시키는 것: 터미널 행이 맨 앞이나 사이에 끼는 것(출력 순서가 바뀜), 터미널 행 id를 바꾸는 것.
+    #[test]
+    fn the_terminal_rows_come_last() {
+        let ids: Vec<&str> = ITEMS.iter().map(|i| i.id).collect();
+        assert_eq!(
+            &ids[ids.len() - 2..],
+            ["terminal-width", "terminal-background"]
         );
     }
 

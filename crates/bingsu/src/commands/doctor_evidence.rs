@@ -101,18 +101,25 @@ fn without(given: &Given, what: &str) -> Option<Finding> {
             status: Status::Unknown,
             text: format!("{what} not confirmed: no shell passed it; {ASK}"),
             fix: None,
+            details: None,
         }),
         Given::Bad(why) => Some(Finding {
             status: Status::Unknown,
             text: format!("{what} not confirmed: the shell's evidence is refused ({why})"),
             fix: None,
+            details: None,
         }),
         Given::Yes(_) => None,
     }
 }
 
 fn found(status: Status, text: String, fix: Option<bingsu_core::diag::DiagCode>) -> Finding {
-    Finding { status, text, fix }
+    Finding {
+        status,
+        text,
+        fix,
+        details: None,
+    }
 }
 
 // ---- shell and its version -----------------------------------------------------

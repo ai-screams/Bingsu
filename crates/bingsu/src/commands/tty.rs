@@ -74,10 +74,6 @@ pub enum ReplyEnd {
     /// `ESC [`, parameter bytes (0x30-0x3f), intermediate bytes (0x20-0x2f)
     /// and the final byte given, for example `Csi(b'R')` for a cursor
     /// position report. At most `CSI_REPLY_MAX` (32) bytes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "bingsu doctor's terminal measurement asks it")
-    )]
     Csi(u8),
 }
 
@@ -127,16 +123,8 @@ pub trait Terminal {
     /// cut the write short (later queries are cancelled), and
     /// `ErrorKind::TimedOut` when the terminal took nothing more for
     /// `WRITE_TIMEOUT` (what was queued is dropped, later queries are silent).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "bingsu doctor's terminal measurement writes")
-    )]
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()>;
     /// Columns from `TIOCGWINSZ`; `None` when unknown or 0.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "bingsu doctor's terminal measurement reads it")
-    )]
     fn columns(&self) -> Option<u16>;
 }
 

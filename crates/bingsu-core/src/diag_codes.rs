@@ -92,6 +92,8 @@ pub const RECORD_VERSION_UNSUPPORTED: DiagCode = e(608);
 pub const HOOK_ORDER_CHANGED: DiagCode = w(609);
 pub const ENVELOPE_UNEXPECTED: DiagCode = w(610);
 pub const ZSH_TOO_OLD: DiagCode = w(611);
+pub const TERMINAL_WIDTH_DIFFERS: DiagCode = w(613);
+pub const TERMINAL_BACKGROUND_DIFFERS: DiagCode = w(614);
 
 const fn stable(
     code: DiagCode,
@@ -433,6 +435,18 @@ pub const CODES: &[CodeInfo] = &[
         "the shell is older than the oldest version bingsu is tested with",
         "versions below the tested one are not covered by the shell tests, so a hook may misbehave",
         "use zsh 5.8 or newer",
+    ),
+    stable(
+        TERMINAL_WIDTH_DIFFERS,
+        "this terminal draws some characters in other widths than the settings assume",
+        "a width that differs from the terminal's makes the prompt's right edge and its lines drift by a cell or more",
+        "set `width.ambiguous` and `width.emoji` to what the terminal draws, or change the terminal's own setting",
+    ),
+    stable(
+        TERMINAL_BACKGROUND_DIFFERS,
+        "the terminal's background is the other brightness than the prompt draws for",
+        "with `colors.mode` set to auto, the prompt picks light or dark colors from a hint that the terminal and the shell may not agree on",
+        "set `colors.mode` to dark or light to match the terminal",
     ),
     stable(
         TEMPLATE_REPLACES_STYLE,
