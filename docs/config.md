@@ -141,6 +141,24 @@ the same way: once a layout from your own files draws it at some width, its valu
 it, including a theme's layout at a narrow width. Naming a segment only in a theme's layout does not run the command
 or show the variable.
 
+## Narrow terminals
+
+A layout band (`[layout.when.NAME]`) is chosen for a range of widths. It takes the lines of `[layout]` unless it has
+a template of its own, and a template draws in place of those lines. The built-in theme has one band, `narrow`, for
+widths under 60, and it has its own template: there the prompt shows the host, the folder and git on the upper line,
+and the duration and the prompt character below, whatever `[layout.line1]` and `[layout.line2]` say. Your lines are
+used from 60 columns on, and `bingsu config check` notes the widths where they are not (N504).
+
+The built-in template stays unless the band gets another one. To draw your own segments under 60 columns too, write
+a template for the band:
+
+```toml
+[layout.when.narrow.style]
+template = "{dir} {git}{@nl}{char}"
+```
+
+`bingsu explain --width 40` shows what is drawn at a narrow width.
+
 ## YAML files
 
 A file whose name ends in `.yaml` or `.yml` takes the same keys as a TOML file and is read the same way, in three

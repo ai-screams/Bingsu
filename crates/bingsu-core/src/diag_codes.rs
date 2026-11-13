@@ -80,6 +80,7 @@ pub const ENV_SHEBANG: DiagCode = w(411);
 pub const TEMPLATE_REPLACES_STYLE: DiagCode = n(501);
 pub const CUSTOM_DRAWN_LATER: DiagCode = n(502);
 pub const KEY_PLANNED: DiagCode = n(503);
+pub const BAND_TEMPLATE_REPLACES_LINES: DiagCode = n(504);
 pub const EXE_FOLDER_CHANGEABLE: DiagCode = w(601);
 pub const PATH_BINGSU_DIFFERS: DiagCode = w(602);
 pub const NO_PINNED_ROOTS: DiagCode = w(603);
@@ -453,6 +454,12 @@ pub const CODES: &[CodeInfo] = &[
         "`{key}` has no effect yet",
         "it is read from {milestone} on; until then it is accepted and left out",
         "keep it, or remove it",
+    ),
+    stable(
+        BAND_TEMPLATE_REPLACES_LINES,
+        "at widths {widths} the band `{band}` draws its own template in place of {lines}",
+        "a band's template replaces the layout lines the band would take from `[layout]`",
+        "to draw your segments at those widths too, write `layout.when.{band}.style.template` yourself",
     ),
 ];
 
