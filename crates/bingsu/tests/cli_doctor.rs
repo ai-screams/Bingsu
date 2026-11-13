@@ -25,9 +25,10 @@ fn doctor(e: &Env, extra: &[(&str, &str)]) -> std::process::Output {
     c.output().unwrap()
 }
 
+/// The line of the check titled `title` (the title column is 16 wide after the 10-wide status).
 fn line<'a>(out: &'a str, title: &str) -> &'a str {
     out.lines()
-        .find(|l| l.split_whitespace().nth(1) == title.split_whitespace().next())
+        .find(|l| l.get(10..26).map(str::trim) == Some(title))
         .unwrap_or_else(|| panic!("no line for {title}: {out}"))
 }
 
@@ -45,6 +46,9 @@ fn a_plain_run_lists_every_check_and_exits_0() {
         "pinned folders",
         "one build",
         "shell",
+        "hook version",
+        "hook order",
+        "envelope",
         "seccomp",
         "settings",
     ] {
@@ -159,10 +163,18 @@ fn doctor_writes_nothing() {
     assert_eq!(e.tree(), before);
 }
 
-/// The source of `doctor.rs` without its test module.
+/// The source of `doctor.rs` and `doctor_evidence.rs` without their test modules.
 fn doctor_source() -> String {
-    let all = include_str!("../src/commands/doctor.rs").replace("\r\n", "\n");
-    all.split("#[cfg(test)]").next().unwrap().to_owned()
+    [
+        include_str!("../src/commands/doctor.rs"),
+        include_str!("../src/commands/doctor_evidence.rs"),
+    ]
+    .iter()
+    .map(|all| {
+        let all = all.replace("\r\n", "\n");
+        all.split("#[cfg(test)]").next().unwrap().to_owned()
+    })
+    .collect()
 }
 
 // doctor starts no program: its source names no way to start one, and (Linux) no `execve` happens under it.
@@ -545,4 +557,319 @@ fn the_schema_ties_result_and_exit_code_to_the_items() {
     for d in &bad {
         assert!(json_schema::validate(None, &[d]).is_err(), "accepted: {d}");
     }
+}
+
+const GOOD: [&str; 10] = [
+    "doctor-evidence-v1",
+    "zsh",
+    "5.9",
+    "0123456789abcdef0123456789abcdef",
+    "1",
+    "B1",
+    "_bingsu_save\x1dother\x1d_bingsu_install",
+    "_bingsu_preexec",
+    "--width\x1d80\x1d--status\x1d0\x1d--pipestatus\x1d0\x1d--jobs\x1d0\x1d--keymap\x1dmain",
+    "",
+];
+
+fn record(f: &[&str; 10]) -> Vec<u8> {
+    let mut out = f.join("\x1f").into_bytes();
+    out.push(0x1e);
+    out
+}
+
+/// `bingsu doctor --evidence-stdin` with `input` on standard input.
+#[allow(clippy::disallowed_methods, reason = "a test feeding a child's stdin")]
+fn with_evidence(e: &Env, input: &[u8], extra: &[&str]) -> (Option<i32>, String, String) {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut c = e.cmd(&["doctor", "--evidence-stdin"]);
+    c.args(extra)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    // A thread writes: doctor stops reading at its limit and answers while a longer record is still being
+    // written, and its answer must be read meanwhile (a full pipe on both sides would stand still). Writing
+    // after it has stopped reading is expected to fail.
+    let mut stdin = child.stdin.take().unwrap();
+    let data = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&data);
+    });
+    let o = child.wait_with_output().unwrap();
+    writer.join().unwrap();
+    (o.status.code(), text(&o.stdout), quiet(&o.stderr))
+}
+
+// With a good record the four shell checks say ok and show what the shell said; the run exits 0.
+// 이것을 실패시키는 것: 증거를 읽지 않고 unknown으로 두는 것, 정상 증거에서 경고·실패를 내는 것.
+#[test]
+fn good_evidence_makes_the_shell_checks_ok() {
+    let e = Env::new("cli_doctor", "evidence-ok");
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    let (code, t, err) = with_evidence(&e, &record(&GOOD), &[]);
+    assert_eq!((code, err.as_str()), (Some(0), ""), "{t}");
+    for title in ["shell", "hook version", "hook order", "envelope"] {
+        assert!(line(&t, title).starts_with("  ok"), "{title}: {t}");
+    }
+    assert!(line(&t, "shell").contains("zsh 5.9"), "{t}");
+    assert!(
+        line(&t, "envelope").contains("--width 80 --status 0"),
+        "{t}"
+    );
+}
+
+// Each shell check fails or warns on its own bad evidence and the others stay ok.
+// 이것을 실패시키는 것: 항목이 다른 항목의 증거를 읽는 것, 가로챈 hook·바뀐 봉투·낡은 셸·모르는 레코드 버전을 놓치는 것.
+#[test]
+fn bad_evidence_is_found_by_the_check_it_belongs_to() {
+    let e = Env::new("cli_doctor", "evidence-bad");
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    let cases: [(usize, &str, &str, &str, &str); 5] = [
+        (2, "5.7", "shell", "  warn", "W611"),
+        (5, "B2", "hook version", "  fail", "E608"),
+        (
+            6,
+            "other\x1d_bingsu_save\x1d_bingsu_install",
+            "hook order",
+            "  warn",
+            "W609",
+        ),
+        (
+            8,
+            "--width\x1d80\x1d--status\x1d0\x1d--pipestatus\x1d0\x1d--keymap\x1dmain",
+            "envelope",
+            "  warn",
+            "W610",
+        ),
+        (
+            8,
+            "--width\x1d80\x1d--status\x1d256\x1d--pipestatus\x1d0\x1d--jobs\x1d0\x1d--keymap\x1dmain",
+            "envelope",
+            "  warn",
+            "W610",
+        ),
+    ];
+    for (at, value, title, status, code) in cases {
+        let mut f = GOOD;
+        f[at] = value;
+        let (exit, t, _) = with_evidence(&e, &record(&f), &[]);
+        let l = line(&t, title);
+        assert!(l.starts_with(status) && l.contains(code), "{title}: {t}");
+        for other in ["shell", "hook version", "hook order", "envelope"]
+            .into_iter()
+            .filter(|o| *o != title)
+        {
+            assert!(
+                line(&t, other).starts_with("  ok"),
+                "{other} with a bad {title}: {t}"
+            );
+        }
+        assert_eq!(exit, Some(i32::from(status == "  fail")), "{t}");
+    }
+}
+
+// A record that is not one is refused by the shell checks only; the other checks run as always.
+// 이것을 실패시키는 것: 형식이 틀린 증거로 전체를 실패시키는 것, 거부 사실을 숨기는 것, 값을 정상으로 읽는 것.
+#[test]
+fn a_refused_record_leaves_the_other_checks_alone() {
+    let e = Env::new("cli_doctor", "evidence-refused");
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    let mut no_end = record(&GOOD);
+    no_end.pop();
+    for input in [Vec::new(), no_end, b"garbage".to_vec(), vec![b'a'; 70_000]] {
+        let (code, t, _) = with_evidence(&e, &input, &[]);
+        assert_eq!(code, Some(0), "{t}");
+        for title in ["shell", "hook version", "hook order", "envelope"] {
+            let l = line(&t, title);
+            assert!(
+                l.starts_with("  unknown") && l.contains("refused"),
+                "{title}: {t}"
+            );
+        }
+        assert!(line(&t, "settings").starts_with("  ok"), "{t}");
+    }
+}
+
+// Without the evidence flag the shell checks say how to get it, and nothing reads standard input.
+// 이것을 실패시키는 것: 플래그 없이 표준 입력을 읽는 것(터미널을 붙잡음), 안내를 빼는 것.
+#[test]
+fn without_evidence_the_shell_checks_say_how_to_get_it() {
+    let e = Env::new("cli_doctor", "evidence-none");
+    let o = e
+        .cmd(&["doctor"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let t = text(&o.stdout);
+    for title in ["shell", "hook version", "hook order", "envelope"] {
+        let l = line(&t, title);
+        assert!(
+            l.starts_with("  unknown") && l.contains("bingsu_doctor"),
+            "{title}: {t}"
+        );
+    }
+    // The flag may come with the format, in either order, once each.
+    let (code, doc, _) = with_evidence(&e, &record(&GOOD), &["--format", "json"]);
+    assert_eq!(code, Some(0));
+    assert!(
+        doc.contains("\"id\":\"hook-order\"") && doc.contains("\"status\":\"ok\""),
+        "{doc}"
+    );
+    json_schema::validate(None, &[&doc]).unwrap();
+    let o = e
+        .cmd(&["doctor", "--evidence-stdin", "--evidence-stdin"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+}
+
+// The evidence is shown cleaned: a control character in a function name never reaches the terminal.
+// 이것을 실패시키는 것: 증거의 이름을 정제하지 않고 출력하는 것.
+#[test]
+fn evidence_is_cleaned_in_the_output() {
+    let e = Env::new("cli_doctor", "evidence-clean");
+    let mut f = GOOD;
+    f[6] = "evil\u{1b}[2J\x1d_bingsu_install";
+    let (_, t, _) = with_evidence(&e, &record(&f), &[]);
+    assert!(!t.contains('\u{1b}'), "{t:?}");
+    assert!(line(&t, "hook order").contains("W609"), "{t}");
+}
+
+/// The record of `GOOD` with its version field padded so the whole record is `total` bytes.
+fn padded_to(total: usize) -> Vec<u8> {
+    let base = record(&GOOD).len();
+    let version = format!("5.9{}", "x".repeat(total - base));
+    let mut f = GOOD;
+    f[2] = &version;
+    let out = record(&f);
+    assert_eq!(out.len(), total);
+    out
+}
+
+// The size limit is 64 KiB, exactly: a record of that size is read, one byte more is refused.
+// 이것을 실패시키는 것: 상한을 한 바이트 낮추거나 높이는 것(`>`를 `>=`로, 상한에 1을 더함).
+#[test]
+fn the_record_limit_is_exactly_64_kib() {
+    let e = Env::new("cli_doctor", "evidence-limit");
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    let (_, at, _) = with_evidence(&e, &padded_to(64 * 1024), &[]);
+    assert!(line(&at, "shell").starts_with("  ok"), "{at}");
+    let (_, over, _) = with_evidence(&e, &padded_to(64 * 1024 + 1), &[]);
+    let l = line(&over, "shell");
+    assert!(
+        l.starts_with("  unknown") && l.contains("refused"),
+        "{over}"
+    );
+}
+
+// A second record behind the first is refused, even when each looks fine.
+// 이것을 실패시키는 것: 레코드 안의 두 번째 끝 표지(0x1e)를 보지 않는 것.
+#[test]
+fn a_second_record_is_refused() {
+    let e = Env::new("cli_doctor", "evidence-two");
+    let mut f = GOOD;
+    f[2] = "5.9\x1e";
+    let (_, t, _) = with_evidence(&e, &record(&f), &[]);
+    let l = line(&t, "shell");
+    assert!(
+        l.starts_with("  unknown") && l.contains("refused") && l.contains("more than one"),
+        "{t}"
+    );
+}
+
+/// Waits for `child` up to `secs` seconds (polling on a short sleep); `None` when it is still running.
+fn wait_for(child: &mut std::process::Child, secs: u64) -> Option<std::process::ExitStatus> {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            return Some(st);
+        }
+        if std::time::Instant::now() >= end {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+// An input that never ends is read only up to the limit: doctor answers (refused) instead of reading on.
+// 이것을 실패시키는 것: 읽는 양을 제한하는 `.take(...)`를 없애는 것(끝없는 입력에서 doctor가 끝나지 않는다).
+#[test]
+fn an_endless_input_is_cut_at_the_limit() {
+    use std::process::{Command, Stdio};
+    let e = Env::new("cli_doctor", "evidence-endless");
+    let mut yes = Command::new("yes")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut doctor = e
+        .cmd(&["doctor", "--evidence-stdin"])
+        .stdin(Stdio::from(yes.stdout.take().unwrap()))
+        // A file, not a pipe: nothing reads the output while this waits.
+        .stdout(Stdio::from(
+            std::fs::File::create(e.base.join("endless.out")).unwrap(),
+        ))
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let done = wait_for(&mut doctor, 10);
+    let _ = yes.kill();
+    let _ = yes.wait();
+    if done.is_none() {
+        let _ = doctor.kill();
+        let _ = doctor.wait();
+        panic!("doctor did not stop reading an endless input");
+    }
+    let out = std::fs::read_to_string(e.base.join("endless.out")).unwrap();
+    let l = line(&out, "shell");
+    assert!(l.starts_with("  unknown") && l.contains("refused"), "{out}");
+}
+
+// With a terminal on standard input doctor does not wait for a record: it says what to run and exits 2.
+// 이것을 실패시키는 것: 표준 입력이 터미널인지 보지 않는 것(사람이 친 입력을 기다리며 멈춘다).
+#[test]
+fn a_terminal_on_standard_input_is_refused() {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    use std::process::Stdio;
+    let e = Env::new("cli_doctor", "evidence-tty");
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty writes two descriptors; the null pointers ask for no name, termios or size.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0);
+    // SAFETY: both descriptors are new and owned here.
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    // SAFETY: as above.
+    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+    let mut c = e
+        .cmd(&["doctor", "--evidence-stdin"])
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let done = wait_for(&mut c, 20);
+    if done.is_none() {
+        let _ = c.kill();
+        let _ = c.wait();
+        panic!("doctor waited for a record on a terminal");
+    }
+    let o = c.wait_with_output().unwrap();
+    drop(master);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(o.stdout.is_empty());
+    assert!(
+        text(&o.stderr).contains("bingsu_doctor"),
+        "{}",
+        text(&o.stderr)
+    );
 }

@@ -424,6 +424,20 @@ How to fix
 
 ----
 
+E608 (error)
+
+What happened
+  The hook that this shell runs asks for a record or envelope version that this bingsu does not read.
+  The versions are the ones the hook was written with, not what you installed last.
+
+Why
+  The hook and the program speak one record format. After an upgrade, a shell that was opened before it still runs the old hook, and bingsu does not guess what an unknown version means.
+
+How to fix
+  Open a new shell, or run `bingsu init` again in this one. Then run `bingsu doctor` from the shell function bingsu_doctor to check.
+
+----
+
 W401 (warning)
 
 What happened
@@ -641,6 +655,46 @@ Why
 
 How to fix
   Nothing in your settings changes this. Run a kernel built with seccomp; `bingsu config check` is not affected.
+
+----
+
+W609 (warning)
+
+What happened
+  The shell's hook functions are not in the order bingsu needs: `_bingsu_save` first and `_bingsu_install` last in `precmd_functions`, and `_bingsu_preexec` in `preexec_functions`.
+  The message names the function that stands where a bingsu function should.
+
+Why
+  The first precmd function must read `$?` and the pipe statuses before anything changes them, and the last one draws the prompt after every other hook has run. Another framework that adds a hook after bingsu moves them.
+
+How to fix
+  Put `bingsu init` at the very end of your shell setup file, then open a new shell. The shell function bingsu_doctor shows the order again.
+
+----
+
+W610 (warning)
+
+What happened
+  The last words the hook gave the prompt call do not have the expected fields: a field is missing, out of order, or has a value of another shape.
+
+Why
+  The prompt reads a fixed set of fields from the hook (width, status, pipe statuses, jobs, keymap and sometimes the duration). A changed hook or a plugin that rewrites them makes the prompt draw wrong data.
+
+How to fix
+  Run `bingsu init` again in this shell. If the message stays, look for a plugin that changes the prompt hooks.
+
+----
+
+W611 (warning)
+
+What happened
+  The shell reports a version older than 5.8.
+
+Why
+  Shell versions below the oldest one in bingsu's tests are not covered, so a hook can behave in ways nobody checked.
+
+How to fix
+  Use zsh 5.8 or newer, then run `bingsu init` again in it.
 
 ----
 

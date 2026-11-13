@@ -163,6 +163,12 @@ pub fn seccomp_kernel() -> SeccompKernel {
     }
 }
 
+/// Whether descriptor `fd` is a terminal.
+pub fn fd_is_tty(fd: i32) -> bool {
+    // SAFETY: isatty takes an integer and reads no memory.
+    unsafe { libc::isatty(fd) == 1 }
+}
+
 pub struct Passwd {
     pub name: Vec<u8>,
     pub home: PathBuf,
