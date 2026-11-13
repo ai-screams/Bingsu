@@ -105,15 +105,15 @@ const EN: [(MsgId, &str); 36] = [
     ),
     (
         MsgId::Tamperable,
-        "bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions (bingsu doctor shows which folder), then open a new shell or evaluate your bingsu init line again",
+        "bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions and run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::TamperUnknown,
-        "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists (bingsu doctor shows what could not be read), then open a new shell or evaluate your bingsu init line again",
+        "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists and run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::NoRuntimeRoot,
-        "bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions (bingsu doctor shows the folder and why), then open a new shell or evaluate your bingsu init line again",
+        "bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions and run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::UnconfirmedRoot,
@@ -149,7 +149,7 @@ const EN: [(MsgId, &str); 36] = [
     ),
     (
         MsgId::NoSandbox,
-        "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor to see the filter state, then open a new shell",
+        "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor, which checks whether the kernel supports the filter, then open a new shell",
     ),
     (
         MsgId::ColdInitUnfinished,
@@ -264,15 +264,15 @@ mod tests {
         ),
         (
             MsgId::Tamperable,
-            "bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions (bingsu doctor shows which folder), then open a new shell or evaluate your bingsu init line again",
+            "bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions and run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
         ),
         (
             MsgId::TamperUnknown,
-            "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists (bingsu doctor shows what could not be read), then open a new shell or evaluate your bingsu init line again",
+            "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists and run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
         ),
         (
             MsgId::NoRuntimeRoot,
-            "bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions (bingsu doctor shows the folder and why), then open a new shell or evaluate your bingsu init line again",
+            "bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions and run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
         ),
         (
             MsgId::UnconfirmedRoot,
@@ -308,7 +308,7 @@ mod tests {
         ),
         (
             MsgId::NoSandbox,
-            "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor to see the filter state, then open a new shell",
+            "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor, which checks whether the kernel supports the filter, then open a new shell",
         ),
         (
             MsgId::ColdInitUnfinished,
@@ -438,7 +438,6 @@ mod tests {
             assert!(
                 t.contains("Run: bingsu doctor")
                     || t.contains("run bingsu doctor")
-                    || t.contains("bingsu doctor shows")
                     || t.contains("run: bingsu doctor"),
                 "{id:?}: {t}"
             );
