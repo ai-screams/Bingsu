@@ -1,6 +1,6 @@
 [package]
 name = "bingsu-golden"
-version = "0.0.0"
+version.workspace = true
 description = "Prints core render output for fixed inputs; native and wasm32-wasip1 runs must match tests/golden/render/render.tsv byte for byte"
 publish = false
 edition.workspace = true

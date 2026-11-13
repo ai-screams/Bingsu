@@ -256,7 +256,7 @@ fn select_keeps_layers() {
     let chosen = e.put("other/work.toml", VALID);
     let before = text(&e.run(&["config", "path"]).stdout);
     assert!(
-        before.starts_with("selection: config.toml in the settings folder\n"),
+        before.starts_with("selection: config.toml or config.json in the settings folder\n"),
         "{before}"
     );
     let o = e.run(&["config", "use", "other/work.toml"]);

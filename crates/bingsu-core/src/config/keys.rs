@@ -752,19 +752,99 @@ fn matches(pattern: &str, path: &[&str]) -> bool {
     p.next().is_none() && n == path.len()
 }
 
+/// What `lookup` compares before any name: a row's number of names, the
+/// lengths of its first and last names (`STAR` for a last `*`) and how many
+/// of its names are `*`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Shape {
+    names: u8,
+    first: u8,
+    last: u8,
+    stars: u8,
+}
+
+const STAR: u8 = u8::MAX;
+
+const fn shape(path: &str) -> Shape {
+    let b = path.as_bytes();
+    // Every count below then fits in a u8; a longer path does not compile.
+    assert!(b.len() < STAR as usize, "a key path too long for its shape");
+    let mut names: u8 = 1;
+    let mut stars: u8 = 0;
+    let (mut first, mut start, mut i) = (0, 0, 0);
+    while i <= b.len() {
+        if i == b.len() || b[i] == b'.' {
+            if start == 0 {
+                first = i;
+            }
+            if i - start == 1 && b[start] == b'*' {
+                stars += 1;
+            }
+            if i < b.len() {
+                names += 1;
+                start = i + 1;
+            }
+        }
+        i += 1;
+    }
+    let last = if b.len() - start == 1 && b[start] == b'*' {
+        STAR
+    } else {
+        (b.len() - start) as u8
+    };
+    Shape {
+        names,
+        first: first as u8,
+        last,
+        stars,
+    }
+}
+
+/// `KEYS[i]`'s shape is `ROWS[i]`, computed while compiling.
+const ROWS: &[Shape; KEYS.len()] = &{
+    let mut out = [Shape {
+        names: 0,
+        first: 0,
+        last: 0,
+        stars: 0,
+    }; KEYS.len()];
+    let mut i = 0;
+    while i < KEYS.len() {
+        out[i] = shape(KEYS[i].path);
+        i += 1;
+    }
+    out
+};
+
+/// The rows whose shape fits `path`: as many names, a first name as long
+/// (every row's first name is a literal, `keys_first_names_are_literal`) and
+/// a last name as long or `*`. A config read looks every key up; comparing
+/// these numbers drops most rows before any name is compared.
+fn candidates<'p>(path: &'p [&str]) -> impl Iterator<Item = (&'static KeyDef, Shape)> + 'p {
+    let first = path.first().map_or(0, |s| s.len());
+    let last = path.last().map_or(0, |s| s.len());
+    KEYS.iter()
+        .zip(ROWS.iter())
+        // 이것을 실패시키는 것: 세 비교 가운데 하나를 빼는 것(남는 행이 늘어 이름 비교가 그대로),
+        // 마지막 `*`를 길이로 비교하는 것(`segment.*`가 사용자 세그먼트를 놓침).
+        .filter(move |(_, s)| {
+            usize::from(s.names) == path.len()
+                && usize::from(s.first) == first
+                && (s.last == STAR || usize::from(s.last) == last)
+        })
+        .map(|(k, s)| (k, *s))
+}
+
 /// The row for `path`. A literal row wins over a `*` row (`segment.dir`
 /// over `segment.*`).
 pub fn lookup(path: &[&str]) -> Option<&'static KeyDef> {
-    let mut best: Option<&'static KeyDef> = None;
-    for k in KEYS {
-        if matches(k.path, path) {
-            let stars = |d: &KeyDef| d.path.matches('*').count();
-            if best.is_none_or(|b| stars(k) < stars(b)) {
-                best = Some(k);
-            }
+    let mut best: Option<(&'static KeyDef, u8)> = None;
+    for (k, s) in candidates(path) {
+        if matches(k.path, path) && best.is_none_or(|(_, b)| s.stars < b) {
+            best = Some((k, s.stars));
         }
     }
-    best
+    best.map(|(k, _)| k)
 }
 
 /// The allowed words of an enum key (`Enum` or `EnumList`), straight from
@@ -809,6 +889,7 @@ pub fn children(path: &[&str]) -> alloc::vec::Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::String;
     use alloc::vec::Vec;
 
     // 이것을 실패시키는 것: 표에 없는 키를 모양 키로 다루는 것("새 키는 민감한 것으로 시작"),
@@ -960,6 +1041,117 @@ mod tests {
         assert!(
             lookup(&["segment", "dir", "command"]).is_some(),
             "segment.* keys still match"
+        );
+    }
+
+    /// The scan `lookup` did before the shape filter: every row, by name.
+    fn lookup_by_scan(path: &[&str]) -> Option<&'static KeyDef> {
+        let mut best: Option<&'static KeyDef> = None;
+        for k in KEYS {
+            if matches(k.path, path) {
+                let stars = |d: &KeyDef| d.path.matches('*').count();
+                if best.is_none_or(|b| stars(k) < stars(b)) {
+                    best = Some(k);
+                }
+            }
+        }
+        best
+    }
+
+    /// Paths near every row: the row with its `*` names filled in, one name
+    /// more or less, and its first or last name changed to another of the
+    /// same length; also no names and an unknown name.
+    fn paths_near_rows() -> Vec<Vec<String>> {
+        let mut out = alloc::vec![Vec::new(), alloc::vec![String::from("nonsense")]];
+        for k in KEYS {
+            for fill in ["x", "custom/k", "dir", "line1"] {
+                let names: Vec<String> = k
+                    .path
+                    .split('.')
+                    .map(|n| String::from(if n == "*" { fill } else { n }))
+                    .collect();
+                let mut more = names.clone();
+                more.push(String::from("enabled"));
+                let mut less = names.clone();
+                less.pop();
+                let mut first = names.clone();
+                first[0] = "z".repeat(first[0].len());
+                let mut last = names.clone();
+                let n = last.len() - 1;
+                last[n] = "z".repeat(last[n].len());
+                out.extend([names, more, less, first, last]);
+            }
+        }
+        out
+    }
+
+    // 이것을 실패시키는 것: 모양 표나 거르기가 맞는 행을 버리는 것(첫·마지막 이름 길이를 하나 어긋나게 세기,
+    // 마지막 `*`를 길이로 비교하기), `*` 개수를 잘못 읽어 글자 행 대신 `*` 행을 고르는 것.
+    #[test]
+    fn lookup_finds_the_row_the_scan_finds() {
+        for names in paths_near_rows() {
+            let path: Vec<&str> = names.iter().map(String::as_str).collect();
+            assert_eq!(
+                lookup(&path).map(|k| k.path),
+                lookup_by_scan(&path).map(|k| k.path),
+                "{path:?}"
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: shape가 이름 수, 첫·마지막 이름 길이, `*` 수 가운데 하나를 잘못 세는 것.
+    #[test]
+    fn row_shapes_count_the_paths() {
+        for (k, s) in KEYS.iter().zip(ROWS.iter()) {
+            let names: Vec<&str> = k.path.split('.').collect();
+            let last = names[names.len() - 1];
+            let want = Shape {
+                names: names.len() as u8,
+                first: names[0].len() as u8,
+                last: if last == "*" { STAR } else { last.len() as u8 },
+                stars: names.iter().filter(|n| **n == "*").count() as u8,
+            };
+            assert_eq!(*s, want, "{}", k.path);
+        }
+    }
+
+    // 길이 255바이트부터는 모양의 u8 칸에 들어가지 않고 마지막 이름 길이가 STAR와 겹칠 수 있다. 이것을 실패시키는 것:
+    // 상한을 `<=`로 늦추거나 지우는 것.
+    #[test]
+    #[should_panic(expected = "too long for its shape")]
+    fn a_path_of_255_bytes_has_no_shape() {
+        let _ = shape(&"a".repeat(254));
+        let _ = shape(&"a".repeat(255));
+    }
+
+    // 거르기가 실제로 행을 버리는지 본다(빼도 결과는 같고 느려지기만 하는 변이를 잡는다). 이것을 실패시키는 것:
+    // 이름 수, 첫 이름 길이, 마지막 이름 길이 비교 가운데 하나를 빼는 것.
+    #[test]
+    fn the_shape_filter_keeps_only_rows_of_the_same_shape() {
+        for names in paths_near_rows() {
+            let path: Vec<&str> = names.iter().map(String::as_str).collect();
+            let got: Vec<&str> = candidates(&path).map(|(k, _)| k.path).collect();
+            let want: Vec<&str> = KEYS
+                .iter()
+                .map(|k| k.path)
+                .filter(|p| {
+                    let n: Vec<&str> = p.split('.').collect();
+                    let last = n[n.len() - 1];
+                    n.len() == path.len()
+                        && n[0].len() == path[0].len()
+                        && (last == "*" || last.len() == path[path.len() - 1].len())
+                })
+                .collect();
+            assert_eq!(got, want, "{path:?}");
+        }
+        let few: Vec<&str> = candidates(&["segment", "custom/k", "kind"])
+            .map(|(k, _)| k.path)
+            .collect();
+        // A user segment's key compares names in a few rows (three today), not in all of them.
+        assert!(
+            few.len() * 10 < KEYS.len(),
+            "{few:?} of {} rows",
+            KEYS.len()
         );
     }
 

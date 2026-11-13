@@ -1,6 +1,6 @@
 [package]
 name = "bingsu-identity"
-version = "0.0.0"
+version.workspace = true
 description = "Shared source-bound identity for the bingsu sibling binaries"
 publish = false
 edition.workspace = true

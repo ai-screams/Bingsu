@@ -268,7 +268,7 @@ def prepare(binary):
         linker = os.environ.get("CARGO_TARGET_" + triple.upper().replace("-", "_") + "_LINKER")
         if linker:
             command += ["-C", "linker=" + linker]
-    M3B.run(command, env={**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": "0.0.0"}, timeout=300)
+    M3B.run(command, env={**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": M3B.workspace_version(source)}, timeout=300)
     audit = module("f3_symbols", ROOT / "scripts/check_collector_symbols.py")
     identity = audit.build_id(binary, 2)
     if identity != audit.build_id(binary.with_name("bingsu-collect"), 1):

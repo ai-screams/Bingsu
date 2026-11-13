@@ -95,13 +95,14 @@ fn main() {
         .expect("rustc -vV");
     assert!(rustc.status.success(), "rustc -vV failed");
     let rustc = String::from_utf8(rustc.stdout).unwrap();
-    for key in ["release: ", "commit-hash: "] {
+    let [release, commit] = ["release: ", "commit-hash: "].map(|key| {
         let value = rustc
             .lines()
             .find_map(|line| line.strip_prefix(key))
             .unwrap_or_else(|| panic!("rustc -vV has no {key:?} line"));
         append(&mut manifest, key.as_bytes(), value.as_bytes());
-    }
+        value
+    });
     let mut settings: Vec<_> = env::vars()
         .filter(|(key, _)| {
             key.starts_with("CARGO_FEATURE_")
@@ -126,6 +127,24 @@ fn main() {
     let id = digest::sha256(&manifest);
     let mut tag = b"BNGSIBLING-ID02\0".to_vec();
     tag.extend(id);
+    // `bingsu --version` prints the target and the compiler on one line that
+    // release checks split at spaces, commas and parentheses: letters, digits
+    // and `. _ + -` only (every real target triple, release and hash fits).
+    // 이것을 실패시키는 것: 아래 검사를 빼거나 보이는 ASCII 전부로 넓히는 것.
+    let target = env::var("TARGET").expect("TARGET");
+    for (name, value) in [
+        ("TARGET", target.as_str()),
+        ("rustc release", release),
+        ("rustc commit-hash", commit),
+    ] {
+        assert!(
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b)),
+            "{name} has a character outside [A-Za-z0-9._+-]: {value:?}"
+        );
+    }
     let output = Path::new(&env::var_os("OUT_DIR").unwrap()).join("build_id.rs");
-    fs::write(output, format!("#[used]\npub static BUILD_MANIFEST_TAG: [u8; 48] = {tag:?};\npub const BUILD_ID: bingsu_core::collection::wire::BuildId = bingsu_core::collection::wire::BuildId({id:?});\n")).unwrap();
+    fs::write(output, format!("#[used]\npub static BUILD_MANIFEST_TAG: [u8; 48] = {tag:?};\npub const BUILD_ID: bingsu_core::collection::wire::BuildId = bingsu_core::collection::wire::BuildId({id:?});\npub const TARGET: &str = {target:?};\npub const RUSTC_RELEASE: &str = {release:?};\npub const RUSTC_COMMIT_HASH: &str = {commit:?};\n")).unwrap();
 }

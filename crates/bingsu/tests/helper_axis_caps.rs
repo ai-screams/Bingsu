@@ -235,8 +235,9 @@ fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
 #[test]
 fn reload_publishes_at_cap_and_keeps_the_marker_past_it() {
     let mut seen = Vec::new();
-    // R: config.toml, the absent config.local.toml and n refused entries.
-    for n in [254, 255] {
+    // R: config.toml and the absent config.json, config.local.toml and
+    // config.local.json, and n refused entries.
+    for n in [252, 253] {
         let e = Env::new("helper_axis_caps", &format!("r-{n}"));
         let refs: Vec<String> = (0..n).map(|i| format!("$THEME_{i}")).collect();
         let (code, same, out) = after(&e, |e| {
@@ -269,8 +270,8 @@ fn reload_publishes_at_cap_and_keeps_the_marker_past_it() {
     assert_eq!(
         got,
         [
-            ("R", 254, Some(0), false),
-            ("R", 255, Some(3), true),
+            ("R", 252, Some(0), false),
+            ("R", 253, Some(3), true),
             ("E_n", 253, Some(0), false),
             ("E_n", 254, Some(3), true),
             ("B", 1, Some(3), true),

@@ -1,6 +1,6 @@
 [package]
 name = "bingsu-match"
-version = "0.0.0"
+version.workspace = true
 description = "Output parsing (`match`) of bingsu command segments: one check and one apply, outside the prompt path"
 publish = false
 edition.workspace = true

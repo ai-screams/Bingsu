@@ -2580,8 +2580,9 @@ mod axes {
     #[test]
     fn exceeded_axis_keeps_marker_unchanged() {
         let mut seen = Vec::new();
-        // R: 2 root candidates (config.toml, absent config.local.toml) + n entries.
-        for n in [254usize, 255] {
+        // R: 4 root candidates (config.toml and the absent config.json,
+        // config.local.toml, config.local.json) + n entries.
+        for n in [252usize, 253] {
             let f = Fx::new(&format!("cap-r-{n}"));
             f.put(COMMAND);
             published(f.run());
@@ -2647,8 +2648,8 @@ mod axes {
         assert_eq!(
             got,
             [
-                ("R", 254, true, false, false),
-                ("R", 255, false, true, true),
+                ("R", 252, true, false, false),
+                ("R", 253, false, true, true),
                 ("E_n", 253, true, false, false),
                 ("E_n", 254, false, true, true),
                 ("B", 0, true, false, false),

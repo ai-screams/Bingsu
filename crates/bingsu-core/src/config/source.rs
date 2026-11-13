@@ -104,6 +104,13 @@ pub struct RootMeta {
 pub enum Root {
     Read(Opened),
     File(RootMeta),
+    /// One place holds two files in different formats (`config.toml` and
+    /// `config.json`): neither is read, and the read fails (E308) whatever
+    /// trust the place has. `other` is the second path.
+    TwoFormats {
+        meta: RootMeta,
+        other: Vec<u8>,
+    },
 }
 
 impl From<Opened> for Root {
@@ -122,7 +129,7 @@ impl Root {
     fn meta(&self) -> (FileKey, usize, Trust) {
         match self {
             Root::Read(o) => (o.key, o.bytes.len(), o.trust),
-            Root::File(m) => (m.key, m.size, m.trust),
+            Root::File(m) | Root::TwoFormats { meta: m, .. } => (m.key, m.size, m.trust),
         }
     }
 
@@ -133,7 +140,7 @@ impl Root {
                 bytes: Vec::new(),
                 ..o
             },
-            Root::File(m) => Opened {
+            Root::File(m) | Root::TwoFormats { meta: m, .. } => Opened {
                 key: m.key,
                 bytes: Vec::new(),
                 trust: m.trust,
@@ -255,6 +262,9 @@ fn syntax_diag(id: SourceId, e: &tree::SyntaxError) -> Diagnostic {
         SyntaxErrorKind::Toml(m) => {
             Diagnostic::new(codes::TOML_SYNTAX, at).arg("message", m.clone())
         }
+        SyntaxErrorKind::Json(m) => {
+            Diagnostic::new(codes::JSON_SYNTAX, at).arg("message", m.clone())
+        }
     }
 }
 
@@ -335,6 +345,19 @@ fn take_meta(id: SourceId, t: &mut Table, version: [u32; 3]) -> Meta {
                         .arg("found", v.kind()),
                 ),
             },
+            // For editors only, in both formats: a string is left out, any
+            // other value is an error. Below the top it is an unknown key.
+            // 이것을 실패시키는 것: 문자열 `$schema`를 모델에 남기는 것(E201), 문자열이 아닌 값을 받는 것.
+            "$schema" => {
+                if !matches!(e.node.value, Value::Str(_)) {
+                    m.errors.push(
+                        Diagnostic::new(codes::WRONG_TYPE, at)
+                            .arg("key", "$schema")
+                            .arg("expected", "a string")
+                            .arg("found", e.node.value.kind()),
+                    );
+                }
+            }
             _ => keep.push(e),
         }
     }
@@ -405,7 +428,8 @@ impl Walk<'_> {
         let i = self.known(opened.key).unwrap_or(self.nodes.len());
         let id = SourceId(i as u32);
         let mut problems = Vec::new();
-        let mut tree = match tree::parse(&opened.bytes) {
+        let format = tree::format_of(&opened.display);
+        let mut tree = match tree::parse_as(format, &opened.bytes) {
             Ok(t) => t,
             Err(es) => {
                 problems.extend(es.iter().map(|e| syntax_diag(id, e)));
@@ -748,6 +772,22 @@ pub fn load<R: Into<Root>>(
             continue;
         }
         let r = match r {
+            // Always an error, whatever trust the files would have had: a
+            // shape-only or unsafe place must not drop one of two files and
+            // publish what is left.
+            // 이것을 실패시키는 것: 공존을 그 자리의 신뢰로 판정하는 것(모양 전용·안전하지 않은 두 파일이면
+            // 경고로 내려가 새 스냅샷이 발행됨).
+            Root::TwoFormats { meta, other } => {
+                let d = Diagnostic::new(codes::TWO_FORMATS, Place::Builtin)
+                    .arg("path", String::from_utf8_lossy(&meta.display).into_owned())
+                    .arg("other", String::from_utf8_lossy(&other).into_owned());
+                let meta = RootMeta {
+                    trust: Trust::Executable,
+                    ..meta
+                };
+                w.unread_root(Root::File(meta), d);
+                continue;
+            }
             Root::Read(o) => o,
             Root::File(m) => match w.resolver.open_root(&m) {
                 Ok(o) => o,
@@ -1975,6 +2015,24 @@ pub(crate) mod tests {
         assert_eq!(e.files[0].status, Status::Failed);
         assert_eq!(codes_of(&e.errors), [codes::EXTENDS_BAD_PATH]);
         assert!(e.warnings.is_empty());
+    }
+
+    // 한 자리의 두 형식은 그 자리의 신뢰와 무관하게 읽기를 멈춘다(E308). 이것을 실패시키는 것: 공존을 자리의
+    // 신뢰로 판정하는 것(모양 전용·안전하지 않은 자리면 경고로 내려가 남은 원본이 발행됨).
+    #[test]
+    fn two_formats_fail_the_read_at_any_trust() {
+        for name in ["root", "shape-root", "unsafe-root"] {
+            let Root::File(meta) = on_disk(name, 0, 1) else {
+                unreachable!()
+            };
+            let two = Root::TwoFormats {
+                meta,
+                other: b"/c/config.toml".to_vec(),
+            };
+            let e = load(vec![two], &mut files(&[]), V).unwrap_err();
+            assert_eq!(codes_of(&e.errors), [codes::TWO_FORMATS], "{name}");
+            assert!(e.files[0].opened.bytes.is_empty(), "{name}");
+        }
     }
 
     // 이것을 실패시키는 것: 비신뢰 별칭을 먼저 본 정체를 신뢰 경로에서도 건너뛰어 신뢰·자리·하위 그래프를 잃는 것.

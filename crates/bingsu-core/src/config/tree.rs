@@ -115,6 +115,27 @@ pub enum SyntaxErrorKind {
     FloatSyntax,
     /// Nested deeper than `NESTING_MAX`; the span is where it went over.
     TooDeep,
+    /// A JSON file's grammar or one of its rules (`config::json`).
+    Json(String),
+}
+
+/// How a config file is written, from its name: `.json` is JSON, anything
+/// else TOML (TOML is the source format; an `extends` path without either
+/// suffix stays TOML as before).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Toml,
+    Json,
+}
+
+/// The format of the file at `path` (its last name decides).
+pub fn format_of(path: &[u8]) -> Format {
+    let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+    if name.len() > 5 && name.ends_with(b".json") {
+        Format::Json
+    } else {
+        Format::Toml
+    }
 }
 
 /// `depth` is the nesting of `v` itself (a value at the top is 1). Past
@@ -367,7 +388,20 @@ pub fn parse(bytes: &[u8]) -> Result<Table, Vec<SyntaxError>> {
     parse_inner(bytes, true)
 }
 
-fn parse_inner(bytes: &[u8], check_depth: bool) -> Result<Table, Vec<SyntaxError>> {
+/// Parses one file written in `format`, with the same size, encoding and
+/// nesting limits for both (`config::json` for JSON).
+pub fn parse_as(format: Format, bytes: &[u8]) -> Result<Table, Vec<SyntaxError>> {
+    match format {
+        Format::Toml => parse(bytes),
+        Format::Json => {
+            let text = checked_text(bytes)?;
+            crate::config::json::parse(text).map_err(|e| alloc::vec![e])
+        }
+    }
+}
+
+/// The file as text, if it fits FILE_BYTES_MAX and is UTF-8.
+fn checked_text(bytes: &[u8]) -> Result<&str, Vec<SyntaxError>> {
     if bytes.len() > FILE_BYTES_MAX {
         let at = FILE_BYTES_MAX as u32;
         return Err(alloc::vec![SyntaxError {
@@ -375,7 +409,7 @@ fn parse_inner(bytes: &[u8], check_depth: bool) -> Result<Table, Vec<SyntaxError
             kind: SyntaxErrorKind::TooLarge,
         }]);
     }
-    let text = core::str::from_utf8(bytes).map_err(|e| {
+    core::str::from_utf8(bytes).map_err(|e| {
         let at = e.valid_up_to() as u32;
         alloc::vec![SyntaxError {
             span: Span {
@@ -384,7 +418,11 @@ fn parse_inner(bytes: &[u8], check_depth: bool) -> Result<Table, Vec<SyntaxError
             },
             kind: SyntaxErrorKind::NotUtf8,
         }]
-    })?;
+    })
+}
+
+fn parse_inner(bytes: &[u8], check_depth: bool) -> Result<Table, Vec<SyntaxError>> {
+    let text = checked_text(bytes)?;
     let scanned = scan(text);
     if let Some(at) = scanned.too_deep.filter(|_| check_depth) {
         let at = at as u32;

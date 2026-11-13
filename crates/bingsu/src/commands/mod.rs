@@ -123,6 +123,7 @@ mod trust_record;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) mod tty;
+mod version;
 #[cfg(unix)]
 pub(crate) mod version_manager;
 
@@ -147,6 +148,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("explain") => explain::run(&a.args[1..]),
         Some("help") => help::run(&a.args[1..]),
+        Some("--version") => version::run(&a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
@@ -161,7 +163,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         ),
         _ => {
             eprintln!(
-                "usage: bingsu <config|doctor|explain|help|init|list|prompt|reload|setup> ..."
+                "usage: bingsu <config|doctor|explain|help|init|list|prompt|reload|setup|--version> ..."
             );
             ExitCode::from(2)
         }

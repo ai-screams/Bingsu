@@ -5,7 +5,7 @@
 # covers only bingsu-core's own graph.
 [package]
 name = "core-cfg-check"
-version = "0.0.0"
+version.workspace = true
 description = "Token-level cfg, path and include check for bingsu-core"
 publish = false
 edition.workspace = true

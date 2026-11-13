@@ -1,6 +1,6 @@
 [package]
 name = "bingsu-core-bench"
-version = "0.0.0"
+version.workspace = true
 description = "Instruction-count benchmarks of bingsu-core (Callgrind via gungraun, Linux CI gate)"
 publish = false
 edition.workspace = true

@@ -48,6 +48,9 @@ impl Sibling {
     pub fn name(self) -> &'static str {
         self.name
     }
+    pub fn role(self) -> u8 {
+        self.role
+    }
 }
 
 /// Held evidence for the canonical dedicated executable. This does not select
@@ -131,16 +134,42 @@ impl PinnedCollector {
 fn executable_mode(mode: u32) -> bool {
     mode & 0o111 != 0 && mode & 0o6000 == 0
 }
+/// Accepts only a file whose markers say it is `role` of this very build.
 fn verify_build(file: &File, role: u8) -> Result<(), StoreError> {
+    match read_build(file, role)? {
+        Build::Same => Ok(()),
+        Build::Other(_) | Build::NotSibling => Err(StoreError::Unsafe),
+    }
+}
+
+/// What a file's build markers say, read without running it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Build {
+    /// One manifest tag with this build's identity, and one role tag of the
+    /// asked role for it: the only answer `verify_build` accepts.
+    Same,
+    /// One manifest tag and one role tag of the asked role, both for this
+    /// other build identity.
+    Other([u8; 32]),
+    /// No markers, more than one of either, a cut one, a role tag for another
+    /// role, or a role tag whose identity is not the manifest's.
+    NotSibling,
+}
+
+/// The markers `init` checks before it pins a sibling. A file over 64 MiB is
+/// refused before it is read. The scan stops at a second marker of either
+/// kind, so a file full of markers costs no more than one read of it.
+pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
     use std::os::unix::fs::FileExt;
     let size = file.metadata()?.len();
     if size > 64 * 1024 * 1024 {
         return Err(StoreError::Unsafe);
     }
     let mut buffer = [0u8; 65_536];
-    let expected = bingsu_identity::build_id();
-    let mut found = 0;
-    let mut roles = 0;
+    // The identity each marker carries (None when the file ends inside it),
+    // and the role of the role marker.
+    let mut manifest: Option<Option<[u8; 32]>> = None;
+    let mut role_tag: Option<(Option<u8>, Option<[u8; 32]>)> = None;
     let mut offset = 0;
     let mut overlap = 0;
     while offset < size {
@@ -157,28 +186,36 @@ fn verify_build(file: &File, role: u8) -> Result<(), StoreError> {
         for at in 0..end {
             let window = &buffer[at..length];
             if window[..16] == bingsu_identity::manifest_tag()[..16] {
-                if window.get(16..48) != Some(expected.0.as_slice()) {
-                    return Err(StoreError::Unsafe);
+                if manifest.is_some() {
+                    return Ok(Build::NotSibling);
                 }
-                found += 1;
+                manifest = Some(window.get(16..48).map(|id| id.try_into().unwrap()));
             }
             if window[..16] == std::hint::black_box(&super::ROLE_TAG)[..16] {
-                if window.get(16) != Some(&role)
-                    || window.get(17..49) != Some(expected.0.as_slice())
-                {
-                    return Err(StoreError::Unsafe);
+                if role_tag.is_some() {
+                    return Ok(Build::NotSibling);
                 }
-                roles += 1;
+                role_tag = Some((
+                    window.get(16).copied(),
+                    window.get(17..49).map(|id| id.try_into().unwrap()),
+                ));
             }
         }
         overlap = length - end;
         buffer.copy_within(length - overlap..length, 0);
         offset += n as u64;
     }
-    if found != 1 || roles != 1 {
-        return Err(StoreError::Unsafe);
+    let (Some(Some(id)), Some((Some(tag_role), Some(tag_id)))) = (manifest, role_tag) else {
+        return Ok(Build::NotSibling);
+    };
+    if tag_role != role || tag_id != id {
+        return Ok(Build::NotSibling);
     }
-    Ok(())
+    Ok(if id == bingsu_identity::build_id().0 {
+        Build::Same
+    } else {
+        Build::Other(id)
+    })
 }
 
 /// The caller has already acquired a close-only, read-only collection lock.
@@ -366,6 +403,7 @@ mod tests {
             ]
             .concat(),
             valid[..96].to_vec(),
+            [bingsu_identity::manifest_tag().as_slice(), valid.as_slice()].concat(),
         ] {
             std::fs::write(&path, bad).unwrap();
             assert!(

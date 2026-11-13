@@ -120,7 +120,10 @@ fn config_names(
     meter.charge_folder(canonical)?;
     let mut names: Vec<_> = sys::directory_names_metered(file.as_fd(), meter)?
         .into_iter()
-        .filter(|n| n.as_bytes().ends_with(b".toml") && !n.as_bytes().starts_with(b"."))
+        .filter(|n| {
+            let n = n.as_bytes();
+            (n.ends_with(b".toml") || n.ends_with(b".json")) && !n.starts_with(b".")
+        })
         .collect();
     names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     Ok(names)
@@ -589,8 +592,10 @@ impl Loader {
         Ok(opened)
     }
 
-    /// Built-in, config.toml (or the recorded path), sorted conf.d names,
-    /// config.local.toml. All candidates are probed one at a time and
+    /// Built-in, config.toml or config.json (or the recorded path, which
+    /// stands in for both), sorted conf.d names (`.toml` and `.json`),
+    /// config.local.toml or config.local.json. A place holding both of its
+    /// names reads neither (E308). All candidates are probed one at a time and
     /// deduplicated by FileKey; core owns the semantic file/byte budgets.
     /// S3b/N2 supplies the compiled-in default TOML; R3 does not define it.
     /// Probe fds close before the next candidate. After reading, adopt
@@ -603,10 +608,11 @@ impl Loader {
             display: b"(built-in)".to_vec(),
         })];
         let root = self.places.config_root.path.clone();
-        let mut paths = Vec::new();
+        // Each place is one path, or the two names of an optional root.
+        let mut paths: Vec<Vec<PathBuf>> = Vec::new();
         match &self.record {
-            Some(r) => paths.push(r.path.clone()),
-            None => paths.push(root.join("config.toml")),
+            Some(r) => paths.push(vec![r.path.clone()]),
+            None => paths.push(vec![root.join("config.toml"), root.join("config.json")]),
         }
         let listed = (|| -> std::io::Result<Listing> {
             let meter = &mut *self.meter.borrow_mut();
@@ -629,7 +635,12 @@ impl Loader {
         })();
         match listed {
             Ok(listing) => {
-                paths.extend(listing.names.iter().map(|n| root.join("conf.d").join(n)));
+                paths.extend(
+                    listing
+                        .names
+                        .iter()
+                        .map(|n| vec![root.join("conf.d").join(n)]),
+                );
                 self.fds += listing.chain.fds.len() + 1;
                 self.listing = Some(listing);
             }
@@ -640,23 +651,47 @@ impl Loader {
                 self.complete = false;
             }
         }
-        paths.push(root.join("config.local.toml"));
-        for p in paths {
+        paths.push(vec![
+            root.join("config.local.toml"),
+            root.join("config.local.json"),
+        ]);
+        for place in paths {
             // Every candidate counts, the absent optional ones included.
-            if self.meter.get_mut().charge(HelperAxis::R, 1).is_err() {
+            if (0..place.len()).any(|_| self.meter.get_mut().charge(HelperAxis::R, 1).is_err()) {
                 self.complete = false;
                 break;
             }
-            let selected = self.record.as_ref().is_some_and(|r| r.path == p);
-            let optional =
-                !selected && (p == root.join("config.toml") || p == root.join("config.local.toml"));
-            if optional
-                && std::fs::symlink_metadata(&p)
-                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-            {
-                self.observe_absence(&p);
-                continue;
-            }
+            // The two names of an optional root: absent ones are observed,
+            // one present is read, two present fail the place (E308).
+            // 이것을 실패시키는 것: 없는 이름의 부재를 관찰하지 않는 것(새로 생긴 파일을 helper가 놓침), 둘 다 있을
+            // 때 하나를 고르는 것.
+            let p = if let [first, second] = place.as_slice() {
+                let absent = |p: &Path| {
+                    std::fs::symlink_metadata(p)
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                };
+                match (absent(first), absent(second)) {
+                    (true, true) => {
+                        self.observe_absence(first);
+                        self.observe_absence(second);
+                        continue;
+                    }
+                    (false, true) => {
+                        self.observe_absence(second);
+                        first.clone()
+                    }
+                    (true, false) => {
+                        self.observe_absence(first);
+                        second.clone()
+                    }
+                    (false, false) => {
+                        self.two_formats(&mut out, first, second);
+                        continue;
+                    }
+                }
+            } else {
+                place[0].clone()
+            };
             match self.check(&p) {
                 Ok(c) => {
                     let plan = Planned {
@@ -695,6 +730,30 @@ impl Loader {
             }
         }
         out
+    }
+
+    /// Both names of one place are present: neither is read, and core fails
+    /// the read whatever their trust. Each is still checked, so its evidence
+    /// is observed (removing either one changes the session) and an unsafe
+    /// one is reported.
+    fn two_formats(&mut self, out: &mut Vec<Root>, first: &Path, second: &Path) {
+        for p in [first, second] {
+            let _ = self.check(p);
+        }
+        let trust = Trust::Executable;
+        let key = FileKey {
+            dev: u64::MAX,
+            ino: out.len() as u64,
+        };
+        out.push(Root::TwoFormats {
+            meta: RootMeta {
+                key,
+                size: 0,
+                trust,
+                display: second.as_os_str().as_bytes().to_vec(),
+            },
+            other: first.as_os_str().as_bytes().to_vec(),
+        });
     }
 
     /// Passes a root core will not get bytes for, under a stand-in key no
@@ -1126,6 +1185,143 @@ mod tests {
         assert!(matches!(l.untrusted[0].2, Untrusted::Unsafe(Refusal::Last)));
     }
 
+    fn applied_names(r: &GraphResult) -> Vec<String> {
+        r.order
+            .iter()
+            .map(|id| {
+                let shown =
+                    String::from_utf8_lossy(&r.files[id.0 as usize].opened.display).into_owned();
+                shown.rsplit('/').next().unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    // JSON 설정은 TOML과 같은 자리에서 같은 신뢰로 읽힌다: config.json, conf.d의 `.json`(이름순으로 `.toml`과 섞임),
+    // config.local.json. 이것을 실패시키는 것: conf.d에서 `.json`을 빼는 것, 뿌리 이름에 config.json을 넣지 않는
+    // 것, JSON 파일을 TOML로 읽는 것(그 명령이 E101로 실패), 섞인 conf.d를 형식별로 따로 정렬하는 것.
+    #[test]
+    fn json_files_take_the_toml_places() {
+        let fx = Fx::new("json-places");
+        fx.put(
+            &fx.root.join("config.json"),
+            "{\"colors\": {\"mode\": \"dark\"}}",
+        );
+        fx.put(&fx.root.join("conf.d/b.toml"), "");
+        fx.put(
+            &fx.root.join("conf.d/a.json"),
+            "{\"segment\": {\"custom/k\": {\"kind\": \"command\", \"command\": [\"k\"]}}, \"layout\": {\"line1\": {\"left\": [\"custom/k\", \"dir\"]}}}",
+        );
+        fx.put(&fx.root.join("conf.d/c.json"), "{}");
+        fx.put(&fx.root.join("config.local.json"), "{}");
+        let (r, l) = fx.read(None);
+        assert!(r.succeeded, "{:?}", r.diagnostics);
+        assert_eq!(
+            applied_names(&r),
+            [
+                "(built-in)",
+                "config.json",
+                "a.json",
+                "b.toml",
+                "c.json",
+                "config.local.json"
+            ]
+        );
+        assert_eq!(
+            trust_of(&r, "a.json"),
+            Some((Trust::Executable, Status::Applied))
+        );
+        assert!(l.untrusted.is_empty());
+        assert!(
+            !codes_of(&r).contains(&codes::TOML_SYNTAX),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    // 한 자리에 두 형식이 함께 있으면 어느 것도 읽지 않고 읽기 전체가 실패한다(E308). 이것을 실패시키는 것: 둘 중
+    // 하나를 골라 읽는 것, 지역 자리(config.local)를 검사하지 않는 것, 공존 오류를 자리·파일의 신뢰로 낮추는 것
+    // (남이 쓸 수 있는 두 파일이면 경고로 내려감).
+    #[test]
+    fn two_formats_in_one_place_read_neither() {
+        // Both files writable by others too: unsafe files must not turn the
+        // conflict into a warning.
+        for (toml, json, mode) in [
+            ("config.toml", "config.json", 0o644),
+            ("config.local.toml", "config.local.json", 0o644),
+            ("config.toml", "config.json", 0o646),
+        ] {
+            let fx = Fx::new("two-formats");
+            fx.put(&fx.root.join(toml), "[colors]\nmode = \"dark\"\n");
+            fx.put(&fx.root.join(json), "{}");
+            for name in [toml, json] {
+                std::fs::set_permissions(fx.root.join(name), std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+            }
+            let (r, _) = fx.read(None);
+            assert!(!r.succeeded, "{toml}");
+            let d = r
+                .diagnostics
+                .iter()
+                .find(|d| d.code == codes::TWO_FORMATS)
+                .unwrap_or_else(|| panic!("{toml}: {:?}", r.diagnostics));
+            let arg = |k: &str| {
+                d.args
+                    .iter()
+                    .find(|a| a.name == k)
+                    .map(|a| a.value.clone())
+                    .unwrap()
+            };
+            assert!(
+                arg("path").ends_with(json) && arg("other").ends_with(toml),
+                "{d:?}"
+            );
+            assert!(!applied_names(&r).iter().any(|n| n == toml || n == json));
+        }
+    }
+
+    // helper가 새로 생긴 다른 형식의 파일과, 둘 중 하나가 지워진 것을 알아챈다. 이것을 실패시키는 것: 있는 쪽만
+    // 보고 없는 이름의 부재를 관찰하지 않는 것, 충돌한 두 파일을 관찰 증거에 넣지 않는 것.
+    #[test]
+    fn the_session_sees_the_other_name_come_and_go() {
+        let fx = Fx::new("other-name");
+        fx.put(&fx.root.join("config.toml"), "");
+        let (r, l) = fx.read(None);
+        assert!(matches!(
+            l.verified(&r.files, r.succeeded),
+            Verified::Publish { .. }
+        ));
+        let json = fx.put(&fx.root.join("config.json"), "{}");
+        assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
+        let mut l = fx.loader(None);
+        let _roots = l.roots(b"");
+        assert!(l.revalidate().is_ok());
+        std::fs::remove_file(json).unwrap();
+        assert!(l.revalidate().is_err());
+    }
+
+    // `config use` 기록은 전역 자리 전체를 대신한다: config.toml과 config.json을 둘 다 읽지 않고, 둘이 함께 있어도
+    // 충돌이 아니다. 이것을 실패시키는 것: 기록이 있을 때도 두 이름을 탐침하는 것.
+    #[test]
+    fn the_config_use_record_stands_in_for_both_names() {
+        let fx = Fx::new("record-both");
+        let chosen = fx.put(
+            &fx.home.join("chosen.json"),
+            "{\"colors\": {\"mode\": \"light\"}}",
+        );
+        fx.put(&fx.root.join("config.toml"), "");
+        fx.put(&fx.root.join("config.json"), "{}");
+        let md = std::fs::metadata(&chosen).unwrap();
+        let record = Record {
+            dev: md.dev(),
+            ino: md.ino(),
+            path: chosen,
+        };
+        let (r, _) = fx.read(Some(record));
+        assert!(r.succeeded, "{:?}", r.diagnostics);
+        assert_eq!(applied_names(&r), ["(built-in)", "chosen.json"]);
+        assert!(!codes_of(&r).contains(&codes::TWO_FORMATS));
+    }
+
     // 파일은 한 번 연다: fstat한 fd에서 읽으므로 확인 뒤 바꿔치기한 파일은 읽히지 않는다.
     // 이것을 실패시키는 것: 읽기 계획과 다른 정체를 열고도 바이트를 읽는 것.
     #[test]
@@ -1230,8 +1426,9 @@ mod tests {
         }
         let mut l = fx.loader(None);
         let roots = l.roots(b"");
-        // config.toml (absent) and 255 conf.d names; the 256th name is refused.
-        assert_eq!(l.plan.len(), 255);
+        // config.toml and config.json (both absent) and 254 conf.d names; the
+        // 255th name is refused.
+        assert_eq!(l.plan.len(), 254);
         let r = read_graph(roots, &mut l);
         assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
         // A root that is there but is not a regular file keeps its reason.
@@ -1748,6 +1945,30 @@ mod tests {
         assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
     }
 
+    // `conf.d`가 너무 큰 설정이 "파일이 너무 많음"(E303, 고유 파일 32개 예산)으로 끝나는지, 그 회차가 R 상한
+    // (256)에 걸려 끝나지 않는지의 경계: 뿌리 이름 넷과 함께 `conf.d` 이름 252개까지는 읽어서 E303이고, 253개부터는
+    // 미완료다(이름이 둘이던 때는 254개와 255개). 이것을 실패시키는 것: 한 자리에 R을 하나만 세는 것, 없는 이름을
+    // R에 세지 않는 것, cap 비교의 하나 차이.
+    #[test]
+    fn a_huge_conf_d_is_too_many_files_until_the_r_cap() {
+        for (n, verdict) in [(252, Verified::Invalid), (253, Verified::Incomplete)] {
+            let fx = Fx::new(&format!("conf-d-{n}"));
+            fx.put(&fx.root.join("config.toml"), "");
+            for i in 0..n {
+                fx.put(&fx.root.join(format!("conf.d/{i:03}.toml")), "");
+            }
+            let (r, l) = fx.read(None);
+            assert_eq!(l.verified(&r.files, r.succeeded), verdict, "{n}");
+            if verdict == Verified::Invalid {
+                assert!(
+                    codes_of(&r).contains(&codes::EXTENDS_TOO_MANY),
+                    "{n}: {:?}",
+                    codes_of(&r)
+                );
+            }
+        }
+    }
+
     // 상한을 한 번 넘으면 그 세션은 원본 I/O를 더 하지 않는다: core가 남은 뿌리를 열려 해도, 발행 전 재확인도
     // 시스템 호출 래퍼를 부르지 않고 Incomplete로 끝난다. 래퍼 호출은 수집 계수기로 센다.
     // 이것을 실패시키는 것: 걷기 시작 전 걸쇠 확인을 빼는 것(남은 뿌리마다 "/"를 엶), 거부한 뒤 뿌리 후보를 계속
@@ -1764,8 +1985,9 @@ mod tests {
         let _caps = TestCaps::set(AxisCaps { r: 2, ..AXIS_CAPS });
         let mut l = fx.loader(None);
         let roots = l.roots(b"");
-        // Built-in, config.toml and a.toml; b.toml was refused before its probe.
-        assert_eq!(roots.len(), 3);
+        // Built-in and config.toml: the absent config.json took the second R,
+        // and a.toml was refused before its probe.
+        assert_eq!(roots.len(), 2);
         let ops = sys::CollectionMeter::fixture_operations(u32::MAX);
         let r = read_graph(roots, &mut l);
         let verdict = l.verified(&r.files, r.succeeded);
@@ -1774,7 +1996,7 @@ mod tests {
     }
 
     // 뿌리 찾기의 P는 걷기마다 이름 하나에 1이다: 빈 conf.d를 걷기(open_dir)와 목록용 사슬(open_chain)로 두 번,
-    // 없는 config.toml·config.local.toml은 부재를 확인하는 설정 뿌리 걷기로 한 번씩.
+    // 없는 config.toml·config.json·config.local.toml·config.local.json은 부재를 확인하는 설정 뿌리 걷기로 한 번씩.
     // 이것을 실패시키는 것: 목록용 사슬을 세지 않는 것, 부재 확인 걷기를 세지 않는 것, "/" 열기를 P에 세는 것.
     #[test]
     fn root_discovery_charges_each_name_walked() {
@@ -1790,7 +2012,7 @@ mod tests {
             .count() as u64;
         assert_eq!(
             l.io_used()[HelperAxis::P as usize],
-            2 * names + 2 * (names - 1)
+            2 * names + 4 * (names - 1)
         );
     }
 
