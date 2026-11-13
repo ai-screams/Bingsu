@@ -109,6 +109,7 @@ mod source_path;
 pub(crate) mod sys;
 #[cfg(unix)]
 mod trust_record;
+mod version;
 #[cfg(unix)]
 pub(crate) mod version_manager;
 
@@ -131,6 +132,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("explain") => explain::run(&a.args[1..]),
         Some("help") => help::run(&a.args[1..]),
+        Some("--version") => version::run(&a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
@@ -142,7 +144,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
             u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
         ),
         _ => {
-            eprintln!("usage: bingsu <config|explain|help|init|list|prompt|reload> ...");
+            eprintln!("usage: bingsu <config|explain|help|init|list|prompt|reload|--version> ...");
             ExitCode::from(2)
         }
     }

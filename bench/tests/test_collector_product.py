@@ -633,3 +633,15 @@ def test_cli_libraries_follow_the_trees_dependencies(tmp_path):
     assert product.cli_libraries(tree(with_match)) == ("bingsu_match",)
     assert product.cli_libraries(tree(base)) == ()
     assert product.cli_libraries(Path(SOURCE).resolve().parents[1]) == ("bingsu_match",)
+
+
+# 이것을 실패시키는 것: 픽스처 컴파일의 CARGO_PKG_VERSION을 고정 값으로 두는 것, workspace 상속을 따르지 않는 것,
+# 자기 version을 가진 이전 base 트리(prompt gate의 base)에서 workspace 표를 찾다 실패하는 것.
+def test_fixture_version_is_the_checkout_version(tmp_path):
+    (tmp_path / "crates/bingsu").mkdir(parents=True)
+    (tmp_path / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/bingsu"]\n')
+    (tmp_path / "crates/bingsu/Cargo.toml").write_text('[package]\nname = "bingsu"\nversion = "0.0.0"\n')
+    assert product.workspace_version(tmp_path) == "0.0.0"
+    (tmp_path / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/bingsu"]\n\n[workspace.package]\nversion = "9.8.7"\n')
+    (tmp_path / "crates/bingsu/Cargo.toml").write_text('[package]\nname = "bingsu"\nversion.workspace = true\n')
+    assert product.workspace_version(tmp_path) == "9.8.7"
