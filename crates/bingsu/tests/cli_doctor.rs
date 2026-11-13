@@ -3,6 +3,8 @@
 //! program, writes nothing and never reads a version from a path.
 #![cfg(unix)]
 
+#[path = "../../bingsu-core-tests/src/json_schema.rs"]
+mod json_schema;
 #[path = "support/user_env.rs"]
 mod user_env;
 use user_env::{Env, frame, quiet, text};
@@ -343,4 +345,118 @@ fn a_refused_settings_folder_fails_the_settings_check() {
     assert_eq!(o.status.code(), Some(1), "{t}");
     let c = e.run(&["config", "check"]);
     assert_eq!(c.status.code(), Some(1), "config check agrees");
+}
+
+/// The string value of `"name":"…"` in one item's JSON text (`None` for null).
+fn field(item: &str, name: &str) -> Option<String> {
+    let key = format!("\"{name}\":");
+    let rest = &item[item.find(&key)? + key.len()..];
+    let rest = rest.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => out.push(chars.next()?),
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+fn json_run(e: &Env, extra: &[(&str, &str)]) -> (Option<i32>, String) {
+    let mut c = e.cmd(&["doctor", "--format", "json"]);
+    for (k, v) in extra {
+        c.env(k, v);
+    }
+    let o = c.output().unwrap();
+    (o.status.code(), text(&o.stdout))
+}
+
+// The JSON has the same checks, statuses, lines and codes as the text, matches the schema, and carries the same
+// exit code.
+// 이것을 실패시키는 것: json의 항목·상태·문구·코드가 사람용 출력과 갈라지는 것, 필드 이름을 바꾸거나 더하는 것(스키마),
+// result·exit_code가 실패 종료와 어긋나는 것.
+#[test]
+fn doctor_json_says_what_the_text_says() {
+    let e = Env::new("cli_doctor", "json");
+    e.put_config("config.toml", "colr = 1\n");
+    let (code, doc) = json_run(&e, &[]);
+    assert_eq!(code, Some(1), "{doc}");
+    if let Err(err) = json_schema::validate(None, &[&doc]) {
+        panic!("{err}\n{doc}");
+    }
+    let t = text(&doctor(&e, &[]).stdout);
+    assert!(
+        doc.contains("\"result\":\"invalid\"") && doc.contains("\"exit_code\":1"),
+        "{doc}"
+    );
+    let items: Vec<&str> = doc.split("{\"id\":").skip(1).collect();
+    assert_eq!(
+        items.len(),
+        t.lines().filter(|l| l.starts_with("  ")).count(),
+        "{doc}"
+    );
+    for item in &items {
+        let title = field(item, "title").unwrap();
+        let l = line(&t, &title);
+        assert!(l.contains(&field(item, "text").unwrap()), "{l} / {item}");
+        assert!(
+            l.starts_with(&format!("  {}", field(item, "status").unwrap())),
+            "{l} / {item}"
+        );
+        match field(item, "fix") {
+            Some(code) => assert!(l.contains(&format!("({code}; bingsu help {code})")), "{l}"),
+            None => assert!(!l.contains("bingsu help"), "{l}"),
+        }
+    }
+    let settings = items
+        .iter()
+        .find(|i| i.starts_with("\"settings\""))
+        .unwrap();
+    assert_eq!(
+        (
+            field(settings, "status").as_deref(),
+            field(settings, "fix").as_deref()
+        ),
+        (Some("fail"), Some("E607"))
+    );
+    // A run with nothing failed is valid, exit 0.
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    let (code, doc) = json_run(&e, &[]);
+    assert_eq!(code, Some(0), "{doc}");
+    assert!(
+        doc.contains("\"result\":\"valid\"") && doc.contains("\"exit_code\":0"),
+        "{doc}"
+    );
+    json_schema::validate(None, &[&doc]).unwrap();
+}
+
+// A value of the environment is never in the output: a pin variable that is garbled is reported as garbled, not shown.
+// 이것을 실패시키는 것: BINGSU_ROOTS·PATH의 값을 json(또는 text)에 그대로 넣는 것.
+#[test]
+fn doctor_never_prints_an_environment_value() {
+    let e = Env::new("cli_doctor", "envvalue");
+    let secret = "topsecretvalue";
+    let (_, doc) = json_run(&e, &[("BINGSU_ROOTS", secret)]);
+    assert!(doc.contains("\"id\":\"roots-pin\""), "{doc}");
+    assert!(!doc.contains(secret), "{doc}");
+    let t = text(&doctor(&e, &[("BINGSU_ROOTS", secret)]).stdout);
+    assert!(!t.contains(secret), "{t}");
+}
+
+// 이것을 실패시키는 것: 모르는 형식·중복·값 없는 `--format`, 그 밖의 인자를 받는 것.
+#[test]
+fn a_wrong_format_exits_2() {
+    let e = Env::new("cli_doctor", "usage");
+    for args in [
+        vec!["doctor", "--format"],
+        vec!["doctor", "--format", "xml"],
+        vec!["doctor", "--format", "json", "--format", "json"],
+        vec!["doctor", "extra"],
+    ] {
+        let o = e.cmd(&args).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(o.stdout.is_empty(), "{args:?}");
+    }
 }

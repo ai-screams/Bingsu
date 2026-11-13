@@ -34,7 +34,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu doctor";
+const USAGE: &str = "usage: bingsu doctor [--format json|text]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Status {
@@ -84,7 +84,6 @@ pub(super) struct Ctx {
 }
 
 pub(super) struct Item {
-    #[allow(dead_code, reason = "the JSON output names a check by it")]
     pub id: &'static str,
     pub title: &'static str,
     pub run: fn(&Ctx) -> Finding,
@@ -616,12 +615,61 @@ pub(super) fn exit_of(rows: &[(&Item, Finding)]) -> u8 {
     u8::from(rows.iter().any(|(_, f)| f.status == Status::Fail))
 }
 
+/// `--format json|text`, at most once; `Some(json)`.
+fn parse(args: &[OsString]) -> Option<bool> {
+    match args {
+        [] => Some(false),
+        [flag, value] if flag == "--format" => match value.to_str()? {
+            "json" => Some(true),
+            "text" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The JSON document of a run: the same rows as the text, as data. A
+/// finding's `fix` is its diagnostic code. No value of the environment is in
+/// a `Finding`, so none can be here.
+pub(super) fn render_json(rows: &[(&Item, Finding)]) -> String {
+    use bingsu_core::diag_json::{SCHEMA, Writer};
+    let code = exit_of(rows);
+    let mut w = Writer::new();
+    w.begin_object();
+    w.key("schema").number(u64::from(SCHEMA));
+    w.key("command").string("doctor");
+    w.key("result")
+        .string(if code == 0 { "valid" } else { "invalid" });
+    w.key("items").begin_array();
+    for (item, f) in rows {
+        w.begin_object();
+        w.key("id").string(item.id);
+        w.key("title").string(item.title);
+        w.key("status").string(f.status.word());
+        w.key("text").string(&f.text);
+        w.key("fix")
+            .opt_string(f.fix.map(|c| c.to_string()).as_deref());
+        w.end_object();
+    }
+    w.end_array();
+    w.key("exit_code").number(u64::from(code));
+    w.end_object();
+    w.finish()
+}
+
 pub fn run(args: &[OsString]) -> ExitCode {
-    if !args.is_empty() {
+    let Some(json) = parse(args) else {
         eprintln!("{USAGE}");
         return ctx::code(EXIT_USAGE);
-    }
+    };
     let Some(user) = User::current() else {
+        if json {
+            return super::config_inspect::fail_json(
+                "doctor",
+                "the account or its home folder cannot be read",
+                EXIT_FAILED,
+            );
+        }
         eprintln!("bingsu doctor: the account or its home folder cannot be read");
         return ctx::code(EXIT_FAILED);
     };
@@ -631,7 +679,12 @@ pub fn run(args: &[OsString]) -> ExitCode {
         exe: std::env::current_exe().ok(),
     };
     let rows: Vec<(&Item, Finding)> = ITEMS.iter().map(|i| (i, (i.run)(&c))).collect();
-    if !ctx::print(&render(&rows)) {
+    let out = if json {
+        render_json(&rows)
+    } else {
+        render(&rows)
+    };
+    if !ctx::print(&out) {
         return ctx::code(EXIT_UNFINISHED);
     }
     ctx::code(exit_of(&rows))

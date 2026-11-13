@@ -5,6 +5,7 @@
   "oneOf": [
     { "$ref": "#/$defs/explain" },
     { "$ref": "#/$defs/configCheck" },
+    { "$ref": "#/$defs/doctor" },
     { "$ref": "#/$defs/failure" }
   ],
   "$defs": {
@@ -263,6 +264,33 @@
         }
       }
     },
+    "doctor": {
+      "description": "bingsu doctor: one item per check, in the order the text shows them. `fix` is the diagnostic code that explains the way out (bingsu help <code>), null when there is nothing to do. `result` is invalid when a check failed (exit 1); a warning or an unknown is not a failure.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "command", "result", "items", "exit_code"],
+      "properties": {
+        "schema": { "const": 1 },
+        "command": { "const": "doctor" },
+        "result": { "enum": ["valid", "invalid"] },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title", "status", "text", "fix"],
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "status": { "enum": ["ok", "warn", "fail", "unknown", "skipped"] },
+              "text": { "type": "string" },
+              "fix": { "type": ["string", "null"], "maxLength": 4, "pattern": "^[EWN][0-9]{3}$" }
+            }
+          }
+        },
+        "exit_code": { "enum": [0, 1] }
+      }
+    },
     "failure": {
       "description": "A run that could not give its result: the settings have errors (listed in diagnostics) or could not be read at all (error). The exit code is the same as in text mode.",
       "type": "object",
@@ -270,7 +298,7 @@
       "required": ["schema", "command", "result", "diagnostics", "error"],
       "properties": {
         "schema": { "const": 1 },
-        "command": { "enum": ["explain", "config-check"] },
+        "command": { "enum": ["explain", "config-check", "doctor"] },
         "result": { "const": "invalid" },
         "diagnostics": { "$ref": "#/$defs/diagnostics" },
         "error": { "type": ["string", "null"] }
