@@ -90,6 +90,18 @@ pub const HELP: &[Help] = &[
         "Fix the text at the place shown, then run `bingsu config check` to read the file again.",
     ),
     h(
+        c::YAML_SYNTAX,
+        "The file is not valid YAML for a settings file, so bingsu could not read it.\nThe place points at the first character the reader could not accept.",
+        "Nothing in a file is used until the whole file parses. A YAML settings file is one mapping; a key may appear only once in a mapping, and `null` (`~` or an empty value) is not a setting value.",
+        "Fix the text at the place shown, then run `bingsu config check` to read the file again.",
+    ),
+    h(
+        c::YAML_UNSUPPORTED,
+        "The YAML file uses a feature bingsu does not read: an anchor (`&name`), an alias (`*name`), a tag (`!tag`), a second document (`---`) or a key that is a mapping or list.",
+        "An alias can repeat a value many times over, and a tag can change what a value means, both out of sight of the line you read. Settings are read only from what is written where it is used.",
+        "Write the value out in each place instead of using an anchor and alias, remove the tag, and keep one document per file. Then run `bingsu config check`.",
+    ),
+    h(
         c::UNKNOWN_KEY,
         "A key in the file is not a bingsu key.",
         "Unknown keys are errors, so a typo such as `colr` never passes silently and leaves you wondering why nothing changed.",

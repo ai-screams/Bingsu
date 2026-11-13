@@ -43,6 +43,8 @@ pub const NOT_UTF8: DiagCode = e(103);
 pub const INTEGER_RANGE: DiagCode = e(104);
 pub const NESTING_TOO_DEEP: DiagCode = e(105);
 pub const JSON_SYNTAX: DiagCode = e(106);
+pub const YAML_SYNTAX: DiagCode = e(107);
+pub const YAML_UNSUPPORTED: DiagCode = e(108);
 pub const UNKNOWN_KEY: DiagCode = e(201);
 pub const WRONG_TYPE: DiagCode = e(202);
 pub const BAD_VALUE: DiagCode = e(203);
@@ -156,6 +158,18 @@ pub const CODES: &[CodeInfo] = &[
         "this is not valid JSON: {message}",
         "the file must parse before anything in it is used",
         "fix the text at this place",
+    ),
+    stable(
+        YAML_SYNTAX,
+        "this is not valid YAML: {message}",
+        "the file must parse before anything in it is used",
+        "fix the text at this place",
+    ),
+    stable(
+        YAML_UNSUPPORTED,
+        "YAML {feature} is not read",
+        "settings files use plain mappings, lists and scalars; anchors, aliases and tags could expand or change values out of sight",
+        "write the value out where it is used, and keep one document per file",
     ),
     stable(
         UNKNOWN_KEY,

@@ -80,6 +80,33 @@ How to fix
 
 ----
 
+E107 (error)
+
+What happened
+  The file is not valid YAML for a settings file, so bingsu could not read it.
+  The place points at the first character the reader could not accept.
+
+Why
+  Nothing in a file is used until the whole file parses. A YAML settings file is one mapping; a key may appear only once in a mapping, and `null` (`~` or an empty value) is not a setting value.
+
+How to fix
+  Fix the text at the place shown, then run `bingsu config check` to read the file again.
+
+----
+
+E108 (error)
+
+What happened
+  The YAML file uses a feature bingsu does not read: an anchor (`&name`), an alias (`*name`), a tag (`!tag`), a second document (`---`) or a key that is a mapping or list.
+
+Why
+  An alias can repeat a value many times over, and a tag can change what a value means, both out of sight of the line you read. Settings are read only from what is written where it is used.
+
+How to fix
+  Write the value out in each place instead of using an anchor and alias, remove the tag, and keep one document per file. Then run `bingsu config check`.
+
+----
+
 E201 (error)
 
 What happened

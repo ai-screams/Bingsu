@@ -107,6 +107,13 @@ impl Resolver for NoExtends {
             trust: Trust::Executable,
         })
     }
+
+    fn parse_yaml(
+        &mut self,
+        text: &str,
+    ) -> Result<bingsu_core::config::tree::Table, Vec<bingsu_core::config::tree::SyntaxError>> {
+        super::config_yaml::parse(text)
+    }
 }
 
 fn read_file(path: &OsStr) -> Result<Opened, String> {

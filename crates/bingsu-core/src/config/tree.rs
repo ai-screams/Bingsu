@@ -117,22 +117,34 @@ pub enum SyntaxErrorKind {
     TooDeep,
     /// A JSON file's grammar or one of its rules (`config::json`).
     Json(String),
+    /// A YAML file's grammar or one of its rules, as the reader that parsed
+    /// it said (core keeps no YAML parser; see `check_parsed`).
+    Yaml(String),
+    /// A YAML feature bingsu does not read: an anchor, an alias, a tag, a
+    /// second document or a key that is not a scalar. Its name.
+    YamlUnsupported(String),
 }
 
-/// How a config file is written, from its name: `.json` is JSON, anything
-/// else TOML (TOML is the source format; an `extends` path without either
-/// suffix stays TOML as before).
+/// How a config file is written, from its name: `.json` is JSON, `.yaml`
+/// and `.yml` YAML, anything else TOML (TOML is the source format; an
+/// `extends` path without one of these suffixes stays TOML as before).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Toml,
     Json,
+    Yaml,
 }
 
 /// The format of the file at `path` (its last name decides).
 pub fn format_of(path: &[u8]) -> Format {
     let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+    // 이것을 실패시키는 것: `.yml`을 빼는 것, 이름 전체가 확장자뿐인 숨은 파일(`.yaml`)을 YAML로 보는 것.
     if name.len() > 5 && name.ends_with(b".json") {
         Format::Json
+    } else if (name.len() > 5 && name.ends_with(b".yaml"))
+        || (name.len() > 4 && name.ends_with(b".yml"))
+    {
+        Format::Yaml
     } else {
         Format::Toml
     }
@@ -389,7 +401,10 @@ pub fn parse(bytes: &[u8]) -> Result<Table, Vec<SyntaxError>> {
 }
 
 /// Parses one file written in `format`, with the same size, encoding and
-/// nesting limits for both (`config::json` for JSON).
+/// nesting limits for each (`config::json` for JSON). Core has no YAML
+/// parser: YAML text goes to the reader that opened the file
+/// (`source::Resolver::parse_yaml`), and here it is an error after the size
+/// and encoding checks.
 pub fn parse_as(format: Format, bytes: &[u8]) -> Result<Table, Vec<SyntaxError>> {
     match format {
         Format::Toml => parse(bytes),
@@ -397,11 +412,113 @@ pub fn parse_as(format: Format, bytes: &[u8]) -> Result<Table, Vec<SyntaxError>>
             let text = checked_text(bytes)?;
             crate::config::json::parse(text).map_err(|e| alloc::vec![e])
         }
+        Format::Yaml => {
+            checked_text(bytes)?;
+            Err(alloc::vec![SyntaxError {
+                span: Span::default(),
+                kind: SyntaxErrorKind::Yaml(String::from(
+                    "YAML is read by the bingsu command only"
+                )),
+            }])
+        }
+    }
+}
+
+/// What a YAML reader returned for `text`, checked against the rules every
+/// tree keeps: spans inside the text on character boundaries, no nested
+/// value deeper than `NESTING_MAX` (a value at the top is 1, as for TOML and
+/// JSON), and keys that do not repeat in one table. A reader's error keeps
+/// its kind; a span that breaks the first rule moves to the start of the
+/// file. A tree that breaks a rule becomes one error, so a reader's mistake
+/// cannot reach the merge.
+pub fn check_parsed(
+    text: &str,
+    parsed: Result<Table, Vec<SyntaxError>>,
+) -> Result<Table, Vec<SyntaxError>> {
+    let fits = |s: Span| {
+        s.start <= s.end
+            && (s.end as usize) <= text.len()
+            && text.is_char_boundary(s.start as usize)
+            && text.is_char_boundary(s.end as usize)
+    };
+    match parsed {
+        Err(mut errors) => {
+            // 이것을 실패시키는 것: 읽는 쪽 오류의 범위를 검사하지 않는 것(글 밖이나 글자 가운데를 가리킴).
+            for e in &mut errors {
+                if !fits(e.span) {
+                    e.span = Span::default();
+                }
+            }
+            Err(errors)
+        }
+        Ok(table) => match checked_table(&table, 1, &fits) {
+            None => Ok(table),
+            Some(e) => Err(alloc::vec![e]),
+        },
+    }
+}
+
+/// The first rule `t` breaks; its values are at `depth`. Iterative over
+/// nested tables and arrays, so a deep tree cannot exhaust the stack here.
+fn checked_table(t: &Table, depth: u32, fits: &dyn Fn(Span) -> bool) -> Option<SyntaxError> {
+    let bad = |span: Span, kind| {
+        Some(SyntaxError {
+            span: if fits(span) { span } else { Span::default() },
+            kind,
+        })
+    };
+    let mut tables: Vec<(&Table, u32)> = alloc::vec![(t, depth)];
+    let mut arrays: Vec<(&[Node], u32)> = Vec::new();
+    loop {
+        let nodes: Vec<(&Node, u32)> = if let Some((t, depth)) = tables.pop() {
+            // 이것을 실패시키는 것: 키 범위를 검사하지 않는 것, 한 표에서 겹치는 키를 받아들이는 것.
+            if let Some(e) = t.entries.iter().find(|e| !fits(e.key_span)) {
+                return bad(
+                    e.key_span,
+                    SyntaxErrorKind::Yaml(String::from("a key position is outside the text")),
+                );
+            }
+            // Sorted, so a table of n keys costs n log n.
+            let mut keys: Vec<(&str, Span)> = t
+                .entries
+                .iter()
+                .map(|e| (e.key.as_str(), e.key_span))
+                .collect();
+            keys.sort_unstable();
+            if let Some(w) = keys.windows(2).find(|w| w[0].0 == w[1].0) {
+                return bad(
+                    w[1].1,
+                    SyntaxErrorKind::Yaml(alloc::format!("duplicate key `{}`", w[1].0)),
+                );
+            }
+            t.entries.iter().map(|e| (&e.node, depth)).collect()
+        } else if let Some((items, depth)) = arrays.pop() {
+            items.iter().map(|n| (n, depth)).collect()
+        } else {
+            return None;
+        };
+        for (n, depth) in nodes {
+            // 이것을 실패시키는 것: 값 범위를 검사하지 않는 것, 깊이를 세지 않거나 하나 어긋나게 세는 것.
+            if !fits(n.span) {
+                return bad(
+                    n.span,
+                    SyntaxErrorKind::Yaml(String::from("a value position is outside the text")),
+                );
+            }
+            match &n.value {
+                Value::Table(_) | Value::Array(_) if depth > NESTING_MAX => {
+                    return bad(n.span, SyntaxErrorKind::TooDeep);
+                }
+                Value::Table(t) => tables.push((t, depth + 1)),
+                Value::Array(items) => arrays.push((items, depth + 1)),
+                _ => {}
+            }
+        }
     }
 }
 
 /// The file as text, if it fits FILE_BYTES_MAX and is UTF-8.
-fn checked_text(bytes: &[u8]) -> Result<&str, Vec<SyntaxError>> {
+pub(crate) fn checked_text(bytes: &[u8]) -> Result<&str, Vec<SyntaxError>> {
     if bytes.len() > FILE_BYTES_MAX {
         let at = FILE_BYTES_MAX as u32;
         return Err(alloc::vec![SyntaxError {
@@ -743,5 +860,145 @@ mod tests {
             assert_eq!(value.span, sp(&src, spelling));
             assert_eq!(value.value.kind(), "date-time");
         }
+    }
+
+    fn str_node(s: u32, e: u32) -> Node {
+        Node {
+            value: Value::Str(String::from("x")),
+            span: Span { start: s, end: e },
+        }
+    }
+
+    fn entry(key: &str, node: Node) -> Entry {
+        Entry {
+            key: String::from(key),
+            key_span: Span { start: 0, end: 1 },
+            node,
+        }
+    }
+
+    /// `depth` nested tables under the key `a` (the first table is depth 1).
+    fn nested_tables(depth: u32) -> Table {
+        let mut inner = Table {
+            entries: vec![entry("z", str_node(0, 1))],
+        };
+        for _ in 1..depth {
+            inner = Table {
+                entries: vec![entry(
+                    "a",
+                    Node {
+                        value: Value::Table(inner),
+                        span: Span::default(),
+                    },
+                )],
+            };
+        }
+        Table {
+            entries: vec![entry(
+                "a",
+                Node {
+                    value: Value::Table(inner),
+                    span: Span::default(),
+                },
+            )],
+        }
+    }
+
+    // 읽는 쪽이 돌려준 트리를 core가 다시 본다. 이것을 실패시키는 것: 깊이를 세지 않거나 하나 어긋나게 세는 것, 한
+    // 표의 겹치는 키를 받아들이는 것, 글 밖이나 글자 가운데를 가리키는 키·값 범위를 받아들이는 것, 배열 안을 보지 않는 것.
+    #[test]
+    fn a_parsed_tree_is_checked_again() {
+        // "가" is bytes 2..5.
+        let text = "ab가\n";
+        let check = |t: Table| check_parsed(text, Ok(t)).map_err(|e| e[0].kind.clone());
+        for depth in [31, 32] {
+            assert!(check(nested_tables(depth)).is_ok(), "{depth}");
+        }
+        assert_eq!(check(nested_tables(33)), Err(SyntaxErrorKind::TooDeep));
+        let in_array = |depth: u32| Table {
+            entries: vec![entry(
+                "l",
+                Node {
+                    value: Value::Array(vec![Node {
+                        value: Value::Table(nested_tables(depth)),
+                        span: Span::default(),
+                    }]),
+                    span: Span::default(),
+                },
+            )],
+        };
+        // The list is depth 1 and the table in it depth 2.
+        assert!(check(in_array(30)).is_ok());
+        assert_eq!(check(in_array(31)), Err(SyntaxErrorKind::TooDeep));
+        let twice = Table {
+            entries: vec![entry("k", str_node(0, 1)), entry("k", str_node(0, 1))],
+        };
+        assert!(
+            matches!(check(twice), Err(SyntaxErrorKind::Yaml(m)) if m.contains("duplicate key `k`"))
+        );
+        let nested_twice = Table {
+            entries: vec![entry(
+                "t",
+                Node {
+                    value: Value::Table(Table {
+                        entries: vec![entry("k", str_node(0, 1)), entry("k", str_node(0, 1))],
+                    }),
+                    span: Span::default(),
+                },
+            )],
+        };
+        assert!(check(nested_twice).is_err());
+        // 3 and 4 are inside "가", 7 is past the end.
+        for (s, e) in [(0, 7), (3, 5), (0, 4), (3, 2)] {
+            let value = Table {
+                entries: vec![entry("k", str_node(s, e))],
+            };
+            assert!(check(value).is_err(), "value {s}..{e}");
+            let mut key = Table {
+                entries: vec![entry("k", str_node(0, 1))],
+            };
+            key.entries[0].key_span = Span { start: s, end: e };
+            assert!(check(key).is_err(), "key {s}..{e}");
+        }
+        assert!(
+            check(Table {
+                entries: vec![entry("k", str_node(2, 5))]
+            })
+            .is_ok()
+        );
+        let in_list = Table {
+            entries: vec![entry(
+                "l",
+                Node {
+                    value: Value::Array(vec![str_node(3, 5)]),
+                    span: Span::default(),
+                },
+            )],
+        };
+        assert!(check(in_list).is_err());
+    }
+
+    // 이것을 실패시키는 것: 읽는 쪽 오류의 범위를 그대로 두는 것(글 밖이나 글자 가운데).
+    #[test]
+    fn a_reader_error_keeps_its_kind_and_a_safe_span() {
+        let bad = SyntaxError {
+            span: Span { start: 1, end: 9 },
+            kind: SyntaxErrorKind::Yaml(String::from("m")),
+        };
+        let good = SyntaxError {
+            span: Span { start: 2, end: 5 },
+            kind: SyntaxErrorKind::TooDeep,
+        };
+        let got = check_parsed("ab가\n", Err(vec![bad.clone(), good.clone()])).unwrap_err();
+        assert_eq!(
+            got,
+            vec![
+                SyntaxError {
+                    span: Span::default(),
+                    ..bad
+                },
+                good
+            ]
+        );
     }
 }

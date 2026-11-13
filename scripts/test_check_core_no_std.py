@@ -16,12 +16,15 @@ EDGES = {
     "bingsu-core": ["libm", "unicode-segmentation", "toml"],
     "toml": ["toml_parser", "toml_datetime", "serde_spanned", "winnow"],
     "toml_parser": ["winnow"],
-    "bingsu": ["bingsu-core", "bingsu-identity", "libc", "bingsu-match"],
+    "bingsu": ["bingsu-core", "bingsu-identity", "libc", "bingsu-match", "yaml-rust2"],
     "bingsu-prompt": ["bingsu-core", "bingsu-identity", "libc"],
     "bingsu-identity": ["bingsu-core"],
     "bingsu-match": ["regex"],
     "regex": ["regex-automata", "regex-syntax"],
     "regex-automata": ["regex-syntax"],
+    "yaml-rust2": ["arraydeque", "hashlink"],
+    "hashlink": ["hashbrown"],
+    "hashbrown": ["allocator-api2", "equivalent", "foldhash"],
 }
 
 
@@ -81,8 +84,9 @@ class Judge(unittest.TestCase):
 
     # 이것을 실패시키는 것: identity 분리를 핑계로 앞단 pin을 늘리거나 worker/Git edge를 허용하는 것.
     def test_identity_split_does_not_expand_the_front(self):
-        # 11 plus the four of `match` (U-28: bingsu-match, regex, regex-automata, regex-syntax).
-        self.assertEqual(len(gate.BINGSU_GRAPH), 15)
+        # 11 plus the four of `match` (U-28: bingsu-match, regex, regex-automata, regex-syntax)
+        # and the seven of YAML config files (yaml-rust2 and what it needs).
+        self.assertEqual(len(gate.BINGSU_GRAPH), 22)
         self.assertEqual(EDGES["bingsu-identity"], ["bingsu-core"])
         for parent in ("bingsu", "bingsu-identity"):
             for name in ("bingsu-collect", "gix-index"):

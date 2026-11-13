@@ -53,6 +53,45 @@ fn explain(e: &Env, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// `LAYOUT` in YAML.
+const LAYOUT_YAML: &str = r#"version: 1
+segment:
+  custom/a: {kind: text, text: AAAAAAAAAAAAAAAA}
+  custom/b: {kind: text, text: BBBBBBBBBBBBBBBB}
+layout:
+  line2:
+    left: [custom/a, dir, char]
+    right: [custom/b]
+  when:
+    narrow: {max_cols: 40}
+"#;
+
+// `--config`로 준 YAML 파일도 TOML과 같은 결정을 낸다. 이것을 실패시키는 것: explain의 읽는 쪽이 YAML 파서를 주지
+// 않는 것(E107로 실패), YAML을 TOML로 읽는 것.
+#[test]
+fn a_yaml_config_explains_like_its_toml() {
+    let e = Env::new("cli_explain", "yaml");
+    let toml = e.put("layout.toml", LAYOUT);
+    let yaml = e.put("layout.yaml", LAYOUT_YAML);
+    // Naming a segment of the file: settings read as empty have no `custom/b`.
+    for (w, id) in [("120", None), ("40", None), ("40", Some("custom/b"))] {
+        let args = |file: &std::path::Path| {
+            let mut v: Vec<String> = id.into_iter().map(String::from).collect();
+            v.extend(["--config", file.to_str().unwrap(), "--width", w].map(String::from));
+            v
+        };
+        let (ta, ya) = (args(&toml), args(&yaml));
+        let a = explain(&e, &ta.iter().map(String::as_str).collect::<Vec<_>>());
+        let b = explain(&e, &ya.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(b.status.code(), Some(0), "{w}: {}", text(&b.stderr));
+        assert_eq!(
+            text(&a.stdout).replace(toml.to_str().unwrap(), "<file>"),
+            text(&b.stdout).replace(yaml.to_str().unwrap(), "<file>"),
+            "width {w}"
+        );
+    }
+}
+
 // 이것을 실패시키는 것: 폭마다 다른 구간·넘침 단계·숨김 이유가 문구로 나오는 길을 바꾸는 것(golden), 폭 경계(40·41)의 구간 선택.
 #[allow(clippy::disallowed_methods, reason = "golden update switch of a test")]
 #[test]

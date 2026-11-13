@@ -657,4 +657,35 @@ mod tests {
         assert!(parse_as(Format::Json, b"{\"a\": 1}").is_ok());
         assert!(parse_as(Format::Toml, b"{\"a\": 1}").is_err());
     }
+
+    // 이것을 실패시키는 것: `.yml`을 빼는 것, 이름이 확장자뿐인 숨은 파일을 YAML로 읽는 것, core에서 YAML을 크기·인코딩
+    // 검사 전에 거절하는 것(상한은 형식마다 같다).
+    #[test]
+    fn yaml_names_and_limits() {
+        for yaml in [&b"/c/conf.d/a.yaml"[..], b"a.yml", b"/c/x.y.yaml"] {
+            assert_eq!(format_of(yaml), Format::Yaml, "{yaml:?}");
+        }
+        for toml in [
+            &b"/c/.yaml"[..],
+            b".yml",
+            b"/c/x.yaml/config",
+            b"x.YAML",
+            b"x.yaml.bak",
+        ] {
+            assert_eq!(format_of(toml), Format::Toml, "{toml:?}");
+        }
+        let big = "x".repeat(crate::config::tree::FILE_BYTES_MAX + 1);
+        assert_eq!(
+            parse_as(Format::Yaml, big.as_bytes()).unwrap_err()[0].kind,
+            SyntaxErrorKind::TooLarge
+        );
+        assert_eq!(
+            parse_as(Format::Yaml, b"\xff").unwrap_err()[0].kind,
+            SyntaxErrorKind::NotUtf8
+        );
+        assert!(matches!(
+            parse_as(Format::Yaml, b"a: 1").unwrap_err()[0].kind,
+            SyntaxErrorKind::Yaml(_)
+        ));
+    }
 }

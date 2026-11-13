@@ -6,6 +6,8 @@ E103 stable
 E104 stable
 E105 stable
 E106 stable
+E107 stable
+E108 stable
 E201 stable
 E202 stable
 E203 stable
