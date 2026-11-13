@@ -537,11 +537,20 @@ Ctrl-C stops the run with exit code 130 after the terminal is back in its normal
 | `terminal width` | Writes twelve probe characters one after the other (ASCII, a Hangul syllable, three East Asian ambiguous characters, an emoji, an emoji made by U+FE0F, a joined emoji, a flag, a letter with a combining mark, two Nerd Font glyphs) and asks the cursor position after each. It runs when the terminal is at least 40 columns wide | The terminal draws something in another number of cells than `width.ambiguous` and `width.emoji` say (W613). The row names the characters and the values the terminal fits |
 | `background` | Asks for the background color (OSC 11) and compares light or dark with what the prompt picks. It runs only when `colors.mode` is `auto`; with `dark` or `light` set, the prompt does not guess and the row is `skipped` | The prompt would draw for the other brightness (W614). Set `colors.mode` to `dark` or `light` |
 
+What each status means on these rows:
+
+| Status | Meaning |
+| -- | -- |
+| `ok` | The terminal drew every probe in the number of cells the settings say (`terminal width`), or its background is the brightness the prompt draws for (`background`) |
+| `warn` | W613 for width, W614 for background; `bingsu help W613` and `bingsu help W614` say what to set |
+| `unknown` | The terminal did not answer in time, answered with something that is not a cursor position, or the cursor left the line while measuring; or the control characters moved the cursor by an unexpected number of cells, so the measurement is not trusted; or the settings could not be read |
+| `skipped` | Nothing was asked: standard output is not a terminal (and `--terminal` is not given), there is no controlling terminal, the terminal is under 40 columns wide, or `colors.mode` is not `auto` (background only) |
+
+The usage is `bingsu doctor [--format json|text] [--terminal]`; the two options may come in either order, once each.
+
 With `--format json` the two rows carry a `details` object with the measured cells per probe and the values that fit
 (`probes`, `recommended`, `inside_tmux`), or the two brightnesses (`terminal`, `prompt`, `colors_mode`).
 Inside `tmux` the answers come from `tmux`, which may differ from the outer terminal; the width row says so.
-
-<!-- G2-PENDING #306-follow-up: add a real `bingsu doctor --terminal` output here after the terminal rows are merged -->
 
 `bingsu help CODE` explains a diagnostic code that `config check`, `explain` or `doctor` printed, in three parts: what
 happened, why, and how to fix it. It does not read your settings. A code it does not know ends with exit code 2.
