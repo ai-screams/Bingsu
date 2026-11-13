@@ -756,6 +756,12 @@ jobs:
       - run: brew install bash fish
       # One interpreter for every step: a venv with the hash-pinned test
       # dependencies, and the Homebrew shells first in PATH.
+      # macOS stops growing new pipes past 512 bytes once pipe kernel memory
+      # is at its system-wide cap, which cuts the prompt's environment frame;
+      # the job log records the runner's state here and on a failure.
+      - name: Record pipe capacity
+        run: |
+          python3 -c 'import os, fcntl; r, w = os.pipe(); fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK); print("pipe capacity: a new pipe took", os.write(w, bytes(65536)), "of 65536 bytes in one non-blocking write")'
       - name: Set up the test environment
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
@@ -893,7 +899,9 @@ jobs:
       # 1 MiB (the helper's refresh.log and state), not the binary copies.
       - name: Pack the failed run's test folders
         if: failure()
-        run: tests/shell/pack-failed-run.sh "$RUNNER_TEMP/pytest-folders.tgz" "$RUNNER_TEMP/pty-pytest" "$RUNNER_TEMP/command-round-pytest" "$RUNNER_TEMP/shell-gates-pytest"
+        run: |
+          python3 -c 'import os, fcntl; r, w = os.pipe(); fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK); print("pipe capacity: a new pipe took", os.write(w, bytes(65536)), "of 65536 bytes in one non-blocking write")'
+          tests/shell/pack-failed-run.sh "$RUNNER_TEMP/pytest-folders.tgz" "$RUNNER_TEMP/pty-pytest" "$RUNNER_TEMP/command-round-pytest" "$RUNNER_TEMP/shell-gates-pytest"
       - name: Upload the failed run's test folders
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -924,6 +932,12 @@ jobs:
       - run: brew install bash fish
       # One interpreter for every step: a venv with the hash-pinned test
       # dependencies, and the Homebrew shells first in PATH.
+      # macOS stops growing new pipes past 512 bytes once pipe kernel memory
+      # is at its system-wide cap, which cuts the prompt's environment frame;
+      # the job log records the runner's state here and on a failure.
+      - name: Record pipe capacity
+        run: |
+          python3 -c 'import os, fcntl; r, w = os.pipe(); fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK); print("pipe capacity: a new pipe took", os.write(w, bytes(65536)), "of 65536 bytes in one non-blocking write")'
       - name: Set up the test environment
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
@@ -973,7 +987,9 @@ jobs:
       # 1 MiB (the helper's refresh.log and state), not the binary copies.
       - name: Pack the failed run's test folders
         if: failure()
-        run: tests/shell/pack-failed-run.sh "$RUNNER_TEMP/pytest-folders.tgz" "$RUNNER_TEMP/pty-pytest" "$RUNNER_TEMP/command-round-pytest" "$RUNNER_TEMP/shell-gates-pytest"
+        run: |
+          python3 -c 'import os, fcntl; r, w = os.pipe(); fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK); print("pipe capacity: a new pipe took", os.write(w, bytes(65536)), "of 65536 bytes in one non-blocking write")'
+          tests/shell/pack-failed-run.sh "$RUNNER_TEMP/pytest-folders.tgz" "$RUNNER_TEMP/pty-pytest" "$RUNNER_TEMP/command-round-pytest" "$RUNNER_TEMP/shell-gates-pytest"
       - name: Upload the failed run's test folders
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
