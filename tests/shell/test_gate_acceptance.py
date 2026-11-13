@@ -1230,11 +1230,14 @@ LINUX_PTY_RUN = re.compile(r"exec python3 -m pytest (.*) \"\$@\"' sh \$\{BINGSU_
 MACOS_PTY_RUN = re.compile(r"\"\$BINGSU_PY\" -m pytest (.*) \$\{BINGSU_RECORD_OBSERVATIONS:\+-s\}", re.S)
 PTY_ALWAYS = "success() || failure()"
 # Every condition a step of a PTY job may carry. Any other step runs in every cell.
+# The two failure-only steps keep a failed run's pytest folders; they run no test.
+FAILED_RUN_STEPS = {"Pack the failed run's test folders": "failure()",
+                    "Upload the failed run's test folders": "failure()"}
 LINUX_CONDITIONS = {"Assert minimum versions": "matrix.versions != ''", "PTY tests": PTY_ALWAYS,
                     "Shell-independent tests": "(success() || failure()) && matrix.image == 'min-d12'",
                     "Long folder test (AppArmor unconfined)": PTY_ALWAYS,
-                    "Fetch the pinned oh-my-zsh": PTY_ALWAYS}
-MACOS_CONDITIONS = {"PTY tests": PTY_ALWAYS, "Fetch the pinned oh-my-zsh": PTY_ALWAYS}
+                    "Fetch the pinned oh-my-zsh": PTY_ALWAYS, **FAILED_RUN_STEPS}
+MACOS_CONDITIONS = {"PTY tests": PTY_ALWAYS, "Fetch the pinned oh-my-zsh": PTY_ALWAYS, **FAILED_RUN_STEPS}
 LONG_FOLDER_RUN = "-m pytest tests/shell/test_display_words.py::test_fish_long_cwd_is_passed_empty -q"
 SHELL_FREE_STEP = "      - name: Shell-independent tests\n"
 SHELL_FREE_RUN = "-m pytest tests/shell/test_prompt_trace_budget.py -q"
@@ -1337,6 +1340,8 @@ def assert_pty_selection(run, pattern, deselected, ignored):
     got = shlex.split(match[1].replace("\\\n", " "))
     if pattern is LINUX_PTY_RUN:
         want.append("--basetemp=/root/pytest")
+    else:
+        want.append("--basetemp=$RUNNER_TEMP/pty-pytest")
     assert sorted(got) == sorted(want), sorted(set(got) ^ set(want))
 
 
@@ -1552,7 +1557,12 @@ def test_pty_cells_cover_every_shell_and_shell_free_file():
         "pytest-addopts": ("-e CI=true ", "-e CI=true -e PYTEST_ADDOPTS='-k first' ", "shell-linux"),
         "drop-locale": ('-e LOCALES="C.UTF-8 C ko_KR.UTF-8"', '-e LOCALES="C.UTF-8"', "shell-linux"),
         "narrow-long-folder": (LONG_FOLDER_RUN, LONG_FOLDER_RUN.replace(" -q", " -k first -q"), "shell-linux"),
-        "macos-narrow-by-keyword": (" -q -rf -p no:cacheprovider --ignore", " -k first -q -rf -p no:cacheprovider --ignore", "both-macos-jobs"),
+        "macos-narrow-by-keyword": (" -q -rf -p no:cacheprovider --basetemp=", " -k first -q -rf -p no:cacheprovider --basetemp=",
+                                    "both-macos-jobs"),
+        "macos-other-basetemp": ('--basetemp="$RUNNER_TEMP/pty-pytest"', '--basetemp="$RUNNER_TEMP/other"', "both-macos-jobs"),
+        "macos-failed-run-step-runs-always": ("      - name: Pack the failed run's test folders\n        if: failure()\n",
+                                              "      - name: Pack the failed run's test folders\n        if: always()\n",
+                                              "both-macos-jobs"),
         "macos-add-deselect": (" --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux",
                                " --deselect tests/shell/test_zsh_screen.py", "both-macos-jobs"),
         "macos-skip-pty-step": ("      - name: PTY tests\n        if: success() || failure()\n",
