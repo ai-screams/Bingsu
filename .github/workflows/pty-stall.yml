@@ -54,7 +54,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
           targets: x86_64-unknown-linux-musl
       - name: Prepare the host
         run: tests/shell/probes/stall-host.sh prepare "${{ matrix.host }}"
@@ -94,7 +94,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
           targets: x86_64-unknown-linux-musl
       - name: Prepare the host
         run: tests/shell/probes/stall-host.sh prepare "${{ matrix.host }}"
