@@ -356,6 +356,89 @@ pub fn render_check(i: &Inspection) -> String {
     out
 }
 
+/// Whether a command or language unit runs, and why not: the one verdict
+/// that `config explain` draws as text (`verdict_words`) and as JSON
+/// (`units_json`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunVerdict {
+    /// The settings keep it from running (`explain::not_run_text`).
+    NotRun(&'static str, Option<bingsu_core::diag::DiagCode>),
+    /// The lookup on the sanitized PATH found no file. The lookup decides
+    /// too, as W411 says (E2 review M1).
+    NotFound,
+    /// The lookup found its file and refused it.
+    Refused,
+    /// A language unit: it runs only where its marker files are found
+    /// (D3c-2).
+    WhereDetected,
+    Runs,
+}
+
+impl RunVerdict {
+    fn runs(&self) -> bool {
+        matches!(self, Self::WhereDetected | Self::Runs)
+    }
+
+    /// The reason in words: why not, or where it runs.
+    fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::NotRun(text, _) => Some(text),
+            Self::NotFound => Some("not found on the sanitized PATH"),
+            Self::Refused => Some("its file is refused"),
+            Self::WhereDetected => Some("runs where its detect files are found"),
+            Self::Runs => None,
+        }
+    }
+
+    /// The diagnostic that reports it.
+    fn code(&self) -> Option<bingsu_core::diag::DiagCode> {
+        match self {
+            Self::NotRun(_, code) => *code,
+            _ => None,
+        }
+    }
+}
+
+/// The PATH lookup's result for the unit `id`.
+fn lookup<'a>(
+    found: &'a [(String, exec_path::Explained)],
+    id: &str,
+) -> Option<&'a exec_path::Explained> {
+    found.iter().find(|(f, _)| f == id).map(|(_, e)| e)
+}
+
+/// The verdict of `unit`, given the PATH lookup's result for it.
+fn run_verdict(
+    unit: &bingsu_core::config::explain::UnitView,
+    looked: Option<&exec_path::Explained>,
+) -> RunVerdict {
+    if let Some(n) = &unit.not_run {
+        let (text, code) = bingsu_core::config::explain::not_run_text(n);
+        return RunVerdict::NotRun(text, code);
+    }
+    match looked {
+        Some(exec_path::Explained::Absent) => RunVerdict::NotFound,
+        Some(exec_path::Explained::Refused { .. }) => RunVerdict::Refused,
+        _ if unit.kind == "language" => RunVerdict::WhereDetected,
+        _ => RunVerdict::Runs,
+    }
+}
+
+/// The verdict as the text line says it after the unit's id and kind.
+fn verdict_words(v: &RunVerdict) -> String {
+    let reason = v.reason().unwrap_or_default();
+    match v {
+        RunVerdict::NotRun(..) => {
+            let code = v.code().map(|c| format!(" ({c})")).unwrap_or_default();
+            format!("not run: {reason}{code}")
+        }
+        RunVerdict::NotFound => format!("will not run: {reason}"),
+        RunVerdict::Refused => format!("will not run: {reason} (see executable)"),
+        RunVerdict::WhereDetected => reason.to_owned(),
+        RunVerdict::Runs => "runs".to_owned(),
+    }
+}
+
 /// The `execution` array of the JSON output: the same units and the same
 /// verdicts as `render_explain`, as data. Environment names only.
 pub(super) fn units_json(
@@ -389,36 +472,15 @@ pub(super) fn units_json(
         .iter()
         .filter(|u| only.is_none_or(|o| o == u.id))
     {
-        let looked = found.iter().find(|(id, _)| *id == u.id).map(|(_, f)| f);
-        // (runs, reason, code)
-        let (runs, reason, code): (bool, Option<String>, Option<String>) = match &u.not_run {
-            Some(n) => {
-                let (text, code) = explain::not_run_text(n);
-                (false, Some(text.to_owned()), code.map(|c| c.to_string()))
-            }
-            None => match looked {
-                Some(exec_path::Explained::Absent) => (
-                    false,
-                    Some("not found on the sanitized PATH".to_owned()),
-                    None,
-                ),
-                Some(exec_path::Explained::Refused { .. }) => {
-                    (false, Some("its file is refused".to_owned()), None)
-                }
-                _ if u.kind == "language" => (
-                    true,
-                    Some("runs where its detect files are found".to_owned()),
-                    None,
-                ),
-                _ => (true, None, None),
-            },
-        };
+        let looked = lookup(found, &u.id);
+        let verdict = run_verdict(u, looked);
         w.begin_object();
         w.key("id").string(&u.id);
         w.key("kind").string(u.kind);
-        w.key("runs").boolean(runs);
-        w.key("reason").opt_string(reason.as_deref());
-        w.key("code").opt_string(code.as_deref());
+        w.key("runs").boolean(verdict.runs());
+        w.key("reason").opt_string(verdict.reason());
+        w.key("code")
+            .opt_string(verdict.code().map(|c| c.to_string()).as_deref());
         w.key("rows").begin_array();
         for r in &u.rows {
             w.begin_object();
@@ -715,49 +777,15 @@ pub(super) fn render_explain(
         }
     };
     for u in &units {
-        let looked = found.iter().find(|(id, _)| *id == u.id).map(|(_, f)| f);
-        match &u.not_run {
-            // The lookup decides too: a unit whose file is refused or not
-            // found will not run, as W411 says (E2 review M1).
-            // Fails without it: explain_shows_limits_cwd_shell_and_the_sanitized_lookup.
-            None => match looked {
-                Some(exec_path::Explained::Absent) => {
-                    let _ = writeln!(
-                        out,
-                        "{}  {}, will not run: not found on the sanitized PATH",
-                        clean(&u.id),
-                        u.kind
-                    );
-                }
-                Some(exec_path::Explained::Refused { .. }) => {
-                    let _ = writeln!(
-                        out,
-                        "{}  {}, will not run: its file is refused (see executable)",
-                        clean(&u.id),
-                        u.kind
-                    );
-                }
-                // A language unit runs only where its marker files are
-                // found (D3c-2). Fails without it:
-                // explain_shows_shell_relative_and_language_units.
-                _ if u.kind == "language" => {
-                    let _ = writeln!(
-                        out,
-                        "{}  {}, runs where its detect files are found",
-                        clean(&u.id),
-                        u.kind
-                    );
-                }
-                _ => {
-                    let _ = writeln!(out, "{}  {}, runs", clean(&u.id), u.kind);
-                }
-            },
-            Some(n) => {
-                let (text, code) = explain::not_run_text(n);
-                let code = code.map(|c| format!(" ({c})")).unwrap_or_default();
-                let _ = writeln!(out, "{}  {}, not run: {text}{code}", clean(&u.id), u.kind);
-            }
-        }
+        let looked = lookup(found, &u.id);
+        let verdict = run_verdict(u, looked);
+        let _ = writeln!(
+            out,
+            "{}  {}, {}",
+            clean(&u.id),
+            u.kind,
+            verdict_words(&verdict)
+        );
         for r in &u.rows {
             let _ = writeln!(
                 out,
@@ -1056,6 +1084,99 @@ mod tests {
     thread_local! {
         /// `PATH` walks of `lookups` (E2 review M2).
         pub(super) static PATH_WALKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    // The words of each verdict, as `config explain` printed them before
+    // text and JSON drew one model. 이것을 실패시키는 것: 한 출력의 문구·runs·code만 바꾸는 것, 사유를 다른
+    // 판정의 것으로 바꾸는 것, Refused의 "(see executable)"를 빼는 것.
+    #[test]
+    fn each_verdict_reads_as_before_in_text_and_json() {
+        use bingsu_core::diag_codes as codes;
+        // (verdict, text words, JSON runs / reason / code)
+        type Json<'a> = (bool, Option<&'a str>, Option<String>);
+        let cases: [(RunVerdict, &str, Json); 6] = [
+            (
+                RunVerdict::NotRun("turned off with `enabled = false`", None),
+                "not run: turned off with `enabled = false`",
+                (false, Some("turned off with `enabled = false`"), None),
+            ),
+            (
+                RunVerdict::NotRun(
+                    "no layout from a trusted file draws it",
+                    Some(codes::NOT_RUN_UNTRUSTED_LAYOUT),
+                ),
+                "not run: no layout from a trusted file draws it (W404)",
+                (
+                    false,
+                    Some("no layout from a trusted file draws it"),
+                    Some("W404".to_owned()),
+                ),
+            ),
+            (
+                RunVerdict::NotFound,
+                "will not run: not found on the sanitized PATH",
+                (false, Some("not found on the sanitized PATH"), None),
+            ),
+            (
+                RunVerdict::Refused,
+                "will not run: its file is refused (see executable)",
+                (false, Some("its file is refused"), None),
+            ),
+            (
+                RunVerdict::WhereDetected,
+                "runs where its detect files are found",
+                (true, Some("runs where its detect files are found"), None),
+            ),
+            (RunVerdict::Runs, "runs", (true, None, None)),
+        ];
+        for (v, text, json) in cases {
+            assert_eq!(verdict_words(&v), text, "{v:?}");
+            assert_eq!(
+                (v.runs(), v.reason(), v.code().map(|c| c.to_string())),
+                json,
+                "{v:?}"
+            );
+        }
+    }
+
+    // 이것을 실패시키는 것: 설정이 막은 단위를 PATH 찾기 결과로 판정하는 것(not_run을 먼저 보지 않음), 찾지 못함과
+    // 거부를 바꾸는 것, language 단위를 그냥 runs로 두는 것, 다른 단위의 찾기 결과를 쓰는 것.
+    #[test]
+    fn the_verdict_comes_from_the_settings_then_the_lookup() {
+        use bingsu_core::config::compile::NotRun;
+        use bingsu_core::config::explain::UnitView;
+        let unit = |id: &str, kind: &'static str, not_run: Option<NotRun>| UnitView {
+            id: id.to_owned(),
+            kind,
+            not_run,
+            rows: Vec::new(),
+            environment: Vec::new(),
+        };
+        let refused = || exec_path::Explained::Refused {
+            file: None,
+            script: None,
+            set_id: false,
+        };
+        let found = vec![
+            ("custom/a".to_owned(), exec_path::Explained::Absent),
+            ("custom/b".to_owned(), refused()),
+        ];
+        let off = unit("custom/a", "command", Some(NotRun::Disabled));
+        assert_eq!(
+            run_verdict(&off, lookup(&found, &off.id)),
+            RunVerdict::NotRun("turned off with `enabled = false`", None)
+        );
+        let a = unit("custom/a", "command", None);
+        assert_eq!(run_verdict(&a, lookup(&found, &a.id)), RunVerdict::NotFound);
+        let b = unit("custom/b", "command", None);
+        assert_eq!(run_verdict(&b, lookup(&found, &b.id)), RunVerdict::Refused);
+        let lang = unit("custom/l", "language", None);
+        assert_eq!(
+            run_verdict(&lang, lookup(&found, &lang.id)),
+            RunVerdict::WhereDetected
+        );
+        let c = unit("custom/c", "command", None);
+        assert_eq!(run_verdict(&c, lookup(&found, &c.id)), RunVerdict::Runs);
     }
 
     // 실행할 명령 단위가 없으면 config check는 PATH를 걷지 않는다(멈춘 마운트가 기본 설정의 check까지 붙잡지
