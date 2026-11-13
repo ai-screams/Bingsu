@@ -732,20 +732,15 @@ impl Loader {
         out
     }
 
-    /// Both names of one place are present: neither is read. Each is still
-    /// checked, so its evidence is observed (removing either one changes
-    /// the session) and an unsafe one is reported. The place fails like a
-    /// trusted root when either file could have been trusted.
+    /// Both names of one place are present: neither is read, and core fails
+    /// the read whatever their trust. Each is still checked, so its evidence
+    /// is observed (removing either one changes the session) and an unsafe
+    /// one is reported.
     fn two_formats(&mut self, out: &mut Vec<Root>, first: &Path, second: &Path) {
-        let trust = [first, second].map(|p| match self.check(p) {
-            Ok(c) => c.trust,
-            Err(e) => e.trust,
-        });
-        let trust = if trust.contains(&Trust::Executable) {
-            Trust::Executable
-        } else {
-            trust[0]
-        };
+        for p in [first, second] {
+            let _ = self.check(p);
+        }
+        let trust = Trust::Executable;
         let key = FileKey {
             dev: u64::MAX,
             ino: out.len() as u64,
@@ -1244,16 +1239,24 @@ mod tests {
     }
 
     // 한 자리에 두 형식이 함께 있으면 어느 것도 읽지 않고 읽기 전체가 실패한다(E308). 이것을 실패시키는 것: 둘 중
-    // 하나를 골라 읽는 것, 지역 자리(config.local)를 검사하지 않는 것, 신뢰 자리의 충돌을 경고로 낮추는 것.
+    // 하나를 골라 읽는 것, 지역 자리(config.local)를 검사하지 않는 것, 공존 오류를 자리·파일의 신뢰로 낮추는 것
+    // (남이 쓸 수 있는 두 파일이면 경고로 내려감).
     #[test]
     fn two_formats_in_one_place_read_neither() {
-        for (toml, json) in [
-            ("config.toml", "config.json"),
-            ("config.local.toml", "config.local.json"),
+        // Both files writable by others too: unsafe files must not turn the
+        // conflict into a warning.
+        for (toml, json, mode) in [
+            ("config.toml", "config.json", 0o644),
+            ("config.local.toml", "config.local.json", 0o644),
+            ("config.toml", "config.json", 0o646),
         ] {
             let fx = Fx::new("two-formats");
             fx.put(&fx.root.join(toml), "[colors]\nmode = \"dark\"\n");
             fx.put(&fx.root.join(json), "{}");
+            for name in [toml, json] {
+                std::fs::set_permissions(fx.root.join(name), std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+            }
             let (r, _) = fx.read(None);
             assert!(!r.succeeded, "{toml}");
             let d = r

@@ -105,8 +105,8 @@ pub enum Root {
     Read(Opened),
     File(RootMeta),
     /// One place holds two files in different formats (`config.toml` and
-    /// `config.json`): neither is read, and the place fails like an
-    /// unreadable root of its trust (E308). `other` is the second path.
+    /// `config.json`): neither is read, and the read fails (E308) whatever
+    /// trust the place has. `other` is the second path.
     TwoFormats {
         meta: RootMeta,
         other: Vec<u8>,
@@ -772,10 +772,19 @@ pub fn load<R: Into<Root>>(
             continue;
         }
         let r = match r {
+            // Always an error, whatever trust the files would have had: a
+            // shape-only or unsafe place must not drop one of two files and
+            // publish what is left.
+            // 이것을 실패시키는 것: 공존을 그 자리의 신뢰로 판정하는 것(모양 전용·안전하지 않은 두 파일이면
+            // 경고로 내려가 새 스냅샷이 발행됨).
             Root::TwoFormats { meta, other } => {
                 let d = Diagnostic::new(codes::TWO_FORMATS, Place::Builtin)
                     .arg("path", String::from_utf8_lossy(&meta.display).into_owned())
                     .arg("other", String::from_utf8_lossy(&other).into_owned());
+                let meta = RootMeta {
+                    trust: Trust::Executable,
+                    ..meta
+                };
                 w.unread_root(Root::File(meta), d);
                 continue;
             }
@@ -2006,6 +2015,24 @@ pub(crate) mod tests {
         assert_eq!(e.files[0].status, Status::Failed);
         assert_eq!(codes_of(&e.errors), [codes::EXTENDS_BAD_PATH]);
         assert!(e.warnings.is_empty());
+    }
+
+    // 한 자리의 두 형식은 그 자리의 신뢰와 무관하게 읽기를 멈춘다(E308). 이것을 실패시키는 것: 공존을 자리의
+    // 신뢰로 판정하는 것(모양 전용·안전하지 않은 자리면 경고로 내려가 남은 원본이 발행됨).
+    #[test]
+    fn two_formats_fail_the_read_at_any_trust() {
+        for name in ["root", "shape-root", "unsafe-root"] {
+            let Root::File(meta) = on_disk(name, 0, 1) else {
+                unreachable!()
+            };
+            let two = Root::TwoFormats {
+                meta,
+                other: b"/c/config.toml".to_vec(),
+            };
+            let e = load(vec![two], &mut files(&[]), V).unwrap_err();
+            assert_eq!(codes_of(&e.errors), [codes::TWO_FORMATS], "{name}");
+            assert!(e.files[0].opened.bytes.is_empty(), "{name}");
+        }
     }
 
     // 이것을 실패시키는 것: 비신뢰 별칭을 먼저 본 정체를 신뢰 경로에서도 건너뛰어 신뢰·자리·하위 그래프를 잃는 것.

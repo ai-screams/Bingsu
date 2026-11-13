@@ -259,13 +259,18 @@ impl Parser<'_> {
             Some(b'0') => {
                 self.at += 1;
                 if matches!(self.peek(), Some(b'0'..=b'9')) {
-                    return Err(self.error(start, self.at + 1, "a number may not start with 0"));
+                    return Err(self.error(
+                        start,
+                        self.token_end(),
+                        "a number may not start with 0",
+                    ));
                 }
             }
             Some(b'1'..=b'9') => {
                 digits(self);
             }
-            _ => return Err(self.error(start, self.at + 1, "expected digits")),
+            // The range ends inside the text, on a character boundary.
+            _ => return Err(self.error(start, self.token_end(), "expected digits")),
         }
         let mut float = false;
         if self.peek() == Some(b'.') {
@@ -493,7 +498,8 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: RFC 8259 밖의 모양(주석, 끝 쉼표, 홑따옴표, 앞의 0, `.5`·`1.`·`+1`, NaN, 다른 공백,
-    // BOM, 맨 위 배열, 뒤에 남은 글자, null, 제어 문자, 잘못된 이스케이프, 짝 없는 서로게이트)을 받는 것.
+    // BOM, 맨 위 배열, 뒤에 남은 글자, null, 제어 문자, 잘못된 이스케이프, 짝 없는 서로게이트)을 받는 것, 오류 범위를
+    // 파일 끝 밖이나 글자 가운데로 내는 것.
     #[test]
     fn only_strict_json_is_read() {
         for bad in [
@@ -530,8 +536,20 @@ mod tests {
             "{\"a\": tru}",
             "",
             "   ",
+            "{\"a\":-",
+            "{\"a\":-\u{e9}}",
+            "{\"a\": 0\u{e9}}",
+            "{\"a\": \"\u{e9}",
         ] {
-            assert!(json(bad).is_err(), "{bad:?}");
+            // The error's range stays inside the text, on character boundaries.
+            let e = json(bad).expect_err(bad);
+            let (start, end) = (e.span.start as usize, e.span.end as usize);
+            assert!(start <= end && end <= bad.len(), "{bad:?}: {:?}", e.span);
+            assert!(
+                bad.is_char_boundary(start) && bad.is_char_boundary(end),
+                "{bad:?}: {:?}",
+                e.span
+            );
         }
         assert_eq!(message("{\"a\": null}"), "`null` is not a setting value");
         assert_eq!(message("[]"), "the file must hold one object");
