@@ -1,11 +1,12 @@
 //! The command environment the prompt hands the refresh helper: the shell's
 //! environ entries (`NAME=VALUE\0`, as the shell passed them) in one frame of
 //! magic, body length, CRC32C and body. The prompt writes it with one write
-//! into an empty pipe whose read end the helper gets at [`FD`]; the helper's
-//! envp stays empty, so its dynamic loader never sees these bytes. Neither
-//! side parses the body here, and the helper never derives a location from it.
+//! into an empty Unix stream socket pair whose read end the helper gets at
+//! [`FD`]; the helper's envp stays empty, so its dynamic loader never sees
+//! these bytes. Neither side parses the body here, and the helper never
+//! derives a location from it.
 
-/// The helper descriptor the prompt hands the pipe's read end to.
+/// The helper descriptor the prompt hands the socket's read end to.
 pub const FD: i32 = 4;
 const MAGIC: &[u8; 8] = b"BNGENV01";
 const DOMAIN: &[u8] = b"bingsu-env-frame-v1\0";
