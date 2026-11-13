@@ -877,6 +877,16 @@ def collector_modules(source, worker_path):
     return modules
 
 
+def dependency_search(artifacts):
+    """`-L dependency=<folder>` for every folder cargo put a library in, from
+    its `--message-format=json` artifacts: one `deps/` per profile up to
+    Cargo 1.99, one `build/<package>/<hash>/out/` per unit from 1.100. rustc
+    picks each dependency of an `--extern` library by its recorded hash."""
+    folders = sorted({str(Path(p).parent) for a in artifacts if a.get("reason") == "compiler-artifact"
+                      for p in a.get("filenames", []) if p.endswith((".rlib", ".rmeta", ".so", ".dylib"))})
+    return [arg for folder in folders for arg in ("-L", f"dependency={folder}")]
+
+
 def prepare(binary):
     binary = Path(binary).resolve()
     source = build_context(binary)
@@ -891,6 +901,7 @@ def prepare(binary):
     artifacts = [json.loads(line) for line in run(build, cwd=source, timeout=120).stdout.splitlines()]
     collector_artifact, = [a for a in artifacts if a.get("reason") == "compiler-artifact"
                           and a["target"]["name"] == "bingsu-collect" and a.get("executable")]
+    search = dependency_search(artifacts)
     deps = {}
     for a in artifacts:
         if a.get("reason") == "compiler-artifact":
@@ -967,8 +978,7 @@ def prepare(binary):
     rust.write_text(HARNESS.replace("@MODULES@", "\n".join(modules)).replace("@COLLECTOR@", json.dumps(str(binary.with_name("bingsu-collect"))))
                     .replace("@MARKER@", broker_marker(source)))
     fixture = directory / "collector-product"
-    command = ["rustc", "--edition=2024", "--cfg", "test", "-O", str(rust), "-o", str(fixture),
-               "-L", f"dependency={binary.parent / 'deps'}"]
+    command = ["rustc", "--edition=2024", "--cfg", "test", "-O", str(rust), "-o", str(fixture), *search]
     if profile == "release":
         command += ["-C", "lto=fat", "-C", "embed-bitcode=yes"]
     if triple.endswith(("-linux-musl", "-linux-gnu")):

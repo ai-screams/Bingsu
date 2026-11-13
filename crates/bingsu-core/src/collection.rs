@@ -142,9 +142,10 @@ pub(crate) fn pending(values: &mut crate::shell_values::Collected, mask: u32) {
     let custom = mask & (u32::MAX << field::BUILTIN.len());
     if custom != 0 {
         values.values.resize(32, None);
-        for segment in field::BUILTIN.len()..32 {
+        let custom_slots = values.values.iter_mut().enumerate();
+        for (segment, value) in custom_slots.skip(field::BUILTIN.len()) {
             if custom & (1 << segment) != 0 {
-                values.values[segment] = Some(Value::new(b"?", alloc::vec![Field::PENDING]));
+                *value = Some(Value::new(b"?", alloc::vec![Field::PENDING]));
             }
         }
     }
