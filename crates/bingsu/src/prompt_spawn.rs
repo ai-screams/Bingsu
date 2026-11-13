@@ -1,8 +1,9 @@
 //! Pre-filter TCB: one fixed helper, no PATH lookup, no inherited environment,
 //! no wait. The caller's argv0 is the absolute binary path pinned by init.
 //! The shell's environment reaches the helper only as bytes: one framed
-//! write into a pipe whose read end becomes the helper's fd 4
-//! (`bingsu_core::command::env_frame`); the helper's envp stays empty.
+//! write into a pipe (Linux) or a Unix stream socket pair (macOS) whose read
+//! end becomes the helper's fd 4 (`bingsu_core::command::env_frame`); the
+//! helper's envp stays empty.
 #![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -172,9 +173,20 @@ fn check(rc: i32) -> Result<(), ()> {
 
 const ENV_FD: i32 = bingsu_core::command::env_frame::FD;
 
-/// The read end of a new pipe holding `frame`, its write end already
-/// closed. `None` when no pipe could be made; the helper then starts without
-/// fd 4, which it reads as no environment.
+/// Send buffer of the macOS frame socket: one whole frame
+/// (`env_frame::FRAME_MAX`), which one non-blocking write then takes
+/// (`max_env_frame_fits_one_write`). A macOS pipe cannot promise that room:
+/// the kernel starts every pipe at 512 bytes and grows it only while pipe
+/// kernel memory is under a system-wide cap. A socket buffer draws on socket
+/// memory instead. A system whose limit is lower takes less: the write is
+/// then short, the helper reports the frame cut and runs no command unit,
+/// and the prompt does not wait. Linux keeps the pipe (see `env_frame`).
+#[cfg(target_os = "macos")]
+const SEND_BUFFER: libc::c_int = bingsu_core::command::env_frame::FRAME_MAX as libc::c_int;
+
+/// The read end of a new pipe (a socket pair on macOS) holding `frame`, its
+/// write end already closed. `None` when none could be made; the helper then
+/// starts without fd 4, which it reads as no environment.
 fn env_pipe(frame: Option<&[u8]>) -> Option<i32> {
     let [read, write] = env_pipe_ends()?;
     let _ = write_frame(write, frame);
@@ -183,16 +195,21 @@ fn env_pipe(frame: Option<&[u8]>) -> Option<i32> {
     Some(read)
 }
 
-/// `[read, write]`, the write end non-blocking (on Linux both ends, from pipe2).
+/// `[read, write]`, the write end non-blocking (on Linux both ends, from
+/// pipe2). On macOS a Unix stream socket pair whose write end's send buffer
+/// is set to `SEND_BUFFER`; a refused size is left as the kernel's, so a
+/// frame that does not fit is cut, never waited for. The write end is closed
+/// before the spawn, so the helper's fd 4 has no peer to send to.
 fn env_pipe_ends() -> Option<[i32; 2]> {
     let mut fds = [-1; 2];
     // SAFETY: two writable ints for the new descriptors.
     #[cfg(target_os = "linux")]
     let made = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } == 0;
-    // macOS has no pipe2. Spawn closes every other fd (POSIX_SPAWN_CLOEXEC_DEFAULT).
+    // macOS has no socket flags. Spawn closes every other fd (POSIX_SPAWN_CLOEXEC_DEFAULT).
     // SAFETY: two writable ints for the new descriptors.
     #[cfg(target_os = "macos")]
-    let made = unsafe { libc::pipe(fds.as_mut_ptr()) } == 0;
+    let made =
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) } == 0;
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let made = false;
     if !made {
@@ -200,7 +217,7 @@ fn env_pipe_ends() -> Option<[i32; 2]> {
     }
     #[cfg(target_os = "macos")]
     {
-        // A blocking write could wait on the helper: without the flag, no pipe.
+        // A blocking write could wait on the helper: without the flag, no socket.
         // No test: F_SETFL fails only on an invalid fd, which a test cannot
         // produce here. Kept by user decision (2026-11-04).
         // SAFETY: the write end made above; changes only its status flags.
@@ -211,6 +228,16 @@ fn env_pipe_ends() -> Option<[i32; 2]> {
             unsafe { libc::close(fds[1]) };
             return None;
         }
+        // SAFETY: the write end made above; reads `SEND_BUFFER` for its size.
+        let _ = unsafe {
+            libc::setsockopt(
+                fds[1],
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&SEND_BUFFER as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
     }
     Some(fds)
 }
@@ -273,6 +300,11 @@ mod tests {
     fn frame_of(entries: &[&[u8]]) -> Option<Vec<u8>> {
         bingsu_core::command::env_frame::encode(entries.iter().copied())
     }
+    /// The length of the frame `spawn` hands over: this process's environment.
+    fn env_frame_len() -> i32 {
+        let frame = bingsu_core::command::env_frame::encode(super::environ_entries()).unwrap();
+        i32::try_from(frame.len()).unwrap()
+    }
     use super::*;
     use std::{
         fs,
@@ -333,10 +365,12 @@ mod tests {
         // fds 0-2 and the environment pipe at 4, nothing else.
         assert_eq!(&report[..5], &[4, 0, 0, 1, 1]);
         // The parent's BINGSU_ATTACK reaches the helper only as frame bytes (report[4]: not in envp).
-        // 이것을 실패시키는 것: adddup2를 빼는 것(fd 4가 없어 -1), 쓰기를 빼는 것(0바이트).
-        assert!(
-            report[8] > 16 && report[9] == 1,
-            "frame on fd 4: {report:?}"
+        // 이것을 실패시키는 것: adddup2를 빼는 것(fd 4가 없어 -1), 쓰기를 빼는 것(0바이트), 프레임 일부만
+        // 넘기는 것(macOS에서 소켓을 파이프로 되돌리면 파이프 메모리가 모자란 Mac에서 512바이트만 간다).
+        assert_eq!(
+            (report[8], report[9]),
+            (env_frame_len(), 1),
+            "the whole frame on fd 4: {report:?}"
         );
         // 이것을 실패시키는 것: fd 0–2 중 하나의 addopen을 지우는 것(시험 부모의 stdout·stderr가 남는다).
         assert_eq!(report[7], 3, "fds 0-2 must be the spawn's own /dev/null");
@@ -428,7 +462,7 @@ mod tests {
         limit.rlim_cur = LIMIT as libc::rlim_t;
         // SAFETY: lowers only the soft limit of this child.
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
-        // One free slot: the fd walk (Linux) still opens its folder, a pipe cannot.
+        // One free slot: the fd walk (Linux) still opens its folder, a pipe (macOS: socket pair) cannot.
         assert!(
             super::env_pipe_ends().is_none(),
             "the fixture must make pipe fail"
@@ -500,9 +534,10 @@ mod tests {
         spawn(exe.as_os_str(), &raw).unwrap();
         let report = crate::commands::n3_test::wait_report(&base.join("probe"));
         assert_eq!(&report[..5], &[4, 0, 0, 1, 1], "{report:?}");
-        assert!(
-            report[8] > 16 && report[9] == 1,
-            "frame on fd 4: {report:?}"
+        assert_eq!(
+            (report[8], report[9]),
+            (env_frame_len(), 1),
+            "the whole frame on fd 4: {report:?}"
         );
         fs::remove_dir_all(base).unwrap();
     }
@@ -538,6 +573,37 @@ mod tests {
         use bingsu_core::command::env_frame::{BODY_MAX, FRAME_MAX};
         let max = entry(BODY_MAX);
         let [read, write] = super::env_pipe_ends().unwrap();
+        // macOS: whatever the machine's pipe state, the read end is a socket
+        // and the write end's send buffer takes a whole frame. Linux keeps the
+        // pipe; the write below is its check.
+        // 이것을 실패시키는 것: macOS에서 파이프로 되돌리는 것(S_IFSOCK 아님), 보내기 버퍼를 넓히지 않는 것
+        // (macOS Unix stream 기본값 8 KiB).
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: all-zero storage for the stat fstat writes.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: `read` is open and `st` is writable.
+            assert_eq!(unsafe { libc::fstat(read, &mut st) }, 0);
+            assert_eq!(
+                st.st_mode & libc::S_IFMT,
+                libc::S_IFSOCK,
+                "the read end is a socket"
+            );
+            let mut size: libc::c_int = 0;
+            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: `write` is open; `size` and `len` are writable and sized for an int.
+            let rc = unsafe {
+                libc::getsockopt(
+                    write,
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&mut size as *mut libc::c_int).cast(),
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+            assert!(size as usize >= FRAME_MAX, "send buffer {size}");
+        }
         assert_eq!(
             super::write_frame(write, frame_of(&[max.as_slice()]).as_deref()),
             FRAME_MAX as isize

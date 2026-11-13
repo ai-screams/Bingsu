@@ -592,8 +592,9 @@ pub(crate) enum NoEnv {
     /// environment is over the frame cap.
     Unwritten,
     /// Fewer bytes than the frame declares: the prompt's single write was
-    /// cut, as with a pipe smaller than the frame (pipe-user-pages-soft
-    /// leaves 4 KB pipes, m6-C1a).
+    /// cut, as with a Linux pipe smaller than the frame (a user past
+    /// pipe-user-pages-soft gets two-page, 8 KiB pipes) or a macOS send
+    /// buffer the kernel kept smaller than the frame.
     Cut,
     /// Another magic, a wrong checksum, or more than the cap.
     Damaged,
@@ -603,7 +604,9 @@ impl NoEnv {
         match self {
             Self::Missing => "command environment: none handed over",
             Self::Unwritten => "command environment: not written (over 64 KB)",
-            Self::Cut => "command environment: frame cut short (pipe smaller than the frame)",
+            Self::Cut => {
+                "command environment: frame cut short (pipe or send buffer smaller than the frame)"
+            }
             Self::Damaged => "command environment: frame damaged",
         }
     }

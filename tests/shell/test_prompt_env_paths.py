@@ -2757,9 +2757,12 @@ def front_env_pipe_calls(front, boundary, spawns):
         assert match and pipe.ret == '0', ('front environment pipe creation', pipe)
         reader, inode, writer = match.groups()
         read_fd, write_fd = (f'{fd}<pipe:[{inode}]>' for fd in (reader, writer))
-        channel = [c for c in front if c.name in ('read', 'write', 'close', 'fcntl', 'dup2', 'dup3')
-                   and args_of(c) and args_of(c)[0] in (read_fd, write_fd)]
-        shape = [(c.name, args_of(c)[0]) for c in channel]
+        # Every call that names either end, wherever in its arguments: a poll,
+        # select or splice on the pipe is not in the allowed shape.
+        # 이것을 실패시키는 것: 이름 목록에 든 호출만 보는 것(쓰기 쪽 poll이 끼어도 통과, env-poll-writer).
+        names = re.compile(rf"(?<![0-9])(?:{re.escape(read_fd)}|{re.escape(write_fd)})")
+        channel = [c for c in front if c is not pipe and names.search(c.args)]
+        shape = [(c.name, args_of(c)[0] if args_of(c) else '') for c in channel]
         # Write, write-end close, spawn, read-end close, all before the filter. A retried
         # write is also caught by the primitive count below.
         # 이것을 실패시키는 것: 쓰기 쪽을 생성 뒤에 닫는 것(test_prompt_trace_budget.py의 env-open-writer).

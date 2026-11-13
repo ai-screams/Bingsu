@@ -537,6 +537,44 @@ def test_real_trace_needs_collector_exec_allowance(debian_trace, monkeypatch):
         assert_prompt_trace_budget(debian_trace, DEBIAN_EXE, DEBIAN_ROOTS)
 
 
+# The Linux front hands the environment over a pipe; only macOS uses a socket
+# pair. The front's call table and its network check both refuse these calls,
+# and the error names the inserted ones.
+# 이것을 실패시키는 것: Linux 앞단의 소켓 호출을 허용하는 것(호출 표에 넣고 network 검사에서 빼는 것:
+# macOS 모양의 socketpair·SO_SNDBUF 채널, 파이프에 건 setsockopt, socket·connect가 통과한다).
+@pytest.mark.parametrize("mutation,calls", [
+    ("none", []), ("socket-channel", ["socketpair", "setsockopt"]), ("socketpair", ["socketpair"]),
+    ("setsockopt-on-pipe", ["setsockopt"]), ("socket", ["socket"]), ("connect", ["connect"]),
+])
+def test_linux_front_makes_no_socket_calls(debian_trace, mutation, calls):
+    lines = list(debian_trace)
+    replay_env_pipe(lines, "1947")
+    at = next(i for i, l in enumerate(lines) if l.startswith("1947 pipe2([200<pipe:[909090]>"))
+    if mutation == "socket-channel":
+        lines[at:at + 3] = [
+            "1947 socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0, [200<socket:[909090]>, 201<socket:[909091]>]) = 0",
+            "1947 setsockopt(201<socket:[909091]>, SOL_SOCKET, SO_SNDBUF, [65536], 4) = 0",
+            '1947 write(201<socket:[909091]>, "BNGENV01", 64) = 64',
+            "1947 close(201<socket:[909091]>) = 0",
+        ]
+        close = next(i for i, l in enumerate(lines) if l == "1947 close(200<pipe:[909090]>) = 0")
+        lines[close] = "1947 close(200<socket:[909090]>) = 0"
+    elif mutation == "socketpair":
+        lines.insert(at, "1947 socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0, [202<socket:[808080]>, 203<socket:[808081]>]) = 0")
+    elif mutation == "setsockopt-on-pipe":
+        lines.insert(at + 1, "1947 setsockopt(201<pipe:[909090]>, SOL_SOCKET, SO_SNDBUF, [65536], 4) = -1 ENOTSOCK (Socket operation on non-socket)")
+    elif mutation == "socket":
+        lines.insert(at, "1947 socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0) = 202<socket:[808080]>")
+    elif mutation == "connect":
+        lines.insert(at, '1947 connect(3<socket:[808080]>, {sa_family=AF_UNIX, sun_path="/x"}, 5) = -1 ENOENT (No such file or directory)')
+    if mutation == "none":
+        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
+        return
+    with pytest.raises(AssertionError) as caught:
+        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
+    assert all(f"name='{name}'" in str(caught.value) for name in calls), caught.value
+
+
 def test_real_trace_rejects_followed_missing_ancestor(debian_trace):
     lines = [line.replace("|AT_SYMLINK_NOFOLLOW", "")
              if f'"{DEBIAN_BASE}/cfg-t",' in line and "statx(" in line else line
@@ -3175,7 +3213,7 @@ def test_front_axis_capture_counter(monkeypatch, arch, mutation):
 @pytest.mark.parametrize('mutation', [
     'none', 'extra-read', 'missing-read', 'missing-pipe', 'missing-close',
     'extra-pipe', 'wrong-size', 'non-eof', 'late-pipe',
-    'env-retry', 'env-short', 'env-open-writer', 'env-no-spawn',
+    'env-retry', 'env-short', 'env-open-writer', 'env-no-spawn', 'env-poll-writer',
 ])
 def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     lines, pinned, store, attempts = front_axis_control()
@@ -3234,12 +3272,17 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
         channel.append(writer_close)
     elif mutation == 'env-no-spawn' and not spawn:
         channel = env_before + env_after
+    # 이것을 실패시키는 것: 환경 파이프 검사를 이름 목록의 호출로만 좁히는 것(쓰기 쪽 poll이 빠져나간다).
+    elif mutation == 'env-poll-writer' and spawn:
+        channel.insert(channel.index(env_before[2]),
+                       '1 poll([{fd=201<pipe:[909090]>, events=POLLOUT}], 1, 10) = 1 ([{fd=201<pipe:[909090]>, revents=POLLOUT}])')
     boundary = next(i for i, l in enumerate(lines) if 'PR_SET_SECCOMP' in l)
     lines[boundary + (mutation == 'late-pipe'):boundary + (mutation == 'late-pipe')] = channel
     evidence = {}
-    env_mutation = mutation in ('env-retry', 'env-short', 'env-open-writer') and spawn or mutation == 'env-no-spawn' and not spawn
+    env_mutations = ('env-retry', 'env-short', 'env-open-writer', 'env-poll-writer')
+    env_mutation = mutation in env_mutations and spawn or mutation == 'env-no-spawn' and not spawn
     changed = (mutation in ('extra-read', 'extra-pipe') or env_mutation
-               or libc == 'musl' and spawn and mutation not in ('none', 'env-retry', 'env-short', 'env-open-writer', 'env-no-spawn')
+               or libc == 'musl' and spawn and mutation not in ('none', 'env-no-spawn', *env_mutations)
                or mutation == 'late-pipe' and spawn)
     if changed:
         with pytest.raises(AssertionError):
