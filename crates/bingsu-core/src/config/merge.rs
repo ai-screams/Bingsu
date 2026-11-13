@@ -12,6 +12,7 @@ use crate::config::source::{LoadReport, Trust};
 use crate::config::tree::{Node, Span, Table, Value};
 use crate::diag::{Diagnostic, Place, SourceId};
 use crate::diag_codes as codes;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -100,9 +101,50 @@ struct Ctx<'a> {
     via: &'a [SourceId],
     slot: &'a dyn Fn(&[&str]) -> Slot,
     warnings: Vec<Diagnostic>,
+    /// `INDEX_FROM`, or another size in tests.
+    index_from: usize,
 }
 
-fn convert(n: &Node, path: &mut Vec<String>, cx: &mut Ctx<'_>) -> MValue {
+/// A merged table with more entries than this finds keys through an index
+/// instead of a scan, so a source with many keys merges in n log n, not n².
+/// Where the two cost the same: merging two sources that share one table of
+/// n keys took, per merge, 9.9 µs scanned and 10.2 µs indexed at n = 16,
+/// 15.2 and 15.1 µs at 24, 19.6 and 19.3 µs at 32 (release, one Mac). A
+/// hand-written config's tables hold far fewer keys and keep the scan.
+const INDEX_FROM: usize = 24;
+
+/// Finding an entry of one merged table by key: a scan while the table is
+/// small, an index (key to position) once it has more than `from` entries,
+/// built the first time it is that large. A key added while one source table
+/// is merged is never looked up again in that merge (a source table's keys
+/// are unique), so the index need not follow additions; the next source
+/// builds its own. The entries keep their order; the index only points into
+/// them.
+struct Keys {
+    index: Option<BTreeMap<String, usize>>,
+}
+
+impl Keys {
+    fn find(&mut self, entries: &[MEntry], key: &str, from: usize) -> Option<usize> {
+        // 이것을 실패시키는 것: 색인을 만들지 않는 것(큰 표에서 키마다 전체를 훑음), 지금 크기가 아닌 시작
+        // 크기로 판단하는 것(빈 표에 큰 첫 파일이 들어올 때 색인이 없음).
+        if self.index.is_none() && entries.len() > from {
+            self.index = Some(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| (e.key.clone(), i))
+                    .collect(),
+            );
+        }
+        match &self.index {
+            Some(index) => index.get(key).copied(),
+            None => entries.iter().position(|m| m.key == key),
+        }
+    }
+}
+
+fn convert<'a>(n: &'a Node, path: &mut Vec<&'a str>, cx: &mut Ctx<'_>) -> MValue {
     match &n.value {
         Value::Array(items) => MValue::Array(items.clone()),
         Value::Table(t) => {
@@ -114,14 +156,14 @@ fn convert(n: &Node, path: &mut Vec<String>, cx: &mut Ctx<'_>) -> MValue {
     }
 }
 
-fn dropped(key: &str, path: &[String], n: &Node, cx: &mut Ctx<'_>) {
+fn dropped(key: &str, path: &[&str], n: &Node, cx: &mut Ctx<'_>) {
     let at = Place::Source {
         id: cx.source,
         span: n.span,
     };
     let is_env = key == "kind" && n.value == Value::Str(String::from("env"));
     let mut d = if is_env {
-        let id = path.get(1).cloned().unwrap_or_default();
+        let id = path.get(1).map(|s| String::from(*s)).unwrap_or_default();
         Diagnostic::new(codes::ENV_SEGMENT_IGNORED, at).arg("id", id)
     } else {
         Diagnostic::new(codes::EXEC_KEY_IGNORED, at).arg("key", path.join("."))
@@ -130,17 +172,19 @@ fn dropped(key: &str, path: &[String], n: &Node, cx: &mut Ctx<'_>) {
     cx.warnings.push(d);
 }
 
-fn merge_table(into: &mut MTable, from: &Table, path: &mut Vec<String>, cx: &mut Ctx<'_>) {
+/// `path` borrows the keys of the source being merged, so walking it copies
+/// no key; a key is copied only into a new entry.
+fn merge_table<'a>(into: &mut MTable, from: &'a Table, path: &mut Vec<&'a str>, cx: &mut Ctx<'_>) {
+    let mut keys = Keys { index: None };
     for e in &from.entries {
-        path.push(e.key.clone());
-        let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+        path.push(&e.key);
         let is_table = matches!(e.node.value, Value::Table(_));
         // From a shape-only file a value must have the shape its row has: a
         // table only where the row is a table (its keys are then checked one
         // by one), anything else only where the row is a shape key. So a
         // shape-only file cannot set an execution key, nor put a table or a
         // number where one is (`enabled = {}`, `segment."custom/k" = 1`).
-        let fits = match (cx.slot)(&segs) {
+        let fits = match (cx.slot)(path) {
             Slot::Table => is_table,
             Slot::Shape => !is_table,
             Slot::Exec => false,
@@ -156,10 +200,8 @@ fn merge_table(into: &mut MTable, from: &Table, path: &mut Vec<String>, cx: &mut
             span: e.node.span,
             trust: cx.trust,
         };
-        match (
-            into.entries.iter_mut().find(|m| m.key == e.key),
-            &e.node.value,
-        ) {
+        let at = keys.find(&into.entries, &e.key, cx.index_from);
+        match (at.map(|i| &mut into.entries[i]), &e.node.value) {
             (Some(m), Value::Table(t)) if matches!(m.node.value, MValue::Table(_)) => {
                 if let MValue::Table(mt) = &mut m.node.value {
                     merge_table(mt, t, path, cx);
@@ -184,6 +226,15 @@ fn merge_table(into: &mut MTable, from: &Table, path: &mut Vec<String>, cx: &mut
 /// Merges the applied sources in apply order, leaving out `skip` (the
 /// shape-only files a later check dropped).
 pub fn merge(report: &LoadReport, skip: &[SourceId], slot: &dyn Fn(&[&str]) -> Slot) -> Merged {
+    merge_with(report, skip, slot, INDEX_FROM)
+}
+
+fn merge_with(
+    report: &LoadReport,
+    skip: &[SourceId],
+    slot: &dyn Fn(&[&str]) -> Slot,
+    index_from: usize,
+) -> Merged {
     let mut out = Merged::default();
     for id in report.order.iter().filter(|id| !skip.contains(id)) {
         let Some(s) = report.get(*id) else { continue };
@@ -193,6 +244,7 @@ pub fn merge(report: &LoadReport, skip: &[SourceId], slot: &dyn Fn(&[&str]) -> S
             via: &s.via,
             slot,
             warnings: Vec::new(),
+            index_from,
         };
         merge_table(&mut out.root, &s.tree, &mut Vec::new(), &mut cx);
         out.warnings.append(&mut cx.warnings);
@@ -507,5 +559,119 @@ mod tests {
         );
         assert_eq!(m.warnings.len(), 3);
         assert!(m.warnings.iter().all(|d| d.code == codes::EXEC_KEY_IGNORED));
+    }
+
+    /// A small pseudo-random source of sizes and choices (wrapping: tests run
+    /// in release too).
+    struct Lcg(u64);
+    impl Lcg {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) % n
+        }
+    }
+
+    /// An inline TOML table of up to `width` keys from a pool of 40 names,
+    /// so merged tables cross `INDEX_FROM` and sources share keys.
+    fn table(r: &mut Lcg, depth: u32, width: u64) -> String {
+        let mut used = alloc::collections::BTreeSet::new();
+        let mut parts = Vec::new();
+        for _ in 0..r.below(width + 1) {
+            let k = r.below(40);
+            if !used.insert(k) {
+                continue;
+            }
+            let v = match r.below(if depth < 3 { 5 } else { 4 }) {
+                0 => alloc::format!("{}", r.below(9)),
+                1 => alloc::format!("\"s{}\"", r.below(9)),
+                2 => alloc::format!("[{}]", r.below(9)),
+                3 => String::from("[]"),
+                _ => table(r, depth + 1, width),
+            };
+            parts.push(alloc::format!("k{k} = {v}"));
+        }
+        alloc::format!("{{ {} }}", parts.join(", "))
+    }
+
+    // 색인으로 찾든 훑어서 찾든 합친 결과는 같다: 항목 순서, 값, 출처, 경고. 이것을 실패시키는 것: 색인이 틀린
+    // 자리를 가리키는 것(새 키를 넣고 색인을 고치지 않거나 다른 위치를 넣음), 색인을 쓰는 표에서 순서를 바꾸는 것.
+    #[test]
+    fn an_index_merges_like_a_scan() {
+        let mut r = Lcg(7);
+        for case in 0..300 {
+            let names = ["root", "a", "shape-b", "unsafe-c"];
+            let mut list: Vec<(&'static str, String)> = Vec::new();
+            let mut root = String::from("extends = [\"a\", \"shape-b\", \"unsafe-c\"]\n");
+            for (i, name) in names.iter().enumerate() {
+                let body = alloc::format!(
+                    "top = {}\nsegment = {}\n",
+                    table(&mut r, 1, 30),
+                    table(&mut r, 1, 30)
+                );
+                if i == 0 {
+                    root.push_str(&body);
+                } else {
+                    list.push((name, body));
+                }
+            }
+            let pairs: Vec<(&'static str, &str)> =
+                list.iter().map(|(n, b)| (*n, b.as_str())).collect();
+            let mut f = files(&pairs);
+            let g = load(vec![opened("root", &root, 1)], &mut f, [0, 3, 0]).unwrap();
+            let indexed = merge_with(&g, &[], &slot, 0);
+            let scanned = merge_with(&g, &[], &slot, usize::MAX);
+            assert_eq!(indexed.root, scanned.root, "case {case}");
+            assert_eq!(indexed.warnings, scanned.warnings, "case {case}");
+            assert_eq!(merge(&g, &[], &slot).root, scanned.root, "case {case}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 색인을 만들지 않는 것(성능만 달라지는 변이), 문턱을 넘기 전에 만드는 것, 지금 크기가
+    // 아닌 처음 크기로 판단하는 것(합치는 동안 문턱을 넘는 표에 색인이 없음).
+    #[test]
+    fn the_index_starts_once_the_table_is_past_the_threshold() {
+        let entry = |k: &str| MEntry {
+            key: String::from(k),
+            node: MNode {
+                value: MValue::Scalar(Value::Int(0)),
+                origin: Origin {
+                    source: SourceId(0),
+                    key_span: Span::default(),
+                    span: Span::default(),
+                    trust: Trust::Executable,
+                },
+            },
+        };
+        let mut entries: Vec<MEntry> = (0..INDEX_FROM)
+            .map(|i| entry(&alloc::format!("k{i}")))
+            .collect();
+        let mut keys = Keys { index: None };
+        assert_eq!(keys.find(&entries, "k3", INDEX_FROM), Some(3));
+        assert!(keys.index.is_none(), "an index at {INDEX_FROM} entries");
+        // The table grows past the threshold while it is merged.
+        entries.push(entry("last"));
+        assert_eq!(keys.find(&entries, "last", INDEX_FROM), Some(INDEX_FROM));
+        assert!(keys.index.is_some(), "no index past {INDEX_FROM} entries");
+        assert_eq!(keys.find(&entries, "k0", INDEX_FROM), Some(0));
+        assert_eq!(keys.find(&entries, "absent", INDEX_FROM), None);
+    }
+
+    // 버린 env 세그먼트의 경고는 그 세그먼트의 id를 단다. 이것을 실패시키는 것: 경로의 다른 칸(예: `segment`)을
+    // id로 쓰는 것.
+    #[test]
+    fn a_dropped_env_segment_is_named_by_its_id() {
+        let m = merged(
+            "extends = [\"shape-team\"]\n",
+            &[(
+                "shape-team",
+                "[segment.\"custom/secret\"]\nkind = \"env\"\n",
+            )],
+        );
+        let d = &m.warnings[0];
+        assert_eq!(d.code, codes::ENV_SEGMENT_IGNORED);
+        assert_eq!(d.args[0].value, "custom/secret");
     }
 }
