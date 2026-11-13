@@ -86,6 +86,9 @@ pub(crate) struct SupervisionReport {
     pub unconfined_reads: u32,
     #[cfg(test)]
     pub unconfined_decodes: u32,
+    /// Waits of the exchange loop: polls and stall sleeps.
+    #[cfg(test)]
+    pub waits: u32,
 }
 
 impl SupervisionReport {
@@ -291,6 +294,8 @@ impl CollectorJob {
             unconfined_reads: 0,
             #[cfg(test)]
             unconfined_decodes: 0,
+            #[cfg(test)]
+            waits: 0,
         };
         let result = Transcript::with_catalog(&self.request, self.catalog);
         if let Ok(mut transcript) = result {
@@ -423,6 +428,17 @@ impl CollectorJob {
         let mut sent = 0;
         let mut ready = false;
         let mut complete = false;
+        // macOS reports a full pipe smaller than 16 KiB as writable (XNU
+        // counts at least 16 KiB of room for POLLOUT) while every write finds
+        // none: a pipe stays that small when the kernel is short of pipe
+        // memory. After a poll said the request pipe had room and the write
+        // still took nothing, the loop sleeps instead of polling, from 50 us
+        // doubling to 1 ms, until a write takes bytes again: no spin to the
+        // deadline, and a 512-byte pipe still takes a large request in time
+        // (the collector reads it as it comes). A pipe whose POLLOUT is exact
+        // never gets here.
+        let mut stall = Duration::ZERO;
+        let mut room_said = false;
         loop {
             let Ok(now) = now_ns() else {
                 return EndReason::Resource;
@@ -438,6 +454,7 @@ impl CollectorJob {
                     Ok(0) => return EndReason::WorkerExit,
                     Ok(n) => {
                         sent += n;
+                        stall = Duration::ZERO;
                         if sent == outgoing.len() {
                             if transcript.request_sent().is_err() {
                                 return EndReason::Protocol;
@@ -445,11 +462,10 @@ impl CollectorJob {
                             report.lifecycle.request_sent = now_ns().ok();
                         }
                     }
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                        ) => {}
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        stall = grow_stall(stall, room_said);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(_) => return EndReason::WorkerExit,
                 }
                 if now_ns().map_or(true, |now| now >= deadline) {
@@ -593,6 +609,14 @@ impl CollectorJob {
             if now >= deadline {
                 return EndReason::Deadline;
             }
+            if !stall.is_zero() && sent < outgoing.len() {
+                #[cfg(test)]
+                {
+                    report.waits += 1;
+                }
+                std::thread::sleep(stall.min(Duration::from_nanos(deadline - now)));
+                continue;
+            }
             let mut fds = [
                 libc::pollfd {
                     fd: self.input.as_raw_fd(),
@@ -612,6 +636,11 @@ impl CollectorJob {
             let timeout = (deadline.saturating_sub(now).div_ceil(1_000_000)).min(2) as i32;
             // SAFETY: two initialized pollfd records and bounded nonnegative timeout.
             let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+            #[cfg(test)]
+            {
+                report.waits += 1;
+            }
+            room_said = said_room(rc, &fds[1]);
             if rc < 0 {
                 if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
                     return EndReason::Resource;
@@ -620,6 +649,27 @@ impl CollectorJob {
                 POLL_INTERRUPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
+    }
+}
+
+/// The first and the longest sleep after a write found no room that `poll`
+/// had reported.
+const STALL_FIRST: Duration = Duration::from_micros(50);
+const STALL_MAX: Duration = Duration::from_millis(1);
+
+/// Whether a poll that returned `rc` said the pipe `pfd` had room.
+fn said_room(rc: i32, pfd: &libc::pollfd) -> bool {
+    rc > 0 && pfd.fd >= 0 && pfd.revents & libc::POLLOUT != 0
+}
+
+/// The sleep after a write that took nothing: it starts and grows only when
+/// `poll` had said there was room (a pipe whose POLLOUT is not exact), so an
+/// exact pipe keeps waiting in `poll`.
+fn grow_stall(stall: Duration, room_said: bool) -> Duration {
+    if room_said {
+        (stall * 2).clamp(STALL_FIRST, STALL_MAX)
+    } else {
+        stall
     }
 }
 
@@ -744,6 +794,8 @@ impl SupervisorHandle {
                 unconfined_reads: 0,
                 #[cfg(test)]
                 unconfined_decodes: 0,
+                #[cfg(test)]
+                waits: 0,
             })
     }
 }
@@ -772,6 +824,49 @@ mod tests {
             assert_eq!(deadlines(started, helper), (ready, life));
         }
         assert_eq!(request_budget(2_000_000_000, 1_999_500_000, 50), 0);
+    }
+
+    // 이것을 실패시키는 것: poll이 쓰기 가능이라 하지 않았는데도 쉬는 것(정확한 파이프에서 poll 대신 잠으로
+    // 기다려 늦어짐), 처음 쉬는 시간을 50 µs가 아니게 하는 것, 두 배씩 늘리지 않는 것, 1 ms를 넘기는 것.
+    #[test]
+    fn a_stall_grows_only_after_poll_said_there_was_room() {
+        let us = Duration::from_micros;
+        assert_eq!(grow_stall(Duration::ZERO, false), Duration::ZERO);
+        assert_eq!(grow_stall(us(400), false), us(400));
+        let mut stall = Duration::ZERO;
+        let mut seen = Vec::new();
+        for _ in 0..7 {
+            stall = grow_stall(stall, true);
+            seen.push(stall);
+        }
+        assert_eq!(
+            seen,
+            [
+                us(50),
+                us(100),
+                us(200),
+                us(400),
+                us(800),
+                us(1_000),
+                us(1_000)
+            ]
+        );
+    }
+
+    // 이것을 실패시키는 것: poll이 실패했거나(rc ≤ 0) 요청 파이프를 넣지 않은 poll(fd -1)의 revents를 쓰기
+    // 가능으로 읽는 것, POLLOUT 아닌 비트를 쓰기 가능으로 읽는 것.
+    #[test]
+    fn room_is_said_only_by_a_poll_that_watched_the_pipe() {
+        let pfd = |fd, revents| libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents,
+        };
+        assert!(said_room(1, &pfd(5, libc::POLLOUT)));
+        assert!(!said_room(0, &pfd(5, libc::POLLOUT)));
+        assert!(!said_room(-1, &pfd(5, libc::POLLOUT)));
+        assert!(!said_room(1, &pfd(-1, libc::POLLOUT)));
+        assert!(!said_room(1, &pfd(5, libc::POLLHUP)));
     }
 
     // 이것을 실패시키는 것: 남은 밀리초를 올림하거나 50ms/호출자 예산 상한을 없애는 것.
