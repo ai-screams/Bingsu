@@ -683,6 +683,44 @@ mod tests {
         }
     }
 
+    // macOS의 collector는 정확히 {0,1,2,3,5}를 받는다: 0·2는 /dev/null, 1은 응답 파이프, 3은 요청 파이프, 5는
+    // lock(여기서는 /dev/null 파일). 도우미가 close-on-exec 없이 쥔 fd 60은 넘어가지 않는다. 이것을 실패시키는 것:
+    // spawn_args_with_probe의 POSIX_SPAWN_CLOEXEC_DEFAULT를 빼는 것(fd 60이 넘어감), lock 이동(fd 5)을 빼는 것,
+    // 응답과 lock의 번호를 맞바꾸는 것(1이 파일, 5가 파이프).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn spawn_gives_only_the_fixed_slots_on_macos() {
+        use crate::commands::sys::{test_fd_table, test_inheritable_fd};
+        let _guard = crate::commands::sys::test_inherited_fd_lock();
+        let decoy = test_inheritable_fd(60);
+        let (request, _request_write) = pipe().unwrap();
+        let (_response_read, response) = pipe().unwrap();
+        let lock = File::open("/dev/null").unwrap();
+        let mut child = spawn_args(
+            OsStr::new("/bin/sleep"),
+            &[OsStr::new("5")],
+            &request,
+            &response,
+            &lock,
+            u64::MAX,
+        )
+        .unwrap();
+        let seen = test_fd_table(child.pid);
+        let _ = child.signal(libc::SIGKILL);
+        while !child.reap().unwrap() {}
+        drop(decoy);
+        assert_eq!(
+            seen,
+            [
+                (0, "vnode"),
+                (1, "pipe"),
+                (2, "vnode"),
+                (3, "pipe"),
+                (5, "vnode")
+            ]
+        );
+    }
+
     // 이것을 실패시키는 것: Linux 생성의 addclose(fd 4와 fd 6 이상)를 지우는 것. 도우미가 CLOEXEC 없이
     // 쥔 fd가 자식에 남는다.
     #[cfg(target_os = "linux")]
