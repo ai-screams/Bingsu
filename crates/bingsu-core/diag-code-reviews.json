@@ -22,5 +22,11 @@
     "after": "dc73729b5f611de72093fe88975e9aeadb9228ef36ace3806483291327891bac",
     "kind": "meaning",
     "reason": "N502 is deprecated, not reused: it said a declared user segment of a kind the prompt does not draw yet would show after an upgrade. Language segments are now drawn, so every kind a segment can declare (text, command, env, language) is drawn and the condition can no longer arise; the compile step that emitted it is removed. Its number, severity and texts stay so an old report still reads. No other code changes, and no new code takes its place."
+  },
+  {
+    "before": "dc73729b5f611de72093fe88975e9aeadb9228ef36ace3806483291327891bac",
+    "after": "72b99a3e645916f7f7e4afdca18e1bd448a54f7e6960b8efa2cc2c8070781d8a",
+    "kind": "meaning",
+    "reason": "Adds the findings of `bingsu doctor`: W601 (a folder on the way to the executable can be changed by another user), W602 (the bingsu on PATH is not the running one), W603 (no folders pinned in this shell), E604 (a pinned folder is not the same now), W605 (the collector or prompt executable beside bingsu is missing or from another build), W606 (the kernel has no seccomp) and E607 (the settings have an error). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
   }
 ]
