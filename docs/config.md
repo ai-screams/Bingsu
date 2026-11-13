@@ -261,6 +261,18 @@ enabled = false
 `bingsu config check --explain` shows each file as "trusted" or "colors and layout only", and for each command
 segment, whether it runs and which file each key came from.
 
+### Asking for a bingsu version: `requires`
+
+A config can say which bingsu it needs with a top-level `requires`, for example `requires = ">=0.2"`. The only form
+accepted is `>=MAJOR.MINOR` or `>=MAJOR.MINOR.PATCH`. When the running bingsu is older, the file is not read and
+`bingsu config check` reports E306 with the version asked for; the prompt keeps drawing with the last good settings.
+
+The running version is compared as SemVer says: a pre-release is lower than the release with the same numbers. So
+`0.1.0-rc.1` does not satisfy `requires = ">=0.1.0"` (or `">=0.1"`), while `0.1.1-rc.1` does satisfy `">=0.1.0"`, and
+`0.1.0` itself satisfies both.
+
+<!-- G2-PENDING #310: paste the real `bingsu config check` output of `requires = ">=0.1.0"` on 0.1.0-rc.1 once #310 is merged -->
+
 ## How commands run
 
 The refresh helper starts with each prompt (not with a redraw, such as after a terminal resize) and runs commands,
