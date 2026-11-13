@@ -26,17 +26,8 @@ left = ["dir", "git", "custom/kube", "custom/aws", "custom/tag"]
 and language segment, whether it runs, why not, and where each key came from. Editors that read JSON Schema complete
 the keys from `bingsu config schema`.
 
-`bingsu list` prints the names a config accepts, one per line: `presets`, `segments`, `flavors`, `roles`, `shorteners`
-and `icons`. `bingsu list presets --preview` draws each preset once with your current folder (the other values are
-samples; on a terminal it uses color unless `NO_COLOR` is set; `--icons nerd|light|unicode|ascii` picks the icon set,
-`unicode` by default). It starts no command and reads no config.
-
-`bingsu setup` makes a first settings file from two questions: whether you can see Nerd Font symbols, and the color
-mode (it asks the terminal for its background color and shows what it found). It writes
-`$XDG_CONFIG_HOME/bingsu/config.toml` (folder 0700, file 0600) only when there is no such file; when there is, it
-changes nothing and lists the differences from its suggestion. It does not edit your shell startup file: it prints the
-line to add. Without a terminal it asks nothing and needs `--yes --icons nerd|unicode --mode auto|dark|light`; on a
-terminal, `--icons` and `--mode` answer their question in advance and `--yes` skips the final confirmation.
+For the commands that help write and check a config (`setup`, `list`, `explain`, `doctor`, `help`), see
+[Commands that help with a config](#commands-that-help-with-a-config) below.
 
 Writing a command segment for other people to use? See
 [Writing a command segment for others](writing-command-segments.md).
@@ -268,6 +259,150 @@ again: the next round applies the new pattern to the stored line, or shows the w
 `cache` of 0, or once it has passed, the command runs again as usual. Right after the edit the prompt can still show
 the old value until that round publishes the new one; it never shows a value picked by a pattern other than the one in
 the config it reads.
+
+## Commands that help with a config
+
+### First settings: `bingsu setup`
+
+`bingsu setup` makes a first settings file from two questions: whether you can see Nerd Font symbols, and the color
+mode (it asks the terminal for its background color and shows what it found). It writes
+`$XDG_CONFIG_HOME/bingsu/config.toml` (folder 0700, file 0600) only when there is no such file. Answering "no" to the
+symbols question writes `icons = "unicode"` and `preset = "lean"`. The file starts with a `#:schema` line, so editors
+that read JSON Schema complete the keys, and every line has a comment.
+
+When the file is there, `setup` changes nothing and lists how it differs from what it would have written. It does not
+edit your shell startup file: it prints the line to add.
+
+```console
+$ bingsu setup --yes --icons unicode --mode light
+bingsu: ~/.config/bingsu/config.toml is already there, so nothing was written.
+It differs from your choices here:
+  icons: "nerd" now, "unicode" suggested
+  style.preset: "triangle" now, "lean" suggested
+  colors.mode: "dark" now, "light" suggested
+Edit it yourself to change them; `bingsu config check` checks the result.
+Add this to your shell's startup file to start bingsu:
+eval "$(bingsu init zsh)"
+```
+
+Without a terminal it asks nothing and needs `--yes --icons nerd|unicode --mode auto|dark|light`. On a terminal,
+`--icons` and `--mode` answer their question in advance and `--yes` skips the final confirmation.
+
+### Names: `bingsu list`
+
+`bingsu list KIND` prints the names a config accepts, one row per line with the columns split by a tab. It reads the same tables the
+config checker and the renderer read, so a name it prints is a name the config accepts.
+
+| `KIND` | Columns |
+| -- | -- |
+| `presets` | The seven style presets: `lean`, `triangle`, `pill`, `slant`, `diamond`, `block`, `bracket` |
+| `segments` | A built-in segment and the color role it draws with |
+| `flavors` | The color flavors |
+| `roles` | A color role and the palette colors it points to in dark and in light mode |
+| `shorteners` | The ways `segment.dir.shorten` can shorten a path |
+| `icons` | An icon name and its glyph in the `nerd`, `light`, `unicode` and `ascii` sets |
+
+`bingsu list presets --preview` draws every preset once as the upper line of the default layout, with your current
+folder; the other values (a branch, a duration, the time) are samples. On a terminal it uses color unless `NO_COLOR` is
+set, and `--icons nerd|light|unicode|ascii` picks the icon set (`unicode` by default). The width is `$COLUMNS`, or 80,
+and never narrower than 60. It starts no command, reads no config and writes nothing.
+
+```console
+$ bingsu list presets --preview --icons unicode
+lean     ~/projects/api main                                         2.3s 12:34
+triangle  ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
+pill     ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
+slant     ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
+diamond  ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
+block      ~/projects/api     main                             2.3s     12:34  
+bracket  [~/projects/api] [main]                                 [2.3s] [12:34]
+```
+
+### Why a segment is hidden: `bingsu explain`
+
+`bingsu explain [SEGMENT] [--width N] [--config FILE] [--format json|text]` says what the layout decides at one
+width, in words: which layout band applies, which overflow steps were taken, which segments are hidden and why, and
+which are shortened. It decides with the same code the prompt uses, so the report is what the prompt does with the
+same settings and values. Give a segment name to look at one segment; for a command or language segment it also says
+whether the unit would run and why not (the same words as `config check --explain`).
+
+`explain` runs nothing: no command, no collector, no helper, and nothing is written or published. Values a collector
+or a command would bring are not there, so those segments show as `no-value`; read the result as "what the layout does
+with the values a prompt has".
+
+```console
+$ bingsu explain --width 30
+settings: the ones `bingsu config path` lists
+basis: nothing is published yet, so this is what your files give; the next prompt publishes them
+width: 30 cells
+layout: band `narrow`
+line 1:
+  overflow step 1: shortened names
+  hidden: git [no-value] (the segment sent no value)
+  hidden: host [no-value] (the segment sent no value)
+  shortened: dir with abbrev 1
+line 2:
+  hidden: duration [no-value] (the segment sent no value)
+explain runs no command and collects no git or folder facts; a segment that needs them shows as no-value.
+```
+
+`--config FILE` reads that one file in place of your settings, as a config that cannot run anything: a file that uses
+`extends` is refused, since it would read other files. This is the way to try a config someone sent you.
+
+`--format json` prints the same facts as one JSON document with fixed field names (`bingsu` ships its JSON Schema in
+`crates/bingsu-core/schema/diag-output-v1.json`). `bingsu config check --format json` uses the same document form for
+diagnostics. Values of environment variables do not appear in either output.
+
+### Problems with the installation: `bingsu doctor` and `bingsu help`
+
+`bingsu doctor` checks the installation and the shell setup, one row per check. It only reads: it runs no other
+executable, writes nothing and starts no process. Each row has a status (`ok`, `warn`, `fail`, `unknown`, `skipped`), one
+line, and, when there is something to do, a diagnostic code that `bingsu help CODE` explains.
+
+```console
+$ bingsu doctor
+bingsu doctor
+  ok      executable      ~/.local/bin/bingsu: only you and root can change it or the folders above it
+  ok      bingsu on PATH  ~/.local/bin/bingsu: the bingsu on PATH is this executable
+  warn    pinned folders  init has not run in this shell; commands read the current environment (W603; bingsu help W603)
+  ok      one build       bingsu-prompt is not installed here; the hook calls `bingsu prompt`; bingsu-collect is from this build
+  unknown shell           shell version not confirmed: no shell passed it to this command
+  skipped seccomp         this platform has no seccomp
+  ok      settings        the settings check out (0 warning(s))
+result: 4 ok, 1 warning(s), 0 failed, 1 unknown, 1 skipped
+```
+
+| Check | What it looks at |
+| -- | -- |
+| `executable` | The path bingsu runs from, every link on the way and every folder above it: only you and root (or a group with no other member) may change them |
+| `bingsu on PATH` | Whether the `bingsu` your shell finds on `PATH` is the one running now |
+| `pinned folders` | The runtime, settings, state and log folders `bingsu init` pinned in this shell: changed, removed or replaced folders |
+| `one build` | That `bingsu`, `bingsu-prompt` and `bingsu-collect` come from the same build (read from the files, not by running them) |
+| `shell` | The shell version, when a shell passes it (`unknown` otherwise; bingsu never guesses a version from a path) |
+| `seccomp` | Whether the kernel can install the prompt's system call filter (Linux; the example above is from macOS) |
+| `settings` | A summary of `config check`; a settings folder that fails the safety check is a `fail` |
+
+The exit code is 1 when any check fails; warnings, `unknown` and `skipped` give 0. `--format json` prints the same
+rows as a JSON document. The shell evidence a hook can give (hook order, the envelope a hook sent, the circuit
+breaker) is not part of this table yet.
+
+`bingsu help CODE` explains a diagnostic code that `config check`, `explain` or `doctor` printed, in three parts: what
+happened, why, and how to fix it. It does not read your settings. A code it does not know ends with exit code 2.
+
+```console
+$ bingsu help E201
+E201 (error)
+
+What happened
+  A key in the file is not a bingsu key.
+
+Why
+  Unknown keys are errors, so a typo such as `colr` never passes silently and leaves you wondering why nothing changed.
+
+How to fix
+  Check the spelling against `bingsu config schema`. When a close key exists, the message suggests it.
+  A key inside a user segment is written as `segment.<id>.command`, `segment.<id>.text` and so on.
+```
 
 ## Current limits
 
