@@ -1261,3 +1261,38 @@ fn peek_distrusts_another_clock_and_an_unsafe_folder() {
     symlink(&moved, &dir).unwrap();
     assert!(store::peek(&f.runtime, SESSION, b"/repo", clock(5)).is_err());
 }
+
+// Every folder on the way, the control folder and `sessions` included, and the record itself must pass the helper's
+// checks: a damaged, group-readable or hard-linked record is an error, never "no record".
+// 이것을 실패시키는 것: control·sessions 단계의 `check_directory`를 빼는 것, 기록 읽기 오류(손상, 0644, 하드 링크)를 기록 없음으로 매기는 것.
+#[test]
+fn peek_refuses_an_unsafe_way_and_an_unsafe_record() {
+    let f = Fixture::new();
+    f.trip();
+    let ok = || store::peek(&f.runtime, SESSION, b"/repo", clock(5));
+    assert_eq!(ok().unwrap(), store::Peek::Blocked);
+    for dir in [
+        f.root.join(store::ROOT),
+        f.root.join(store::ROOT).join("sessions"),
+    ] {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ok().is_err(), "{}", dir.display());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(ok().unwrap(), store::Peek::Blocked);
+    }
+    let record = f.dir().join(store::RECORD);
+    let good = fs::read(&record).unwrap();
+    fs::write(&record, b"not a breaker record").unwrap();
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(ok().is_err(), "a damaged record");
+    fs::write(&record, &good).unwrap();
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(ok().is_err(), "a record others can read");
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(ok().unwrap(), store::Peek::Blocked);
+    let twin = f.dir().join("twin");
+    fs::hard_link(&record, &twin).unwrap();
+    assert!(ok().is_err(), "a record with another name");
+    fs::remove_file(&twin).unwrap();
+    assert_eq!(ok().unwrap(), store::Peek::Blocked);
+}

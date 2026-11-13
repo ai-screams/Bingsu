@@ -542,26 +542,75 @@ fn judge_breaker(read: Result<Peek, ()>) -> Finding {
     }
 }
 
+/// A breaker row that cannot be confirmed, with the reason.
+fn breaker_unknown(why: &str) -> Finding {
+    finding(
+        Status::Unknown,
+        format!("the collection breaker is not confirmed: {why}"),
+        None,
+    )
+}
+
+/// The folder key the prompt used: the shell's `PWD`, as the prompt's own
+/// envelope rule takes it (an absolute path of a bounded length). The string is
+/// the key as it is: the helper keys the breaker by the `$PWD` the shell passed,
+/// and the folder is never looked at here, since a stopped mount is exactly
+/// when the breaker is on and a look at it would stop this command too.
+fn shell_pwd(pwd: Option<&OsStr>) -> Result<Vec<u8>, &'static str> {
+    let Some(pwd) = pwd else {
+        return Err(
+            "the shell does not export PWD to its commands, so the folder the prompt used is not known",
+        );
+    };
+    // `--width` is a required word of the envelope; its value does not matter here.
+    let argv: [&[u8]; 8] = [
+        b"--ctx",
+        b"1",
+        b"--record",
+        b"B1",
+        b"--width",
+        b"80",
+        b"--pwd",
+        pwd.as_bytes(),
+    ];
+    match bingsu_core::envelope::parse(&argv) {
+        Ok(e) => e.pwd.ok_or(
+            "PWD is not an absolute path the prompt accepts, so the folder it used is not known",
+        ),
+        Err(_) => Err("PWD could not be read as the prompt reads it"),
+    }
+}
+
 fn run_breaker(c: &Ctx) -> Finding {
     let session = match doctor_evidence::session_of(&c.evidence) {
         Ok(s) => s,
         Err(f) => return f,
     };
-    let unread = || judge_breaker(Err(()));
-    let Some(place) = super::config_inspect::place_of(&c.user, &c.env) else {
-        return unread();
+    // The runtime folder is the one init pinned in this shell and nothing else:
+    // a pin that no longer holds (the folder was made again) must not let the
+    // folder in its place stand in for it, since an empty folder has no record.
+    let Some(value) = TrustedEnv::pinned_roots() else {
+        return breaker_unknown(
+            "init has not pinned the folders in this shell (see the pinned folders check)",
+        );
     };
-    let mut groups = SystemGroups::new(&c.user.pw.name);
-    let Ok(runtime) = runtime_root::open_runtime_root(&place.runtime, c.user.me, &mut groups)
-    else {
-        return unread();
+    let Some(runtime) = pinned::open_runtime(
+        value.as_bytes(),
+        c.user.me,
+        &c.user.pw.name,
+        &c.user.pw.home,
+    ) else {
+        return breaker_unknown(
+            "the folders init pinned do not hold now (see the pinned folders check)",
+        );
     };
     let (_, pwd) = TrustedEnv::shell();
-    let Some(cwd) = super::explain_builtin::shell_folder(pwd.as_deref()) else {
-        return unread();
+    let cwd = match shell_pwd(pwd.as_deref()) {
+        Ok(cwd) => cwd,
+        Err(why) => return breaker_unknown(why),
     };
     let Ok(now) = crate::prompt_io::observe_clock() else {
-        return unread();
+        return judge_breaker(Err(()));
     };
     judge_breaker(collection_breaker::peek(&runtime, &session, &cwd, now).map_err(|_| ()))
 }
@@ -1033,6 +1082,21 @@ mod tests {
         let f = judge_breaker(Err(()));
         is(&f, Status::Unknown, None);
         assert!(f.text.contains("pinned folders"), "{}", f.text);
+    }
+
+    // 이것을 실패시키는 것: PWD가 없는데 다른 값(현재 폴더, 물리 경로)으로 키를 만드는 것, 프롬프트의 봉투 규칙을 어기는 PWD(상대 경로,
+    // 너무 긴 값)를 키로 쓰는 것, PWD 문자열을 고치는 것(링크로 들어간 폴더의 논리 경로를 그대로 써야 helper와 같은 키가 된다).
+    #[test]
+    fn the_folder_key_is_the_shells_pwd_string_or_nothing() {
+        assert_eq!(
+            shell_pwd(Some(OsStr::new("/home/me/link/dir"))).unwrap(),
+            b"/home/me/link/dir"
+        );
+        assert!(shell_pwd(None).is_err());
+        assert!(shell_pwd(Some(OsStr::new(""))).is_err());
+        assert!(shell_pwd(Some(OsStr::new("relative"))).is_err());
+        let long = format!("/{}", "a".repeat(70_000));
+        assert!(shell_pwd(Some(OsStr::new(&long))).is_err());
     }
 
     // 이것을 실패시키는 것: 점검 id나 제목을 겹치게 등록하는 것(JSON과 사람용 줄이 한 점검을 가리지 못함).

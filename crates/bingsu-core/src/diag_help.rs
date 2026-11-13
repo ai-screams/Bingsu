@@ -363,7 +363,7 @@ pub const HELP: &[Help] = &[
         c::COLLECTION_BREAKER_ON,
         "Collection of git and folder facts is switched off for the folder you are in, in this shell session.\nThe prompt still draws; the segments that need those facts show no value until it is on again.",
         "The same mount missed its deadline three times in a row (a stopped or very slow mount can do that). The session then stops collecting there for up to five minutes, so a prompt never waits on it. The switch is kept per session and per folder, and the next collection after the wait is a trial.",
-        "Wait about five minutes, or open a new shell. Fix or unmount the stuck mount if it stays. Run `bingsu doctor` from the shell function bingsu_doctor to see whether it is on again.",
+        "Wait about five minutes, or open a new shell. Fix or unmount the stuck mount if it stays. Run the shell function bingsu_doctor, which calls `bingsu doctor`, to see whether it is still on.",
     ),
     h(
         c::TEMPLATE_REPLACES_STYLE,

@@ -875,34 +875,165 @@ fn a_terminal_on_standard_input_is_refused() {
     );
 }
 
-// The breaker row reads the session the shell passed: with a session and no record it is ok, without a
-// session of the right shape it says it cannot tell (and shows no other session's state).
-// 이것을 실패시키는 것: 세션 없이 아무 세션의 차단기를 보이는 것, 기록이 없는 것을 경고로 매기는 것, 증거가 없는데 정상으로 매기는 것.
+/// `bingsu doctor --evidence-stdin` with `input` on standard input, through `cmd`.
+fn evidence_through(mut cmd: std::process::Command, input: &[u8]) -> String {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let data = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        #[allow(clippy::disallowed_methods, reason = "a test feeding a child's stdin")]
+        let _ = stdin.write_all(&data);
+    });
+    let o = child.wait_with_output().unwrap();
+    writer.join().unwrap();
+    text(&o.stdout)
+}
+
+// The breaker row reads the session the shell passed, in the runtime folder init pinned, for the shell's PWD:
+// with all three and no record it is ok; without a session of the right shape, without a pin that holds, or
+// without a PWD that names the current folder it says it cannot tell, and shows no other state in its place.
+// 이것을 실패시키는 것: 세션 없이 아무 세션의 차단기를 보이는 것, 기록이 없는 것을 경고로 매기는 것, 증거가 없는데 정상으로 매기는 것,
+// 고정이 깨졌는데 현재 후보 폴더로 대신 읽는 것(빈 폴더에는 기록이 없어 ok가 나온다), PWD가 없거나 현재 폴더가 아닌데 물리 경로로 키를 만드는 것.
 #[test]
-fn the_breaker_row_needs_the_session() {
+fn the_breaker_row_needs_the_session_the_pin_and_the_pwd() {
     let e = Env::new("cli_doctor", "breaker");
     e.put_config("config.toml", "icons = \"ascii\"\n");
-    let _ = e.pinned_words();
-    let (code, t, _) = with_evidence(&e, &record(&GOOD), &[]);
-    assert_eq!(code, Some(0), "{t}");
+    let var = frame(&e.pinned_words());
+    let here = e.base.to_str().unwrap().to_owned();
+    let run = |input: &[u8], pwd: Option<&str>| {
+        let mut c = e.cmd_pinned(&["doctor", "--evidence-stdin"], &var);
+        if let Some(p) = pwd {
+            c.env("PWD", p);
+        }
+        evidence_through(c, input)
+    };
+    // Everything in place: ok.
+    let t = run(&record(&GOOD), Some(&here));
     let l = line(&t, "breaker");
     assert!(
         l.starts_with("  ok") && l.contains("no breaker record"),
         "{t}"
     );
+    // No PWD, or one the prompt would not take as a folder. The folder is never looked at: any absolute PWD is a key.
+    for pwd in [None, Some("relative"), Some("")] {
+        let l = line(&run(&record(&GOOD), pwd), "breaker").to_owned();
+        assert!(
+            l.starts_with("  unknown") && l.contains("PWD"),
+            "{pwd:?}: {l}"
+        );
+    }
+    let t = run(&record(&GOOD), Some("/a/folder/that/does/not/exist"));
+    assert!(line(&t, "breaker").starts_with("  ok"), "{t}");
+    // A session that is not one.
     let mut f = GOOD;
     f[3] = "";
-    let (_, t, _) = with_evidence(&e, &record(&f), &[]);
+    let t = run(&record(&f), Some(&here));
     let l = line(&t, "breaker");
     assert!(
         l.starts_with("  unknown") && l.contains("another session"),
         "{t}"
     );
+    // Without evidence.
     let o = e
         .cmd(&["doctor"])
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap();
-    let t = text(&o.stdout);
-    assert!(line(&t, "breaker").starts_with("  unknown"), "{t}");
+    assert!(line(&text(&o.stdout), "breaker").starts_with("  unknown"));
+    // A runtime folder made again: the pin does not hold, and the folder in its place is not read.
+    let runtime = e.base.join("run/bingsu");
+    std::fs::rename(&runtime, e.base.join("run/bingsu-old")).unwrap();
+    std::fs::create_dir(&runtime).unwrap();
+    user_env::chmod(&runtime, 0o700);
+    // The environment's own runtime folder is the new, empty one (as after a restart): reading it would say
+    // "no record", so the row must refuse it, with the pin in the environment.
+    let mut c = e.cmd(&["doctor", "--evidence-stdin"]);
+    c.env(
+        "BINGSU_ROOTS",
+        <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&var),
+    )
+    .env("PWD", &here);
+    let t = evidence_through(c, &record(&GOOD));
+    let l = line(&t, "breaker");
+    assert!(
+        l.starts_with("  unknown") && l.contains("pinned folders"),
+        "{t}"
+    );
+    // No pin at all.
+    let mut c = e.cmd(&["doctor", "--evidence-stdin"]);
+    c.env("PWD", &here);
+    let l = line(&evidence_through(c, &record(&GOOD)), "breaker").to_owned();
+    assert!(
+        l.starts_with("  unknown") && l.contains("not pinned"),
+        "{l}"
+    );
+}
+
+// The breaker row never looks at the folder the shell is in: a stopped mount is when the breaker is on, and a
+// stat of it would stop doctor too.
+// 이것을 실패시키는 것: 차단기 행(`shell_pwd`, `run_breaker`)에 폴더를 보는 호출(metadata, current_dir, canonicalize, shell_folder 등)을 넣는 것.
+// 확인 명령: 두 함수의 본문에서 metadata|current_dir|canonicalize|read_link|shell_folder|exists( 를 grep.
+#[test]
+fn the_breaker_row_never_looks_at_the_folder() {
+    let all = include_str!("../src/commands/doctor.rs").replace("\r\n", "\n");
+    let body = |start: &str| {
+        let i = all.find(start).unwrap_or_else(|| panic!("no {start}"));
+        let rest = &all[i..];
+        rest[..rest.find("\n}\n").unwrap()].to_owned()
+    };
+    for name in ["fn shell_pwd(", "fn run_breaker("] {
+        let b = body(name);
+        for word in [
+            "metadata",
+            "current_dir",
+            "canonicalize",
+            "read_link",
+            "shell_folder",
+            "exists(",
+            "read_dir",
+            "File::open",
+        ] {
+            assert!(!b.contains(word), "{name} uses {word}");
+        }
+    }
+}
+
+// An unsafe breaker folder is not "no record": doctor says it cannot tell.
+// 이것을 실패시키는 것: peek 오류(안전하지 않은 폴더)를 기록 없음으로 매기는 것(doctor가 ok를 냄).
+#[test]
+fn an_unsafe_breaker_folder_is_not_ok() {
+    let e = Env::new("cli_doctor", "breaker-unsafe");
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    let var = frame(&e.pinned_words());
+    let session = GOOD[3];
+    let dir = e
+        .base
+        .join("run/bingsu/collection-control-v1/sessions")
+        .join(session);
+    std::fs::create_dir_all(&dir).unwrap();
+    let here = e.base.to_str().unwrap().to_owned();
+    let row = || {
+        let mut c = e.cmd_pinned(&["doctor", "--evidence-stdin"], &var);
+        c.env("PWD", &here);
+        line(&evidence_through(c, &record(&GOOD)), "breaker").to_owned()
+    };
+    for p in [
+        e.base.join("run/bingsu/collection-control-v1"),
+        e.base.join("run/bingsu/collection-control-v1/sessions"),
+        dir.clone(),
+    ] {
+        user_env::chmod(&p, 0o700);
+    }
+    assert!(row().starts_with("  ok"), "{}", row());
+    user_env::chmod(&dir, 0o755);
+    let l = row();
+    assert!(
+        l.starts_with("  unknown") && l.contains("pinned folders"),
+        "{l}"
+    );
 }

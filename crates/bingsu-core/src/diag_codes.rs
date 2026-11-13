@@ -439,7 +439,7 @@ pub const CODES: &[CodeInfo] = &[
         COLLECTION_BREAKER_ON,
         "collection is switched off for this folder in this shell session",
         "the same mount missed its deadline three times in a row, so this session stops collecting there for a while; the prompt still draws",
-        "wait about five minutes or open a new shell; run `bingsu doctor` to see when it is on again",
+        "wait about five minutes or open a new shell; the shell function bingsu_doctor shows whether it is still on",
     ),
     stable(
         TEMPLATE_REPLACES_STYLE,
