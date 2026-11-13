@@ -52,5 +52,11 @@
     "after": "4645eb1407d916cebb9ab2157968912ce66cf6fb57b00a3064fde8196bd94795",
     "kind": "meaning",
     "reason": "Adds the shell-evidence findings of `bingsu doctor`: E608 (the shell's hook asks for a record version this bingsu does not read), W609 (the hook functions are not in the order bingsu needs), W610 (the last envelope words are not the expected ones) and W611 (the shell is older than 5.8). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
+  },
+  {
+    "before": "4645eb1407d916cebb9ab2157968912ce66cf6fb57b00a3064fde8196bd94795",
+    "after": "8f8ad0536f360f755bc7dc2a9e94e123b248110f3ef81045f70c935d7d3ca5f6",
+    "kind": "meaning",
+    "reason": "Adds N504 (a note: at some widths a layout band draws its own template in place of [layout] lines that a file other than the built-in theme and other than the file of that template wrote; {band}, {widths} and {lines} name the band, the widths it is chosen at and the lines it replaces). Every existing code keeps its number, status, arguments and text: N501 still covers lines or options written in the same layout table as a template, and W407 a band no width chooses (N504 is never said for such a band). No code is reused or deprecated."
   }
 ]

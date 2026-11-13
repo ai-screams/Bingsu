@@ -16,7 +16,7 @@ use super::{
     init::{roots, trusted_env::TrustedEnv},
     runtime_root::{self, Chain, RootError},
     sys,
-    tty::{Reply, Tty},
+    tty::{Answer, Tty},
 };
 use bingsu_core::color::osc11::{is_light, parse_osc11};
 use bingsu_core::config::starter::{Choices, Icons, Mode, differences, starter};
@@ -115,11 +115,11 @@ fn ask_icons(tty: &Tty) -> Option<Icons> {
 /// first; a missing or unreadable answer leaves the question open.
 fn ask_mode(tty: &Tty) -> Option<Mode> {
     let detected = match tty.ask_background() {
-        Ok(Reply::Bytes(b)) => {
+        Ok(Answer::Reply(b)) => {
             parse_osc11(&b).map(|c| if is_light(c) { Mode::Light } else { Mode::Dark })
         }
-        Ok(Reply::Cancelled) => return None,
-        Ok(Reply::Silent) | Err(_) => None,
+        Ok(Answer::Cancelled) => return None,
+        Ok(Answer::Silent) | Err(_) => None,
     };
     let (default, note) = match detected {
         Some(m) => (m, format!(" (the terminal looks {})", m.word())),

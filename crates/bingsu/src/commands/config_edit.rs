@@ -13,6 +13,7 @@
 use super::{
     clock::SystemClock,
     config_inspect::{Selection, check_report, inspect_config},
+    config_load::{TwoNames, name_present, pick_name, root_names},
     ctx::{self, EXIT_FAILED, EXIT_UNFINISHED, User},
     editor::{self, EditorError},
     init::trusted_env::TrustedEnv,
@@ -57,28 +58,22 @@ fn editor_outcome(result: std::io::Result<std::process::ExitStatus>) -> Result<(
 }
 
 /// Which settings file stands in the one place `config.toml` / `config.json`
-/// of the settings folder, by the rule the reader uses: one name present is
-/// the file, two present are an error (E308), none present is the default
-/// name, which the caller finds missing.
+/// of the settings folder, by the reader's own rule (`config_load::pick_name`):
+/// one name present is the file, two present are an error (E308), none
+/// present is the default name, which the caller finds missing.
 #[derive(Debug, PartialEq, Eq)]
-enum Place {
+pub(super) enum Place {
     One(PathBuf),
     Both(PathBuf, PathBuf),
 }
 
-fn place(root: &std::path::Path, present: impl Fn(&std::path::Path) -> bool) -> Place {
-    let (toml, json) = (root.join("config.toml"), root.join("config.json"));
-    match (present(&toml), present(&json)) {
-        (true, true) => Place::Both(toml, json),
-        (false, true) => Place::One(json),
-        _ => Place::One(toml),
+pub(super) fn place(root: &std::path::Path, present: impl Fn(&std::path::Path) -> bool) -> Place {
+    let [toml, json] = root_names(root);
+    match pick_name([&toml, &json], present) {
+        TwoNames::Both => Place::Both(toml, json),
+        TwoNames::Second => Place::One(json),
+        TwoNames::First | TwoNames::Neither => Place::One(toml),
     }
-}
-
-/// A name counts as present when anything is there, a dangling link too, as
-/// the reader counts it.
-fn is_present(p: &std::path::Path) -> bool {
-    !std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// The file to open: the file `config use` chose when there is one, else the
@@ -86,7 +81,7 @@ fn is_present(p: &std::path::Path) -> bool {
 fn target(selection: &Selection, written_root: &std::path::Path) -> Place {
     match selection {
         Selection::Chosen(r) => Place::One(r.path.clone()),
-        _ => place(written_root, is_present),
+        _ => place(written_root, name_present),
     }
 }
 
