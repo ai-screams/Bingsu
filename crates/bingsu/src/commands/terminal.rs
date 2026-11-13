@@ -65,7 +65,15 @@ fn put<T: Terminal + ?Sized>(t: &mut T, bytes: &[u8]) -> Result<(), Stop> {
     })
 }
 
-fn probe_widths<T: Terminal + ?Sized>(t: &mut T) -> Result<Cells, Stop> {
+/// What the probes left on the screen: whether any probe character was
+/// written, and how many lines above the current one they ran onto.
+#[derive(Default)]
+struct Mark {
+    wrote: bool,
+    up: u16,
+}
+
+fn probe_widths<T: Terminal + ?Sized>(t: &mut T, mark: &mut Mark) -> Result<Cells, Stop> {
     let columns = t.columns();
     let (mut row, mut col) = cursor(t, columns)?;
     if col != 1 {
@@ -82,9 +90,15 @@ fn probe_widths<T: Terminal + ?Sized>(t: &mut T) -> Result<Cells, Stop> {
     }
     let mut cells: Cells = [0; PROBES.len()];
     for (probe, slot) in PROBES.iter().zip(cells.iter_mut()) {
+        mark.wrote = true;
         put(t, probe.text.as_bytes())?;
         let (r, c) = cursor(t, columns)?;
         if r != row || c < col {
+            // The characters ran onto another line (the terminal is narrower
+            // than the probes need, or became so): those lines are cleared
+            // too. On a screen that scrolled the row stays and the column
+            // went back, which is one line.
+            mark.up = if r > row { r - row } else { 1 };
             return Err(Stop::No(Why::Moved));
         }
         *slot = c - col;
@@ -101,11 +115,20 @@ pub fn measure_widths<T: Terminal + ?Sized>(t: &mut T) -> WidthOutcome {
     {
         return WidthOutcome::TooNarrow(c);
     }
-    let result = probe_widths(t);
-    // Also after a cancel: a write goes through after one (only a signal in
+    let mut mark = Mark::default();
+    let result = probe_widths(t, &mut mark);
+    // Only what was written is cleared: a measurement that ended before the
+    // first probe character must not erase what the user had on the line.
+    // Also after a cancel (a write goes through after one; only a signal in
     // the middle of a write interrupts it), so Ctrl-C leaves no probe
     // characters on the line.
-    let _ = t.write(b"\r\x1b[K");
+    if mark.wrote {
+        let mut clear = b"\r\x1b[K".to_vec();
+        for _ in 0..mark.up {
+            clear.extend_from_slice(b"\x1b[A\x1b[K");
+        }
+        let _ = t.write(&clear);
+    }
     match result {
         Ok(cells) => WidthOutcome::Measured(cells),
         Err(Stop::No(why)) => WidthOutcome::NoAnswer(why),
@@ -153,6 +176,8 @@ pub(super) mod fake {
         pub cancel_at: Option<usize>,
         pub garble_at: Option<usize>,
         pub wrap_at_probe: Option<usize>,
+        /// Like `wrap_at_probe`, on a screen that scrolls: the row stays.
+        pub scroll_at_probe: Option<usize>,
         pub fail_writes: bool,
         /// The error kind a failed write gives.
         pub write_error: io::ErrorKind,
@@ -176,6 +201,7 @@ pub(super) mod fake {
                 cancel_at: None,
                 garble_at: None,
                 wrap_at_probe: None,
+                scroll_at_probe: None,
                 fail_writes: false,
                 write_error: io::ErrorKind::BrokenPipe,
                 newline: (1, 1),
@@ -222,6 +248,9 @@ pub(super) mod fake {
             } else if let Some(i) = PROBES.iter().position(|p| p.text.as_bytes() == bytes) {
                 if self.wrap_at_probe == Some(i) {
                     self.row += 1;
+                    self.col = 1;
+                }
+                if self.scroll_at_probe == Some(i) {
                     self.col = 1;
                 }
                 self.col += self.cells[i];
@@ -285,7 +314,13 @@ mod tests {
                 "{answered}"
             );
             assert_eq!(t.queries, answered + 1, "no query after the silent one");
-            assert!(t.written.ends_with(b"\r\x1b[K"));
+            if answered == 0 {
+                // Nothing was written, so nothing is cleared: what the user had
+                // on the line stays.
+                assert!(t.written.is_empty(), "{:?}", t.written);
+            } else {
+                assert!(t.written.ends_with(b"\r\x1b[K"));
+            }
         }
     }
 
@@ -317,6 +352,44 @@ mod tests {
         let mut t = Fake::new(NORMAL);
         t.fail_writes = true;
         assert_eq!(measure_widths(&mut t), WidthOutcome::Failed);
+    }
+
+    // 이것을 실패시키는 것: 측정이 첫 시험 글자 전에 끝났는데(터미널이 CPR을 무시, 첫 질의가 취소) 줄을 지워 사용자가 줄에 둔
+    // 글을 없애는 것, 시험 글자가 다음 줄로 넘어갔는데 그 줄을 지우지 않아 글자가 남는 것(행이 바뀐 경우와 화면이 밀려 행이
+    // 그대로인 경우 둘 다), 글자를 쓰지 않은 경우의 위 줄 지우기.
+    #[test]
+    fn only_what_was_written_is_cleared() {
+        // Cancelled at the first question: nothing written, nothing cleared.
+        let mut t = Fake::new(NORMAL);
+        t.col = 12;
+        t.cancel_at = Some(0);
+        assert_eq!(measure_widths(&mut t), WidthOutcome::Cancelled);
+        assert!(t.written.is_empty(), "{:?}", t.written);
+        // Cancelled after the new line but before any probe character: the
+        // cleared line is the new, empty one; nothing above it is touched.
+        let mut t = Fake::new(NORMAL);
+        t.col = 12;
+        t.cancel_at = Some(1);
+        assert_eq!(measure_widths(&mut t), WidthOutcome::Cancelled);
+        assert_eq!(t.written, b"\r\n");
+        // The probes ran onto the next line: that line is cleared too.
+        let mut t = Fake::new(NORMAL);
+        t.wrap_at_probe = Some(4);
+        assert_eq!(measure_widths(&mut t), WidthOutcome::NoAnswer(Why::Moved));
+        assert!(
+            t.written.ends_with(b"\r\x1b[K\x1b[A\x1b[K"),
+            "{:?}",
+            t.written
+        );
+        // On a screen that scrolled the row stays and the column goes back.
+        let mut t = Fake::new(NORMAL);
+        t.scroll_at_probe = Some(4);
+        assert_eq!(measure_widths(&mut t), WidthOutcome::NoAnswer(Why::Moved));
+        assert!(
+            t.written.ends_with(b"\r\x1b[K\x1b[A\x1b[K"),
+            "{:?}",
+            t.written
+        );
     }
 
     // 이것을 실패시키는 것: 터미널 폭보다 큰 열의 응답(수식키를 누른 F3의 `ESC [ 1 ; 2 R`처럼 위치 모양인 키 입력)을 위치로

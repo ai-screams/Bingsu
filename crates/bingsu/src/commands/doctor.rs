@@ -740,6 +740,9 @@ fn mismatch_text(m: &Mismatch) -> String {
             measured,
             configured,
         } => format!("emoji take {measured} cell(s), the settings say {configured}"),
+        Mismatch::EmojiCells { cells, expected } => {
+            format!("a plain emoji takes {cells} cell(s), bingsu counts {expected}")
+        }
         Mismatch::Vs16Differs { plain, vs16 } => {
             format!("an emoji made by U+FE0F takes {vs16} cell(s), a plain one {plain}")
         }
@@ -909,6 +912,14 @@ fn run_terminal_width(c: &Ctx) -> Finding {
     judge_width(&outcome, settings.profile, c.terminal.tmux)
 }
 
+/// The brightness hint the prompt gets: what the shell's last prompt call
+/// carried when it handed its evidence (a variable that was never exported
+/// is not in the environment, but the hook passes it), else the environment's.
+fn colorfgbg_hint(evidence: &Given, env: Option<&OsStr>) -> Option<Mode> {
+    doctor_evidence::envelope_colorfgbg(evidence)
+        .or_else(|| env.and_then(|v| colorfgbg_mode(v.as_bytes())))
+}
+
 fn run_terminal_background(c: &Ctx) -> Finding {
     let Some(settings) = terminal_settings(c) else {
         return finding(
@@ -932,11 +943,7 @@ fn run_terminal_background(c: &Ctx) -> Finding {
         c.terminal.cancelled.set(true);
     }
     // The prompt draws by what its envelope carries: the same two functions.
-    let hint = c
-        .terminal
-        .colorfgbg
-        .as_deref()
-        .and_then(|v| colorfgbg_mode(v.as_bytes()));
+    let hint = colorfgbg_hint(&c.evidence, c.terminal.colorfgbg.as_deref());
     judge_background(&outcome, display_mode(hint), hint.is_some())
 }
 
@@ -1576,6 +1583,61 @@ mod tests {
         let f = asked(&c).unwrap_err();
         is(&f, Status::Skipped, None);
         assert_eq!(f.text, "stopped");
+    }
+
+    // 이것을 실패시키는 것: 셸이 증거에 실어 보낸 `COLORFGBG`(내보내지 않은 변수라 환경에는 없음)를 무시하고 환경만 보는 것(밝은
+    // 터미널로 맞게 설정된 셸이 어둡다고 판정됨), 증거가 있는데도 환경을 앞세우는 것, 증거에 힌트가 없을 때 환경으로 돌아가지
+    // 않는 것.
+    #[test]
+    fn the_hint_the_hook_passed_is_the_one_doctor_judges() {
+        use doctor_evidence::{Evidence, Given};
+        let evidence = |hint: &str| {
+            let mut envelope: Vec<Vec<u8>> = [
+                "--width",
+                "80",
+                "--status",
+                "0",
+                "--pipestatus",
+                "0",
+                "--jobs",
+                "0",
+                "--keymap",
+                "main",
+            ]
+            .iter()
+            .map(|w| w.as_bytes().to_vec())
+            .collect();
+            envelope.extend([b"--colorfgbg".to_vec(), hint.as_bytes().to_vec()]);
+            Given::Yes(Evidence {
+                shell: b"zsh".to_vec(),
+                version: b"5.9".to_vec(),
+                session: Vec::new(),
+                ctx: b"1".to_vec(),
+                record: b"B1".to_vec(),
+                precmd: Vec::new(),
+                preexec: Vec::new(),
+                envelope,
+                separators: false,
+            })
+        };
+        // 0;15: a white background, set in the shell and not exported.
+        assert_eq!(colorfgbg_hint(&evidence("0;15"), None), Some(Mode::Light));
+        // The environment has another value: the hook's is the one the prompt used.
+        assert_eq!(
+            colorfgbg_hint(&evidence("0;15"), Some(OsStr::new("15;0"))),
+            Some(Mode::Light)
+        );
+        // No hint in the envelope (empty value): the environment's.
+        assert_eq!(
+            colorfgbg_hint(&evidence(""), Some(OsStr::new("0;15"))),
+            Some(Mode::Light)
+        );
+        // No evidence: the environment's, or none.
+        assert_eq!(
+            colorfgbg_hint(&Given::No, Some(OsStr::new("15;0"))),
+            Some(Mode::Dark)
+        );
+        assert_eq!(colorfgbg_hint(&Given::No, None), None);
     }
 
     // 이것을 실패시키는 것: 터미널 행이 맨 앞이나 사이에 끼는 것(출력 순서가 바뀜), 터미널 행 id를 바꾸는 것.

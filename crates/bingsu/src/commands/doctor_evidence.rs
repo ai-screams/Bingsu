@@ -287,6 +287,21 @@ const ORDER: [&[u8]; 5] = [
     b"--keymap",
 ];
 
+/// The brightness hint the last prompt call carried (`--colorfgbg`), read by
+/// the parser the prompt uses; `None` when there is no envelope, it does not
+/// parse, or it has no usable hint.
+pub(super) fn envelope_colorfgbg(given: &Given) -> Option<bingsu_core::color::palette::Mode> {
+    let Given::Yes(e) = given else {
+        return None;
+    };
+    if e.envelope.is_empty() {
+        return None;
+    }
+    let mut argv: Vec<&[u8]> = vec![b"--ctx", b"1", b"--record", b"B1"];
+    argv.extend(e.envelope.iter().map(Vec::as_slice));
+    bingsu_core::envelope::parse(&argv).ok()?.colorfgbg
+}
+
 pub(super) fn judge_envelope(given: &Given) -> Finding {
     if let Some(f) = without(given, "the last envelope") {
         return f;
@@ -301,7 +316,13 @@ pub(super) fn judge_envelope(given: &Given) -> Finding {
             None,
         );
     }
-    let words: &[Vec<u8>] = &e.envelope;
+    // The last pair may be the brightness hint (`--colorfgbg`) the function adds
+    // after the words of the call; the order below is that of the call itself.
+    let all: &[Vec<u8>] = &e.envelope;
+    let words: &[Vec<u8>] = match all {
+        [rest @ .., key, _] if key == b"--colorfgbg" => rest,
+        _ => all,
+    };
     let mut problem: Option<String> = None;
     if words.len() % 2 != 0 {
         problem = Some("a word has no value".into());
@@ -335,7 +356,7 @@ pub(super) fn judge_envelope(given: &Given) -> Finding {
     // The values are judged by the parser the prompt uses, not by a second set of rules here.
     if problem.is_none() {
         let mut argv: Vec<&[u8]> = vec![b"--ctx", b"1", b"--record", b"B1"];
-        argv.extend(words.iter().map(Vec::as_slice));
+        argv.extend(all.iter().map(Vec::as_slice));
         if let Err(err) = bingsu_core::envelope::parse(&argv) {
             problem = Some(format!("the prompt would refuse it: {err:?}"));
         }

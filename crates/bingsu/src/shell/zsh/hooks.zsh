@@ -374,7 +374,10 @@ bingsu_doctor() {
   local helper=@HELPER_EXE@ record=@RECORD@ us=$'\x1f' rs=$'\x1e' gs=$'\x1d'
   helper=${helper#*=}  # the word is name=path; the first = ends the name
   local -a words pre post
-  (( ${#_bingsu_ctx} )) && words=(--width "$_bingsu_drawn_cols" "${_bingsu_ctx[@]}")
+  # The last word pair is the terminal's brightness hint the way the hook gives it
+  # to the prompt: a shell variable that was never exported reaches the prompt
+  # through this call, and doctor must judge the same value.
+  (( ${#_bingsu_ctx} )) && words=(--width "$_bingsu_drawn_cols" "${_bingsu_ctx[@]}" --colorfgbg "${COLORFGBG-}")
   # A hook function may have any name. One that holds a separator would make the
   # record say something else: it is shown with a ? in its place and the last
   # field says so, so doctor does not judge an order it cannot read.

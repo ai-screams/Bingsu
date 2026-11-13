@@ -91,6 +91,9 @@ pub enum Mismatch {
     AmbiguousMixed,
     /// Emoji take `measured` cells, not the configured.
     EmojiWidth { measured: u8, configured: u8 },
+    /// A plain emoji takes `cells`, which is neither 1 nor 2, so no setting
+    /// of `width.emoji` fits it.
+    EmojiCells { cells: u16, expected: u8 },
     /// An emoji made by U+FE0F takes another number of cells than a plain one.
     Vs16Differs { plain: u16, vs16: u16 },
     /// A joined emoji sequence takes `cells`, not the configured emoji width.
@@ -153,12 +156,16 @@ pub fn mismatches(cells: &Cells, profile: WidthProfile) -> Vec<Mismatch> {
         None => out.push(Mismatch::AmbiguousMixed),
     }
     let plain = cells_of(cells, Kind::Emoji)[0];
-    if let Some(m) = one_or_two(plain)
-        && m != profile.emoji()
-    {
-        out.push(Mismatch::EmojiWidth {
-            measured: m,
-            configured: profile.emoji(),
+    if plain != u16::from(profile.emoji()) {
+        out.push(match one_or_two(plain) {
+            Some(measured) => Mismatch::EmojiWidth {
+                measured,
+                configured: profile.emoji(),
+            },
+            None => Mismatch::EmojiCells {
+                cells: plain,
+                expected: profile.emoji(),
+            },
         });
     }
     let vs16 = cells_of(cells, Kind::Vs16)[0];
@@ -197,6 +204,32 @@ mod tests {
     // cells in PROBES order: a, 한, ─ ° →, 😀, ❤️, 👩‍💻, 🇰🇷, é, ,
     fn cells(amb: u16, emoji: u16) -> Cells {
         [1, 2, amb, amb, amb, emoji, emoji, emoji, emoji, 1, 1, 1]
+    }
+
+    // 이것을 실패시키는 것: 이모지가 1도 2도 아닌 칸 수(3)를 차지하는데 불일치로 세지 않는 것(그 값이 `one_or_two`에서 None이라
+    // 덮임: 같은 3칸의 VS16, 2칸의 ZWJ·국기와 함께 정상으로 나옴), 1·2칸의 불일치를 `EmojiCells`로 세는 것.
+    #[test]
+    fn an_emoji_that_takes_three_cells_is_a_mismatch_whatever_else_agrees() {
+        let c = [1, 2, 1, 1, 1, 3, 3, 2, 2, 1, 1, 1];
+        assert!(reliable(&c));
+        assert_eq!(
+            mismatches(&c, WidthProfile::DEFAULT),
+            [Mismatch::EmojiCells {
+                cells: 3,
+                expected: 2
+            }]
+        );
+        // A plain emoji of 1 cell is a setting to change, not an odd width.
+        assert_eq!(
+            mismatches(&cells(1, 1), WidthProfile::DEFAULT)
+                .into_iter()
+                .filter(|m| matches!(m, Mismatch::EmojiWidth { .. } | Mismatch::EmojiCells { .. }))
+                .collect::<Vec<_>>(),
+            [Mismatch::EmojiWidth {
+                measured: 1,
+                configured: 2
+            }]
+        );
     }
 
     // 이것을 실패시키는 것: 시험 글자 표의 개수·순서·종류가 바뀌어 `cells_of`가 엉뚱한 시험을 읽는 것.
