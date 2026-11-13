@@ -176,8 +176,9 @@ const ENV_FD: i32 = bingsu_core::command::env_frame::FD;
 /// (`env_frame::FRAME_MAX`), which one non-blocking write then takes
 /// (`max_env_frame_fits_one_write`). A pipe cannot promise that room: macOS
 /// starts every pipe at 512 bytes and grows it only while pipe kernel memory
-/// is under a system-wide cap, and Linux gives 4 KiB pipes to a user past
-/// pipe-user-pages-soft. A socket buffer draws on socket memory instead. A
+/// is under a system-wide cap, and Linux gives a user past
+/// pipe-user-pages-soft two-page pipes (`PIPE_MIN_DEF_BUFFERS`, 8 KiB with
+/// 4 KiB pages). A socket buffer draws on socket memory instead. A
 /// system whose limit is lower takes less: the write is then short, the
 /// helper reports the frame cut and runs no command unit, and the prompt
 /// does not wait.
