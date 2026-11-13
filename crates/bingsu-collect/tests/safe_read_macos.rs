@@ -3,6 +3,8 @@
 #[allow(dead_code)]
 #[path = "../src/meter.rs"]
 mod meter;
+#[path = "support/rlibs.rs"]
+mod rlibs;
 #[allow(dead_code)]
 #[path = "../src/safe_read/mod.rs"]
 mod safe_read;
@@ -599,33 +601,9 @@ fn startup_probe_is_closed_before_ready() {
 #[test]
 fn probe_fd_cannot_become_repository_root() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let deps = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let libc = fs::read_dir(&deps)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("liblibc-")
-                && p.extension().is_some_and(|e| e == "rlib")
-        })
-        .unwrap();
-    let core = fs::read_dir(&deps)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("libbingsu_core-")
-                && p.extension().is_some_and(|e| e == "rlib")
-        })
-        .unwrap();
+    let rlibs = rlibs::Rlibs::find();
+    let libc = rlibs.rlib("libc");
+    let core = rlibs.rlib("bingsu_core");
     let f = Fixture::new();
     let prefix = format!(
         "#![allow(dead_code)]\n#[path={:?}] mod meter;\n#[path={:?}] mod safe_read;\n#[path={:?}] mod sys;\nuse safe_read::*;\n",
@@ -656,8 +634,7 @@ fn probe_fd_cannot_become_repository_root() {
             .arg(format!("libc={}", libc.display()))
             .arg("--extern")
             .arg(format!("bingsu_core={}", core.display()))
-            .arg("-L")
-            .arg(format!("dependency={}", deps.display()))
+            .args(rlibs.search_args())
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);

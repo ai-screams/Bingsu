@@ -1,38 +1,17 @@
 //! Compile the production modules (without cfg(test)) to check capability boundaries.
 #![cfg(unix)]
 use std::{fs, path::PathBuf, process::Command};
+#[path = "support/rlibs.rs"]
+mod rlibs;
+use rlibs::Rlibs;
 
 // 이것을 실패시키는 것: Discovery 필드를 공개하거나 ancestor/단계 A 폴더에 Root 권한을 주거나 Landlock 증거를 외부에서 만들게 하는 것.
 #[test]
 fn capabilities_cannot_be_forged_or_read_as_roots() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let deps = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let libc = fs::read_dir(&deps)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("liblibc-")
-                && p.extension().is_some_and(|e| e == "rlib")
-        })
-        .expect("cargo-built libc rlib");
-    let core = fs::read_dir(&deps)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("libbingsu_core-")
-                && p.extension().is_some_and(|e| e == "rlib")
-        })
-        .expect("cargo-built core rlib");
+    let rlibs = Rlibs::find();
+    let libc = rlibs.rlib("libc");
+    let core = rlibs.rlib("bingsu_core");
     let temp = std::env::temp_dir().join(format!("bingsu-api-{}", std::process::id()));
     fs::create_dir_all(&temp).unwrap();
     let prefix = format!(
@@ -53,8 +32,7 @@ fn capabilities_cannot_be_forged_or_read_as_roots() {
             .arg(format!("libc={}", libc.display()))
             .arg("--extern")
             .arg(format!("bingsu_core={}", core.display()))
-            .arg("-L")
-            .arg(format!("dependency={}", deps.display()))
+            .args(rlibs.search_args())
             .output()
             .unwrap()
     };
