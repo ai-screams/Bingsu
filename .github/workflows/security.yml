@@ -88,8 +88,9 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_collector_security.py::test_real_collection_has_no_silent_skip' "$RUNNER_TEMP/contracts.txt"
 
   # Long sanitizer fuzz of the collector's in-memory git parsers. The fixed
-  # seeds replay on stable in every PR (ci.yml, F2 fixed fuzz seed regression
-  # corpus); this job explores beyond them on a schedule or on request.
+  # seeds replay on the pinned toolchain in every PR (ci.yml, F2 fixed fuzz
+  # seed regression corpus); this job explores beyond them on a schedule or
+  # on request.
   fuzz:
     name: Collector parser fuzz (${{ matrix.target }})
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

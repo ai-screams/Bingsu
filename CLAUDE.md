@@ -107,6 +107,8 @@ git cliff --tag vX.Y.Z -o CHANGELOG.md
 - Pin every action to a full commit SHA with a version comment. Dependabot updates both.
 - Downloaded tool binaries (actionlint, gitleaks, wasmtime) are pinned by version and verified with `sha256sum --check`.
   Dependabot does not track them; bump the version variables by hand.
+- The Rust toolchain is pinned through the `toolchain:` input of `dtolnay/rust-toolchain` (1.99.1; MSRV 1.88.0, `ICOUNT_RUST`
+  and the fuzz nightly keep their own pins). Dependabot does not raise it; move it in its own PR once everything passes on the new release.
 - gitleaks runs as the CLI, not `gitleaks-action`, because the action needs a license key for organization repositories.
 - Keep `permissions: contents: read` and `persist-credentials: false` unless a job truly needs more.
 - `icount` measures the base tip (`HEAD^1` of the PR merge commit) and the merge result in one job and fails when
