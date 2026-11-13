@@ -287,3 +287,23 @@ fn the_report_after_an_edit_is_the_one_config_check_gives() {
     assert_eq!(code, check.status.code(), "{stdout}{stderr}");
     assert!(stdout.starts_with(&want), "edit: {stdout}\ncheck: {want}");
 }
+
+// 이것을 실패시키는 것: 편집기가 신호로 끝났는데(상태 0이 아님) 저장된 내용을 적용하는 것. 편집기는 유효한 내용을
+// 저장한 뒤 스스로 SIGTERM으로 끝난다.
+#[test]
+fn an_editor_ended_by_a_signal_applies_nothing() {
+    let f = Fixture::new("signalled");
+    let editor = f.e.put(
+        "signalled.sh",
+        "#!/bin/sh\nfor last; do :; done\nprintf '%s' \"$BINGSU_TEST_NEW\" > \"$last\"\nkill -TERM $$\n",
+    );
+    chmod(&editor, 0o700);
+    let (code, stdout, stderr) = out(&f.run(OTHER, editor.to_str().unwrap()));
+    assert_eq!((code, stdout.as_str()), (Some(1), ""));
+    assert!(
+        stderr.contains("the editor ended with") && stderr.contains("nothing was applied"),
+        "{stderr}"
+    );
+    assert_eq!(f.config(), OTHER, "the save is the user's: it stays");
+    assert!(!f.e.base.join("run").exists(), "nothing was published");
+}

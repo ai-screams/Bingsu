@@ -44,7 +44,7 @@ chose, else `config.toml`; it is never created (run `bingsu setup`). The editor 
 into words and quotes are removed; `; & | < > ( )` outside single quotes are refused, and so are `$` and backquotes
 even inside double quotes (only single quotes keep them; point the variable at a script instead). A program name is
 looked up only in absolute `PATH` folders. If the saved file is
-not valid it is not applied: the prompt keeps the previous settings and commands stop running until a valid save.
+not valid it is not applied: the prompt keeps the previous settings and commands stop running until a valid save. While the editor runs, Ctrl-C and Ctrl-\ go to the editor and `bingsu` ignores them; if you suspend the editor (Ctrl-Z), `bingsu` waits and stops with it, and `fg` resumes both.
 
 Writing a command segment for other people to use? See
 [Writing a command segment for others](writing-command-segments.md).

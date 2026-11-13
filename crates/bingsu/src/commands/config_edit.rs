@@ -17,11 +17,11 @@ use super::{
     editor::{self, EditorError},
     init::trusted_env::TrustedEnv,
     messages::{MsgId, en},
-    reload,
+    reload, signal_guard,
 };
 use std::ffi::OsStr;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode, ExitStatus};
+use std::process::{Command, ExitCode};
 
 fn editor_problem(e: &EditorError) -> String {
     match e {
@@ -37,11 +37,23 @@ fn editor_problem(e: &EditorError) -> String {
     }
 }
 
-/// Waits for the editor. Ctrl-C belongs to the editor while it runs; the
-/// interrupt guard (`run_ignoring_interrupts`) takes this place when it is
-/// merged.
-fn wait_for_editor(cmd: &mut Command) -> std::io::Result<ExitStatus> {
-    cmd.status()
+/// Whether what the editor did can be applied: `Ok` only for an editor that
+/// ended with success. The error is the text to show.
+///
+/// An error from the wait is not only "could not start": a process that
+/// ignores SIGCHLD has its child collected for it on some systems, and the
+/// wait then fails after the editor has ended. Whether it saved is not known,
+/// so nothing is applied.
+fn editor_outcome(result: std::io::Result<std::process::ExitStatus>) -> Result<(), String> {
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "bingsu: the editor ended with {status}, so nothing was applied. If you saved changes, bingsu reload applies them"
+        )),
+        Err(e) => Err(format!(
+            "bingsu: could not tell how the editor ended ({e}), so nothing was applied. If you saved changes, bingsu reload applies them"
+        )),
+    }
 }
 
 /// The file to open: the file `config use` chose when there is one, else
@@ -109,18 +121,12 @@ pub fn run(exe: &OsStr) -> ExitCode {
     };
     let mut cmd = Command::new(&program);
     cmd.args(&words[1..]).arg(&file);
-    match wait_for_editor(&mut cmd) {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            eprintln!(
-                "bingsu: the editor ended with {status}, so nothing was applied. If you saved changes, bingsu reload applies them"
-            );
-            return ctx::code(EXIT_FAILED);
-        }
-        Err(e) => {
-            eprintln!("bingsu: the editor could not be started ({e})");
-            return ctx::code(EXIT_FAILED);
-        }
+    // Ctrl-C and Ctrl-\ belong to the editor while it runs (it is in the
+    // foreground group and gets them); this process ignores them until the
+    // editor has ended.
+    if let Err(text) = editor_outcome(signal_guard::run_ignoring_interrupts(&mut cmd)) {
+        eprintln!("{text}");
+        return ctx::code(EXIT_FAILED);
     }
 
     // From here the 3 s command limit counts, not while the editor ran.
@@ -180,5 +186,36 @@ pub fn run(exe: &OsStr) -> ExitCode {
             eprintln!("{text}");
             ctx::code(if check_code != 0 { check_code } else { code })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    // 이것을 실패시키는 것: 기다림 오류(ECHILD: 편집기가 자동 회수됨)를 편집기의 정상 종료로 읽고 적용하는 것,
+    // 신호로 끝났거나 0이 아닌 상태를 적용하는 것, 오류 문구에서 "nothing was applied"를 빼는 것.
+    #[test]
+    fn only_a_successful_end_can_be_applied() {
+        assert_eq!(editor_outcome(Ok(ExitStatus::from_raw(0))), Ok(()));
+        let failed = editor_outcome(Ok(ExitStatus::from_raw(3 << 8))).unwrap_err();
+        assert!(
+            failed.contains("exit status: 3") && failed.contains("nothing was applied"),
+            "{failed}"
+        );
+        let signalled = editor_outcome(Ok(ExitStatus::from_raw(libc::SIGTERM))).unwrap_err();
+        assert!(
+            signalled.contains("signal") && signalled.contains("nothing was applied"),
+            "{signalled}"
+        );
+        let unknown =
+            editor_outcome(Err(std::io::Error::from_raw_os_error(libc::ECHILD))).unwrap_err();
+        assert!(
+            unknown.contains("could not tell how the editor ended"),
+            "{unknown}"
+        );
+        assert!(unknown.contains("nothing was applied"), "{unknown}");
     }
 }
