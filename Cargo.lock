@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-bench",
  "bingsu-core",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-bench"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "libc",
  "seccompiler",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-collect"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
  "bingsu-identity",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-core"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "libm",
  "toml",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-core-bench"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
  "bingsu-match",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-core-tests"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
  "bingsu-match",
@@ -103,28 +103,28 @@ dependencies = [
 
 [[package]]
 name = "bingsu-golden"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
 ]
 
 [[package]]
 name = "bingsu-identity"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
 ]
 
 [[package]]
 name = "bingsu-match"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "regex",
 ]
 
 [[package]]
 name = "bingsu-prompt"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
  "bingsu-identity",
@@ -168,7 +168,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "core-cfg-check"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "proc-macro2",
  "syn 3.0.9",

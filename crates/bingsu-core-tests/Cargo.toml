@@ -1,6 +1,6 @@
 [package]
 name = "bingsu-core-tests"
-version = "0.0.0"
+version.workspace = true
 description = "Property (layer 1) and byte-golden snapshot (layer 2) tests of bingsu-core; kept out of core's dependency graph"
 publish = false
 edition.workspace = true

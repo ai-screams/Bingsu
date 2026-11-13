@@ -120,7 +120,8 @@ def built_id(out):
 # 이것을 실패시키는 것: source·lock·collector 정책·feature·target·profile·flags 중 하나를 build-id에서 빼는 것,
 # bingsu-prompt의 manifest·entry 소스를 빼는 것, bingsu-match 또는 crate의 build.rs를 빼는 것,
 # rustc의 release·commit-hash를 빼거나 host·LLVM 줄까지 넣는 것, 뿌리·OUT_DIR 경로를 정체에 넣는 것,
-# 제어 문자가 든 이름이나 UTF-8이 아닌 이름을 받아들이는 것.
+# 제어 문자가 든 이름이나 UTF-8이 아닌 이름을 받아들이는 것, `--version`이 보일 target·rustc 값을 쓰지 않거나
+# 공백·제어 문자, 괄호·쉼표·따옴표처럼 그 줄을 나누는 글자가 든 값을 받아들이는 것.
 def test_sibling_build_manifest_is_exact(tmp_path):
     builder, rustc = manifest_builder(tmp_path)
     answer = tmp_path / "rustc.vV"
@@ -191,6 +192,26 @@ def test_sibling_build_manifest_is_exact(tmp_path):
     for extra in ({"RUSTC": str(tmp_path / "missing-rustc")}, {"FAKE_RUSTC_EXIT": "1"}):
         with pytest.raises(subprocess.CalledProcessError):
             identity(extra)
+    assert identity() == baseline
+
+    # `bingsu --version` prints these: written as constants, visible ASCII only.
+    text = (out / "build_id.rs").read_text()
+    for line in ('pub const TARGET: &str = "aarch64-apple-darwin";', 'pub const RUSTC_RELEASE: &str = "1.99.1";',
+                 'pub const RUSTC_COMMIT_HASH: &str = "58cf8f9c3d0e4a1b";'):
+        assert line in text.splitlines(), (line, text)
+    for before, after in (("release: 1.99.1", "release: 1.99.1 beta"), ("release: 1.99.1", "release: 1.99.1\x1b[2J"),
+                          ("commit-hash: 58cf8f9c3d0e4a1b", "commit-hash: "), ("release: 1.99.1", "release: 1.99.\u00e9"),
+                          ("release: 1.99.1", "release: 1.99.1)"), ("release: 1.99.1", "release: 1.99,1"),
+                          ("commit-hash: 58cf8f9c3d0e4a1b", 'commit-hash: 58cf"8f9'), ("release: 1.99.1", "release: (1.99.1")):
+        try:
+            answer.write_text(RUSTC_VV.replace(before, after))
+            with pytest.raises(subprocess.CalledProcessError):
+                identity()
+        finally:
+            answer.write_text(RUSTC_VV)
+    for target in ("x86 64", "", "aarch64\napple", "x86_64,linux", "x86_64)", 'x86"64'):
+        with pytest.raises(subprocess.CalledProcessError):
+            identity({"TARGET": target})
     assert identity() == baseline
 
     # Another checkout path and another OUT_DIR (target folder) give the same identity.
