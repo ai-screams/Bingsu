@@ -174,7 +174,9 @@ def test_not_run_unit_never_runs(tmp_path, _native_boot_required):
 def lock_of(pid):
     """The session lock a supervisor holds at fd 5 (its name carries the session digest)."""
     if sys.platform != "linux":
-        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "5", "-Fn"],
+        # -b -w: without them lsof took about 0.9 s per call on a Mac, longer
+        # than the supervisor of a 1 s unit lives, so it read nothing.
+        out = subprocess.run(["lsof", "-b", "-w", "-a", "-p", str(pid), "-d", "5", "-Fn"],
                              capture_output=True, text=True).stdout
         return next((line[1:] for line in out.splitlines() if line.startswith("n")), None)
     try:
