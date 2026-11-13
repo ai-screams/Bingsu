@@ -1865,7 +1865,12 @@ mod tests {
 
         /// Fills the terminal's output queue through a second, non-blocking
         /// open of /dev/tty, as a terminal that stopped reading would leave
-        /// it. The bytes written.
+        /// it. The bytes written. Full means the terminal took nothing for
+        /// `FULL_QUIET`, not the first EAGAIN: a Linux pseudo-terminal moves
+        /// written bytes on between its two buffers afterwards, and room came
+        /// back for about 1.8 KB after a first EAGAIN at 10,240 bytes (arm64).
+        /// 이것을 실패시키는 것: 첫 EAGAIN에서 멈추는 것(나중에 난 자리로 질의의 요청이 나가, 큐 시험이 가끔
+        /// 실패함: arm64 컨테이너 40번 중 4번).
         fn fill_output() -> usize {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
@@ -1876,15 +1881,32 @@ mod tests {
                 .unwrap();
             let chunk = [b'x'; 4096];
             let mut filled = 0;
+            let mut quiet = Instant::now();
             loop {
-                match (&filler).write(&chunk) {
-                    Ok(n) => filled += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return filled,
-                    Err(e) => panic!("{e}"),
+                let mut took = 0;
+                for size in [chunk.len(), 512, 1] {
+                    loop {
+                        match (&filler).write(&chunk[..size]) {
+                            Ok(n) => took += n,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(e) => panic!("{e}"),
+                        }
+                        assert!(filled + took < 64 << 20, "the queue never filled");
+                    }
                 }
-                assert!(filled < 64 << 20, "the queue never filled");
+                filled += took;
+                if took > 0 {
+                    quiet = Instant::now();
+                } else if quiet.elapsed() >= FULL_QUIET {
+                    return filled;
+                }
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
+
+        /// How long the terminal must take nothing before the queue counts as
+        /// full.
+        const FULL_QUIET: Duration = Duration::from_millis(200);
 
         fn nonblocking(fd: RawFd) -> bool {
             // SAFETY: `fd` is open; F_GETFL only reads its status flags.
