@@ -1122,14 +1122,27 @@ jobs:
             echo "::error::HEAD is not a merge commit of the base tip and the PR head"
             exit 1
           fi
-          git worktree add "$RUNNER_TEMP/base" "$(git rev-parse HEAD^1)"
+          # The base tip is built beside the pull request in a folder whose
+          # path is as long as the workspace's: a longer or shorter path moves
+          # strings and data in the binary (paths of the build, the manifest
+          # folder) and changes the counts of code that did not change, which
+          # reads as a regression or an improvement of a fraction of a percent.
+          name=$(basename "$GITHUB_WORKSPACE")
+          base_name=$(printf '%*s' "${#name}" '' | tr ' ' b)
+          if [ "$base_name" = "$name" ]; then base_name=$(tr b c <<<"$base_name"); fi
+          base="$(dirname "$GITHUB_WORKSPACE")/$base_name"
+          if [ "${#base}" -ne "${#GITHUB_WORKSPACE}" ]; then
+            echo "::error::the base folder $base is not as long as the workspace $GITHUB_WORKSPACE"
+            exit 1
+          fi
+          git worktree add "$base" "$(git rev-parse HEAD^1)"
           read -ra pairs <<<"$BENCH_PACKAGES"
           for pair in "${pairs[@]}"; do
             manifest=${pair%%:*} pkg=${pair#*:}
             # No bench package (or manifest) at the base tip gives no
             # targets: every target of that package records only.
-            if [ -f "$RUNNER_TEMP/base/$manifest" ]; then
-              (cd "$RUNNER_TEMP/base" && cargo metadata --manifest-path "$manifest" --no-deps --format-version 1) | jq -r --arg p "$pkg" "$BENCH_TARGETS_JQ" | sort > "$RUNNER_TEMP/$pkg.base.targets"
+            if [ -f "$base/$manifest" ]; then
+              (cd "$base" && cargo metadata --manifest-path "$manifest" --no-deps --format-version 1) | jq -r --arg p "$pkg" "$BENCH_TARGETS_JQ" | sort > "$RUNNER_TEMP/$pkg.base.targets"
             else
               : > "$RUNNER_TEMP/$pkg.base.targets"
             fi
@@ -1142,11 +1155,11 @@ jobs:
             # that reads stdin would take the rest of the list.
             mapfile -t targets < "$RUNNER_TEMP/$pkg.base.targets"
             for t in "${targets[@]}"; do
-              (cd "$RUNNER_TEMP/base" && cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --list --format terse) > "$RUNNER_TEMP/base-lists/$pkg/$t.list"
+              (cd "$base" && cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --list --format terse) > "$RUNNER_TEMP/base-lists/$pkg/$t.list"
               # A target the pull request drops is only listed, for the
               # warning in the next step.
               if grep -Fqx -- "$t" "$RUNNER_TEMP/$pkg.pr.targets"; then
-                (cd "$RUNNER_TEMP/base" && cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --save-baseline=base)
+                (cd "$base" && cargo bench --manifest-path "$manifest" -p "$pkg" --bench="$t" -- --save-baseline=base)
                 if [ ! -s "$RUNNER_TEMP/base-lists/$pkg/$t.list" ]; then
                   echo "::warning::bench target $t of $pkg at the base tip lists no benchmarks: its benchmarks in the pull request have no baseline"
                   echo "bench target $t of $pkg at the base tip lists no benchmarks: its benchmarks in the pull request have no baseline" >> "$GITHUB_STEP_SUMMARY"
@@ -1246,12 +1259,15 @@ jobs:
     timeout-minutes: 45
     env:
       # Decision U3: GATE_RATIO_P50 and GATE_RATIO_P95 are the largest
-      # accepted candidate/base ratios of p50 and p95; GATE_SIZE_CAP_BYTES caps
-      # stripped front + collector (decimal bytes, no per-binary cap);
+      # accepted candidate/base ratios of p50 and p95. Size caps of the first
+      # release, in decimal stripped bytes with no per-binary cap:
+      # GATE_SIZE_CAP_BYTES caps front + collector (combined, what a prompt
+      # loads), GATE_INSTALLED_CAP_BYTES caps the three shipped files together.
       # GATE_ENFORCE=true makes a FAIL verdict fail the job; BLOCKED only warns.
       GATE_RATIO_P50: '1.03'
       GATE_RATIO_P95: '1.10'
-      GATE_SIZE_CAP_BYTES: '6000000'
+      GATE_SIZE_CAP_BYTES: '2500000'
+      GATE_INSTALLED_CAP_BYTES: '7000000'
       GATE_ENFORCE: 'true'
       GATE_CASES: no-git,git-clean,git-dirty,prompt-env64k,prompt-env64k-commands,prompt-commands-hit,prompt-commands-max,prompt-commands-max-empty,prompt-commands-redraw,prompt-commands-max-empty-redraw,prompt-text-max,prompt-env-segments
       # M6 C4b-3: the command time fixtures are measured and recorded, not
@@ -1295,7 +1311,8 @@ jobs:
             --rounds 200 --cases "$GATE_CASES" --admission ci-r2 --out "$RUNNER_TEMP/measurements/prompt-pairs.json" || test "$?" -eq 2
       - name: Record the verdict
         run: |
-          args=(--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95" --cap-bytes "$GATE_SIZE_CAP_BYTES" --record-only "$GATE_RECORD_ONLY")
+          args=(--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95" --cap-bytes "$GATE_SIZE_CAP_BYTES"
+                --installed-cap-bytes "$GATE_INSTALLED_CAP_BYTES" --record-only "$GATE_RECORD_ONLY")
           if [ "$GATE_ENFORCE" = true ]; then args+=(--enforce); fi
           status=0
           python3 bench/size_gate.py --measurement "$RUNNER_TEMP/measurements/prompt-pairs.json" \

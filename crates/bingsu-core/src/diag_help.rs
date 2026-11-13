@@ -36,6 +36,7 @@ pub const COMMANDS: &[&str] = &[
     "bingsu config schema",
     "bingsu config schema --theme",
     "bingsu config use",
+    "bingsu doctor",
     "bingsu help",
     "bingsu init",
     "bingsu reload",
@@ -73,7 +74,7 @@ pub const HELP: &[Help] = &[
     h(
         c::INTEGER_RANGE,
         "A whole number in the file is outside the 64-bit signed range (about 9.2 quintillion up or down).",
-        "TOML integers are 64-bit signed. A larger number cannot be stored without changing its value.",
+        "Integers in config files are 64-bit signed. A larger number cannot be stored without changing its value.",
         "Write a smaller number. Most keys accept far smaller ranges; `bingsu config schema` lists the range of each key.",
     ),
     h(
@@ -81,6 +82,24 @@ pub const HELP: &[Help] = &[
         "Tables or arrays are nested more than 32 levels deep.",
         "The depth is capped so that reading a file can never run out of stack, whoever wrote the file.",
         "Flatten the structure. The config keys are at most a handful of levels deep; `bingsu config schema` shows the shape.",
+    ),
+    h(
+        c::JSON_SYNTAX,
+        "The file is not valid JSON, so bingsu could not read it.\nThe place points at the first character the reader could not accept.",
+        "Nothing in a file is used until the whole file parses. JSON settings are read strictly: no comments, no trailing commas, no `null`, and a key may appear only once in an object.",
+        "Fix the text at the place shown, then run `bingsu config check` to read the file again.",
+    ),
+    h(
+        c::YAML_SYNTAX,
+        "The file is not valid YAML for a settings file, so bingsu could not read it.\nThe place points at the first character the reader could not accept.",
+        "Nothing in a file is used until the whole file parses. A YAML settings file is one mapping; a key may appear only once in a mapping, and `null` (`~` or an empty value) is not a setting value.",
+        "Fix the text at the place shown, then run `bingsu config check` to read the file again.",
+    ),
+    h(
+        c::YAML_UNSUPPORTED,
+        "The YAML file uses a feature bingsu does not read: an anchor (`&name`), an alias (`*name`), a tag (`!tag`), a second document (`---`) or a key that is a mapping or list.",
+        "An alias can repeat a value many times over, and a tag can change what a value means, both out of sight of the line you read. Settings are read only from what is written where it is used.",
+        "Write the value out in each place instead of using an anchor and alias, remove the tag, and keep one document per file. Then run `bingsu config check`.",
     ),
     h(
         c::UNKNOWN_KEY,
@@ -203,6 +222,24 @@ pub const HELP: &[Help] = &[
         "Set `version` to 1, or upgrade bingsu if the file comes from a newer version.",
     ),
     h(
+        c::TWO_FORMATS,
+        "One place holds two settings files in different formats, for example `config.toml` and `config.json` in the settings folder.",
+        "Each place reads one file. Reading both, or picking one, would hide settings you wrote in the other.",
+        "Keep one of the two files (move what you need from the other into it), then run `bingsu config check`.",
+    ),
+    h(
+        c::ROOTS_NO_LONGER_MATCH,
+        "A folder that `init` pinned in this shell is not the same folder now: the runtime folder was removed and made again, or a pinned folder is no longer safe.",
+        "bingsu does not trust a folder again just because a folder with the same name exists. The prompt shows a notice until the shell pins the new one.",
+        "Run `bingsu init` again in this shell, or open a new shell.",
+    ),
+    h(
+        c::SETTINGS_INVALID,
+        "Reading the settings finds an error, so no new settings are published.",
+        "An error is never applied half way. The prompt keeps drawing with the last settings that checked out.",
+        "Run `bingsu config check`, fix what it reports, then `bingsu reload`.",
+    ),
+    h(
         c::EXEC_KEY_IGNORED,
         "A key that runs something or reaches the environment is set in a shape-only file, so it is dropped.",
         "A shape-only file is read for colors and layout only; it may change how the prompt looks but never what runs.\nThemes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.\nA file in your config folder whose own folder fails the safety check is a different case (W405).",
@@ -267,6 +304,36 @@ pub const HELP: &[Help] = &[
         "A program that a segment would run is refused. The message gives the reason, which is one of these:\na script whose first line starts with `#!/usr/bin/env`, or names a relative interpreter, or is longer than 256 bytes, or holds a NUL byte, or names an interpreter that is setuid, setgid or has file capabilities;\nor the program itself is setuid, setgid or has file capabilities (a compiled program has no first line to fix).",
         "`#!/usr/bin/env python3` does name an absolute path, but `env` then looks `python3` up in `PATH`, which a folder you work in can influence, so it is refused. A set-id program or a file with capabilities runs with rights that bingsu will not hand to a prompt segment.",
         "For a script, write the absolute path of the interpreter on its first line, for example `#!/usr/bin/python3`, and keep that line under 256 bytes. Or run the interpreter itself from `segment.<id>.command`.\nFor a set-id program, use a different program in `segment.<id>.command`.",
+    ),
+    h(
+        c::EXE_FOLDER_CHANGEABLE,
+        "A folder on the way to the bingsu executable, or the file itself, can be changed by another user.\nThe check follows every symbolic link and every folder above the file.",
+        "The prompt runs whatever file is at that path when a prompt starts. If another user can write there, they can make the prompt run their code as you.\nA folder that only you or root can write is fine; a folder shared with a group is fine when the group has no member besides you and root.",
+        "Install bingsu under a folder that only you or root can change (a package manager folder owned by root is the usual choice), then run `bingsu init` again in your shell setup.",
+    ),
+    h(
+        c::PATH_BINGSU_DIFFERS,
+        "The `bingsu` that your shell finds on `PATH` is a different file from the executable that is running now.",
+        "The hook that `init` wrote calls the path it pinned, not whatever `PATH` finds. After an install or an upgrade the two can differ, and then commands you type and the prompt come from different builds.",
+        "Run `bingsu init` again from the bingsu you want to use, then open a new shell, or put that bingsu first on `PATH`.",
+    ),
+    h(
+        c::NO_PINNED_ROOTS,
+        "This shell has no pinned folders: `init` has not run in it.",
+        "`init` pins the settings, state and runtime folders into the shell so that your commands act on the folders the prompt reads, even if `XDG_*` variables change later. Without the pin, commands read the current environment instead, which can differ.",
+        "Add `bingsu init` for your shell to the end of your shell setup file and open a new shell.",
+    ),
+    h(
+        c::SIBLING_UNVERIFIED,
+        "`bingsu-collect` or `bingsu-prompt` next to the `bingsu` executable is missing, is not from this build, or sits in a folder that fails the safety check.",
+        "The three executables must come from one build and live in one folder. Without a verified `bingsu-collect` no git or folder facts are collected. Without `bingsu-prompt` the hook calls `bingsu prompt`, which works but starts a larger program.",
+        "Install the three executables from one build into one folder, then run `bingsu init` again.",
+    ),
+    h(
+        c::NO_KERNEL_SECCOMP,
+        "The kernel answers that it has no seccomp support.",
+        "The prompt installs a system call filter around itself. Without kernel support the prompt still draws, and the filter is the only thing missing.",
+        "Nothing in your settings changes this. Run a kernel built with seccomp; `bingsu config check` is not affected.",
     ),
     h(
         c::TEMPLATE_REPLACES_STYLE,
@@ -410,12 +477,19 @@ mod tests {
                 };
                 assert!(ok, "{}: `{n}` is not a command or a config key", x.code);
             }
-            assert!(
-                !x.fix.contains("doctor"),
-                "{}: no doctor command yet",
-                x.code
-            );
         }
+    }
+
+    // `bingsu doctor` is a command a `fix` text may name (it exists, and `help.rs` checks that the CLI
+    // dispatches it). 이것을 실패시키는 것: COMMANDS에서 doctor를 빼는 것(`fix`에 doctor를 적은 코드가 검사에서 떨어짐),
+    // 백틱 안의 `bingsu doctor`를 이름으로 읽지 못하는 것.
+    #[test]
+    fn a_fix_may_name_doctor() {
+        let fix = "Run `bingsu doctor` to see the folder, then `bingsu init` again.";
+        let found = names(fix);
+        assert_eq!(found, ["bingsu doctor", "bingsu init"]);
+        assert!(found.iter().all(|n| command_exists(n)), "{found:?}");
+        assert!(!command_exists("bingsu doctors"));
     }
 
     // 이것을 실패시키는 것: 대소문자 구분, 자릿수 검사, 레지스트리에 없는 번호를 받는 것.

@@ -1,13 +1,12 @@
 //! `bingsu config …`: `schema` prints core's JSON Schema, `check` and `path`
 //! read the settings and write nothing, `use` records which file stands in
 //! `config.toml`'s place and applies it.
-use super::{config_inspect, config_use, sys};
+use super::{config_edit, config_inspect, config_use, sys};
 use bingsu_core::config::schema::{Which, schema};
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "usage: bingsu config <check [--explain] [--format json|text]|path|schema [--theme]|use PATH>";
+const USAGE: &str = "usage: bingsu config <check [--explain] [--format json|text]|edit|path|schema [--theme]|use PATH>";
 
 pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let [verb, rest @ ..] = args
@@ -30,6 +29,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 return ExitCode::from(super::ctx::EXIT_USAGE);
             }
         },
+        [Some("edit")] => return config_edit::run(exe),
         [Some("path")] => return config_inspect::path(),
         [Some("schema")] => Which::Config,
         [Some("schema"), Some("--theme")] => Which::Theme,

@@ -52,13 +52,21 @@ pub(crate) mod command_supervisor;
 #[cfg(unix)]
 mod config;
 #[cfg(unix)]
+mod config_edit;
+#[cfg(unix)]
 mod config_inspect;
 #[cfg(unix)]
 mod config_load;
 #[cfg(unix)]
 mod config_use;
 #[cfg(unix)]
+mod config_yaml;
+#[cfg(unix)]
 mod ctx;
+#[cfg(unix)]
+mod doctor;
+#[cfg(unix)]
+mod editor;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]
 mod evidence;
@@ -102,6 +110,9 @@ pub(crate) mod runtime_root;
 #[cfg(unix)]
 mod setup;
 #[cfg(unix)]
+#[allow(unsafe_code)]
+mod signal_guard;
+#[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
 pub(crate) mod snapshot_store;
 #[cfg(unix)]
@@ -114,6 +125,7 @@ mod trust_record;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) mod tty;
+mod version;
 #[cfg(unix)]
 pub(crate) mod version_manager;
 
@@ -134,8 +146,11 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("config") => config::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
+        Some("doctor") => doctor::run(&a.args[1..]),
+        #[cfg(unix)]
         Some("explain") => explain::run(&a.args[1..]),
         Some("help") => help::run(&a.args[1..]),
+        Some("--version") => version::run(&a.args[1..]),
         #[cfg(unix)]
         Some("init") => init::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
@@ -149,7 +164,9 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
             u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
         ),
         _ => {
-            eprintln!("usage: bingsu <config|explain|help|init|list|prompt|reload|setup> ...");
+            eprintln!(
+                "usage: bingsu <config|doctor|explain|help|init|list|prompt|reload|setup|--version> ..."
+            );
             ExitCode::from(2)
         }
     }

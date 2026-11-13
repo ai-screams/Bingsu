@@ -1,6 +1,6 @@
 [package]
 name = "bingsu-prompt"
-version = "0.0.0"
+version.workspace = true
 description = "The bingsu prompt alone: the prompt files of the bingsu crate, without its other commands"
 publish = false
 edition.workspace = true

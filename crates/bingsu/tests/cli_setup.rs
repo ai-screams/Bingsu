@@ -183,3 +183,38 @@ fn a_config_folder_that_is_already_there_gets_the_file() {
         0o600
     );
 }
+
+// `config.json` is the same place as `config.toml`: setup writes nothing beside it, compares the
+// choices with it, and the settings still read afterwards.
+// 이것을 실패시키는 것: setup이 `config.toml`만 보는 것(그 곁에 `config.toml`을 만들어 다음 읽기가 E308로
+// 멈춤), JSON 파일의 차이를 TOML로 읽으려다 "does not parse"로 내는 것.
+#[test]
+fn a_json_config_is_the_settings_file_already_there() {
+    let h = Home::new("json");
+    let dir = h.config().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let json = dir.join("config.json");
+    let mine = b"{\"icons\": \"nerd\", \"colors\": {\"mode\": \"dark\"}}";
+    std::fs::write(&json, mine).unwrap();
+    std::fs::set_permissions(&json, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let before = h.tree();
+    let o = h.run(&["--yes", "--icons", "unicode", "--mode", "dark"]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    assert_eq!(h.tree(), before, "setup wrote beside config.json");
+    assert_eq!(std::fs::read(&json).unwrap(), mine);
+    let err = text(&o.stderr);
+    assert!(err.contains("config.json is already there"), "{err}");
+    assert!(
+        err.contains("icons: \"nerd\" now, \"unicode\" suggested"),
+        "{err}"
+    );
+    assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
+    let c = h.run(&["config", "check"]);
+    assert_eq!(c.status.code(), Some(0), "{}", text(&c.stderr));
+    let out = text(&c.stdout) + &text(&c.stderr);
+    assert!(
+        out.contains("result: valid") && !out.contains("E308"),
+        "{out}"
+    );
+}

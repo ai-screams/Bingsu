@@ -15,7 +15,7 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 > **bingsu is in early development (M3a, M3b, M3c, M3d, M4 and M6 done; bash and fish integration (M5) comes after M7).** `bingsu prompt` draws the built-in default prompt
 > in bash, zsh and fish, or your own look from a TOML config file, with git status collected in the background. Your
 > own text, command and environment variable segments are drawn; commands run in the background, on Linux and macOS.
-> There is no release yet. Published performance numbers do not exist yet.
+> M7 (the first-use commands and the seven built-in style presets) is in progress. There is no release yet. Published performance numbers do not exist yet.
 > This README describes what is being built. The feature list below describes the plan; the Status table records what works today.
 
 ## What is bingsu?
@@ -69,7 +69,8 @@ bingsu is designed to start from a single set of color tokens and generate all o
 
 - A web **Studio** for live previews and a segment catalog, a terminal **wizard** for the basics,
   and a local Studio that can preview on your real terminal (also over SSH port forwarding).
-- **TOML** config with a JSON Schema for editor completion. YAML and JSON are read too.
+- **TOML** config with a JSON Schema for editor completion, JSON config files, and YAML files in `conf.d`, through
+  `extends` and with `bingsu config use`, without anchors, aliases or tags (all work today).
 - Layered configs with `extends`, share links, and a `bingsu.lock` file for reproducible setups.
 
 ## Status
@@ -91,7 +92,8 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | zsh integration (M4) | Done for zsh 5.8 and 5.9: shell notices, exit status and duration, a transient line for past prompts, vi mode prompt switching, redraw when the terminal width changes, and runs next to a pinned oh-my-zsh. Not complete: the shell time gate runs on Linux only, records its verdict without failing the job, and some runs can end BLOCKED; the redraw time has no recorded value on Linux or macOS. bash and fish already handle the exit status and duration; they get the notices, transient line, vi mode switch and width redraw in M5, which comes after M7 |
 | User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width; your text, command and environment variable segments, and node, python, rust and go versions where a layout draws them |
 | User commands and segments (M6) | Done on Linux and macOS: text, command and `env` segments are drawn, commands run in the background with a cleaned environment, time limits, caching and `match`, and the built-in language segments show versions. User-defined language segments run their version command where their project files are found. See [docs/config.md](docs/config.md), which also says how a team shares a config, and [docs/writing-command-segments.md](docs/writing-command-segments.md) for writing a command segment others will use. Not complete: on macOS the helper's check of the folders on `PATH` is slower than on Linux, because it asks the system about each account's group membership; this delays the first value of a command segment (the prompt does not wait for it); on macOS, prompt time has only a record-only run on one Mac: no case was slower than M4 beyond that run's noise, and the cost of command segments could not be called; the Linux CI prompt gate gives the verdict |
-| Theme selection and customization | Partly: style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
+| Theme selection and customization | Partly: seven style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
+| First-use commands and presets (M7) | In progress. Done: the seven built-in presets (`lean`, `triangle`, `pill`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file; `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation; `bingsu help CODE` explains a diagnostic. Still to come in M7: `bingsu config edit`, JSON config files and the first release. See [Setting up and customizing](#setting-up-and-customizing) |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
 
@@ -158,6 +160,153 @@ says so. Here executables are looked up as a prompt in this folder does, inside 
 with `config use` does not grant execution trust. Check the ownership, permissions and access lists named by the
 diagnostic before running init again. External text in diagnostics is sanitized for terminal display; path arguments
 in the hooks retain their original bytes. Displayed paths with removed control characters are not exact copies of the names.
+
+## Setting up and customizing
+
+Settings live in `config.toml` in `$XDG_CONFIG_HOME/bingsu/` (`~/.config/bingsu/` by default). Every key is optional: an
+empty file gives the built-in look. The commands below only read your settings, except `bingsu setup`, which makes the
+first file, and `bingsu reload`, which applies a change right away (otherwise the next prompt picks it up).
+
+### First settings
+
+`bingsu setup` asks two questions (can you see Nerd Font symbols? is the terminal dark or light?) and writes a starter
+`config.toml`, with comments and a `#:schema` line for editors. It never replaces a file that is there: it shows how
+your file differs from its suggestion instead. It does not edit your shell startup file; it prints the line to add.
+
+```console
+$ bingsu setup --yes --icons nerd --mode dark
+bingsu: wrote ~/.config/bingsu/config.toml
+Add this to your shell's startup file to start bingsu:
+eval "$(bingsu init zsh)"
+```
+
+Without a terminal it asks nothing, so all three arguments are needed. [docs/config.md](docs/config.md) has the details.
+
+### 1. Pick a theme
+
+Seven style presets draw the same segments in different shapes. `bingsu list presets --preview` draws each one with
+your current folder (the other values are samples):
+
+```console
+$ bingsu list presets --preview --icons unicode
+lean     ~/projects/api main                                         2.3s 12:34
+triangle  ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
+pill     ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
+slant     ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
+diamond  ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
+block      ~/projects/api     main                             2.3s     12:34  
+bracket  [~/projects/api] [main]                                 [2.3s] [12:34]
+```
+
+| Preset | Look |
+| -- | -- |
+| `lean` | No background colors; plain spaces between segments |
+| `triangle` | The default: blocks joined by triangle separators |
+| `pill` | Each segment in its own rounded block |
+| `slant` | Blocks joined by slanted separators |
+| `diamond` | Each segment in its own pointed block |
+| `block` | Each segment in its own flat block |
+| `bracket` | No backgrounds; each segment inside `[` `]` |
+
+Pick one in the config. `icons` chooses the symbols: `nerd` needs a Nerd Font, `unicode` and `ascii` need nothing.
+
+```toml
+icons = "unicode"
+
+[style]
+preset = "pill"
+```
+
+### 2. Add and remove segments
+
+The prompt has two lines. `[layout.line1]` and `[layout.line2]` list the segments on the left and the right, and
+`bingsu list segments` prints the built-in names. A segment with nothing to show is left out together with its
+separators. Turn one off with `enabled = false`, and show the duration from five seconds:
+
+```toml
+[layout.line1]
+left = ["dir", "git"]
+right = ["status", "duration", "time"]
+
+[segment.duration]
+min = "5s"
+
+[segment.venv]
+enabled = false
+```
+
+You can add your own segments (fixed text, an environment variable, a command with a time limit and a cache) under
+`[segment."custom/NAME"]`; see [docs/config.md](docs/config.md).
+
+### 3. Tune the colors
+
+Colors come from role tokens (`bingsu list roles`), not from fixed values, so they stay in step across segments. Set
+the mode, or move the accent color with three knobs:
+
+```toml
+[colors]
+mode = "dark"
+
+[colors.knobs]
+hue = 280
+accent_c = 0.12
+accent_l = 0.76
+```
+
+`mode = "auto"` follows the terminal; `"dark"` or `"light"` fixes it.
+
+### 4. Go further
+
+- `style.template` replaces a preset with your own template text.
+- `[layout.when.NAME]` draws another layout, or style, for a range of widths. The built-in `narrow` band covers
+  widths under 60; this one adds a `compact` band for 60 to 79 cells that draws the `lean` preset. `bingsu config check`
+  lists the bands, and `bingsu explain --width 70` says which one applies:
+
+  ```toml
+  [layout.when.compact]
+  max_cols = 79
+
+  [layout.when.compact.style]
+  preset = "lean"
+  ```
+
+  ```console
+  $ bingsu config check
+  ...
+  widths (columns -> layout):
+    0-59       narrow
+    60-79      compact
+    80+        (default layout)
+  result: valid
+  ```
+
+- `bingsu config schema` prints the JSON Schema; editors that read it complete every key above.
+- `extends` layers config files, for example a team file under your own. [docs/config.md](docs/config.md) says what a
+  shared file may and may not do.
+
+### Checking and fixing
+
+| Command | Use |
+| -- | -- |
+| `bingsu config check` | Reads your files and reports mistakes, with a diagnostic code for each |
+| `bingsu help CODE` | Explains a diagnostic code (`bingsu help E201`): what happened, why, how to fix it |
+| `bingsu explain` | Says which segments are hidden or shortened at a width, and why (`--width N`, `--format json`) |
+| `bingsu doctor` | Checks the installation: the executable and the folders above it, the pinned folders, the three binaries |
+| `bingsu reload` | Applies the settings now |
+
+```console
+$ bingsu config check
+settings folder: ~/.config/bingsu
+selection: config.toml in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.toml (trusted)
+diagnostics: 0 error(s), 0 warning(s), 0 note(s)
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
+result: valid
+```
 
 ## Current limits
 

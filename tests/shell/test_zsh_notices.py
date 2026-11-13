@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from messages import msg
 from conftest import ROOT, Install, minimal_record, run_shell_script, short_dir, trusted_env
 from pty_session import Session
 from screen_session import ScreenSession
@@ -17,26 +18,26 @@ pytestmark = pytest.mark.skipif("zsh" not in os.environ.get("BINGSU_TEST_SHELLS"
                                 reason="zsh not under test")
 
 FAKE = ROOT / "tests/shell/fake_bingsu_status.sh"
-GENERIC = "bingsu: a status notice is waiting. Run: bingsu config check"
-NO_RECORD = "bingsu: the prompt gave no usable answer, so a minimal prompt is drawn. Open a new shell or evaluate your bingsu init line again"
-RUNTIME_ROOT = "bingsu: the runtime folder changed, so the prompt runs without saved state. Open a new shell or evaluate your bingsu init line again"
-SANDBOX = "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Check that your system permits seccomp filters, then open a new shell"
-EXPIRED = "bingsu: settings verification is out of date; configured commands are paused. Run: bingsu reload"
-TRUST_INVALID = "bingsu: settings verification failed; configured commands are paused. Run: bingsu config check, then bingsu reload"
+GENERIC = msg("NoticeGeneric")
+NO_RECORD = msg("NoRecord")
+RUNTIME_ROOT = msg("NoticeRuntimeRoot")
+SANDBOX = msg("NoSandbox")
+EXPIRED = msg("NoticeTrustExpired")
+TRUST_INVALID = msg("TrustInvalid")
 # Status::KNOWN_NON_OK, each with its own text.
 KNOWN = {
-    "error:bad-args": "bingsu: the shell hook and the bingsu program do not match, so a minimal prompt is drawn. Open a new shell or evaluate your bingsu init line again",
-    "error:internal": "bingsu: the prompt hit an internal error, so a minimal prompt is drawn. Open a new shell",
+    "error:bad-args": msg("NoticeBadArgs"),
+    "error:internal": msg("NoticeInternal"),
     "degraded:runtime-root": RUNTIME_ROOT,
-    "degraded:oversize": "bingsu: the prompt grew too large, so a minimal prompt is drawn. Use a shorter layout",
-    "degraded:trust-unverified": "bingsu: settings are not verified yet; configured commands are paused. Run: bingsu reload",
+    "degraded:oversize": msg("NoticeOversize"),
+    "degraded:trust-unverified": msg("NoticeTrustUnverified"),
     "degraded:trust-expired": EXPIRED,
     "degraded:trust-invalid": TRUST_INVALID,
-    "degraded:trust-mismatch": "bingsu: saved settings and their verification do not match; configured commands are paused. Run: bingsu config check, then bingsu reload",
-    "degraded:trust-clock": "bingsu: settings verification time could not be confirmed; configured commands are paused. Run: bingsu reload",
+    "degraded:trust-mismatch": msg("TrustMismatch"),
+    "degraded:trust-clock": msg("TrustClock"),
     "degraded:sandbox": SANDBOX,
-    "error:config-last-good": "bingsu: your settings are not valid, so the prompt keeps the last good settings. Run: bingsu config check",
-    "error:config-default": "bingsu: your settings are not valid, so the prompt uses the built-in look. Run: bingsu config check",
+    "error:config-last-good": msg("NoticeConfigLastGood"),
+    "error:config-default": msg("NoticeConfigDefault"),
 }
 
 

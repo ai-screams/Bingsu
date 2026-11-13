@@ -22,5 +22,29 @@
     "after": "dc73729b5f611de72093fe88975e9aeadb9228ef36ace3806483291327891bac",
     "kind": "meaning",
     "reason": "N502 is deprecated, not reused: it said a declared user segment of a kind the prompt does not draw yet would show after an upgrade. Language segments are now drawn, so every kind a segment can declare (text, command, env, language) is drawn and the condition can no longer arise; the compile step that emitted it is removed. Its number, severity and texts stay so an old report still reads. No other code changes, and no new code takes its place."
+  },
+  {
+    "before": "dc73729b5f611de72093fe88975e9aeadb9228ef36ace3806483291327891bac",
+    "after": "72b99a3e645916f7f7e4afdca18e1bd448a54f7e6960b8efa2cc2c8070781d8a",
+    "kind": "meaning",
+    "reason": "Adds the findings of `bingsu doctor`: W601 (a folder on the way to the executable can be changed by another user), W602 (the bingsu on PATH is not the running one), W603 (no folders pinned in this shell), E604 (a pinned folder is not the same now), W605 (the collector or prompt executable beside bingsu is missing or from another build), W606 (the kernel has no seccomp) and E607 (the settings have an error). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
+  },
+  {
+    "before": "72b99a3e645916f7f7e4afdca18e1bd448a54f7e6960b8efa2cc2c8070781d8a",
+    "after": "2f15c1766e8184aac943e7f1af041a288fee4f3e96ef916bfe6635dc681185bc",
+    "kind": "meaning",
+    "reason": "Adds E106 (a JSON settings file that does not parse, with the reader's {message}) and E308 (one place holds two settings files of different formats, naming both {path} and {other}). Every existing code keeps its number, status, arguments and text: E101 still means invalid TOML only, and E102-E105 already describe any config file. No code is reused or deprecated."
+  },
+  {
+    "before": "2f15c1766e8184aac943e7f1af041a288fee4f3e96ef916bfe6635dc681185bc",
+    "after": "f4a7856e595fd945ec024efc4d2bacd6c43330b6aea1d48ab7d042d926ff86ee",
+    "kind": "meaning",
+    "reason": "Removes a unit test from the registry file that refused the word `doctor` in a fix text, since the command exists now. No code is added, removed, reused or deprecated, and every code keeps its number, status, arguments and text."
+  },
+  {
+    "before": "f4a7856e595fd945ec024efc4d2bacd6c43330b6aea1d48ab7d042d926ff86ee",
+    "after": "a548633ebee95c7465eb9852edb04fabd87fb01955f9580b15dfcded71ca51f0",
+    "kind": "meaning",
+    "reason": "Adds E107 (a YAML settings file that does not parse, or breaks a rule every settings file keeps: a key written twice in one mapping, `null` as a value, a top that is not a mapping; the reader's {message}) and E108 (a YAML feature bingsu does not read, named in {feature}: an anchor, an alias, a tag, a second document or a key that is a mapping or a list). Every existing code keeps its number, status, arguments and text: E101 still means invalid TOML only and E106 invalid JSON only; E102-E105 already describe any config file, including the size, encoding, integer range and nesting limits of a YAML file. No code is reused or deprecated."
   }
 ]

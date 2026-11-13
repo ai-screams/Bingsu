@@ -1,6 +1,6 @@
 [package]
 name = "bingsu"
-version = "0.0.0"
+version.workspace = true
 description = "Cross-shell prompt engine"
 publish = false
 edition.workspace = true
@@ -21,6 +21,12 @@ bingsu-identity = { path = "../bingsu-identity" }
 # `match` of command segments (C4c): regex in the CLI only, never in core.
 bingsu-match = { path = "../bingsu-match" }
 bingsu-bench = { path = "../bingsu-bench", optional = true }
+# YAML config files (conf.d, extends, config use): an event parser that never
+# expands aliases, so anchors and aliases are refused before anything is
+# copied. In the CLI only; core takes the tree it builds and checks it again.
+# Without default features: no encoding_rs (the text is UTF-8 already), and
+# no build script or proc-macro enters the shipped graph.
+yaml-rust2 = { version = "=0.13.0", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

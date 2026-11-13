@@ -231,13 +231,13 @@ fn selection_line(s: &Selection) -> String {
         Selection::Incomplete => {
             "selection: could not read the choice; inspection is incomplete".into()
         }
-        Selection::None => "selection: config.toml in the settings folder".into(),
+        Selection::None => "selection: config.toml or config.json in the settings folder".into(),
         Selection::Chosen(r) => format!(
-            "selection: {} (from bingsu config use; it stands in config.toml's place, conf.d and config.local.toml still apply)",
+            "selection: {} (from bingsu config use; it stands in for config.toml and config.json, conf.d and config.local still apply)",
             ctx::show(&r.path)
         ),
         Selection::Unusable(why) => {
-            format!("selection: record unusable ({why}); config.toml is read")
+            format!("selection: record unusable ({why}); config.toml or config.json is read")
         }
     }
 }
@@ -942,6 +942,22 @@ enum Extra {
     None,
     Scripts,
     Explain,
+}
+
+/// What `config check` prints for the settings as they are now, and the
+/// code it exits with: the same reading, the same executor lookups and notes
+/// (`env_shebang_notes`), the same text. `config edit` shows it after an edit.
+pub fn check_report(user: &User, env: &TrustedEnv) -> Result<(String, u8), (String, u8)> {
+    let mut i = inspect_config(user, env)?;
+    let found = lookups(
+        &i.report,
+        env.path.as_deref(),
+        user.me,
+        &mut SystemGroups::new(&user.pw.name),
+    );
+    let notes = env_shebang_notes(&i.report, &found);
+    i.report.diagnostics.extend(notes);
+    Ok((render_check(&i), exit_for(&i)))
 }
 
 fn run_with(

@@ -127,6 +127,42 @@ pub fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// What the kernel says about seccomp (`PR_GET_SECCOMP`, a question that
+/// changes nothing; no filter is installed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "`NotApplicable` is made off Linux, the other variants on Linux"
+)]
+pub enum SeccompKernel {
+    Supported,
+    /// The kernel was built without it (`EINVAL`).
+    Absent,
+    /// The question failed otherwise.
+    Failed(i32),
+    /// This platform has none (macOS).
+    NotApplicable,
+}
+
+pub fn seccomp_kernel() -> SeccompKernel {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: integer arguments only; PR_GET_SECCOMP changes nothing.
+        let r = unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) };
+        if r >= 0 {
+            return SeccompKernel::Supported;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINVAL) => SeccompKernel::Absent,
+            other => SeccompKernel::Failed(other.unwrap_or(0)),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        SeccompKernel::NotApplicable
+    }
+}
+
 pub struct Passwd {
     pub name: Vec<u8>,
     pub home: PathBuf,

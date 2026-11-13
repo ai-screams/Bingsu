@@ -10,8 +10,18 @@ use std::process::{Command, Output};
 
 #[path = "support/exec_file.rs"]
 mod exec_file;
+#[allow(dead_code)]
+#[path = "../src/commands/messages.rs"]
+mod messages;
 #[path = "support/user_env.rs"]
 mod user_env;
+
+use messages::{MsgId, en};
+
+/// The line a message makes on stderr, from the table the program reads.
+fn line(id: MsgId) -> Vec<u8> {
+    format!("{}\n", en(id)).into_bytes()
+}
 
 fn scratch(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -82,10 +92,7 @@ fn unsupported_shell_prints_nothing_on_stdout() {
             .unwrap();
         assert!(out.stdout.is_empty(), "{args:?}");
         assert_eq!(out.status.code(), Some(2));
-        assert_eq!(
-            out.stderr,
-            b"bingsu: unsupported shell. Supported: zsh, bash, fish\n"
-        );
+        assert_eq!(out.stderr, line(MsgId::UnsupportedShell));
     }
 }
 
@@ -200,10 +207,7 @@ fn unusable_runtime_root_drops_the_word_and_says_why() {
     let out = init(&exe, "zsh", &base);
     assert_eq!(out.status.code(), Some(0));
     assert!(!has(&out.stdout, b"--runtime-root="));
-    assert_eq!(
-        out.stderr,
-        b"bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions, then open a new shell or evaluate your bingsu init line again\n"
-    );
+    assert_eq!(out.stderr, line(MsgId::NoRuntimeRoot));
 }
 
 // 이것을 실패시키는 것: 틀 표식을 값에 넣은 뒤 다시 훑는 치환(값 안의 표식이 바뀜).
@@ -232,7 +236,8 @@ fn template_markers_inside_paths_are_not_substituted() {
 // Decision 2 checks, one row per inspected place. 이것을 실패시키는 것: 링크·대상·상위 폴더 중 하나를 빼고 보는 것.
 #[test]
 fn tamper_rows_warn_on_stderr_only() {
-    const TAMPER: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again\n";
+    let tamper = line(MsgId::Tamperable);
+    let tamper: &[u8] = &tamper;
     // (row, setup on (base, exe), expected stderr)
     type Setup = fn(&Path, &Path);
     let rows: &[(&str, Setup, &[u8])] = &[
@@ -240,18 +245,23 @@ fn tamper_rows_warn_on_stderr_only() {
         (
             "install dir other-writable",
             |_, exe| chmod(exe.parent().unwrap(), 0o777),
-            TAMPER,
+            tamper,
         ),
         // 이것을 실패시키는 것: init이 남이 쓸 수 있는 런타임·설정 조상을 거부하지 않는 것.
         (
             "ancestor other-writable",
             |base, _| chmod(base, 0o777),
-            b"bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again\nbingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Check the path and its permissions, then open a new shell or evaluate your bingsu init line again\nbingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions, then open a new shell or evaluate your bingsu init line again\n",
+            &[
+                line(MsgId::Tamperable),
+                line(MsgId::UnconfirmedRoot),
+                line(MsgId::NoRuntimeRoot),
+            ]
+            .concat(),
         ),
         (
             "target dir other-writable",
             |base, _| chmod(&base.join("target"), 0o777),
-            TAMPER,
+            tamper,
         ),
     ];
     for (row, setup, want) in rows {
@@ -325,10 +335,7 @@ fn uninspectable_target_warns_unknown() {
         .unwrap();
     chmod(&hidden, 0o755);
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(
-        out.stderr,
-        b"bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists, then open a new shell or evaluate your bingsu init line again\n"
-    );
+    assert_eq!(out.stderr, line(MsgId::TamperUnknown));
 }
 
 // macOS ACL rows. 이것을 실패시키는 것: ACL을 보지 않거나, deny 항목을 위험으로 보는 것.
@@ -352,8 +359,9 @@ fn macos_acl_rows() {
             .args(["-N"])
             .arg(exe.parent().unwrap())
             .status();
+        let warning = tamper_line();
         assert_eq!(
-            !clean_row_stderr(&out.stderr, if want_warn { TAMPER_LINE } else { b"" }).is_empty(),
+            !clean_row_stderr(&out.stderr, if want_warn { &warning[..] } else { b"" }).is_empty(),
             want_warn,
             "{row}: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -370,7 +378,7 @@ fn bash_script_is_wrapped_in_version_guard() {
         out.stdout
             .starts_with(b"if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 501 )); then\n")
     );
-    assert!(has(&out.stdout, b"bingsu: bash 5.1 or newer is required"));
+    assert!(has(&out.stdout, en(MsgId::BashTooOld).as_bytes()));
 }
 
 // Review Focus 4. 이것을 실패시키는 것: 경로를 String으로 바꾸며 깨뜨리는 것(to_string_lossy 등).
@@ -424,10 +432,11 @@ fn concurrent_init_pins_same_runtime_root() {
 // 이것을 실패시키는 것: 실행 경로와 최종 정규 대상만 보고 사슬 중간 hop과 그 폴더를 건너뛰는 것.
 #[test]
 fn symlink_chain_hops_are_checked() {
-    const TAMPER: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again\n";
+    let tamper = line(MsgId::Tamperable);
+    let tamper: &[u8] = &tamper;
     for (row, hop_mode, want) in [
         ("clean chain", 0o755, &b""[..]),
-        ("hop dir other-writable", 0o777, TAMPER),
+        ("hop dir other-writable", 0o777, tamper),
     ] {
         let base = scratch(&format!("chain-{}", row.replace(' ', "-")));
         for d in ["bin", "hop", "real"] {
@@ -477,10 +486,7 @@ fn symlink_chain_over_40_hops_warns_unknown() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(
-        out.stderr,
-        b"bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists, then open a new shell or evaluate your bingsu init line again\n"
-    );
+    assert_eq!(out.stderr, line(MsgId::TamperUnknown));
 }
 
 fn is_root() -> bool {
@@ -488,7 +494,10 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-const TAMPER_LINE: &[u8] = b"bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again\n";
+/// The warning `init` gives for an executable others can change.
+fn tamper_line() -> Vec<u8> {
+    line(MsgId::Tamperable)
+}
 
 // macOS computes the members of `everyone` (nobody, daemon, ...); the group
 // lists none. Also the path that read the member array unaligned.
@@ -511,7 +520,7 @@ fn macos_everyone_group_writable_warns() {
     );
     assert_eq!(
         out.stderr,
-        TAMPER_LINE,
+        tamper_line(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -626,7 +635,7 @@ fn runtime_root_is_0700_under_any_umask() {
 #[test]
 fn dotdot_after_symlinked_folder_follows_the_kernel() {
     for (row, true_mode, decoy_mode, want) in [
-        ("true dir writable", 0o777, 0o755, TAMPER_LINE),
+        ("true dir writable", 0o777, 0o755, &tamper_line()[..]),
         ("decoy dir writable", 0o755, 0o777, &b""[..]),
     ] {
         let base = scratch(&format!("dotdot-{}", row.replace(' ', "-")));
@@ -678,15 +687,13 @@ fn relative_path_entry_falls_back_to_resolved_executable() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(
-        after_cold(&out.stderr),
-        b"bingsu: could not find the path you ran bingsu from; using the resolved executable path. Check your PATH and open a new shell or evaluate your bingsu init line again\n"
-    );
+    assert_eq!(after_cold(&out.stderr), line(MsgId::NoExePath));
     assert!(!has(&out.stdout, exe.as_os_str().as_bytes()));
 }
 
-const NO_RUNTIME: &[u8] =
-    b"bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions, then open a new shell or evaluate your bingsu init line again\n";
+fn no_runtime() -> Vec<u8> {
+    line(MsgId::NoRuntimeRoot)
+}
 
 // The last runtime folder must be opened without following a symlink:
 // `run/bingsu -> victim` is refused, and victim keeps its mode.
@@ -704,7 +711,7 @@ fn runtime_root_symlink_is_refused_not_followed() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         out.stderr,
-        NO_RUNTIME,
+        no_runtime(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -763,10 +770,7 @@ fn state_root_with_dotdot_after_missing_name_is_not_pinned() {
     };
     let out = run("cl/missing/../lnk/../x");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(
-        out.stderr,
-        b"bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Check the path and its permissions, then open a new shell or evaluate your bingsu init line again\n"
-    );
+    assert_eq!(out.stderr, line(MsgId::UnconfirmedRoot));
     assert!(!has(&out.stdout, b"--state-root="));
     assert!(!has(&out.stdout, b"--log-root="));
     assert!(has(&out.stdout, b"--config-root="));
@@ -813,7 +817,7 @@ fn refused_runtime_candidate_creates_nothing() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         out.stderr,
-        NO_RUNTIME,
+        no_runtime(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );

@@ -268,7 +268,7 @@ def prepare(binary):
         linker = os.environ.get("CARGO_TARGET_" + triple.upper().replace("-", "_") + "_LINKER")
         if linker:
             command += ["-C", "linker=" + linker]
-    M3B.run(command, env={**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": "0.0.0"}, timeout=300)
+    M3B.run(command, env={**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": M3B.workspace_version(source)}, timeout=300)
     audit = module("f3_symbols", ROOT / "scripts/check_collector_symbols.py")
     identity = audit.build_id(binary, 2)
     if identity != audit.build_id(binary.with_name("bingsu-collect"), 1):
@@ -293,8 +293,8 @@ def prepare(binary):
 def stripped_sizes(binary, front, directory, dedicated):
     """Stripped bytes of the front, the collector and the CLI beside `binary`,
     each stripped into `directory`, and the two sums: combined (the prompt image
-    and the collector, the size cap) and installed (every file of the install,
-    recorded only). Without bingsu-prompt the front is the CLI itself."""
+    and the collector, one size cap) and installed (every file of the install,
+    the other cap). Without bingsu-prompt the front is the CLI itself."""
     sizes = {}
     for name, path in (("front", front), ("collector", Path(binary).with_name("bingsu-collect")), ("cli", binary)):
         stripped = Path(directory) / (name + "-stripped")

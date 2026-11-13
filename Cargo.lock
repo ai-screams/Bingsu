@@ -18,6 +18,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -35,18 +41,19 @@ dependencies = [
 
 [[package]]
 name = "bingsu"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-bench",
  "bingsu-core",
  "bingsu-identity",
  "bingsu-match",
  "libc",
+ "yaml-rust2",
 ]
 
 [[package]]
 name = "bingsu-bench"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "libc",
  "seccompiler",
@@ -54,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-collect"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
  "bingsu-identity",
@@ -74,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-core"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "libm",
  "toml",
@@ -84,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-core-bench"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
  "bingsu-match",
@@ -93,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "bingsu-core-tests"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
  "bingsu-match",
@@ -103,28 +110,28 @@ dependencies = [
 
 [[package]]
 name = "bingsu-golden"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
 ]
 
 [[package]]
 name = "bingsu-identity"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
 ]
 
 [[package]]
 name = "bingsu-match"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "regex",
 ]
 
 [[package]]
 name = "bingsu-prompt"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bingsu-core",
  "bingsu-identity",
@@ -168,7 +175,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "core-cfg-check"
-version = "0.0.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "proc-macro2",
  "syn 3.0.9",
@@ -805,6 +812,15 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+dependencies = [
+ "hashbrown",
 ]
 
 [[package]]
@@ -1461,6 +1477,16 @@ name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
+
+[[package]]
+name = "yaml-rust2"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57e5b818a27a4cd30884ea380857a5e56f7ec3ba24a3990a3cc0b95af3238e18"
+dependencies = [
+ "arraydeque",
+ "hashlink",
+]
 
 [[package]]
 name = "zerocopy"

@@ -2,9 +2,10 @@
 //! background color) asked on the terminal (`/dev/tty`). The file is made
 //! only when there is none: a temporary file in the settings folder
 //! (`O_EXCL`, 0600), its data and the folder flushed, then `linkat`, which
-//! cannot replace a name another process made in the meantime. When
-//! `config.toml` is there, nothing is written and only the differences from
-//! the starter are shown. The shell startup file is never edited: the line to
+//! cannot replace a name another process made in the meantime. When the
+//! settings file is there, as `config.toml` or as `config.json` (one place,
+//! and both names together are refused when settings are read), nothing is
+//! written and only the differences from the starter are shown. The shell startup file is never edited: the line to
 //! add is the only thing printed on stdout.
 //!
 //! Exit codes: 0 done (written, or already there), 1 refused or failed,
@@ -29,6 +30,9 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: bingsu setup [--yes] [--icons nerd|unicode] [--mode auto|dark|light]";
 const FILE: &str = "config.toml";
+/// The names of the one place `setup` writes: the file it makes, and the
+/// JSON name that stands in the same place.
+const NAMES: [&str; 2] = [FILE, "config.json"];
 const CANCELLED: u8 = 130;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -204,27 +208,43 @@ fn create(chain: &Chain, dir_path: &Path, text: &str) -> std::io::Result<Created
     Ok(made)
 }
 
-/// The bytes of `config.toml` (capped), `Ok(None)` when there is none, an
-/// error when something is there that is not a plain file.
-fn existing(chain: &Chain) -> std::io::Result<Option<Vec<u8>>> {
+/// The settings file already in the place, under either of its names
+/// (`config.toml` first), with its bytes (capped). `Ok(None)` when there is
+/// none; an error when something is there that is not a plain file.
+/// 이것을 실패시키는 것: `config.json`을 보지 않는 것(그 곁에 `config.toml`을 만들어 다음 읽기가 E308로 멈춤).
+fn existing(chain: &Chain) -> std::io::Result<Option<(&'static str, Vec<u8>)>> {
     let cap = bingsu_core::config::tree::FILE_BYTES_MAX as u64;
-    match sys::open_data_at_nofollow(chain.last().as_fd(), OsStr::new(FILE)) {
-        Ok(f) => {
-            let mut bytes = Vec::new();
-            f.take(cap + 1).read_to_end(&mut bytes)?;
-            Ok(Some(bytes))
+    for name in NAMES {
+        match sys::open_data_at_nofollow(chain.last().as_fd(), OsStr::new(name)) {
+            Ok(f) => {
+                let mut bytes = Vec::new();
+                f.take(cap + 1).read_to_end(&mut bytes)?;
+                return Ok(Some((name, bytes)));
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
+            Err(e) => return Err(e),
         }
-        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Ok(None),
-        Err(e) => Err(e),
     }
+    Ok(None)
 }
 
-fn report_existing(path: &Path, bytes: std::io::Result<Option<Vec<u8>>>, c: Choices) {
-    let shown = ctx::show(path);
+/// `found` is what `existing` found in `dir`; a read error is named after
+/// the file `setup` would have written.
+fn report_existing(
+    dir: &Path,
+    found: std::io::Result<Option<(&'static str, Vec<u8>)>>,
+    c: Choices,
+) {
+    let name = match &found {
+        Ok(Some((name, _))) => name,
+        _ => FILE,
+    };
+    let shown = ctx::show(&dir.join(name));
     eprintln!("bingsu: {shown} is already there, so nothing was written.");
-    match bytes {
-        Ok(Some(b)) if b.len() <= bingsu_core::config::tree::FILE_BYTES_MAX => {
-            match differences(&b, c) {
+    let format = bingsu_core::config::tree::format_of(name.as_bytes());
+    match found {
+        Ok(Some((_, b))) if b.len() <= bingsu_core::config::tree::FILE_BYTES_MAX => {
+            match differences(format, &b, c) {
                 Some(d) if d.is_empty() => eprintln!("It already has the choices you made."),
                 Some(d) => {
                     eprintln!("It differs from your choices here:");
@@ -235,7 +255,7 @@ fn report_existing(path: &Path, bytes: std::io::Result<Option<Vec<u8>>>, c: Choi
                         "Edit it yourself to change them; `bingsu config check` checks the result."
                     );
                 }
-                None => eprintln!("It does not parse as TOML; `bingsu config check` says where."),
+                None => eprintln!("It does not parse; `bingsu config check` says where."),
             }
         }
         _ => eprintln!("It could not be read to compare."),
@@ -342,7 +362,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
         match existing(chain) {
             Ok(None) => {}
             other => {
-                report_existing(&path, other, choices);
+                report_existing(&dir, other, choices);
                 return finish();
             }
         }
@@ -371,7 +391,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
     };
     match create(&chain, &dir, &starter(choices)) {
         Ok(Created::Wrote) => eprintln!("bingsu: wrote {}", ctx::show(&path)),
-        Ok(Created::Exists) => report_existing(&path, existing(&chain), choices),
+        Ok(Created::Exists) => report_existing(&dir, existing(&chain), choices),
         Err(_) => return refuse(&format!("{} could not be written", ctx::show(&path))),
     }
     finish()
@@ -535,7 +555,10 @@ mod tests {
         let chain = runtime_root::open_chain(&dir).unwrap();
         assert!(matches!(existing(&chain), Ok(None)));
         std::fs::write(dir.join(FILE), b"icons = \"nerd\"\n").unwrap();
-        assert_eq!(existing(&chain).unwrap().unwrap(), b"icons = \"nerd\"\n");
+        assert_eq!(
+            existing(&chain).unwrap().unwrap(),
+            (FILE, b"icons = \"nerd\"\n".to_vec())
+        );
         std::fs::remove_file(dir.join(FILE)).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", dir.join(FILE)).unwrap();
         assert!(existing(&chain).is_err(), "a link is not read");

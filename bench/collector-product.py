@@ -186,6 +186,22 @@ def run(command, **kwargs):
     return result
 
 
+def workspace_version(source):
+    """The bingsu package version of the checkout, as cargo would pass it in
+    CARGO_PKG_VERSION to fixtures compiled with rustc alone: its own
+    `version`, or the workspace's when it says `version.workspace = true`
+    (older base trees have their own)."""
+    import tomllib
+    def read(path):
+        return tomllib.loads((Path(source) / path).read_text())
+    version = read("crates/bingsu/Cargo.toml")["package"]["version"]
+    if isinstance(version, dict):
+        assert version == {"workspace": True}, version
+        version = read("Cargo.toml")["workspace"]["package"]["version"]
+    assert isinstance(version, str) and version, version
+    return version
+
+
 def manifest_path(binary):
     return Path(binary).resolve().with_name("collector-product.json")
 
@@ -818,7 +834,7 @@ READ_MEASUREMENT = r'''
 # the dependency key and the extern name: a tree that does not depend on one
 # (an older base tip) does not get it, and a tree that does fails loudly if
 # the build did not produce it.
-CLI_LIBRARIES = (("bingsu-match", "bingsu_match"),)
+CLI_LIBRARIES = (("bingsu-match", "bingsu_match"), ("yaml-rust2", "yaml_rust2"))
 
 
 def cli_libraries(source):
@@ -991,7 +1007,7 @@ def prepare(binary):
                  "gix_object", "gix_pack", "gix_error", "gix_zlib", "gix_ignore",
                  "gix_attributes", "gix_utils", "gix_revwalk", *cli_libraries(source)):
         command += ["--extern", f"{name}={deps[name]}"]
-    env = {**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": "0.0.0"}
+    env = {**os.environ, "CARGO_MANIFEST_DIR": str(source / "crates/bingsu"), "CARGO_PKG_VERSION": workspace_version(source)}
     run(command, env=env, cwd=source, timeout=120)
     table = source / "crates/bingsu-collect/collector-syscalls.tsv"
     sizes = {}

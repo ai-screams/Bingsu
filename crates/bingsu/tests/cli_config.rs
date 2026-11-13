@@ -43,7 +43,7 @@ fn prints_the_core_schemas() {
         assert_eq!((bad.status.code(), bad.stdout.is_empty()), (Some(2), true));
         assert_eq!(
             bad.stderr,
-            b"usage: bingsu config <check [--explain] [--format json|text]|path|schema [--theme]|use PATH>\n"
+            b"usage: bingsu config <check [--explain] [--format json|text]|edit|path|schema [--theme]|use PATH>\n"
         );
     }
     use std::os::unix::ffi::OsStringExt;
@@ -256,7 +256,7 @@ fn select_keeps_layers() {
     let chosen = e.put("other/work.toml", VALID);
     let before = text(&e.run(&["config", "path"]).stdout);
     assert!(
-        before.starts_with("selection: config.toml in the settings folder\n"),
+        before.starts_with("selection: config.toml or config.json in the settings folder\n"),
         "{before}"
     );
     let o = e.run(&["config", "use", "other/work.toml"]);

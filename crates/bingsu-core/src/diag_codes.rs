@@ -6,7 +6,9 @@
 //! base branch.
 //!
 //! Numbers: 1xx file syntax, 2xx keys and values, 3xx sources and
-//! `extends`, 4xx trust of execution keys, 5xx style notices. Texts are
+//! `extends`, 4xx trust of execution keys, 5xx style notices, 6xx the
+//! findings of `bingsu doctor` (an environment or installation problem, not a
+//! problem in a settings file). Texts are
 //! provisional (M7 writes the wording); `{name}` is an argument.
 use crate::diag::{DiagCode, Severity};
 
@@ -40,6 +42,9 @@ pub const FILE_TOO_LARGE: DiagCode = e(102);
 pub const NOT_UTF8: DiagCode = e(103);
 pub const INTEGER_RANGE: DiagCode = e(104);
 pub const NESTING_TOO_DEEP: DiagCode = e(105);
+pub const JSON_SYNTAX: DiagCode = e(106);
+pub const YAML_SYNTAX: DiagCode = e(107);
+pub const YAML_UNSUPPORTED: DiagCode = e(108);
 pub const UNKNOWN_KEY: DiagCode = e(201);
 pub const WRONG_TYPE: DiagCode = e(202);
 pub const BAD_VALUE: DiagCode = e(203);
@@ -60,6 +65,7 @@ pub const EXTENDS_TOO_BIG: DiagCode = e(304);
 pub const EXTENDS_BAD_PATH: DiagCode = e(305);
 pub const REQUIRES_NEWER: DiagCode = e(306);
 pub const VERSION_UNKNOWN: DiagCode = e(307);
+pub const TWO_FORMATS: DiagCode = e(308);
 pub const EXEC_KEY_IGNORED: DiagCode = w(401);
 pub const ENV_SEGMENT_IGNORED: DiagCode = w(402);
 pub const SEGMENT_DROPPED: DiagCode = w(403);
@@ -74,6 +80,13 @@ pub const ENV_SHEBANG: DiagCode = w(411);
 pub const TEMPLATE_REPLACES_STYLE: DiagCode = n(501);
 pub const CUSTOM_DRAWN_LATER: DiagCode = n(502);
 pub const KEY_PLANNED: DiagCode = n(503);
+pub const EXE_FOLDER_CHANGEABLE: DiagCode = w(601);
+pub const PATH_BINGSU_DIFFERS: DiagCode = w(602);
+pub const NO_PINNED_ROOTS: DiagCode = w(603);
+pub const ROOTS_NO_LONGER_MATCH: DiagCode = e(604);
+pub const SIBLING_UNVERIFIED: DiagCode = w(605);
+pub const NO_KERNEL_SECCOMP: DiagCode = w(606);
+pub const SETTINGS_INVALID: DiagCode = e(607);
 
 const fn stable(
     code: DiagCode,
@@ -139,6 +152,24 @@ pub const CODES: &[CodeInfo] = &[
         "tables and arrays are nested more than 32 deep here",
         "nesting is capped so reading a file can never run out of stack",
         "flatten the structure",
+    ),
+    stable(
+        JSON_SYNTAX,
+        "this is not valid JSON: {message}",
+        "the file must parse before anything in it is used",
+        "fix the text at this place",
+    ),
+    stable(
+        YAML_SYNTAX,
+        "this is not valid YAML: {message}",
+        "the file must parse before anything in it is used",
+        "fix the text at this place",
+    ),
+    stable(
+        YAML_UNSUPPORTED,
+        "YAML {feature} is not read",
+        "settings files use plain mappings, lists and scalars; anchors, aliases and tags could expand or change values out of sight",
+        "write the value out where it is used, and keep one document per file",
     ),
     stable(
         UNKNOWN_KEY,
@@ -261,6 +292,24 @@ pub const CODES: &[CodeInfo] = &[
         "upgrade bingsu, or check `version`",
     ),
     stable(
+        TWO_FORMATS,
+        "`{path}` and `{other}` are both here",
+        "one place holds one settings file, and bingsu does not pick one of two",
+        "keep one of the two files",
+    ),
+    stable(
+        ROOTS_NO_LONGER_MATCH,
+        "a folder pinned by `init` is not the same folder now",
+        "a runtime folder that was removed and made again, or a folder that is no longer safe, is not trusted again silently",
+        "run `bingsu init <shell>` again in this shell, or open a new shell",
+    ),
+    stable(
+        SETTINGS_INVALID,
+        "the settings have an error, so the prompt keeps the last good settings",
+        "a settings error is never applied half way; the last settings that checked out stay in use",
+        "run `bingsu config check` and fix what it reports",
+    ),
+    stable(
         EXEC_KEY_IGNORED,
         "`{key}` is ignored here",
         "this file is trusted for colors and layout only; execution keys are not allowed",
@@ -327,6 +376,36 @@ pub const CODES: &[CodeInfo] = &[
         "write the interpreter's absolute path on the first line, for example `#!/usr/bin/python3`",
     ),
     stable(
+        EXE_FOLDER_CHANGEABLE,
+        "a folder on the way to the bingsu executable can be changed by another user",
+        "a prompt runs whatever file is there when it starts, so a folder that others can write is a way to run their code as you",
+        "install bingsu under a folder only you or root can change, then run `bingsu init <shell>` again",
+    ),
+    stable(
+        PATH_BINGSU_DIFFERS,
+        "the `bingsu` found on PATH is not the executable that is running",
+        "the shell hook calls the path pinned when `init` ran, so a different `bingsu` on PATH is not the one your prompt uses",
+        "run `bingsu init <shell>` again from the bingsu you want to use",
+    ),
+    stable(
+        NO_PINNED_ROOTS,
+        "no folders are pinned in this shell, so `init` has not run here",
+        "`init` pins the settings, state and runtime folders for the shell; commands fall back to the current environment, which may differ from what your prompt reads",
+        "add `bingsu init <shell>` to your shell setup and open a new shell",
+    ),
+    stable(
+        SIBLING_UNVERIFIED,
+        "`bingsu-collect` or `bingsu-prompt` beside bingsu is missing or is not from this build",
+        "the three executables must come from one build in one folder; without the collector no git or folder facts are collected, and without the prompt executable the hook calls `bingsu prompt`",
+        "install the three executables from one build into one folder, then run `bingsu init <shell>` again",
+    ),
+    stable(
+        NO_KERNEL_SECCOMP,
+        "this kernel has no seccomp, so the prompt runs without its system call filter",
+        "the filter is an extra guard around the prompt; without kernel support the prompt still draws but has that guard missing",
+        "use a kernel built with seccomp; nothing in the settings changes this",
+    ),
+    stable(
         TEMPLATE_REPLACES_STYLE,
         "the template replaces the preset and options",
         "a template takes precedence over style keys",
@@ -352,14 +431,6 @@ pub const CODES: &[CodeInfo] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // 이것을 실패시키는 것: 진단 도움말에 아직 없는 doctor 명령을 다시 넣는 것.
-    #[test]
-    fn fixes_use_available_commands() {
-        for c in CODES {
-            assert!(!c.fix.contains("doctor"), "{}", c.code);
-        }
-    }
 
     // 이것을 실패시키는 것: 모양 전용을 설정 폴더 밖의 미승인 파일로만 설명하거나, 안전 확인 없이 config use만 안내하는 것.
     #[test]

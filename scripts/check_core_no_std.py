@@ -45,7 +45,7 @@ CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 # (name, version, source or workspace manifest) -> (features, target kinds)
 # Target kinds leave out test, bench and example targets, which never link.
 CORE_GRAPH = {
-    ("bingsu-core", "0.0.0", "crates/bingsu-core/Cargo.toml"): ((), ("lib",)),
+    ("bingsu-core", "0.1.0-rc.1", "crates/bingsu-core/Cargo.toml"): ((), ("lib",)),
     ("libm", "0.2.16", CRATES_IO): ((), ("custom-build", "lib")),
     ("unicode-segmentation", "1.13.3", CRATES_IO): ((), ("lib",)),
     # TOML for the config model (M3a S1): `parse` without `std`. Its nesting
@@ -60,15 +60,15 @@ CORE_GRAPH = {
 # the binary and libc.
 BINGSU_GRAPH = {
     **CORE_GRAPH,
-    ("bingsu", "0.0.0", "crates/bingsu/Cargo.toml"): ((), ("bin",)),
+    ("bingsu", "0.1.0-rc.1", "crates/bingsu/Cargo.toml"): ((), ("bin",)),
     # The shared no_std identity library, not the worker binary's OS modules.
-    ("bingsu-identity", "0.0.0", "crates/bingsu-identity/Cargo.toml"): ((), ("custom-build", "lib")),
+    ("bingsu-identity", "0.1.0-rc.1", "crates/bingsu-identity/Cargo.toml"): ((), ("custom-build", "lib")),
     ("libc", "0.2.191", CRATES_IO): (("default", "std"), ("custom-build", "lib")),
     # A command segment's `match` (U-9c, U-28): the CLI's own crate and the
     # standard regex with Unicode classes and no perf engines (C4c ruling
     # Q6), so a perf or other feature turned on fails here. regex-syntax's
     # `default` comes from proptest in the workspace resolution.
-    ("bingsu-match", "0.0.0", "crates/bingsu-match/Cargo.toml"): ((), ("lib",)),
+    ("bingsu-match", "0.1.0-rc.1", "crates/bingsu-match/Cargo.toml"): ((), ("lib",)),
     ("regex", "1.13.1", CRATES_IO): (
         ("std", "unicode", "unicode-age", "unicode-bool", "unicode-case", "unicode-gencat",
          "unicode-perl", "unicode-script", "unicode-segment"),
@@ -85,12 +85,28 @@ BINGSU_GRAPH = {
          "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"),
         ("lib",),
     ),
+    # YAML config files (conf.d, extends, config use): yaml-rust2's event
+    # parser without its `encoding` feature, and the crates it depends on
+    # (arraydeque is the scanner's token queue; hashlink and hashbrown serve
+    # its YAML value type, which bingsu does not use). No build script and no
+    # proc-macro. hashbrown's features are the workspace resolution (the
+    # collector's Git crates use it too).
+    ("yaml-rust2", "0.13.0", CRATES_IO): ((), ("lib",)),
+    ("arraydeque", "0.5.1", CRATES_IO): (("default", "std"), ("lib",)),
+    ("hashlink", "0.12.2", CRATES_IO): ((), ("lib",)),
+    ("hashbrown", "0.17.1", CRATES_IO): (
+        ("allocator-api2", "default", "default-hasher", "equivalent", "inline-more", "raw-entry"),
+        ("lib",),
+    ),
+    ("foldhash", "0.2.0", CRATES_IO): ((), ("lib",)),
+    ("equivalent", "1.0.2", CRATES_IO): ((), ("lib",)),
+    ("allocator-api2", "0.2.21", CRATES_IO): (("alloc",), ("lib",)),
 }
 # The dedicated prompt binary: the same graph without the CLI.
 PROMPT_GRAPH = {
     **CORE_GRAPH,
-    ("bingsu-prompt", "0.0.0", "crates/bingsu-prompt/Cargo.toml"): ((), ("bin",)),
-    ("bingsu-identity", "0.0.0", "crates/bingsu-identity/Cargo.toml"): ((), ("custom-build", "lib")),
+    ("bingsu-prompt", "0.1.0-rc.1", "crates/bingsu-prompt/Cargo.toml"): ((), ("bin",)),
+    ("bingsu-identity", "0.1.0-rc.1", "crates/bingsu-identity/Cargo.toml"): ((), ("custom-build", "lib")),
     ("libc", "0.2.191", CRATES_IO): (("default", "std"), ("custom-build", "lib")),
 }
 PINS = {"bingsu-core": CORE_GRAPH, "bingsu": BINGSU_GRAPH, "bingsu-prompt": PROMPT_GRAPH}
@@ -101,7 +117,7 @@ PINS = {"bingsu-core": CORE_GRAPH, "bingsu": BINGSU_GRAPH, "bingsu-prompt": PROM
 # constant to OUT_DIR; it emits rerun directives, no linker/configuration/
 # native-code directives. It refuses symlinks, names that are not UTF-8 and
 # names with a control character, so no source name can add a directive line.
-REVIEWED_BUILD = {("libm", "0.2.16"), ("libc", "0.2.191"), ("bingsu-identity", "0.0.0")}
+REVIEWED_BUILD = {("libm", "0.2.16"), ("libc", "0.2.191"), ("bingsu-identity", "0.1.0-rc.1")}
 SKIP_KINDS = {"test", "bench", "example"}
 TARGETS = {
     "bingsu": [{"name": "bingsu", "kind": ["bin"], "crate_types": ["bin"],
