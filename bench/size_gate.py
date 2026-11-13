@@ -6,7 +6,8 @@ p50 and p95 ratio limits and the size cap are inputs (U3: 1.03, 1.10, 6,000,000
 bytes for front + collector); a missing one leaves its verdict BLOCKED, never FAIL.
 The CLI exits 0 unless --enforce is given, and then exits 1 only on FAIL; BLOCKED
 stays visible in the report and summary but passes. Absolute time is recorded only; it is
-never a reason to fail.
+never a reason to fail. So is the release size: each of the three shipped files
+stripped, and their sum.
 """
 from __future__ import annotations
 
@@ -139,6 +140,38 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
     return result
 
 
+# Release size: the three files a release ships, stripped, and their sum
+# (`installed`). Recorded beside the verdict for every pull request, never
+# judged: the cap above stays on front + collector.
+RELEASE_FILES = (("bingsu", "cli"), ("bingsu-prompt", "front"), ("bingsu-collect", "collector"))
+
+
+def release_side(side):
+    """Each release file's stripped bytes and their sum, or None when the
+    preparation lacks a file or its `installed` is not exactly that sum (a tree
+    without bingsu-prompt records front = bingsu and no third file)."""
+    if not isinstance(side, dict) or not all(_size_ok(side.get(key)) for _, key in RELEASE_FILES):
+        return None
+    files = {name: side[key] for name, key in RELEASE_FILES}
+    if not _size_ok(side.get("installed")) or side["installed"] != sum(files.values()):
+        return None
+    return {"files": files, "installed": side["installed"]}
+
+
+def release_size(base: dict, candidate: dict) -> GateResult:
+    """The release size of base and candidate and the change, status RECORDED."""
+    sides = {"base": release_side(base), "candidate": release_side(candidate)}
+    result = GateResult(status="RECORDED", metric="stripped_bytes", base=sides["base"], candidate=sides["candidate"])
+    missing = [name for name, side in sides.items() if side is None]
+    if missing:
+        result["reason"] = "missing or inconsistent release size: " + ", ".join(missing)
+        return result
+    old, new = sides["base"], sides["candidate"]
+    result["delta"] = {**{name: new["files"][name] - old["files"][name] for name, _ in RELEASE_FILES},
+                       "installed": new["installed"] - old["installed"]}
+    return result
+
+
 def recorded(result: GateResult) -> GateResult:
     """`result` kept for the record: its own status moves to `observed_status`."""
     return {**result, "status": "RECORDED", "observed_status": result["status"], "record_only": RECORD_ONLY}
@@ -172,15 +205,17 @@ def main(argv=None):
         time_results["-"] = _blocked("prompt_ns", "measurement has no judged cases: " + str(measurement.get("reason", "")))
     sizes = [json.loads(f.read_text()).get("stripped_bytes") for f in (args.base_preparation, args.candidate_preparation)]
     size = size_gate(sizes[0], sizes[1], args.cap_bytes)
+    release = release_size(sizes[0], sizes[1])  # recorded only: not part of the verdict
     verdict = aggregate([*time_results.values(), size])
     report = {"schema": 1, "status": verdict, "enforced": args.enforce,
               "threshold": None if threshold is None else {k: t if math.isfinite(t) else str(t) for k, t in zip(("p50", "p95"), threshold)},
-              "cap_bytes": args.cap_bytes, "time": time_results, "size": size}
+              "cap_bytes": args.cap_bytes, "time": time_results, "size": size, "release_size": release}
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     reasons = sorted({r["reason"] for r in (*time_results.values(), size) if r.get("reason") and r["status"] != "RECORDED"})
     print(json.dumps({"status": verdict, "enforced": args.enforce, "blocked_by": reasons,
                       "time": {c: {k: r.get(k) for k in ("status", "observed_status", "ratio_p50", "ratio_p95", "reason")} for c, r in time_results.items()},
-                      "size": {k: size.get(k) for k in ("status", "over", "reason")}}, indent=2))
+                      "size": {k: size.get(k) for k in ("status", "over", "reason")},
+                      "release_size": {k: release.get(k) for k in ("status", "base", "candidate", "delta", "reason")}}, indent=2))
     # BLOCKED (no usable evidence) is reported in the report and summary but does not fail the run.
     return 1 if args.enforce and verdict == "FAIL" else 0
 

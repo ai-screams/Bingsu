@@ -277,15 +277,7 @@ def prepare(binary):
     front = binary.with_name("bingsu-prompt") if dedicated else binary
     if dedicated and identity != audit.build_id(front, 3):
         raise ValueError("prompt sibling build mismatch")
-    sizes = {}
-    for name, path in (("front", front), ("collector", binary.with_name("bingsu-collect")), ("cli", binary)):
-        stripped = directory / (name + "-stripped")
-        M3B.run(["strip", "-o", str(stripped), str(path)])
-        sizes[name] = stripped.stat().st_size
-    # combined: the prompt image and the collector (the size cap); installed:
-    # every file of the install (record only).
-    sizes["combined"] = sizes["front"] + sizes["collector"]
-    sizes["installed"] = sizes["combined"] + (sizes["cli"] if dedicated else 0)
+    sizes = stripped_sizes(binary, front, directory, dedicated)
     diagnostic = prepare_diagnostic(source, directory, binary, deps, cross, triple)
     value = {"diagnostic": str(diagnostic), "source": str(source), "profile": "release", "product_mask": 10, "fixture": str(fixture),
              "front": str(front),
@@ -295,6 +287,21 @@ def prepare(binary):
              "probe_sources": {"stage_fixture": M3B.digest(stage_harness(source)), "reader_fixture": M3B.digest(ROOT / "bench/collector-product.py")}}
     manifest_path(binary).write_text(json.dumps(value, indent=2) + "\n")
     return value
+
+
+def stripped_sizes(binary, front, directory, dedicated):
+    """Stripped bytes of the front, the collector and the CLI beside `binary`,
+    each stripped into `directory`, and the two sums: combined (the prompt image
+    and the collector, the size cap) and installed (every file of the install,
+    recorded only). Without bingsu-prompt the front is the CLI itself."""
+    sizes = {}
+    for name, path in (("front", front), ("collector", Path(binary).with_name("bingsu-collect")), ("cli", binary)):
+        stripped = Path(directory) / (name + "-stripped")
+        M3B.run(["strip", "-o", str(stripped), str(path)])
+        sizes[name] = stripped.stat().st_size
+    sizes["combined"] = sizes["front"] + sizes["collector"]
+    sizes["installed"] = sizes["combined"] + (sizes["cli"] if dedicated else 0)
+    return sizes
 
 
 def prepare_diagnostic(source, directory, binary, deps, cross, triple):

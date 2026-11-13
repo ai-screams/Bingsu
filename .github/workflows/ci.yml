@@ -107,7 +107,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
           components: rustfmt, clippy
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -149,7 +149,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Prepare native musl toolchain
         run: |
@@ -200,7 +200,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # 이것을 실패시키는 것: Rust 행이 미실행/ignored여도 cargo 종료 코드만으로 통과하는 것.
       - run: |
@@ -740,7 +740,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install musl and trace tools
         run: |
@@ -829,7 +829,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: runner.os == 'Linux'
         run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
@@ -943,7 +943,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
           components: clippy
           # The gate builds bingsu-core and bingsu-identity without std;
           # the front graph remains pinned to 11 packages.
@@ -984,7 +984,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
           targets: wasm32-unknown-unknown, wasm32-wasip1
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -1060,7 +1060,7 @@ jobs:
       GUNGRAUN_VERSION: 0.20.0
       CARGO_BUILD_JOBS: 2
       # Pinned so the base and the PR, and runs on different days, compare
-      # like with like. Bump by hand together with the stable toolchain.
+      # like with like. Bump by hand together with the pinned toolchain.
       ICOUNT_RUST: 1.98.1
       # Bench packages as manifest:package, one per word. The root workspace's
       # package is found by name in its metadata, so a manifest moved inside
@@ -1265,7 +1265,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build the base tip and the merge result
         run: |
@@ -1346,7 +1346,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Static musl binaries run on the runner and in the older image alike.
@@ -1427,7 +1427,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: ldd --version | head -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
       - run: sudo apt-get update && sudo apt-get install -y strace

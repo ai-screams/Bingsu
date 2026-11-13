@@ -356,6 +356,195 @@ pub fn render_check(i: &Inspection) -> String {
     out
 }
 
+/// The `execution` array of the JSON output: the same units and the same
+/// verdicts as `render_explain`, as data. Environment names only.
+pub(super) fn units_json(
+    w: &mut bingsu_core::diag_json::Writer,
+    report: &ConfigReport,
+    found: &[(String, exec_path::Explained)],
+    only: Option<&str>,
+) {
+    use bingsu_core::config::explain::{self, From};
+    use bingsu_core::diag::SourceView as _;
+    let Some(c) = &report.snapshot else {
+        w.null();
+        return;
+    };
+    let catalog = Catalog(&report.files);
+    let place = |f: &From| -> String {
+        match f {
+            From::Default => "default".into(),
+            From::KeepList => "keep list".into(),
+            From::Source(o) => {
+                let (l, _) = bingsu_core::diag::line_col(catalog.bytes(o.source), o.span.start);
+                format!(
+                    "{}:{l}",
+                    bingsu_core::sanitize::sanitize(catalog.display(o.source))
+                )
+            }
+        }
+    };
+    w.begin_array();
+    for u in explain::units(c)
+        .iter()
+        .filter(|u| only.is_none_or(|o| o == u.id))
+    {
+        let looked = found.iter().find(|(id, _)| *id == u.id).map(|(_, f)| f);
+        // (runs, reason, code)
+        let (runs, reason, code): (bool, Option<String>, Option<String>) = match &u.not_run {
+            Some(n) => {
+                let (text, code) = explain::not_run_text(n);
+                (false, Some(text.to_owned()), code.map(|c| c.to_string()))
+            }
+            None => match looked {
+                Some(exec_path::Explained::Absent) => (
+                    false,
+                    Some("not found on the sanitized PATH".to_owned()),
+                    None,
+                ),
+                Some(exec_path::Explained::Refused { .. }) => {
+                    (false, Some("its file is refused".to_owned()), None)
+                }
+                _ if u.kind == "language" => (
+                    true,
+                    Some("runs where its detect files are found".to_owned()),
+                    None,
+                ),
+                _ => (true, None, None),
+            },
+        };
+        w.begin_object();
+        w.key("id").string(&u.id);
+        w.key("kind").string(u.kind);
+        w.key("runs").boolean(runs);
+        w.key("reason").opt_string(reason.as_deref());
+        w.key("code").opt_string(code.as_deref());
+        w.key("rows").begin_array();
+        for r in &u.rows {
+            w.begin_object();
+            w.key("key").string(r.key);
+            w.key("value").string(&r.value);
+            w.key("from").string(&place(&r.from));
+            w.end_object();
+        }
+        w.end_array();
+        w.key("environment").begin_array();
+        for e in &u.environment {
+            w.begin_object();
+            w.key("name").string(&e.name);
+            w.key("from").string(&place(&e.from));
+            w.end_object();
+        }
+        w.end_array();
+        let executable = match looked {
+            Some(exec_path::Explained::Runs(f)) => Some(ctx::show(&f.executable)),
+            Some(exec_path::Explained::Refused { file: Some(f), .. }) => Some(ctx::show(f)),
+            _ => None,
+        };
+        w.key("executable").opt_string(executable.as_deref());
+        w.end_object();
+    }
+    w.end_array();
+}
+
+/// `config check --format json`: the same facts as the text, as data.
+fn check_json(
+    i: &Inspection,
+    units: Option<&[(String, exec_path::Explained)]>,
+    builtin: Option<(&User, &TrustedEnv)>,
+) -> String {
+    use bingsu_core::diag_json::{self as j, Writer};
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut w = Writer::new();
+    w.begin_object();
+    w.key("schema").number(u64::from(j::SCHEMA));
+    w.key("command").string("config-check");
+    w.key("settings_folder").string(&ctx::show(&i.root));
+    let (kind, path, reason) = match &i.selection {
+        Selection::None => ("none", None, None),
+        Selection::Chosen(r) => ("chosen", Some(ctx::show(&r.path)), None),
+        Selection::Unusable(why) => ("unusable", None, Some(why.clone())),
+        Selection::Incomplete => ("incomplete", None, None),
+    };
+    w.key("selection").begin_object();
+    w.key("kind").string(kind);
+    w.key("path").opt_string(path.as_deref());
+    w.key("reason").opt_string(reason.as_deref());
+    w.end_object();
+    w.key("files").begin_array();
+    let order = applied_order(i);
+    let rest: Vec<usize> = (0..i.report.files.len())
+        .filter(|idx| !order.contains(idx))
+        .collect();
+    for idx in order.iter().chain(rest.iter()) {
+        let (Some(f), Some(line)) = (i.report.files.get(*idx), i.lines.get(*idx)) else {
+            continue;
+        };
+        w.begin_object();
+        w.key("display").bytes(&f.opened.display);
+        w.key("trust").string(match f.trust {
+            Trust::Executable => "trusted",
+            Trust::ShapeOnly => "shape-only",
+            Trust::Unsafe => "unsafe",
+        });
+        w.key("status").string(match f.status {
+            Status::Applied => "applied",
+            Status::Dropped => "dropped",
+            Status::Failed => "failed",
+        });
+        w.key("written_as");
+        match &line.written {
+            Some(p) => w.bytes(p.as_os_str().as_bytes()),
+            None => w.null(),
+        };
+        w.key("unsafe_reason")
+            .opt_string(line.unsafe_reason.as_deref());
+        w.end_object();
+    }
+    w.end_array();
+    w.key("diagnostics");
+    j::diagnostics(&mut w, &i.report.diagnostics, &Catalog(&i.report.files));
+    w.key("remedies").begin_array();
+    for r in &i.remedies {
+        w.string(r);
+    }
+    w.end_array();
+    w.key("widths").begin_array();
+    for x in &i.report.widths {
+        w.begin_object();
+        w.key("from").number(u64::from(x.from));
+        w.key("to").number(u64::from(x.to));
+        w.key("band").opt_string(x.band.as_deref());
+        w.end_object();
+    }
+    w.end_array();
+    // The machine-readable verdict follows the exit code; the sentence is for people.
+    let code = exit_for(i);
+    w.key("result").string(match code {
+        0 => "valid",
+        EXIT_UNFINISHED => "incomplete",
+        _ => "invalid",
+    });
+    w.key("result_text").string(verdict_text(i));
+    w.key("exit_code").number(u64::from(code));
+    w.key("execution");
+    match units {
+        Some(found) => units_json(&mut w, &i.report, found, None),
+        None => {
+            w.null();
+        }
+    }
+    w.key("builtin_languages");
+    match builtin {
+        Some((user, env)) => builtin_json(&mut w, &i.report, user, env),
+        None => {
+            w.null();
+        }
+    }
+    w.end_object();
+    w.finish()
+}
+
 fn verdict_text(i: &Inspection) -> &'static str {
     match (&i.selection, &i.verdict) {
         (Selection::Unusable(_), _) => "not usable until the selection record is fixed",
@@ -642,6 +831,57 @@ fn builtin_section(i: &Inspection, user: &User, env: &TrustedEnv) -> String {
     )
 }
 
+/// The builtin language outcomes of `--explain` for the JSON output: the
+/// same decisions as `builtin_section`, as data; `null` when the layout
+/// draws no builtin language (nothing is looked up then).
+fn builtin_json(
+    w: &mut bingsu_core::diag_json::Writer,
+    report: &ConfigReport,
+    user: &User,
+    env: &TrustedEnv,
+) {
+    use super::explain_builtin as b;
+    let Some(c) = &report.snapshot else {
+        w.null();
+        return;
+    };
+    if b::drawn(c).is_empty() {
+        w.null();
+        return;
+    }
+    let place = place_of(user, env);
+    let (environment, pwd) = TrustedEnv::shell();
+    let cwd = b::shell_folder(pwd.as_deref());
+    let Some(found) = b::decisions(
+        c,
+        place.as_ref(),
+        &environment,
+        cwd.as_deref(),
+        crate::prompt_io::observe_clock().ok(),
+        user.me,
+        &mut SystemGroups::new(&user.pw.name),
+    ) else {
+        w.null();
+        return;
+    };
+    w.begin_object();
+    w.key("folder_facts_age_s");
+    match found.age_s {
+        Some(n) => w.number(n),
+        None => w.null(),
+    };
+    w.key("languages").begin_array();
+    for (language, d) in &found.rows {
+        w.begin_object();
+        w.key("language").string(language.id);
+        w.key("outcome").string(b::outcome_word(d));
+        w.key("text").string(&b::line(language, d));
+        w.end_object();
+    }
+    w.end_array();
+    w.end_object();
+}
+
 /// The runtime folder and roots of the saved folder facts. The pinned
 /// roots when init exported them (asked only then: without a pin
 /// `pinned_roots` says so on stderr); else the current candidates, read
@@ -708,8 +948,12 @@ fn run_with(
     render: fn(&Inspection) -> String,
     exit: fn(&Inspection) -> u8,
     extra: Extra,
+    json: bool,
 ) -> ExitCode {
     let Some(user) = User::current() else {
+        if json {
+            return fail_json("config-check", en(MsgId::NoHome), EXIT_FAILED);
+        }
         eprintln!("{}", en(MsgId::NoHome));
         return ctx::code(EXIT_FAILED);
     };
@@ -727,6 +971,14 @@ fn run_with(
             };
             let notes = env_shebang_notes(&i.report, &found);
             i.report.diagnostics.extend(notes);
+            if json {
+                let units = (extra == Extra::Explain).then_some(found.as_slice());
+                let builtin = (extra == Extra::Explain).then_some((&user, &env));
+                if !ctx::print(&check_json(&i, units, builtin)) {
+                    return ctx::code(EXIT_FAILED);
+                }
+                return ctx::code(exit(&i));
+            }
             let mut text = render(&i);
             // Fails without it: explain_shows_not_run_reason.
             if extra == Extra::Explain {
@@ -739,25 +991,40 @@ fn run_with(
             ctx::code(exit(&i))
         }
         Err((text, code)) => {
+            if json {
+                return fail_json("config-check", &text, code);
+            }
             eprintln!("{text}");
             ctx::code(code)
         }
     }
 }
 
-pub fn check() -> ExitCode {
-    run_with(render_check, exit_for, Extra::Scripts)
+/// The JSON output of a run that could not read the settings at all: the
+/// same `result: "invalid"` document `explain` gives, with the reason in
+/// `error`. The exit code is the text mode's.
+pub(super) fn fail_json(command: &str, error: &str, code: u8) -> ExitCode {
+    let doc = bingsu_core::diag_json::failure(command, &[], &Catalog(&[]), Some(error));
+    if ctx::print(&doc) {
+        ctx::code(code)
+    } else {
+        ctx::code(EXIT_FAILED)
+    }
+}
+
+pub fn check(json: bool) -> ExitCode {
+    run_with(render_check, exit_for, Extra::Scripts, json)
 }
 
 /// `config check --explain`: `check`, then the execution section.
-pub fn check_explain() -> ExitCode {
-    run_with(render_check, exit_for, Extra::Explain)
+pub fn check_explain(json: bool) -> ExitCode {
+    run_with(render_check, exit_for, Extra::Explain, json)
 }
 
 /// `config path` lists; it does not judge, so it succeeds whenever it could
 /// read the folder.
 pub fn path() -> ExitCode {
-    run_with(render_path, path_exit, Extra::None)
+    run_with(render_path, path_exit, Extra::None, false)
 }
 
 fn path_exit(i: &Inspection) -> u8 {
