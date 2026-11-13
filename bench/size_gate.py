@@ -2,12 +2,13 @@
 """Pull request gate verdicts for full prompt time and stripped binary size.
 
 Pure judgement over D1 `Paired` rows and `git-product.py --prepare` size maps. The
-p50 and p95 ratio limits and the size cap are inputs (U3: 1.03, 1.10, 6,000,000
-bytes for front + collector); a missing one leaves its verdict BLOCKED, never FAIL.
-The CLI exits 0 unless --enforce is given, and then exits 1 only on FAIL; BLOCKED
-stays visible in the report and summary but passes. Absolute time is recorded only; it is
-never a reason to fail. So is the release size: each of the three shipped files
-stripped, and their sum.
+p50 and p95 ratio limits and the two size caps are inputs (U3: 1.03, 1.10; the
+first release: 2,500,000 bytes for front + collector, 7,000,000 bytes for the
+three shipped files together); a missing one leaves its verdict BLOCKED, never
+FAIL. The CLI exits 0 unless --enforce is given, and then exits 1 only on FAIL;
+BLOCKED stays visible in the report and summary but passes. Absolute time is
+recorded only; it is never a reason to fail. The release size (each of the three
+shipped files stripped, and their sum) is recorded with its change from the base.
 """
 from __future__ import annotations
 
@@ -115,11 +116,14 @@ def _size_ok(v):
     return type(v) is int and v > 0
 
 
-def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
-    """FAIL when the candidate front + collector exceeds `cap_bytes` (U3 S1: no per-binary cap).
+def size_gate(base: dict, candidate: dict, cap_bytes: int | None, installed_cap_bytes: int | None) -> GateResult:
+    """FAIL when the candidate front + collector (`combined`) exceeds `cap_bytes`
+    or its three shipped files together (`installed`, checked by `release_side`)
+    exceed `installed_cap_bytes`; no per-binary cap.
 
     A missing or invalid cap, a missing candidate size or a combined that is not
-    front + collector is BLOCKED; so is a bad base size, unless the candidate is over the cap.
+    front + collector is BLOCKED; so is an installed that is not the three files'
+    sum, or a bad base size, unless the candidate is over a cap.
     """
     def valid(side):
         return (isinstance(side, dict) and all(_size_ok(side.get(k)) for k in SIZE_KEYS)
@@ -127,13 +131,20 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
     if not valid(candidate):
         return _blocked("stripped_bytes", "missing or inconsistent size")
     result = GateResult(metric="stripped_bytes", base=base, candidate=candidate)
-    if cap_bytes is None:
+    caps = {"combined": cap_bytes, "installed": installed_cap_bytes}
+    if any(cap is None for cap in caps.values()):
         return {**result, "status": "BLOCKED", "reason": "cap " + PENDING}
-    if not _size_ok(cap_bytes):
+    if not all(_size_ok(cap) for cap in caps.values()):
         return {**result, "status": "BLOCKED", "reason": "invalid cap"}
-    result["cap_bytes"] = {"combined": cap_bytes}
-    result["over"] = ["combined"] if candidate["combined"] > cap_bytes else []
-    # The cap judges the candidate alone; a missing base only blocks a candidate that fits.
+    result["cap_bytes"] = caps
+    release = release_side(candidate)
+    sizes = {"combined": candidate["combined"], "installed": None if release is None else release["installed"]}
+    # 이것을 실패시키는 것: installed를 판정에서 빼는 것, 경계(상한과 같은 크기)를 넘은 것으로 치는 것,
+    # 후보 대신 기준의 크기를 재는 것.
+    result["over"] = [k for k in caps if sizes[k] is not None and sizes[k] > caps[k]]
+    # The caps judge the candidate alone; a missing record only blocks a candidate that fits.
+    if not result["over"] and release is None:
+        return {**result, "status": "BLOCKED", "reason": "missing or inconsistent release size"}
     if not result["over"] and not valid(base):
         return {**result, "status": "BLOCKED", "reason": "missing or inconsistent size"}
     result["status"] = "FAIL" if result["over"] else "PASS"
@@ -141,8 +152,8 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | None) -> GateResult:
 
 
 # Release size: the three files a release ships, stripped, and their sum
-# (`installed`). Recorded beside the verdict for every pull request, never
-# judged: the cap above stays on front + collector.
+# (`installed`). The candidate's sum is judged by `size_gate`; base, candidate
+# and the change are recorded beside the verdict for every pull request.
 RELEASE_FILES = (("bingsu", "cli"), ("bingsu-prompt", "front"), ("bingsu-collect", "collector"))
 
 
@@ -189,7 +200,9 @@ def main(argv=None):
     p.add_argument("--candidate-preparation", type=Path, required=True)
     p.add_argument("--ratio-p50", type=float, help="max candidate/base ratio of p50 (U3: 1.03)")
     p.add_argument("--ratio-p95", type=float, help="max candidate/base ratio of p95 (U3: 1.10)")
-    p.add_argument("--cap-bytes", type=int, help="cap on stripped front + collector bytes (U3: 6000000)")
+    p.add_argument("--cap-bytes", type=int, help="cap on stripped front + collector bytes (2500000)")
+    p.add_argument("--installed-cap-bytes", type=int,
+                   help="cap on the stripped bytes of the three shipped files together (7000000)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--enforce", action="store_true", help="exit 1 on FAIL; BLOCKED and PASS exit 0")
     p.add_argument("--record-only", default="", help="comma-separated cases recorded but not judged")
@@ -204,12 +217,13 @@ def main(argv=None):
     if not any(r["status"] != "RECORDED" for r in time_results.values()):
         time_results["-"] = _blocked("prompt_ns", "measurement has no judged cases: " + str(measurement.get("reason", "")))
     sizes = [json.loads(f.read_text()).get("stripped_bytes") for f in (args.base_preparation, args.candidate_preparation)]
-    size = size_gate(sizes[0], sizes[1], args.cap_bytes)
-    release = release_size(sizes[0], sizes[1])  # recorded only: not part of the verdict
+    size = size_gate(sizes[0], sizes[1], args.cap_bytes, args.installed_cap_bytes)
+    release = release_size(sizes[0], sizes[1])  # the record; `size` judges the candidate's sum
     verdict = aggregate([*time_results.values(), size])
     report = {"schema": 1, "status": verdict, "enforced": args.enforce,
               "threshold": None if threshold is None else {k: t if math.isfinite(t) else str(t) for k, t in zip(("p50", "p95"), threshold)},
-              "cap_bytes": args.cap_bytes, "time": time_results, "size": size, "release_size": release}
+              "cap_bytes": args.cap_bytes, "installed_cap_bytes": args.installed_cap_bytes,
+              "time": time_results, "size": size, "release_size": release}
     args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     reasons = sorted({r["reason"] for r in (*time_results.values(), size) if r.get("reason") and r["status"] != "RECORDED"})
     print(json.dumps({"status": verdict, "enforced": args.enforce, "blocked_by": reasons,
