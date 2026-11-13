@@ -52,6 +52,8 @@ pub(crate) mod command_supervisor;
 #[cfg(unix)]
 mod config;
 #[cfg(unix)]
+mod config_edit;
+#[cfg(unix)]
 mod config_inspect;
 #[cfg(unix)]
 mod config_load;
@@ -61,6 +63,8 @@ mod config_use;
 mod ctx;
 #[cfg(unix)]
 mod doctor;
+#[cfg(unix)]
+mod editor;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]
 mod evidence;
@@ -105,10 +109,6 @@ pub(crate) mod runtime_root;
 mod setup;
 #[cfg(unix)]
 #[allow(unsafe_code)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "config edit calls it in the next change")
-)]
 mod signal_guard;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
