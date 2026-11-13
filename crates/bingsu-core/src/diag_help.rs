@@ -36,6 +36,7 @@ pub const COMMANDS: &[&str] = &[
     "bingsu config schema",
     "bingsu config schema --theme",
     "bingsu config use",
+    "bingsu doctor",
     "bingsu help",
     "bingsu init",
     "bingsu reload",
@@ -452,12 +453,19 @@ mod tests {
                 };
                 assert!(ok, "{}: `{n}` is not a command or a config key", x.code);
             }
-            assert!(
-                !x.fix.contains("doctor"),
-                "{}: no doctor command yet",
-                x.code
-            );
         }
+    }
+
+    // `bingsu doctor` is a command a `fix` text may name (it exists, and `help.rs` checks that the CLI
+    // dispatches it). 이것을 실패시키는 것: COMMANDS에서 doctor를 빼는 것(`fix`에 doctor를 적은 코드가 검사에서 떨어짐),
+    // 백틱 안의 `bingsu doctor`를 이름으로 읽지 못하는 것.
+    #[test]
+    fn a_fix_may_name_doctor() {
+        let fix = "Run `bingsu doctor` to see the folder, then `bingsu init` again.";
+        let found = names(fix);
+        assert_eq!(found, ["bingsu doctor", "bingsu init"]);
+        assert!(found.iter().all(|n| command_exists(n)), "{found:?}");
+        assert!(!command_exists("bingsu doctors"));
     }
 
     // 이것을 실패시키는 것: 대소문자 구분, 자릿수 검사, 레지스트리에 없는 번호를 받는 것.

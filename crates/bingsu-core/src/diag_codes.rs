@@ -404,14 +404,6 @@ pub const CODES: &[CodeInfo] = &[
 mod tests {
     use super::*;
 
-    // 이것을 실패시키는 것: 진단 도움말에 아직 없는 doctor 명령을 다시 넣는 것.
-    #[test]
-    fn fixes_use_available_commands() {
-        for c in CODES {
-            assert!(!c.fix.contains("doctor"), "{}", c.code);
-        }
-    }
-
     // 이것을 실패시키는 것: 모양 전용을 설정 폴더 밖의 미승인 파일로만 설명하거나, 안전 확인 없이 config use만 안내하는 것.
     #[test]
     fn shape_only_reason_also_fits_an_unconfirmed_config_root() {
