@@ -377,6 +377,12 @@ pub const HELP: &[Help] = &[
         "The key is read from a later milestone on. Until then it is accepted and left out, so a config written for the future does not fail today.",
         "Keep the key, or remove it. `bingsu config schema` marks which keys are planned.",
     ),
+    h(
+        c::BAND_TEMPLATE_REPLACES_LINES,
+        "At some widths a layout band draws its own template, so layout lines you wrote are not used there.",
+        "A band chosen for a width range takes its lines from `[layout]` unless it has its own template; a template replaces the lines. The built-in theme has such a band, `narrow`, for widths under 60.",
+        "To draw your segments at those widths too, give the band a template of your own, for example:\n[layout.when.narrow.style]\ntemplate = \"{dir} {git}{@nl}{char}\"\nThen run `bingsu config check` to see the widths again.",
+    ),
 ];
 
 /// Parse a code as typed: a letter `E`, `W` or `N` (either case) and

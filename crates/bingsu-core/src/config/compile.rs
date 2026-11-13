@@ -26,7 +26,7 @@ use crate::config::merge::{KeyClass, MEntry, MNode, MTable, MValue, Merged, Orig
 use crate::config::source::Trust;
 use crate::config::tree::Value;
 use crate::default_theme::{DIR_METHODS, SETUP};
-use crate::diag::{Diagnostic, Place};
+use crate::diag::{Diagnostic, Place, SourceId};
 use crate::diag_codes as codes;
 use crate::diag_widths::{WidthRun, width_table};
 use crate::field::BUILTIN;
@@ -494,6 +494,63 @@ fn without_hidden(text: &str, off: &BTreeSet<&str>, texts: &[&str]) -> String {
     }
     out.push_str(&text[at..]);
     out
+}
+
+/// The built-in theme is the first source of every read (module comment).
+const BUILTIN_SOURCE: SourceId = SourceId(0);
+
+/// Widths `from..=to` as the width table of `config check` writes them.
+fn width_span(from: u16, to: u16) -> String {
+    if to == u16::MAX {
+        alloc::format!("{from}+")
+    } else if from == to {
+        alloc::format!("{from}")
+    } else {
+        alloc::format!("{from}-{to}")
+    }
+}
+
+/// N504: a band's own template draws in place of the lines the band takes
+/// from `[layout]`. Said only for lines a file wrote that is neither the
+/// built-in theme nor the file of the template (a file that writes both
+/// chose it); lines the band writes itself are N501's case. `None` when no
+/// such line is replaced or no width draws the band.
+fn band_replaces_lines(lay: &Layout, own: &MNode, widths: &[WidthRun]) -> Option<Diagnostic> {
+    let name = lay.name.as_ref()?;
+    let mut lines = Vec::new();
+    let mut first = None;
+    for (i, l) in lay.lines.iter().enumerate() {
+        // 이것을 실패시키는 것: 구간이 직접 쓴 줄에도 내는 것(N501과 겹침).
+        if l.written {
+            continue;
+        }
+        // 이것을 실패시키는 것: 내장 테마가 쓴 줄에 내는 것(설정 없는 사용자에게도 노트), 템플릿과 같은 파일이
+        // 쓴 줄에 내는 것, 사용자 파일이 쓴 줄을 놓치는 것.
+        let by_user = l
+            .nodes
+            .iter()
+            .find(|n| n.origin.source != BUILTIN_SOURCE && n.origin.source != own.origin.source);
+        if let Some(n) = by_user {
+            first.get_or_insert(n);
+            lines.push(alloc::format!("layout.line{}", i + 1));
+        }
+    }
+    let first = first?;
+    let spans: Vec<String> = widths
+        .iter()
+        .filter(|w| w.band.as_deref() == Some(name.as_str()))
+        .map(|w| width_span(w.from, w.to))
+        .collect();
+    // 이것을 실패시키는 것: 어느 폭에서도 골라지지 않는 구간(W407)에 내는 것.
+    if spans.is_empty() {
+        return None;
+    }
+    Some(
+        Diagnostic::new(codes::BAND_TEMPLATE_REPLACES_LINES, at(first))
+            .arg("band", name.clone())
+            .arg("widths", spans.join(", "))
+            .arg("lines", lines.join(" and ")),
+    )
 }
 
 /// The index of a band name; a name `names` lacks gets `names.len()`, which
@@ -978,6 +1035,12 @@ pub fn compile(
                 // say so, never drop them in silence.
                 if options != StyleOptions::default() || lay.lines.iter().any(|l| l.written) {
                     notes.push(Diagnostic::new(codes::TEMPLATE_REPLACES_STYLE, where_));
+                }
+                // A band's own template also draws in place of the lines it
+                // takes from `[layout]`: never in silence either.
+                // 이것을 실패시키는 것: 구간이 물려받은 기본 템플릿(자기 것 아님)에 내는 것(N501이 기본 레이아웃에서 이미 알림).
+                if let Some(own) = bt.and_then(|bt| get(bt, &["style", "template"])) {
+                    notes.extend(band_replaces_lines(&lay, own, &banded.widths));
                 }
                 // A `custom/…` reference that is not drawn (turned off, or
                 // undeclared, which W408 names) goes alone; the rest compiles.
@@ -1868,7 +1931,8 @@ mod tests {
         assert_eq!(codes_of(&r), [codes::KEY_PLANNED]);
     }
 
-    /// One drawn command segment with `body` as its keys.
+    /// One drawn command segment with `body` as its keys. Its `[layout.line1]`
+    /// is the user's, so the built-in narrow band's template notes N504.
     fn command_seg(body: &str) -> String {
         alloc::format!(
             "[segment.\"custom/k\"]\nkind = \"command\"\n{body}[layout.line1]\nleft = [\"custom/k\"]\n"
@@ -1921,7 +1985,13 @@ mod tests {
             &command_seg("shell = \"kubectl ctx | head -1\"\nunsafe_shell = true\n"),
             &[],
         );
-        assert_eq!(codes_of(&r), [codes::UNSAFE_SHELL_USED]);
+        assert_eq!(
+            codes_of(&r),
+            [
+                codes::UNSAFE_SHELL_USED,
+                codes::BAND_TEMPLATE_REPLACES_LINES
+            ]
+        );
         let c = r.snapshot.unwrap();
         assert_eq!(c.exec_units[0].not_run, None);
     }
@@ -1933,10 +2003,19 @@ mod tests {
         let both = command_seg("command = [\"k\"]\nshell = \"k\"\nunsafe_shell = true\n");
         assert!(codes_of(&read(&both, &[])).contains(&codes::COMMAND_FORM_CONFLICT));
         let alone = command_seg("command = [\"k\"]\nunsafe_shell = true\n");
-        assert_eq!(codes_of(&read(&alone, &[])), [codes::COMMAND_FORM_CONFLICT]);
+        assert_eq!(
+            codes_of(&read(&alone, &[])),
+            [
+                codes::COMMAND_FORM_CONFLICT,
+                codes::BAND_TEMPLATE_REPLACES_LINES
+            ]
+        );
         // `unsafe_shell = false` alone says nothing to conflict with.
         let off = command_seg("command = [\"k\"]\nunsafe_shell = false\n");
-        assert_eq!(codes_of(&read(&off, &[])), []);
+        assert_eq!(
+            codes_of(&read(&off, &[])),
+            [codes::BAND_TEMPLATE_REPLACES_LINES]
+        );
     }
 
     // 실행할 것이 없는 command 세그먼트(command·shell 둘 다 없음, `command = []`)는 E212다.
@@ -1945,11 +2024,18 @@ mod tests {
     fn test_command_segment_needs_something_to_run() {
         for body in ["", "command = []\n", "timeout = \"200ms\"\n"] {
             let r = read(&command_seg(body), &[]);
-            assert_eq!(codes_of(&r), [codes::COMMAND_FORM_CONFLICT], "{body:?}");
+            assert_eq!(
+                codes_of(&r),
+                [
+                    codes::COMMAND_FORM_CONFLICT,
+                    codes::BAND_TEMPLATE_REPLACES_LINES
+                ],
+                "{body:?}"
+            );
             assert!(r.snapshot.is_none(), "{body:?}");
         }
         let r = read(&command_seg("command = [\"k\"]\n"), &[]);
-        assert_eq!(codes_of(&r), []);
+        assert_eq!(codes_of(&r), [codes::BAND_TEMPLATE_REPLACES_LINES]);
     }
 
     // `shell` 텍스트 안의 자리표시자는 E213이다(허용이 있어도).
@@ -1971,7 +2057,13 @@ mod tests {
             &command_seg("shell = \"echo {a,b} ${HOME}\"\nunsafe_shell = true\n"),
             &[],
         );
-        assert_eq!(codes_of(&r), [codes::UNSAFE_SHELL_USED]);
+        assert_eq!(
+            codes_of(&r),
+            [
+                codes::UNSAFE_SHELL_USED,
+                codes::BAND_TEMPLATE_REPLACES_LINES
+            ]
+        );
     }
 
     // 자리표시자는 argv 원소 하나 전체로만 쓴다. 원소 전체 `{dir}`과 다른 중괄호(awk)는 받는다.
@@ -1980,13 +2072,19 @@ mod tests {
     #[test]
     fn test_placeholder_mid_string_rejected() {
         let r = read(&command_seg("command = [\"ls\", \"a{dir}\"]\n"), &[]);
-        assert_eq!(codes_of(&r), [codes::PLACEHOLDER_NOT_WHOLE]);
+        assert_eq!(
+            codes_of(&r),
+            [
+                codes::PLACEHOLDER_NOT_WHOLE,
+                codes::BAND_TEMPLATE_REPLACES_LINES
+            ]
+        );
         assert!(r.snapshot.is_none());
         let ok = read(
             &command_seg("command = [\"awk\", \"{print $1}\", \"{dir}\"]\n"),
             &[],
         );
-        assert_eq!(codes_of(&ok), []);
+        assert_eq!(codes_of(&ok), [codes::BAND_TEMPLATE_REPLACES_LINES]);
     }
 
     // `cwd = "untrusted-current"`는 경고 W410, 목록 밖 값은 E203이다.
@@ -1997,10 +2095,16 @@ mod tests {
             &command_seg("command = [\"k\"]\ncwd = \"untrusted-current\"\n"),
             &[],
         );
-        assert_eq!(codes_of(&r), [codes::CWD_UNTRUSTED_CURRENT]);
+        assert_eq!(
+            codes_of(&r),
+            [
+                codes::CWD_UNTRUSTED_CURRENT,
+                codes::BAND_TEMPLATE_REPLACES_LINES
+            ]
+        );
         assert!(r.snapshot.is_some());
         let r = read(&command_seg("command = [\"k\"]\ncwd = \"neutral\"\n"), &[]);
-        assert_eq!(codes_of(&r), []);
+        assert_eq!(codes_of(&r), [codes::BAND_TEMPLATE_REPLACES_LINES]);
         let r = read(&command_seg("command = [\"k\"]\ncwd = \"/w\"\n"), &[]);
         assert_eq!(codes_of(&r), [codes::BAD_VALUE]);
     }
@@ -2088,7 +2192,11 @@ mod tests {
                 )),
                 &[],
             );
-            assert_eq!(codes_of(&r), [codes::BAD_VALUE], "{name}");
+            assert_eq!(
+                codes_of(&r),
+                [codes::BAD_VALUE, codes::BAND_TEMPLATE_REPLACES_LINES],
+                "{name}"
+            );
             assert!(r.snapshot.is_none(), "{name}");
         }
         // Credentials may come back (they are warned about later, U-13 V2).
@@ -2096,7 +2204,7 @@ mod tests {
             &command_seg("command = [\"k\"]\nenv_allow = [\"SSH_AUTH_SOCK\", \"LDX\"]\n"),
             &[],
         );
-        assert_eq!(codes_of(&r), []);
+        assert_eq!(codes_of(&r), [codes::BAND_TEMPLATE_REPLACES_LINES]);
     }
 
     // env_allow 이름은 비지 않고 `=`·NUL이 없다(정제 환경의 `NAME=VALUE\0` 틀을 깨지 않게).
@@ -2110,13 +2218,17 @@ mod tests {
                 )),
                 &[],
             );
-            assert_eq!(codes_of(&r), [codes::BAD_VALUE], "{bad:?}");
+            assert_eq!(
+                codes_of(&r),
+                [codes::BAD_VALUE, codes::BAND_TEMPLATE_REPLACES_LINES],
+                "{bad:?}"
+            );
         }
         let r = read(
             &command_seg("command = [\"k\"]\nenv_allow = [\"KUBECONFIG\"]\n"),
             &[],
         );
-        assert_eq!(codes_of(&r), []);
+        assert_eq!(codes_of(&r), [codes::BAND_TEMPLATE_REPLACES_LINES]);
     }
 
     // 이것을 실패시키는 것: 실행 정책 필드(cwd·env_allow·timeout·cache·shell)와 키별 출처를 snapshot에서 버리는 것.
@@ -2305,7 +2417,10 @@ mod tests {
             alloc::format!("detect_files = [{}]\n{good}", names(16)),
             "detect_files = [\"a\"]\ninterpreter = \"/opt/deno/bin/deno\"\n".into(),
         ];
-        let only_later = |r: &crate::config::report::ConfigReport| codes_of(r).is_empty();
+        // The unit's layout line is the user's, so the built-in narrow template notes N504.
+        let only_later = |r: &crate::config::report::ConfigReport| {
+            codes_of(r) == [codes::BAND_TEMPLATE_REPLACES_LINES]
+        };
 
         for keys in ok {
             let r = read(&lang(&keys), &[]);
@@ -2345,7 +2460,13 @@ mod tests {
             )),
             &[],
         );
-        assert_eq!(codes_of(&r), [codes::CWD_UNTRUSTED_CURRENT]);
+        assert_eq!(
+            codes_of(&r),
+            [
+                codes::CWD_UNTRUSTED_CURRENT,
+                codes::BAND_TEMPLATE_REPLACES_LINES
+            ]
+        );
         assert!(r.snapshot.is_some());
         // 255 bytes is one name still.
         let r = read(
@@ -2395,6 +2516,112 @@ mod tests {
             "{:?}",
             codes_of(&r)
         );
+    }
+
+    /// One N504: its band, widths and lines arguments, and its place.
+    type BandNote<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>, Place);
+
+    fn band_notes(r: &crate::config::report::ConfigReport) -> Vec<BandNote<'_>> {
+        r.diagnostics
+            .iter()
+            .filter(|d| d.code == codes::BAND_TEMPLATE_REPLACES_LINES)
+            .map(|d| {
+                let arg = |k: &str| {
+                    d.args
+                        .iter()
+                        .find(|a| a.name == k)
+                        .map(|a| a.value.as_str())
+                };
+                (arg("band"), arg("widths"), arg("lines"), d.at)
+            })
+            .collect()
+    }
+
+    // A band's own template draws in place of the lines it takes from `[layout]` (N504): said for
+    // lines a user file wrote, at the place they were written, with the band and its widths.
+    // 이것을 실패시키는 것: 사용자 줄이 내장 narrow 템플릿에 밀리는데 말하지 않는 것, 구간 이름·폭·줄 이름을
+    // 틀리게 적는 것, 노트를 사용자 줄이 아닌 곳에 두는 것.
+    #[test]
+    fn a_band_template_over_user_lines_says_so() {
+        let user = "[layout.line1]\nleft = [\"dir\"]\nright = [\"time\"]\n";
+        let r = read(user, &[]);
+        let notes = band_notes(&r);
+        assert_eq!(notes.len(), 1, "{:?}", codes_of(&r));
+        let (band, widths, lines, at) = notes[0];
+        assert_eq!(
+            (band, widths, lines),
+            (Some("narrow"), Some("0-59"), Some("layout.line1"))
+        );
+        assert!(
+            matches!(at, Place::Source { id, .. } if id == SourceId(1)),
+            "{at:?}"
+        );
+        // Both lines, when the user wrote both.
+        let both = read(
+            "[layout.line1]\nleft = [\"dir\"]\n[layout.line2]\nleft = [\"char\"]\n",
+            &[],
+        );
+        assert_eq!(
+            band_notes(&both)[0].2,
+            Some("layout.line1 and layout.line2")
+        );
+        // A theme's band template over the user's lines is the same surprise.
+        let theme = read(
+            "extends = [\"t\"]\n[layout.line1]\nleft = [\"dir\"]\n",
+            &[(
+                "t",
+                "[layout.when.mid]\nmin_cols = 60\nmax_cols = 79\n[layout.when.mid.style]\ntemplate = \"{dir}{@nl}{char}\"\n",
+            )],
+        );
+        let bands: Vec<_> = band_notes(&theme).iter().map(|n| (n.0, n.1)).collect();
+        assert_eq!(
+            bands,
+            [(Some("narrow"), Some("0-59")), (Some("mid"), Some("60-79"))]
+        );
+    }
+
+    // N504 stays quiet where nothing is lost or the user chose it.
+    // 이것을 실패시키는 것: 내장 줄만 있는 설정(설정 없음)에 내는 것, 템플릿과 같은 파일이 쓴 줄에 내는 것,
+    // 구간이 직접 쓴 줄을 N504에도 넣는 것, 기본 레이아웃에서 물려받은 템플릿에 내는 것, 어느 폭에서도
+    // 골라지지 않는 구간에 내는 것.
+    #[test]
+    fn a_band_template_note_only_for_lines_it_takes_away() {
+        assert!(band_notes(&read("", &[])).is_empty());
+        let own = read(
+            "[layout.line1]\nleft = [\"dir\"]\n[layout.when.narrow.style]\ntemplate = \"{dir}{@nl}{char}\"\n",
+            &[],
+        );
+        assert!(band_notes(&own).is_empty(), "{:?}", codes_of(&own));
+        // The band writes line 1 itself (N501's case); only line 2 is taken from the user's layout.
+        let written = read(
+            "[layout.line1]\nleft = [\"dir\"]\n[layout.line2]\nleft = [\"char\"]\n[layout.when.narrow.line1]\nleft = [\"git\"]\n",
+            &[],
+        );
+        let n = band_notes(&written);
+        assert_eq!(n.len(), 1, "{:?}", codes_of(&written));
+        assert_eq!(n[0].2, Some("layout.line2"));
+        assert!(codes_of(&written).contains(&codes::TEMPLATE_REPLACES_STYLE));
+        // A user band without a template of its own takes the default template (from a theme
+        // here, so the file check alone would not keep quiet): that is N501's case in the
+        // default layout, not N504's.
+        let inherited = read(
+            "extends = [\"t\"]\n[layout.line1]\nleft = [\"dir\"]\n[layout.when.mid]\nmin_cols = 60\nmax_cols = 79\n",
+            &[("t", "[style]\ntemplate = \"{dir}{@nl}{char}\"\n")],
+        );
+        assert!(codes_of(&inherited).contains(&codes::TEMPLATE_REPLACES_STYLE));
+        let names: Vec<_> = band_notes(&inherited).iter().map(|n| n.0).collect();
+        assert!(!names.contains(&Some("mid")), "{names:?}");
+        // A band no width chooses replaces nothing.
+        let never = read(
+            "extends = [\"t\"]\n[layout.line1]\nleft = [\"dir\"]\n",
+            &[(
+                "t",
+                "[layout.when.inner]\nmin_cols = 10\nmax_cols = 20\norder = 2\n[layout.when.inner.style]\ntemplate = \"{dir}{@nl}{char}\"\n[layout.when.narrow]\norder = 1\n",
+            )],
+        );
+        assert!(codes_of(&never).contains(&codes::BAND_NEVER_CHOSEN));
+        let names: Vec<_> = band_notes(&never).iter().map(|n| n.0).collect();
+        assert_eq!(names, [Some("narrow")]);
     }
 
     // 이것을 실패시키는 것: 꺼진 내장 세그먼트를 그리거나 수집 mask에 남기는 것, 그려지는 세그먼트를 mask에서 빠뜨리는 것.

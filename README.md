@@ -259,8 +259,9 @@ accent_l = 0.76
 
 - `style.template` replaces a preset with your own template text.
 - `[layout.when.NAME]` draws another layout, or style, for a range of widths. The built-in `narrow` band covers
-  widths under 60; this one adds a `compact` band for 60 to 79 cells that draws the `lean` preset. `bingsu config check`
-  lists the bands, and `bingsu explain --width 70` says which one applies:
+  widths under 60 and draws its own template there in place of your `[layout]` lines (see
+  [Narrow terminals](docs/config.md#narrow-terminals)); this one adds a `compact` band for 60 to 79 cells that draws
+  the `lean` preset. `bingsu config check` lists the bands, and `bingsu explain --width 70` says which one applies:
 
   ```toml
   [layout.when.compact]
