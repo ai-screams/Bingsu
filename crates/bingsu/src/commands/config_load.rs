@@ -2286,6 +2286,24 @@ mod tests {
         }
     }
 
+    // config use로 고른 파일이 YAML이면 YAML로 읽는다. 이것을 실패시키는 것: 기록된 경로의 형식을 이름으로 고르지
+    // 않는 것(E101), 그 파일에 YAML 파서를 주지 않는 것(E107).
+    #[test]
+    fn a_selected_yaml_file_is_read_as_yaml() {
+        let fx = Fx::new("selected-yaml");
+        let chosen = fx.put(&fx.home.join("chosen.yaml"), "colors:\n  mode: dark\n");
+        let md = std::fs::metadata(&chosen).unwrap();
+        let record = Record {
+            dev: md.dev(),
+            ino: md.ino(),
+            path: chosen.clone(),
+        };
+        let (r, _) = fx.read(Some(record));
+        assert!(r.succeeded, "{:?}", r.diagnostics);
+        assert!(codes_of(&r).is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(applied_names(&r), ["(built-in)", "chosen.yaml"]);
+    }
+
     // 이것을 실패시키는 것: config use가 conf.d·local까지 대체하거나 선택 파일의 부재를 숨기는 것.
     #[test]
     fn selected_config_keeps_overlays_and_missing_selection_is_an_error() {

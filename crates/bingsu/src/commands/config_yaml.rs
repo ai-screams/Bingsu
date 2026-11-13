@@ -31,40 +31,83 @@ use std::collections::BTreeMap;
 use yaml_rust2::parser::{Event, Parser};
 use yaml_rust2::scanner::{Marker, ScanError, TScalarStyle};
 
-/// Byte offsets of the parser's positions, which count characters. Moves
-/// forward with the events; a position behind the last one starts over from
-/// the beginning (slower, never wrong).
+/// Byte offsets of the parser's positions. The parser counts lines, and
+/// columns in characters (its running index counts a block scalar's lines in
+/// bytes, so it is not used). A cursor moves along one line in either
+/// direction and jumps to a line's start through `lines`, so a file costs
+/// steps in proportion to its length, however the events move about.
 struct Offsets<'a> {
     text: &'a str,
-    chars: usize,
-    bytes: usize,
+    /// Where each line starts (after `\n`, `\r\n` or a lone `\r`).
+    lines: Vec<usize>,
+    line: usize,
+    col: usize,
+    byte: usize,
+    /// Characters moved over, for `positions_cost_steps_in_proportion_to_the_text`.
+    steps: usize,
 }
 
-impl Offsets<'_> {
-    fn byte(&mut self, chars: usize) -> u32 {
-        // 이것을 실패시키는 것: 뒤로 가는 위치에서 처음부터 다시 세지 않는 것(그 뒤의 위치가 모두 어긋남).
-        if chars < self.chars {
-            (self.chars, self.bytes) = (0, 0);
-        }
-        for c in self.text[self.bytes..].chars() {
-            if self.chars == chars {
-                break;
+impl<'a> Offsets<'a> {
+    fn new(text: &'a str) -> Self {
+        let b = text.as_bytes();
+        let mut lines = vec![0];
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'\n' || (c == b'\r' && b.get(i + 1) != Some(&b'\n')) {
+                lines.push(i + 1);
             }
-            self.bytes += c.len_utf8();
-            self.chars += 1;
         }
-        self.bytes as u32
+        Self {
+            text,
+            lines,
+            line: 0,
+            col: 0,
+            byte: 0,
+            steps: 0,
+        }
+    }
+
+    /// The byte of character `col` on line `line` (both from 0), clamped to
+    /// the end of that line.
+    fn byte_at(&mut self, line: usize, col: usize) -> u32 {
+        let Some(&start) = self.lines.get(line) else {
+            return self.text.len() as u32;
+        };
+        // 이것을 실패시키는 것: 다른 줄로 갈 때 그 줄 처음으로 옮기지 않는 것, 뒤로 가는 위치에서 되돌아가지 않는 것.
+        if line != self.line {
+            (self.line, self.col, self.byte) = (line, 0, start);
+        }
+        while self.col < col {
+            match self.text[self.byte..].chars().next() {
+                Some(c) if c != '\n' && c != '\r' => {
+                    self.byte += c.len_utf8();
+                    self.col += 1;
+                    self.steps += 1;
+                }
+                _ => break,
+            }
+        }
+        while self.col > col {
+            let c = self.text[..self.byte].chars().next_back().unwrap_or('\0');
+            self.byte -= c.len_utf8();
+            self.col -= 1;
+            self.steps += 1;
+        }
+        self.byte as u32
+    }
+
+    fn byte(&mut self, m: &Marker) -> u32 {
+        self.byte_at(m.line().saturating_sub(1), m.col())
     }
 
     /// The point where an event starts.
     fn start(&mut self, m: &Marker) -> Span {
-        let at = self.byte(m.index());
+        let at = self.byte(m);
         Span { start: at, end: at }
     }
 
     /// One character at `m` (none at the end of the text).
     fn point(&mut self, m: &Marker) -> Span {
-        let start = self.byte(m.index());
+        let start = self.byte(m);
         let width = self.text[start as usize..]
             .chars()
             .next()
@@ -118,17 +161,29 @@ fn scan_error(e: &ScanError, at: &mut Offsets<'_>) -> Vec<SyntaxError> {
 
 /// The text of a YAML file as a config tree, or why not.
 pub fn parse(text: &str) -> Result<Table, Vec<SyntaxError>> {
-    let mut at = Offsets {
-        text,
-        chars: 0,
-        bytes: 0,
-    };
+    parse_with(text, &mut Offsets::new(text))
+}
+
+fn parse_with(text: &str, at: &mut Offsets<'_>) -> Result<Table, Vec<SyntaxError>> {
+    // The parser reads a NUL as the end of the text and would drop the rest
+    // silently; YAML does not allow one anyway.
+    // 이것을 실패시키는 것: NUL 뒤를 버리고 앞부분만 읽는 것.
+    if let Some(i) = text.find('\0') {
+        let at = i as u32;
+        return Err(syntax(
+            "a NUL character is not allowed",
+            Span {
+                start: at,
+                end: at + 1,
+            },
+        ));
+    }
     let mut parser = Parser::new_from_str(text);
     let mut stack: Vec<Open> = Vec::new();
     let mut root: Option<Table> = None;
     let mut documents = 0;
     loop {
-        let (event, mark) = parser.next_token().map_err(|e| scan_error(&e, &mut at))?;
+        let (event, mark) = parser.next_token().map_err(|e| scan_error(&e, at))?;
         let span = at.start(&mark);
         // Errors point at the event's first character; the tree keeps the point.
         let point = at.point(&mark);
@@ -608,6 +663,7 @@ segment:
             ("a: !!str 1\n", "tag"),
             ("a: !custom x\n", "tag"),
             ("!!map {a: 1}\n", "tag"),
+            ("a: !!seq []\n", "tag"),
             ("---\na: 1\n---\nb: 2\n", "second document"),
             ("? {a: 1}\n: x\n", "key that is a mapping or a list"),
             ("[a, b]: x\n", "key that is a mapping or a list"),
@@ -635,7 +691,14 @@ segment:
             syntax_message("x:\n  a: 1\n  a: 1\n"),
             "duplicate key `a` (first written at line 2)"
         );
-        for null in ["a: ~\n", "a: null\n", "a:\n", "a: NULL\n", "a: [1, ~]\n"] {
+        for null in [
+            "a: ~\n",
+            "a: null\n",
+            "a: Null\n",
+            "a:\n",
+            "a: NULL\n",
+            "a: [1, ~]\n",
+        ] {
             assert_eq!(
                 syntax_message(null),
                 "`null` is not a setting value",
@@ -651,6 +714,14 @@ segment:
         }
         assert!(!syntax_message("a: [1\n").is_empty());
         assert!(!syntax_message("a: b: c\n").is_empty());
+        // A NUL ends the text for the parser; nothing after it is dropped.
+        let nul = "colors: {mode: dark}\n\0colors: {mode: light}\n";
+        let e = refused(nul);
+        assert_eq!(
+            e.kind,
+            SyntaxErrorKind::Yaml("a NUL character is not allowed".into())
+        );
+        assert_eq!(&nul[e.span.start as usize..e.span.end as usize], "\0");
         // The same key in two mappings is two keys.
         assert!(parse("x: {a: 1}\ny: {a: 1}\n").is_ok());
     }
@@ -678,9 +749,25 @@ segment:
         s
     }
 
-    // 깊이는 TOML·JSON과 같이 센다(맨 위의 값이 1, 32까지). 이것을 실패시키는 것: 하나 어긋나게 세는 것.
+    // 깊이는 TOML·JSON과 같이 센다(맨 위의 값이 1, 32까지). 이것을 실패시키는 것: 하나 어긋나게 세는 것, list나
+    // mapping 한쪽만 세는 것.
     #[test]
     fn nesting_stops_where_toml_and_json_stop() {
+        for depth in [32usize, 33] {
+            let yaml = format!("a: {}1{}\n", "{b: ".repeat(depth), "}".repeat(depth));
+            let toml = format!("a = {}1{}\n", "{b = ".repeat(depth), "}".repeat(depth));
+            let got = parse(&yaml);
+            assert_eq!(
+                got.is_ok(),
+                depth <= NESTING_MAX as usize,
+                "mappings {depth}"
+            );
+            assert_eq!(
+                got.is_ok(),
+                bingsu_core::config::tree::parse(toml.as_bytes()).is_ok(),
+                "{depth}"
+            );
+        }
         for flow in [true, false] {
             for depth in [31usize, 32, 33, 34] {
                 let text = nested(depth, flow);
@@ -796,14 +883,37 @@ segment:
         let text = "가나: \"다\"\nb: [1, ~]\n";
         let err = refused(text);
         assert_eq!(&text[err.span.start as usize..err.span.end as usize], "~");
-        // A position behind the last one counts again from the start.
-        let mut at = Offsets {
-            text: "가a나b",
-            chars: 0,
-            bytes: 0,
-        };
-        assert_eq!((at.byte(3), at.byte(1), at.byte(2)), (7, 3, 4));
-        assert_eq!(at.byte(99), 8);
+        // A block scalar of multibyte text does not move what follows it
+        // (the parser's own running index counts its lines in bytes).
+        let block = format!("a: |\n  {}\nb: ~\n", "가".repeat(32));
+        let err = refused(&block);
+        assert_eq!(&block[err.span.start as usize..err.span.end as usize], "~");
+        // Lines and characters to bytes, in either direction on a line.
+        let mut at = Offsets::new("가a\n나b\r\nc\rd");
+        assert_eq!(at.byte_at(0, 2), 4);
+        assert_eq!(at.byte_at(0, 1), 3);
+        assert_eq!(at.byte_at(1, 1), 8);
+        assert_eq!(at.byte_at(0, 0), 0);
+        assert_eq!(at.byte_at(0, 99), 4, "the end of the line");
+        assert_eq!(at.byte_at(2, 0), 11, "after \\r\\n");
+        assert_eq!(at.byte_at(3, 0), 13, "after a lone \\r");
+        assert_eq!(at.byte_at(9, 0), 14, "past the last line");
+    }
+
+    // 위치를 바이트로 바꾸는 데 드는 걸음은 글 길이에 비례한다. 이것을 실패시키는 것: 뒤로 가는 위치마다 처음부터
+    // 다시 세는 것(블록 mapping이 많으면 n²).
+    #[test]
+    fn positions_cost_steps_in_proportion_to_the_text() {
+        let text: String = (0..16_000).map(|i| format!("k{i:05}:\n  v: 1\n")).collect();
+        let mut at = Offsets::new(&text);
+        let t = parse_with(&text, &mut at).unwrap();
+        assert_eq!(t.entries.len(), 16_000);
+        assert!(
+            at.steps <= 2 * text.len(),
+            "{} steps for {} bytes",
+            at.steps,
+            text.len()
+        );
     }
 
     // 읽은 트리와 오류의 위치는 core의 다시 검사를 늘 지난다.

@@ -86,9 +86,11 @@ BINGSU_GRAPH = {
         ("lib",),
     ),
     # YAML config files (conf.d, extends, config use): yaml-rust2's event
-    # parser without its `encoding` feature, and what it needs for its anchor
-    # map. No build script and no proc-macro. hashbrown's features are the
-    # workspace resolution (the collector's Git crates use it too).
+    # parser without its `encoding` feature, and the crates it depends on
+    # (arraydeque is the scanner's token queue; hashlink and hashbrown serve
+    # its YAML value type, which bingsu does not use). No build script and no
+    # proc-macro. hashbrown's features are the workspace resolution (the
+    # collector's Git crates use it too).
     ("yaml-rust2", "0.13.0", CRATES_IO): ((), ("lib",)),
     ("arraydeque", "0.5.1", CRATES_IO): (("default", "std"), ("lib",)),
     ("hashlink", "0.12.2", CRATES_IO): ((), ("lib",)),

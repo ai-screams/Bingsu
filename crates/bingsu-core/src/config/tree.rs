@@ -443,18 +443,42 @@ pub fn check_parsed(
     };
     match parsed {
         Err(mut errors) => {
-            // 이것을 실패시키는 것: 읽는 쪽 오류의 범위를 검사하지 않는 것(글 밖이나 글자 가운데를 가리킴).
+            // 이것을 실패시키는 것: 읽는 쪽 오류의 범위를 검사하지 않는 것(글 밖이나 글자 가운데를 가리킴), 이유 없는
+            // 실패를 빈 오류 목록 그대로 두는 것(파일이 오류 없이 빈 설정으로 읽힘).
             for e in &mut errors {
                 if !fits(e.span) {
                     e.span = Span::default();
                 }
             }
+            if errors.is_empty() {
+                errors.push(SyntaxError {
+                    span: Span::default(),
+                    kind: SyntaxErrorKind::Yaml(String::from("the reader failed without a reason")),
+                });
+            }
             Err(errors)
         }
         Ok(table) => match checked_table(&table, 1, &fits) {
             None => Ok(table),
-            Some(e) => Err(alloc::vec![e]),
+            Some(e) => {
+                dismantle(table);
+                Err(alloc::vec![e])
+            }
         },
+    }
+}
+
+/// Drops `t` without recursing: a refused tree may be far deeper than
+/// `NESTING_MAX`, and dropping it the usual way would recurse once per level.
+// 이것을 실패시키는 것: 거부한 트리를 그냥 떨어뜨리는 것(10만 단이면 스택이 넘침).
+fn dismantle(t: Table) {
+    let mut values: Vec<Value> = t.entries.into_iter().map(|e| e.node.value).collect();
+    while let Some(v) = values.pop() {
+        match v {
+            Value::Table(t) => values.extend(t.entries.into_iter().map(|e| e.node.value)),
+            Value::Array(items) => values.extend(items.into_iter().map(|n| n.value)),
+            _ => {}
+        }
     }
 }
 
@@ -976,6 +1000,24 @@ mod tests {
             )],
         };
         assert!(check(in_list).is_err());
+        // Lists alone count too: 32 nested lists under a key are the limit.
+        let lists = |depth: u32| {
+            let mut n = str_node(0, 1);
+            for _ in 0..depth {
+                n = Node {
+                    value: Value::Array(vec![n]),
+                    span: Span::default(),
+                };
+            }
+            Table {
+                entries: vec![entry("l", n)],
+            }
+        };
+        assert!(check(lists(32)).is_ok());
+        assert_eq!(check(lists(33)), Err(SyntaxErrorKind::TooDeep));
+        // A refused tree far deeper than the limit is taken apart without
+        // recursing (dropping it the usual way would overflow the stack).
+        assert_eq!(check(lists(100_000)), Err(SyntaxErrorKind::TooDeep));
     }
 
     // 이것을 실패시키는 것: 읽는 쪽 오류의 범위를 그대로 두는 것(글 밖이나 글자 가운데).
@@ -989,7 +1031,11 @@ mod tests {
             span: Span { start: 2, end: 5 },
             kind: SyntaxErrorKind::TooDeep,
         };
-        let got = check_parsed("ab가\n", Err(vec![bad.clone(), good.clone()])).unwrap_err();
+        let inside = SyntaxError {
+            span: Span { start: 3, end: 5 },
+            kind: SyntaxErrorKind::TooDeep,
+        };
+        let got = check_parsed("ab가\n", Err(vec![bad.clone(), good.clone(), inside])).unwrap_err();
         assert_eq!(
             got,
             vec![
@@ -997,8 +1043,21 @@ mod tests {
                     span: Span::default(),
                     ..bad
                 },
-                good
+                good,
+                SyntaxError {
+                    span: Span::default(),
+                    kind: SyntaxErrorKind::TooDeep
+                }
             ]
         );
+        // A failure without a reason is still a failure.
+        let none = check_parsed("ab가\n", Err(vec![])).unwrap_err();
+        assert!(matches!(
+            &none[..],
+            [SyntaxError {
+                kind: SyntaxErrorKind::Yaml(_),
+                ..
+            }]
+        ));
     }
 }
