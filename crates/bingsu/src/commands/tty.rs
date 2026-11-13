@@ -397,10 +397,15 @@ impl Drop for Raw {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sent {
     All,
-    /// A signal asked to stop.
-    Stopped,
-    /// The terminal took no more before the deadline.
-    TimedOut,
+    /// A signal asked to stop. `partial`: the terminal took the first bytes.
+    Stopped {
+        partial: bool,
+    },
+    /// The terminal took no more before the deadline. `partial`: it took
+    /// the first bytes.
+    TimedOut {
+        partial: bool,
+    },
 }
 
 /// Writes all of `buf` through `write`, a non-blocking write. When the
@@ -414,21 +419,23 @@ fn write_checked(
     mut buf: &[u8],
 ) -> std::io::Result<Sent> {
     let stopped = || STOP.load(Ordering::SeqCst);
+    let whole = buf.len();
     while !buf.is_empty() {
+        let partial = buf.len() < whole;
         match write(buf) {
             Ok(0) => return Err(std::io::Error::other("the terminal took no bytes")),
             Ok(n) => buf = &buf[n..],
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
                 if stopped() {
-                    return Ok(Sent::Stopped);
+                    return Ok(Sent::Stopped { partial });
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if !wait() {
                     return Ok(if stopped() {
-                        Sent::Stopped
+                        Sent::Stopped { partial }
                     } else {
-                        Sent::TimedOut
+                        Sent::TimedOut { partial }
                     });
                 }
             }
@@ -566,6 +573,31 @@ fn discard_output(fd: RawFd) {
     }
 }
 
+/// What ends an escape sequence the terminal began to read: CAN. xterm,
+/// VTE, Windows Terminal and ghostty drop a CSI or OSC sequence in progress
+/// on it; alacritty and wezterm end an OSC on it and carry it out; kitty
+/// ends a CSI on it but an OSC only on BEL or ST.
+const CANCEL: &[u8] = b"\x18";
+
+/// After a request was cut short (the terminal took its first bytes, then
+/// nothing more), the terminal's parser is inside an escape sequence and
+/// would read later output (a table, the next question) as the rest of it.
+/// `discard_output` cannot take back what the terminal already read, so
+/// `CANCEL` is queued behind it, for the terminal to read next (what it does
+/// with it: `CANCEL`). One non-blocking write; if the terminal takes nothing, nothing
+/// more is done.
+fn cancel_half_escape(fd: RawFd) {
+    let _ = write_once(fd, CANCEL);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many bytes of a request the terminal takes before it stops
+    /// taking output (tests only): `send` then sleeps to its deadline and
+    /// gives up with the rest unwritten.
+    static TERMINAL_ROOM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// One `write(2)` on `fd`: the bytes taken.
 fn write_once(fd: RawFd, b: &[u8]) -> std::io::Result<usize> {
     // SAFETY: `fd` is open and `b` is a valid slice.
@@ -633,13 +665,42 @@ impl RawGuard<'_> {
     }
 
     /// Writes `bytes` until `deadline`. On a timeout what is still queued is
-    /// dropped (`discard_output`).
+    /// dropped (`discard_output`), and when the terminal took the first
+    /// bytes, the sequence it began is cancelled (`cancel_half_escape`).
     fn send(&self, bytes: &[u8], deadline: Instant) -> std::io::Result<Sent> {
         let fd = self.tty.file.as_raw_fd();
         let wait = writable(fd);
-        let sent = write_checked(|b| write_once(fd, b), || wait(deadline), bytes)?;
-        if sent == Sent::TimedOut {
+        #[cfg(test)]
+        let room = std::cell::Cell::new(TERMINAL_ROOM.with(std::cell::Cell::take));
+        let sent = write_checked(
+            |b| {
+                #[cfg(test)]
+                let b = match room.get() {
+                    Some(0) => return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+                    Some(left) => {
+                        let b = &b[..b.len().min(left)];
+                        room.set(Some(left - b.len()));
+                        b
+                    }
+                    None => b,
+                };
+                write_once(fd, b)
+            },
+            || {
+                #[cfg(test)]
+                if room.get() == Some(0) {
+                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    return false;
+                }
+                wait(deadline)
+            },
+            bytes,
+        )?;
+        if let Sent::TimedOut { partial } = sent {
             discard_output(fd);
+            if partial {
+                cancel_half_escape(fd);
+            }
         }
         Ok(sent)
     }
@@ -673,8 +734,8 @@ impl Terminal for RawGuard<'_> {
                     let mut f = &self.tty.file;
                     read_reply(end, || wait(deadline), |b| f.read(b))
                 }
-                Sent::Stopped => Answer::Cancelled,
-                Sent::TimedOut => Answer::Silent,
+                Sent::Stopped { .. } => Answer::Cancelled,
+                Sent::TimedOut { .. } => Answer::Silent,
             }
         };
         if !matches!(result, Answer::Reply(_)) {
@@ -692,11 +753,11 @@ impl Terminal for RawGuard<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         match self.send(bytes, Instant::now() + WRITE_TIMEOUT)? {
             Sent::All => Ok(()),
-            Sent::Stopped => {
+            Sent::Stopped { .. } => {
                 self.spent = Some(Spent::Cancelled);
                 Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
             }
-            Sent::TimedOut => {
+            Sent::TimedOut { .. } => {
                 self.spent = Some(Spent::Silent);
                 Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
             }
@@ -1034,7 +1095,7 @@ mod tests {
             b"abc",
         );
         STOP.store(false, Ordering::SeqCst);
-        assert!(matches!(got, Ok(Sent::Stopped)));
+        assert!(matches!(got, Ok(Sent::Stopped { partial: false })));
         assert_eq!(calls, 1);
         assert!(
             write_checked(|_| Err(Error::from_raw_os_error(libc::EIO)), || true, b"x").is_err()
@@ -1077,9 +1138,45 @@ mod tests {
                 b"abc",
             );
             STOP.store(false, Ordering::SeqCst);
-            let want = if stop { Sent::Stopped } else { Sent::TimedOut };
+            let want = if stop {
+                Sent::Stopped { partial: false }
+            } else {
+                Sent::TimedOut { partial: false }
+            };
             assert!(matches!(got, Ok(s) if s == want), "{got:?}");
             assert_eq!(calls, 1);
+        }
+        // 이것을 실패시키는 것: 일부를 쓴 뒤 마감·정지로 끝났는데 partial을 false로 알리는 것(반쪽 escape를 끊지
+        // 않음), 아무것도 쓰지 못했는데 true로 알리는 것(쓰지 않은 요청 뒤에 CAN을 보냄; 바로 위의 false 칸).
+        for (stop, interrupted) in [(false, false), (true, false), (true, true)] {
+            let mut calls = 0;
+            let got = write_checked(
+                |b| {
+                    calls += 1;
+                    match calls {
+                        1 => Ok(b.len() - 4),
+                        2 if interrupted => {
+                            STOP.store(true, Ordering::SeqCst);
+                            Err(Error::from(ErrorKind::Interrupted))
+                        }
+                        2 => Err(Error::from(ErrorKind::WouldBlock)),
+                        _ => Err(Error::from_raw_os_error(libc::EIO)),
+                    }
+                },
+                || {
+                    STOP.store(stop, Ordering::SeqCst);
+                    false
+                },
+                b"\x1b]11;?\x1b\\",
+            );
+            STOP.store(false, Ordering::SeqCst);
+            let want = if stop {
+                Sent::Stopped { partial: true }
+            } else {
+                Sent::TimedOut { partial: true }
+            };
+            assert!(matches!(got, Ok(s) if s == want), "{got:?}");
+            assert_eq!(calls, 2);
         }
     }
 
@@ -1941,6 +2038,8 @@ mod tests {
                 all.len()
             );
             assert!(!all.contains(&0x1b), "no request reached the terminal");
+            // 이것을 실패시키는 것: 요청을 한 바이트도 못 썼는데 CANCEL을 보내는 것.
+            assert!(!all.contains(&CANCEL[0]), "a cancel without a request");
         }
 
         #[test]
@@ -1991,6 +2090,32 @@ mod tests {
             let mut g = tty.raw().unwrap();
             fill_output();
             say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
+        }
+
+        // 터미널이 요청의 앞 3바이트(`ESC ] 1`)만 읽고 출력을 받지 않으면, 마감 뒤에 CANCEL이 따라오고 요청의 나머지는
+        // 오지 않는다. 이것을 실패시키는 것: 앞부분이 나간 시간 초과 뒤 cancel_half_escape를 부르지 않는 것(터미널은
+        // OSC 문자열 안에 남음).
+        #[test]
+        fn a_request_cut_short_is_cancelled() {
+            let mut t = start("cut_request_child", 80);
+            t.expect(&OSC11[..3]);
+            t.expect(CANCEL);
+            let (lines, all) = t.finish();
+            assert_eq!(lines, ["silent"]);
+            assert!(
+                !all.windows(2).any(|w| w == b";?"),
+                "{}",
+                all.escape_ascii()
+            );
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn cut_request_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            TERMINAL_ROOM.with(|r| r.set(Some(3)));
+            say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
         }
 
         // 이것을 실패시키는 것: Terminal::write가 마감 없이 막히는 것, 마감에 걸린 쓰기 뒤에도 질의하는 것(터미널이
