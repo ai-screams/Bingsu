@@ -73,6 +73,12 @@ pub fn run(exe: &OsStr) -> ExitCode {
         return ctx::code(EXIT_UNFINISHED);
     }
     let file = target(&inspected.selection, &inspected.root_written);
+    if let Selection::Unusable(why) = &inspected.selection {
+        eprintln!(
+            "bingsu: the file chosen with `config use` cannot be used ({why}); opening {}",
+            ctx::show(&file)
+        );
+    }
     if std::fs::symlink_metadata(&file).is_err() {
         eprintln!(
             "bingsu: there is no settings file at {}; run bingsu setup to make one",

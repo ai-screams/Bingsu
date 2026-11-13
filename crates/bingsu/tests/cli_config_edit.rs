@@ -214,3 +214,32 @@ fn the_file_chosen_with_config_use_is_the_one_opened() {
     let log = std::fs::read_to_string(&f.log).unwrap();
     assert!(log.starts_with(&format!("{}\n", chosen.display())), "{log}");
 }
+
+// 고른 파일의 기록이 쓸 수 없게 되면(깨짐) 사용자가 고른 것이 아닌 `config.toml`을 열게 된다:
+// 편집기를 띄우기 전에 그 사실과 이유를 알려야 한다. 이것을 실패시키는 것: 알림 없이 다른 파일을 여는 것,
+// 쓸 수 없는 고른 파일을 그대로 여는 것.
+#[test]
+fn an_unusable_choice_is_said_before_config_toml_is_opened() {
+    let f = Fixture::new("unusable");
+    let chosen = f.e.put("other/work.toml", VALID);
+    let o = f.e.run(&["config", "use", chosen.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", quiet(&o.stderr));
+    // The record of the choice is damaged.
+    std::fs::write(f.e.state_dir().join("config-use"), b"damaged").unwrap();
+    let editor = f.script.to_str().unwrap().to_owned();
+    let (code, stdout, stderr) = out(&f.run(OTHER, &editor));
+    // The edit is saved, but nothing is applied until the record is fixed: the check says so.
+    assert_eq!(code, Some(3), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("not usable until the selection record is fixed"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("the file chosen with `config use` cannot be used ("),
+        "{stderr}"
+    );
+    assert!(stderr.contains("opening "), "{stderr}");
+    assert!(stderr.contains("config.toml"), "{stderr}");
+    assert_eq!(f.config(), OTHER);
+    assert_eq!(std::fs::read_to_string(&chosen).unwrap(), VALID);
+}

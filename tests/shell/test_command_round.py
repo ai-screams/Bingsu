@@ -1060,3 +1060,57 @@ def test_command_value_is_drawn_for_its_own_shell(tmp_path, _native_boot_require
     session.env["KUBECONFIG"] = "/b"
     assert b"shown-value" not in session.prompt()
     session.wait_quiet(timeout=8)
+
+
+def fail_an_edit(session):
+    """`config edit` whose editor saves a file that does not parse; it exits 1."""
+    editor = session.base / "bad-editor.sh"
+    editor.write_text("#!/bin/sh\nprintf '[broken\\n' > \"$1\"\n")
+    editor.chmod(0o700)
+    session.env["EDITOR"] = str(editor)
+    result = session.run("config", "edit")
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert b"were not applied" in result.stderr, result.stderr
+
+
+# 실패한 편집 뒤의 프롬프트(M7 E, 명령 없이): 유효한 설정으로 발행한 뒤 가짜 편집기가 무효 내용을 저장한다.
+# `config edit`은 1로 끝나고, 그 뒤 프롬프트 레코드는 (1) 표시 설정이 편집 전과 같고(텍스트 세그먼트가 그대로
+# 그려짐), (2) `degraded:trust-invalid`를 내고, (3) 상태 표시 `!`가 있다.
+# 이것을 실패시키는 것: 무효일 때 발행(표식 무효화)을 건너뛰는 것(상태 표시가 없음), 무효 설정이 표시 스냅샷을
+# 바꾸는 것(EDITSHOW가 사라짐).
+def test_a_failed_edit_keeps_the_display_and_marks_the_state(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    session.put("[segment.\"custom/label\"]\nkind='text'\ntext='EDITSHOW'\n"
+                "[layout.line2]\nleft=['custom/label','char']\n")
+    session.init()
+    session.await_text("EDITSHOW")
+    session.wait_quiet()
+    before = session.prompt()
+    assert b"degraded:trust-invalid" not in before, before
+    fail_an_edit(session)
+    for _ in range(3):
+        record = session.prompt()
+        assert b"EDITSHOW" in record, record
+        assert b"degraded:trust-invalid" in record, record
+        assert b"!" in record, record
+        session.wait_quiet()
+
+
+# 실패한 편집 뒤에는 이전 설정의 명령이 돌지 않는다. 먼저 편집 전에는 돈다는 것을 확인한 뒤(양성 대조), 무효 저장
+# 뒤 몇 번의 프롬프트에도 카나리 파일이 생기지 않음을 본다. 이것을 실패시키는 것: 무효일 때 발행(표식 무효화)을
+# 건너뛰어 마지막 정상 설정의 명령이 계속 도는 것.
+def test_a_failed_edit_stops_the_commands_of_the_previous_settings(tmp_path, _native_boot_required):
+    session = CommandSession(tmp_path)
+    canary = session.base / "ran"
+    session.put(config(["/usr/bin/touch", str(canary)]))
+    ready(session)
+    assert until(lambda: (session.prompt(), canary.exists())[1]), "the unit never ran"
+    session.wait_quiet()
+    canary.unlink()
+    forget_results(session)
+    fail_an_edit(session)
+    for _ in range(4):
+        session.prompt()
+        session.wait_quiet()
+        forget_results(session)
+    assert not canary.exists(), "a command ran after an invalid save"
