@@ -435,8 +435,12 @@ impl CollectorJob {
         // still took nothing, the loop sleeps instead of polling, from 50 us
         // doubling to 1 ms, until a write takes bytes again: no spin to the
         // deadline, and a 512-byte pipe still takes a large request in time
-        // (the collector reads it as it comes). A pipe whose POLLOUT is exact
-        // never gets here.
+        // (the collector reads it as it comes). `room_said` is the word of the
+        // last poll, and a response read loops back without polling, so on a
+        // pipe whose POLLOUT is exact a stall could still start after such a
+        // read. It does not in a working exchange (the collector answers only
+        // after the whole request), and it would end at the next write that
+        // takes bytes, each sleep at most 1 ms and never past the deadline.
         let mut stall = Duration::ZERO;
         let mut room_said = false;
         loop {
@@ -614,7 +618,7 @@ impl CollectorJob {
                 {
                     report.waits += 1;
                 }
-                std::thread::sleep(stall.min(Duration::from_nanos(deadline - now)));
+                std::thread::sleep(stall_sleep(stall, now, deadline));
                 continue;
             }
             let mut fds = [
@@ -656,6 +660,12 @@ impl CollectorJob {
 /// had reported.
 const STALL_FIRST: Duration = Duration::from_micros(50);
 const STALL_MAX: Duration = Duration::from_millis(1);
+
+/// How long one stall sleep lasts at `now_ns`: `stall`, but never past
+/// `deadline_ns`.
+fn stall_sleep(stall: Duration, now_ns: u64, deadline_ns: u64) -> Duration {
+    stall.min(Duration::from_nanos(deadline_ns.saturating_sub(now_ns)))
+}
 
 /// Whether a poll that returned `rc` said the pipe `pfd` had room.
 fn said_room(rc: i32, pfd: &libc::pollfd) -> bool {
@@ -851,6 +861,15 @@ mod tests {
                 us(1_000)
             ]
         );
+    }
+
+    // 이것을 실패시키는 것: 남은 시간보다 오래 쉬는 것(마감을 넘겨 끝냄).
+    #[test]
+    fn a_stall_sleep_ends_by_the_deadline() {
+        let ms = Duration::from_millis;
+        assert_eq!(stall_sleep(ms(1), 0, 300_000), Duration::from_micros(300));
+        assert_eq!(stall_sleep(ms(1), 10_000_000, 20_000_000), ms(1));
+        assert_eq!(stall_sleep(ms(1), 20_000_000, 20_000_000), Duration::ZERO);
     }
 
     // 이것을 실패시키는 것: poll이 실패했거나(rc ≤ 0) 요청 파이프를 넣지 않은 poll(fd -1)의 revents를 쓰기
