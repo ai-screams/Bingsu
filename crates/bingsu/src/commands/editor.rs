@@ -4,6 +4,9 @@
 //! meaning to (a command, a variable, a redirect, a list) is refused instead
 //! of being run or silently kept, and the program is looked up only in
 //! absolute places, so a program in the current folder is never picked up.
+//! `$` and the backquote are refused inside double quotes too (only single
+//! quotes keep them): a double-quoted `"$HOME/ed"` is not expanded here, and
+//! reading it literally would differ from what a shell does.
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 

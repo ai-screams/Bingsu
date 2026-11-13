@@ -12,7 +12,7 @@
 //! the editor failed, 2 usage, 3 not finished (busy, deadline).
 use super::{
     clock::SystemClock,
-    config_inspect::{Selection, exit_for, inspect_config, render_check},
+    config_inspect::{Selection, check_report, inspect_config},
     ctx::{self, EXIT_FAILED, EXIT_UNFINISHED, User},
     editor::{self, EditorError},
     init::trusted_env::TrustedEnv,
@@ -79,7 +79,10 @@ pub fn run(exe: &OsStr) -> ExitCode {
             ctx::show(&file)
         );
     }
-    if std::fs::symlink_metadata(&file).is_err() {
+    // The file must be there as a plain file: a link that leads nowhere would
+    // make the editor's save create a file at its target, maybe outside the
+    // settings folder.
+    if !std::fs::metadata(&file).is_ok_and(|m| m.is_file()) {
         eprintln!(
             "bingsu: there is no settings file at {}; run bingsu setup to make one",
             ctx::show(&file)
@@ -132,23 +135,26 @@ pub fn run(exe: &OsStr) -> ExitCode {
         Ok(d) => d,
         Err(code) => return ctx::code(code),
     };
-    match inspect_config(&user, &TrustedEnv::capture()) {
-        Ok(after) => {
-            let shown = render_check(&after);
+    // The same report as `config check`, and its code: the edit ends with it
+    // when the check fails. The publication still runs: for an invalid save it
+    // is what revokes the previous settings' right to run commands.
+    let check_code = match check_report(&user, &TrustedEnv::capture()) {
+        Ok((shown, code)) => {
             if !ctx::print(&shown) {
                 return ctx::code(EXIT_FAILED);
             }
-            if exit_for(&after) != 0 {
+            if code != 0 {
                 eprintln!(
                     "bingsu: the saved settings are not valid, so they were not applied; the prompt keeps the previous settings"
                 );
             }
+            code
         }
         Err((text, code)) => {
             eprintln!("{text}");
             return ctx::code(code);
         }
-    }
+    };
     let roots = match ctx::roots_for_publishing(&user) {
         Ok(r) => r,
         Err((text, code)) => {
@@ -165,15 +171,14 @@ pub fn run(exe: &OsStr) -> ExitCode {
     );
     match reload::report(&applied, "edited") {
         Ok(text) => {
-            if ctx::print(&text) {
-                ExitCode::SUCCESS
-            } else {
-                ctx::code(EXIT_FAILED)
+            if !ctx::print(&text) {
+                return ctx::code(EXIT_FAILED);
             }
+            ctx::code(check_code)
         }
         Err((text, code)) => {
             eprintln!("{text}");
-            ctx::code(code)
+            ctx::code(if check_code != 0 { check_code } else { code })
         }
     }
 }

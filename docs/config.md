@@ -41,8 +41,9 @@ terminal, `--icons` and `--mode` answer their question in advance and `--yes` sk
 `bingsu config edit` opens your settings file in `$VISUAL`, or `$EDITOR` when that is unset (there is no default
 editor), then checks what you saved like `config check` and applies it like `reload`. The file is the one `config use`
 chose, else `config.toml`; it is never created (run `bingsu setup`). The editor value is not run by a shell: it is split
-into words and quotes are removed, `$`, backquotes and `; & | < > ( )` outside single quotes are refused (point the
-variable at a script instead), and a program name is looked up only in absolute `PATH` folders. If the saved file is
+into words and quotes are removed; `; & | < > ( )` outside single quotes are refused, and so are `$` and backquotes
+even inside double quotes (only single quotes keep them; point the variable at a script instead). A program name is
+looked up only in absolute `PATH` folders. If the saved file is
 not valid it is not applied: the prompt keeps the previous settings and commands stop running until a valid save.
 
 Writing a command segment for other people to use? See

@@ -67,7 +67,7 @@ fn a_valid_save_is_checked_and_published() {
     let (code, stdout, stderr) = out(&f.run(OTHER, &editor));
     assert_eq!(code, Some(0), "{stdout}{stderr}");
     assert_eq!(f.config(), OTHER);
-    assert!(stdout.contains("result: valid"), "{stdout}");
+    assert!(stdout.contains("\nresult: valid\n"), "{stdout}");
     assert!(
         stdout.contains("edited; new settings published"),
         "{stdout}"
@@ -92,10 +92,8 @@ fn an_invalid_save_is_not_applied() {
     let good = std::fs::read(&snapshot).unwrap();
     let (code, stdout, stderr) = out(&f.run(INVALID, &editor));
     assert_eq!(code, Some(1), "{stdout}{stderr}");
-    assert!(
-        stdout.contains("result: invalid") || stdout.contains("invalid"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("\nresult: invalid;"), "{stdout}");
+    assert!(!stdout.contains("\nresult: valid"), "{stdout}");
     assert!(stderr.contains("not applied"), "{stderr}");
     assert!(
         stderr.contains("keeps the previous settings") || stderr.contains("last good"),
@@ -228,8 +226,11 @@ fn an_unusable_choice_is_said_before_config_toml_is_opened() {
     std::fs::write(f.e.state_dir().join("config-use"), b"damaged").unwrap();
     let editor = f.script.to_str().unwrap().to_owned();
     let (code, stdout, stderr) = out(&f.run(OTHER, &editor));
-    // The edit is saved, but nothing is applied until the record is fixed: the check says so.
-    assert_eq!(code, Some(3), "{stdout}{stderr}");
+    // The edit is saved, but nothing is applied until the record is fixed: the check says so, and
+    // the edit ends with the code `config check` gives for the same state.
+    let check = f.e.run(&["config", "check"]);
+    assert_eq!(check.status.code(), Some(1));
+    assert_eq!(code, check.status.code(), "{stdout}{stderr}");
     assert!(
         stdout.contains("not usable until the selection record is fixed"),
         "{stdout}"
@@ -242,4 +243,47 @@ fn an_unusable_choice_is_said_before_config_toml_is_opened() {
     assert!(stderr.contains("config.toml"), "{stderr}");
     assert_eq!(f.config(), OTHER);
     assert_eq!(std::fs::read_to_string(&chosen).unwrap(), VALID);
+}
+
+// 이것을 실패시키는 것: `config.toml`이 끊긴 symlink일 때 편집기를 띄우는 것(저장이 링크 대상 자리에 새 파일을 만듦,
+// 설정 폴더 밖일 수 있음), 대상이 일반 파일이 아닌 것(폴더)을 여는 것.
+#[test]
+fn a_dangling_link_is_no_settings_file() {
+    let f = Fixture::new("dangling");
+    let dir = f.e.config_dir();
+    std::fs::remove_file(dir.join("config.toml")).unwrap();
+    let target = f.e.base.join("elsewhere-missing.toml");
+    std::os::unix::fs::symlink(&target, dir.join("config.toml")).unwrap();
+    let editor = f.script.to_str().unwrap().to_owned();
+    let (code, stdout, stderr) = out(&f.run(OTHER, &editor));
+    assert_eq!((code, stdout.as_str()), (Some(1), ""));
+    assert!(stderr.contains("bingsu setup"), "{stderr}");
+    assert!(!f.log.exists(), "the editor must not start");
+    assert!(!target.exists(), "no file may appear at the link's target");
+    // A folder is no settings file either.
+    std::fs::remove_file(dir.join("config.toml")).unwrap();
+    std::fs::create_dir(dir.join("config.toml")).unwrap();
+    let (code, _, stderr) = out(&f.run(OTHER, &editor));
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(!f.log.exists());
+}
+
+// 이것을 실패시키는 것: edit이 `config check`의 진단(실행기 조회로 더해지는 W411 등)을 빼먹는 것(check와 다른 출력).
+#[test]
+fn the_report_after_an_edit_is_the_one_config_check_gives() {
+    let f = Fixture::new("same-report");
+    let script = f.e.put("bin/tool", "#!/usr/bin/env sh\necho 1\n");
+    chmod(&script, 0o755);
+    let config = format!(
+        "[segment.\"custom/tool\"]\nkind = \"command\"\ncommand = [\"{}\"]\n[layout.line1]\nleft = [\"dir\", \"custom/tool\"]\n",
+        script.display()
+    );
+    f.e.put_config("config.toml", &config);
+    let check = f.e.run(&["config", "check"]);
+    let want = text(&check.stdout);
+    assert!(want.contains("W411: segment `custom/tool`"), "{want}");
+    // An editor that changes nothing.
+    let (code, stdout, stderr) = out(&f.run(&config, "true"));
+    assert_eq!(code, check.status.code(), "{stdout}{stderr}");
+    assert!(stdout.starts_with(&want), "edit: {stdout}\ncheck: {want}");
 }

@@ -944,6 +944,22 @@ enum Extra {
     Explain,
 }
 
+/// What `config check` prints for the settings as they are now, and the
+/// code it exits with: the same reading, the same executor lookups and notes
+/// (`env_shebang_notes`), the same text. `config edit` shows it after an edit.
+pub fn check_report(user: &User, env: &TrustedEnv) -> Result<(String, u8), (String, u8)> {
+    let mut i = inspect_config(user, env)?;
+    let found = lookups(
+        &i.report,
+        env.path.as_deref(),
+        user.me,
+        &mut SystemGroups::new(&user.pw.name),
+    );
+    let notes = env_shebang_notes(&i.report, &found);
+    i.report.diagnostics.extend(notes);
+    Ok((render_check(&i), exit_for(&i)))
+}
+
 fn run_with(
     render: fn(&Inspection) -> String,
     exit: fn(&Inspection) -> u8,
