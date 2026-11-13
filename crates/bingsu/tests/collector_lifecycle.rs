@@ -1457,7 +1457,7 @@ fn verified_screen_child() {
         home: root.clone(),
         me: sys::current_uid(),
         user: sys::passwd_entry(sys::current_uid()).unwrap().name,
-        version: [0, 3, 0],
+        version: [0, 3, 0].into(),
         build: Some([1; 40]),
         process_started: now,
     };

@@ -31,7 +31,7 @@ pub struct RefreshRequest {
     pub home: PathBuf,
     pub me: u32,
     pub user: Vec<u8>,
-    pub version: [u32; 3],
+    pub version: source::Version,
     /// Cache discriminator only; None always requires compilation.
     pub build: Option<super::build_identity::BuildIdentity>,
     /// Captured at process entry, before root/NSS observations. N3 also
@@ -44,7 +44,6 @@ impl RefreshRequest {
         e: &Envelope,
         user: &sys::Passwd,
         process_started: Clock,
-        version: [u32; 3],
     ) -> Option<Self> {
         let path = |b: &Vec<u8>| PathBuf::from(std::ffi::OsString::from_vec(b.clone()));
         let r = e.runtime_root.as_ref()?;
@@ -61,7 +60,7 @@ impl RefreshRequest {
             home: path(e.home.as_ref()?),
             me: sys::current_uid(),
             user: user.name.clone(),
-            version,
+            version: super::ctx::version(),
             build: super::build_identity::read(exe),
             process_started,
         })
@@ -269,7 +268,7 @@ fn run(
     let export = loader.evidence_export(
         files,
         &r.state_root,
-        r.version,
+        r.version.numbers,
         r.build.as_ref().map_or(&[], |id| id.as_slice()),
         &selection_evidence,
     )?;

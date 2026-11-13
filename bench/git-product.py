@@ -133,7 +133,7 @@ fn main() {
  runtime:commands::runtime_root::Pinned{path:base.join("runtime"),dev:md.dev(),ino:md.ino()},
  config_written:base.join("config"),config_canonical:base.join("config"),config_root_shape_only:false,
  state_root:base.join("state"),home:repo.to_owned(),me:commands::sys::current_uid(),
- user:commands::sys::passwd_entry(commands::sys::current_uid()).unwrap().name,version:[0,0,0],build:Some([1;40]),process_started:now};
+ user:commands::sys::passwd_entry(commands::sys::current_uid()).unwrap().name,version:[0,0,0].into(),build:Some([1;40]),process_started:now};
  let primed=commands::refresh::refresh(request.clone(),&mut Fixed(now));
  assert!(matches!(primed,commands::refresh::RefreshResult::Published{..}|commands::refresh::RefreshResult::Revalidated{..}),"snapshot prime: {primed:?}");
  let envelope=Envelope {config_root:Some(request.config_canonical.as_os_str().as_bytes().to_vec()),state_root:Some(request.state_root.as_os_str().as_bytes().to_vec()),pwd:Some(repo.as_os_str().as_bytes().to_vec()),home:Some(repo.as_os_str().as_bytes().to_vec()),width:80,..Envelope::default()};

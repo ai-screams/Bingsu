@@ -84,18 +84,8 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         );
         return ExitCode::from(1);
     };
-    let version = bingsu_core::VERSION
-        .split('.')
-        .take(3)
-        .map(|n| n.parse().unwrap_or(0))
-        .collect::<Vec<_>>();
-    let Some(request) = RefreshRequest::from_envelope(
-        Path::new(exe),
-        &e,
-        &user,
-        process_started,
-        [version[0], version[1], version[2]],
-    ) else {
+    let Some(request) = RefreshRequest::from_envelope(Path::new(exe), &e, &user, process_started)
+    else {
         return ExitCode::from(1);
     };
     let runtime_path = request.runtime.path.clone();
