@@ -1942,6 +1942,30 @@ mod tests {
         assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
     }
 
+    // `conf.d`가 너무 큰 설정이 "파일이 너무 많음"(E303, 고유 파일 32개 예산)으로 끝나는지, 그 회차가 R 상한
+    // (256)에 걸려 끝나지 않는지의 경계: 뿌리 이름 넷과 함께 `conf.d` 이름 252개까지는 읽어서 E303이고, 253개부터는
+    // 미완료다(이름이 둘이던 때는 254개와 255개). 이것을 실패시키는 것: 한 자리에 R을 하나만 세는 것, 없는 이름을
+    // R에 세지 않는 것, cap 비교의 하나 차이.
+    #[test]
+    fn a_huge_conf_d_is_too_many_files_until_the_r_cap() {
+        for (n, verdict) in [(252, Verified::Invalid), (253, Verified::Incomplete)] {
+            let fx = Fx::new(&format!("conf-d-{n}"));
+            fx.put(&fx.root.join("config.toml"), "");
+            for i in 0..n {
+                fx.put(&fx.root.join(format!("conf.d/{i:03}.toml")), "");
+            }
+            let (r, l) = fx.read(None);
+            assert_eq!(l.verified(&r.files, r.succeeded), verdict, "{n}");
+            if verdict == Verified::Invalid {
+                assert!(
+                    codes_of(&r).contains(&codes::EXTENDS_TOO_MANY),
+                    "{n}: {:?}",
+                    codes_of(&r)
+                );
+            }
+        }
+    }
+
     // 상한을 한 번 넘으면 그 세션은 원본 I/O를 더 하지 않는다: core가 남은 뿌리를 열려 해도, 발행 전 재확인도
     // 시스템 호출 래퍼를 부르지 않고 Incomplete로 끝난다. 래퍼 호출은 수집 계수기로 센다.
     // 이것을 실패시키는 것: 걷기 시작 전 걸쇠 확인을 빼는 것(남은 뿌리마다 "/"를 엶), 거부한 뒤 뿌리 후보를 계속

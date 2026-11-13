@@ -124,12 +124,12 @@ fn shown(value: &str) -> String {
     out
 }
 
-/// What differs between the file `existing` and the starter for `c`, one
-/// line per key: `icons: "unicode" now, "nerd" suggested`. Empty when the
-/// three keys already match. `None` when the file does not parse. Values
-/// from the file go through `shown`.
-pub fn differences(existing: &[u8], c: Choices) -> Option<Vec<String>> {
-    let tree = tree::parse(existing).ok()?;
+/// What differs between the file `existing`, written in `format`, and the
+/// starter for `c`, one line per key: `icons: "unicode" now, "nerd"
+/// suggested`. Empty when the three keys already match. `None` when the file
+/// does not parse. Values from the file go through `shown`.
+pub fn differences(format: tree::Format, existing: &[u8], c: Choices) -> Option<Vec<String>> {
+    let tree = tree::parse_as(format, existing).ok()?;
     let want = [
         ("icons", &["icons"][..], c.icons.word()),
         ("style.preset", &["style", "preset"], c.icons.preset()),
@@ -182,7 +182,11 @@ mod tests {
             assert_eq!(s.matches("\nicons = ").count(), 1, "{s}");
             assert!(starter(c).is_ascii());
             // The starter agrees with itself: no differences.
-            assert_eq!(differences(s.as_bytes(), c), Some(Vec::new()), "{s}");
+            assert_eq!(
+                differences(tree::Format::Toml, s.as_bytes(), c),
+                Some(Vec::new()),
+                "{s}"
+            );
         }
         assert_eq!(Icons::Unicode.preset(), "lean");
     }
@@ -195,7 +199,12 @@ mod tests {
             icons: Icons::Nerd,
             mode: Mode::Dark,
         };
-        let d = differences(b"icons = \"unicode\"\n[colors]\nmode = \"dark\"\n", c).unwrap();
+        let d = differences(
+            tree::Format::Toml,
+            b"icons = \"unicode\"\n[colors]\nmode = \"dark\"\n",
+            c,
+        )
+        .unwrap();
         assert_eq!(
             d,
             [
@@ -203,11 +212,11 @@ mod tests {
                 "style.preset: not set now, \"triangle\" suggested"
             ]
         );
-        assert_eq!(differences(b"icons = [", c), None);
-        let d = differences(b"icons = \"a\\u001b[31m\\u202eb\"\n", c).unwrap();
+        assert_eq!(differences(tree::Format::Toml, b"icons = [", c), None);
+        let d = differences(tree::Format::Toml, b"icons = \"a\\u001b[31m\\u202eb\"\n", c).unwrap();
         assert_eq!(d[0], "icons: \"a[31mb\" now, \"nerd\" suggested");
         let long = format!("icons = \"{}\"\n", "x".repeat(100));
-        let d = differences(long.as_bytes(), c).unwrap();
+        let d = differences(tree::Format::Toml, long.as_bytes(), c).unwrap();
         assert_eq!(
             d[0],
             format!(
