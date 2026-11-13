@@ -55,7 +55,7 @@ impl Fx {
             home: base.clone(),
             me: sys::current_uid(),
             user: sys::passwd_entry(sys::current_uid()).unwrap().name,
-            version: [0, 3, 0],
+            version: [0, 3, 0].into(),
             build: Some([1; 40]),
             process_started: clock(),
         };
@@ -365,7 +365,10 @@ fn envelope_shape_only_ceiling_survives_clean_reopen() {
     };
     let exe = f.base.join("pinned-exe");
     put(&exe, b"init-pinned executable");
-    let r = RefreshRequest::from_envelope(&exe, &e, &user, clock(), [0, 3, 0]).unwrap();
+    let r = RefreshRequest::from_envelope(&exe, &e, &user, clock()).unwrap();
+    // The helper's request carries this package's version, pre-release included, for `requires`.
+    // 이것을 실패시키는 것: 요청의 version을 숫자만으로 만들어 pre-release 표지를 버리는 것.
+    assert_eq!(r.version, source::Version::parse(env!("CARGO_PKG_VERSION")));
     let identity = super::super::build_identity::read(&exe).unwrap();
     assert_eq!(r.build, Some(identity));
     assert!(r.config_root_shape_only);
@@ -378,7 +381,7 @@ fn envelope_shape_only_ceiling_survives_clean_reopen() {
             .all(|u| u.not_run.is_some())
     );
     e.config_root_written = None;
-    assert!(RefreshRequest::from_envelope(&exe, &e, &user, clock(), [0, 3, 0]).is_none());
+    assert!(RefreshRequest::from_envelope(&exe, &e, &user, clock()).is_none());
 }
 // 이것을 실패시키는 것: shape-only 파일 오류를 전체 Invalid로 바꾸거나 left_out 집합을 누락하는 것.
 #[test]
@@ -934,7 +937,7 @@ fn child_request(base: PathBuf) -> RefreshRequest {
         home: base,
         me: sys::current_uid(),
         user: sys::passwd_entry(sys::current_uid()).unwrap().name,
-        version: [0, 3, 0],
+        version: [0, 3, 0].into(),
         build: Some([1; 40]),
         process_started: clock(),
     }

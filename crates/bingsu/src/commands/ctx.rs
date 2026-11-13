@@ -14,6 +14,7 @@ use super::{
     runtime_root::Pinned,
     sys,
 };
+use bingsu_core::config::source::Version;
 use bingsu_core::snapshot::{Clock, ClockSource};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -45,14 +46,10 @@ impl User {
     }
 }
 
-pub fn version() -> [u32; 3] {
-    parse_version(bingsu_core::VERSION)
-}
-
-fn parse_version(text: &str) -> [u32; 3] {
-    let mut parts = text.split('.').map(|n| n.parse().unwrap_or(0));
-    let mut next = || parts.next().unwrap_or(0);
-    [next(), next(), next()]
+/// This bingsu's version, for `requires`: the numbers and whether it is a
+/// pre-release.
+pub fn version() -> Version {
+    Version::parse(bingsu_core::VERSION)
 }
 
 /// A path for a message: control bytes and escapes cannot reach the terminal.
@@ -332,12 +329,17 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(15));
     }
 
-    // 이것을 실패시키는 것: 버전을 세 숫자로 읽지 못해 요청의 version이 0.0.0이 되는 것, 숫자가 모자란 버전에서 어긋나는 것.
+    // 이것을 실패시키는 것: core가 아는 버전과 이 crate의 버전이 다른 것, pre-release 표지를 버리는 것.
     #[test]
-    fn version_text_is_three_numbers() {
-        assert_eq!(parse_version("1.22.333"), [1, 22, 333]);
-        assert_eq!(parse_version("0.3"), [0, 3, 0]);
-        assert_eq!(parse_version("1.2.3-rc.4"), [1, 2, 0]);
-        assert_eq!(version(), parse_version(env!("CARGO_PKG_VERSION")));
+    fn version_is_this_package_version() {
+        assert_eq!(version(), Version::parse(env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            version().pre_release,
+            env!("CARGO_PKG_VERSION")
+                .split('+')
+                .next()
+                .unwrap()
+                .contains('-')
+        );
     }
 }

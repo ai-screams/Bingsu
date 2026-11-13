@@ -15,7 +15,7 @@ use crate::config::check::check;
 use crate::config::compile::{CompiledConfig, bands_of, compile};
 use crate::config::keys;
 use crate::config::merge::merge;
-use crate::config::source::{Found, LoadReport, Resolver, Root, Status, Trust, load};
+use crate::config::source::{Found, LoadReport, Resolver, Root, Status, Trust, Version, load};
 use crate::diag::{Diagnostic, Place, Severity, SourceId};
 use crate::diag_codes as codes;
 use crate::diag_widths::WidthRun;
@@ -105,10 +105,11 @@ fn sorted(mut d: Vec<Diagnostic>) -> Vec<Diagnostic> {
 /// Reads the config from `roots` (built-in first). `version` is this
 /// bingsu's version. `auto` is retained for caller compatibility; the
 /// snapshot holds both display palettes (S-11).
-pub fn report<R: Into<Root>>(
+/// Numbers alone for `version` are a release.
+pub fn report<R: Into<Root>, V: Into<Version>>(
     roots: Vec<R>,
     resolver: &mut dyn Resolver,
-    version: [u32; 3],
+    version: V,
     auto: Mode,
 ) -> ConfigReport {
     from_loaded(load(roots, resolver, version), auto)

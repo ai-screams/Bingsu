@@ -257,6 +257,53 @@ pub fn parse_requires(s: &str) -> Option<[u32; 3]> {
     (n >= 2).then_some(out)
 }
 
+/// A bingsu version as `requires` compares it: `MAJOR.MINOR.PATCH` and
+/// whether a pre-release label follows (`0.1.0-rc.1`). SemVer puts a
+/// pre-release below the release with the same numbers; build metadata
+/// (`+...`) takes no part. No ordering is derived: the field order would put
+/// a release below its own pre-release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Version {
+    pub numbers: [u32; 3],
+    pub pre_release: bool,
+}
+
+impl Version {
+    /// `text` as Cargo writes a package version. A part that is missing or
+    /// is not a number reads as 0.
+    pub fn parse(text: &str) -> Version {
+        // Build metadata may hold `-` (`1.0.0+build-5`): cut it off first.
+        // 이것을 실패시키는 것: `+` 뒤를 자르지 않는 것(`1.0.0+build-5`가 pre-release가 됨).
+        let text = text.split_once('+').map_or(text, |(v, _)| v);
+        let (numbers, pre_release) = match text.split_once('-') {
+            Some((numbers, _)) => (numbers, true),
+            None => (text, false),
+        };
+        let mut parts = numbers.split('.').map(|n| n.parse().unwrap_or(0));
+        let mut next = || parts.next().unwrap_or(0);
+        Version {
+            numbers: [next(), next(), next()],
+            pre_release,
+        }
+    }
+
+    /// Whether this version meets `requires = ">=want"`: higher numbers, or
+    /// the same numbers without a pre-release label.
+    pub fn meets(self, want: [u32; 3]) -> bool {
+        self.numbers > want || (self.numbers == want && !self.pre_release)
+    }
+}
+
+/// A release: tests and fixed inputs give the numbers alone.
+impl From<[u32; 3]> for Version {
+    fn from(numbers: [u32; 3]) -> Version {
+        Version {
+            numbers,
+            pre_release: false,
+        }
+    }
+}
+
 fn syntax_diag(id: SourceId, e: &tree::SyntaxError) -> Diagnostic {
     let at = Place::Source { id, span: e.span };
     match &e.kind {
@@ -288,7 +335,7 @@ struct Meta {
     errors: Vec<Diagnostic>,
 }
 
-fn take_meta(id: SourceId, t: &mut Table, version: [u32; 3]) -> Meta {
+fn take_meta(id: SourceId, t: &mut Table, version: Version) -> Meta {
     let mut m = Meta {
         extends: Vec::new(),
         errors: Vec::new(),
@@ -341,7 +388,7 @@ fn take_meta(id: SourceId, t: &mut Table, version: [u32; 3]) -> Meta {
             },
             "requires" => match &e.node.value {
                 Value::Str(s) => match parse_requires(s) {
-                    Some(want) if want > version => m.errors.push(
+                    Some(want) if !version.meets(want) => m.errors.push(
                         Diagnostic::new(codes::REQUIRES_NEWER, at).arg("requires", s.clone()),
                     ),
                     Some(_) => {}
@@ -397,7 +444,7 @@ struct Budget {
 
 struct Walk<'r> {
     resolver: &'r mut dyn Resolver,
-    version: [u32; 3],
+    version: Version,
     nodes: Vec<Node>,
     stack: Vec<usize>,
     used: Budget,
@@ -737,11 +784,19 @@ impl Walk<'_> {
 
 /// Loads `roots` in order (built-in, global config, `conf.d` by name,
 /// local), following `extends`. `version` is this bingsu's version, for
-/// `requires`.
-pub fn load<R: Into<Root>>(
+/// `requires` (numbers alone are a release).
+pub fn load<R: Into<Root>, V: Into<Version>>(
     roots: Vec<R>,
     resolver: &mut dyn Resolver,
-    version: [u32; 3],
+    version: V,
+) -> Result<LoadReport, LoadError> {
+    load_as(roots, resolver, version.into())
+}
+
+fn load_as<R: Into<Root>>(
+    roots: Vec<R>,
+    resolver: &mut dyn Resolver,
+    version: Version,
 ) -> Result<LoadReport, LoadError> {
     let mut w = Walk {
         resolver,
@@ -1742,6 +1797,53 @@ pub(crate) mod tests {
         ] {
             assert_eq!(parse_requires(bad), None, "{bad}");
         }
+    }
+
+    // 이것을 실패시키는 것: `-` 뒤를 패치에 붙여 읽어 패치가 0이 되는 것, pre-release 표지를 버리는 것,
+    // `+` 뒤의 빌드 정보를 pre-release로 읽는 것, 숫자만 준 판을 pre-release로 만드는 것.
+    #[test]
+    fn a_version_keeps_its_patch_and_its_pre_release() {
+        let v = |numbers, pre_release| Version {
+            numbers,
+            pre_release,
+        };
+        for (text, want) in [
+            ("1.22.333", v([1, 22, 333], false)),
+            ("0.3", v([0, 3, 0], false)),
+            ("1.2.3-rc.4", v([1, 2, 3], true)),
+            ("0.1.0-rc.1+build.7", v([0, 1, 0], true)),
+            ("1.0.0+build-5", v([1, 0, 0], false)),
+        ] {
+            assert_eq!(Version::parse(text), want, "{text}");
+        }
+        assert_eq!(Version::from([0, 3, 0]), v([0, 3, 0], false));
+    }
+
+    // SemVer: a pre-release is below the release with the same numbers.
+    // 이것을 실패시키는 것: 숫자를 `>=`로 비교하는 것(`0.1.0-rc.1`이 `>=0.1.0`을 만족), 같은 숫자의
+    // pre-release를 받는 것, 더 높은 숫자의 pre-release를 거절하는 것.
+    #[test]
+    fn a_pre_release_does_not_meet_its_own_release() {
+        let rc = Version::parse("0.1.0-rc.1");
+        assert!(!rc.meets([0, 1, 0]));
+        assert!(!rc.meets([0, 1, 1]));
+        assert!(rc.meets([0, 0, 9]));
+        assert!(Version::parse("0.1.1-rc.1").meets([0, 1, 0]));
+        let release = Version::parse("0.1.0");
+        assert!(release.meets([0, 1, 0]));
+        assert!(!release.meets([0, 1, 1]));
+    }
+
+    // 이것을 실패시키는 것: requires 판정이 pre-release 표지를 보지 않고 숫자만 비교하는 것.
+    #[test]
+    fn requires_reads_the_running_pre_release() {
+        let rc = Version::parse("0.3.0-rc.1");
+        let mut f = files(&[]);
+        let root = |text| vec![opened("root", text, 1)];
+        let e = load(root("requires = \">=0.3\"\n"), &mut f, rc).unwrap_err();
+        assert_eq!(codes_of(&e.errors), [codes::REQUIRES_NEWER]);
+        assert!(load(root("requires = \">=0.2.9\"\n"), &mut f, rc).is_ok());
+        assert!(load(root("requires = \">=0.3\"\n"), &mut f, V).is_ok());
     }
 
     // 이것을 실패시키는 것: 파일 크기 덧셈을 넘치게 하거나, 커진 비신뢰 뿌리를 파싱해 전체를 실패시키는 것.

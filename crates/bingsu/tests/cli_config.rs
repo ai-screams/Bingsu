@@ -196,6 +196,25 @@ fn check_reports_and_judges() {
     assert!(stdout.contains("result: invalid"), "{stdout}");
 }
 
+// `requires = ">=MAJOR.MINOR.PATCH"` with this binary's own numbers: a release meets it, a
+// pre-release of the same numbers does not (SemVer), and `config check` names E306 for it.
+// 이것을 실패시키는 것: 실행 중인 판의 pre-release 표지를 버리는 것(rc가 같은 숫자의 정식판 요구를 통과).
+#[test]
+fn check_compares_requires_with_the_running_pre_release() {
+    let version = env!("CARGO_PKG_VERSION");
+    let numbers = version.split(['-', '+']).next().unwrap();
+    let pre_release = version.split('+').next().unwrap().contains('-');
+    let e = Env::new("cli_config", "requires");
+    e.put_config("config.toml", &format!("requires = \">={numbers}\"\n"));
+    let (code, stdout, _) = out(&e.run(&["config", "check"]));
+    if pre_release {
+        assert_eq!(code, Some(1), "{stdout}");
+        assert!(stdout.contains("E306"), "{stdout}");
+    } else {
+        assert_eq!(code, Some(0), "{stdout}");
+    }
+}
+
 // A command whose script starts with `#!/usr/bin/env` is warned about by check (W411), which stays
 // valid; the warning names the segment.
 // 이것을 실패시키는 것: check 경로에서 W411 진단을 보고서에 더하지 않는 것, 경고를 오류로 세는 것.

@@ -286,7 +286,7 @@ mod tests {
                     home: base.clone(),
                     me,
                     user: sys::passwd_entry(me).unwrap().name,
-                    version: [0, 3, 0],
+                    version: [0, 3, 0].into(),
                     build: Some([1; 40]),
                     process_started: Fixed.observe().unwrap(),
                 },
