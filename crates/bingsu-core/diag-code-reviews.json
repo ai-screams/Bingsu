@@ -28,5 +28,11 @@
     "after": "72b99a3e645916f7f7e4afdca18e1bd448a54f7e6960b8efa2cc2c8070781d8a",
     "kind": "meaning",
     "reason": "Adds the findings of `bingsu doctor`: W601 (a folder on the way to the executable can be changed by another user), W602 (the bingsu on PATH is not the running one), W603 (no folders pinned in this shell), E604 (a pinned folder is not the same now), W605 (the collector or prompt executable beside bingsu is missing or from another build), W606 (the kernel has no seccomp) and E607 (the settings have an error). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
+  },
+  {
+    "before": "72b99a3e645916f7f7e4afdca18e1bd448a54f7e6960b8efa2cc2c8070781d8a",
+    "after": "f1309345e434aff56da6d6765c6f9b3f629a64232bfd5d4011e0a7e5069df50b",
+    "kind": "meaning",
+    "reason": "Removes a unit test from the registry file that refused the word `doctor` in a fix text, since the command exists now. No code is added, removed, reused or deprecated, and every code keeps its number, status, arguments and text."
   }
 ]
