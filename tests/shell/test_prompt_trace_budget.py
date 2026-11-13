@@ -1847,8 +1847,72 @@ def helper_stage_case(stage):
     lines = data.decode().splitlines()
     if stage == "collect":
         lines = with_session_listing(with_command_stage_probe(lines))
+    lines = with_json_root_names(lines)
     return with_mount_id_queries(with_capability_queries(lines)), meta["collector"], HelperPlan(**plan)
 
+
+def absence_blocks(lines, helper, name):
+    """The helper's absence checks of `name`: its no-follow stat answering
+    ENOENT, then the walk of its parent folder from "/" up to the run of
+    closes that ends it. Each is (index of its last line, its calls), one
+    whole call per line: a call split around another process's lines is
+    joined, and the other lines are left out."""
+    import re
+    resumed = re.compile(r"^\S+\s+<\.\.\. \w+ resumed>")
+    calls, pending = [], None
+    for i, line in enumerate(lines):
+        if line.split()[0] != helper:
+            continue
+        if pending is not None:
+            assert resumed.match(line), ("split call", line)
+            calls.append((i, pending + resumed.sub("", line)))
+            pending = None
+        elif line.endswith(" <unfinished ...>"):
+            pending = line[: -len(" <unfinished ...>")]
+        else:
+            calls.append((i, line))
+    name_of = lambda line: line.split(None, 1)[1]
+    blocks, k = [], 0
+    while k < len(calls):
+        at, line = calls[k]
+        k += 1
+        if f'/{name}", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW' not in line or "ENOENT" not in line:
+            continue
+        block = [line]
+        assert name_of(calls[k][1]).startswith('openat(AT_FDCWD</>, "/", '), ("absence walk", calls[k][1])
+        while not name_of(calls[k][1]).startswith("close("):
+            block.append(calls[k][1])
+            k += 1
+        while k < len(calls) and name_of(calls[k][1]).startswith("close("):
+            block.append(calls[k][1])
+            k += 1
+        blocks.append((calls[k - 1][0], block))
+    return blocks
+
+
+def with_json_root_names(lines):
+    """The captures predate config.json and config.local.json (F1). Every
+    place the helper checks that config.local.toml is absent (once while it
+    lists the roots, once per revalidation) it now also checks config.json
+    and config.local.json, which the fixture does not have either, with the
+    same stat and parent walk. Replay those calls on the saved capture; a
+    product-shape replay, not a new capture."""
+    helper = next((l.split()[0] for l in lines if '"__refresh-v1"' in l and "execve(" in l), None)
+    if helper is None:
+        return lines
+    blocks = absence_blocks(lines, helper, "config.local.toml")
+    # A capture that already has the calls keeps them; one with some missing
+    # is not this product shape.
+    # 이것을 실패시키는 것: 이미 있는 확인 위에 또 끼워 넣는 것, 두 이름 중 하나만 있거나 수가 다른 캡처를 받는 것.
+    have = [len(absence_blocks(lines, helper, n)) for n in ("config.json", "config.local.json")]
+    if any(have):
+        assert have == [len(blocks)] * 2, ("json root absence checks", have, len(blocks))
+        return lines
+    out = list(lines)
+    for end, calls in reversed(blocks):
+        copies = [l.replace("/config.local.toml", f"/{n}") for n in ("config.json", "config.local.json") for l in calls]
+        out[end + 1:end + 1] = copies
+    return out
 
 KILL_OPEN = re.compile(r'^(\d+)\s+openat\((\d+<[^>]*/u[0-9a-f]+>), "cgroup\.kill", O_WRONLY\|O_NOFOLLOW\|O_CLOEXEC\) = '
                        r'(\d+<[^>]*/u[0-9a-f]+/cgroup\.kill>)$')
@@ -1963,6 +2027,24 @@ def with_capability_queries(lines):
     for at, fd in reversed(sites):
         out.insert(at, query[fd])
     return out
+
+
+# 이것을 실패시키는 것: 재생이 config.local.toml 확인마다 두 이름을 넣지 않는 것(뿌리 목록과 재검증 세 번), 이미
+# 있는 확인 위에 또 넣는 것, 한 이름만 있는 캡처를 받는 것.
+def test_json_root_name_replay():
+    raw = (HELPER_STAGE_TRACES.parent / "helper-stage-unchanged.strace").read_text().splitlines()
+    helper = next(l.split()[0] for l in raw if '"__refresh-v1"' in l and "execve(" in l)
+    blocks = absence_blocks(raw, helper, "config.local.toml")
+    assert len(blocks) == 4, blocks
+    replayed = with_json_root_names(raw)
+    for name in ("config.json", "config.local.json"):
+        assert len(absence_blocks(replayed, helper, name)) == 4, name
+    added = sum(len(calls) for _, calls in blocks) * 2
+    assert len(replayed) == len(raw) + added
+    assert with_json_root_names(replayed) == replayed
+    one = [l for l in replayed if "/config.local.json" not in l]
+    with pytest.raises(AssertionError, match="json root absence checks"):
+        with_json_root_names(one)
 
 
 # 이것을 실패시키는 것: 재생이 이미 있는 호출을 두 번 넣는 것, 호출이 더 있거나 자리·모양이 다른 캡처를 받는 것,

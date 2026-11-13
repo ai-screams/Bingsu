@@ -163,7 +163,8 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let applied = ctx::apply(Path::new(exe), &roots, &user, started, &mut SystemClock);
     match (&applied, reload::report(&applied, "applied")) {
         (_, Ok(text)) => {
-            let line = format!("bingsu: using {shown} in place of config.toml\n{text}");
+            let line =
+                format!("bingsu: using {shown} in place of config.toml and config.json\n{text}");
             if ctx::print(&line) {
                 ExitCode::SUCCESS
             } else {
@@ -171,12 +172,12 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             }
         }
         (Applied::Invalid, Err(_)) => {
-            eprintln!("bingsu: using {shown} in place of config.toml");
+            eprintln!("bingsu: using {shown} in place of config.toml and config.json");
             eprintln!("{}", en(MsgId::UseSavedInvalid));
             ctx::code(EXIT_FAILED)
         }
         (_, Err(_)) => {
-            eprintln!("bingsu: using {shown} in place of config.toml");
+            eprintln!("bingsu: using {shown} in place of config.toml and config.json");
             eprintln!("{}", en(MsgId::UseSavedUnfinished));
             ctx::code(EXIT_UNFINISHED)
         }
