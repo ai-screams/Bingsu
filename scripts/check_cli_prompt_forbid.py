@@ -60,7 +60,7 @@ SANDBOX = ROOT / "crates/bingsu/src/sandbox.rs"
 MANIFEST = ROOT / "crates/bingsu/Cargo.toml"
 PROMPT_PACKAGE = ROOT / "crates/bingsu-prompt"
 PROMPT_MANIFEST = {
-    "package": {"name": "bingsu-prompt", "version": "0.0.0",
+    "package": {"name": "bingsu-prompt", "version": {"workspace": True},
                 "description": "The bingsu prompt alone: the prompt files of the bingsu crate, without its other commands",
                 "publish": False, "edition": {"workspace": True}, "rust-version": "1.88",
                 "license": {"workspace": True}, "repository": {"workspace": True}},
@@ -72,8 +72,8 @@ PROMPT_MANIFEST = {
 # K38: copying a new hash can self-approve a change; these pins are a change-detection
 # tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
-    "crates/bingsu-identity/Cargo.toml": "1c6aeb48d7416df0d76252cf460c62af75c43da16cf834a227ac6cfef9ab336c",
-    "crates/bingsu-identity/build.rs": "eb1a806852046b18c470f33b7141da4894672910c85d1b77569a3ea1f5b6e6ac",
+    "crates/bingsu-identity/Cargo.toml": "ff75b6ce44e1359c1e99593a65b93beb1a43605d38449cbb19abe34e981fecf0",
+    "crates/bingsu-identity/build.rs": "10a627b742c558418ca780876fcd93b4cc12d2dae5295f32c0fe4caeaff66cad",
     "crates/bingsu-identity/src/lib.rs": "fd944c745ea76076f1c1c5f15ed0849df0045da526ab870459ce28880d48521d",
     "crates/bingsu/src/prompt_read.rs": "c84ea1f15b273825d48f7d4f15df9d3457c275b15070d4e9dc8950360eaf3484",
     "crates/bingsu-core/src/command/env_frame.rs": "237c6cdd21b42d45f247651a923f050122ee65a1ff8b54abaa16a695b9272db6",
@@ -105,10 +105,10 @@ TCB_SHA256 = {
     # (keep.rs; no code of its own reaches the prompt binary).
     "crates/bingsu-core/src/command/keep.rs": "217bf65950b2e90607f0114cd5a8afcf36ef44cb76698a1cd82d44647c04cba6",
     "crates/bingsu/src/sandbox.rs": "a8ef03197c75a326c365b3c2ac0ce0170df58b05b4d9af13c8d9e5064bcac929",
-    "crates/bingsu/Cargo.toml": "1e56b43b80795d4042f862c4f563ca1121b1edd88ec401d0e16765a750b1cae8",
+    "crates/bingsu/Cargo.toml": "0c5d54c3357b587671f6027ef6bfe1f64e097316450c0af8b53931c6bd593b07",
     "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
     "crates/bingsu-prompt/src/main.rs": "94585d3f07affd25f2a0b407e7c33759dd8b56f4fc5dd33587d96dd199c838cd",
-    "crates/bingsu-prompt/Cargo.toml": "da03cbb0ffb87da704ba5b186308071b36e2ba072705346505ead5882bbacc61",
+    "crates/bingsu-prompt/Cargo.toml": "520a117c771ca2b087e0ca92f47593629d89aa23f353258fb76c17aaf791fe8c",
 }
 WANT = "#![forbid(clippy::disallowed_methods, clippy::disallowed_types, clippy::disallowed_macros)]"
 

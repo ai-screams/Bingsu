@@ -4,6 +4,7 @@ members = ["crates/bingsu-core", "crates/bingsu", "crates/bingsu-prompt", "crate
 exclude = ["crates/bingsu-core/purity-canary", "crates/bingsu/purity-canary", "bench/size-probe"]
 
 [workspace.package]
+version = "0.1.0-rc.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

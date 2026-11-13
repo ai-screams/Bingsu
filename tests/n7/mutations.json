@@ -2322,7 +2322,7 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/config_load.rs",
-        "before": "paths.push(root.join(\"config.local.toml\"));",
+        "before": "paths.push(vec![\n            root.join(\"config.local.toml\"),\n            root.join(\"config.local.json\"),\n        ]);",
         "after": "// mutation: selection discards local overlay",
         "count": 1
       }

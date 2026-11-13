@@ -2558,14 +2558,16 @@ def axis_cap_case(axis, fixture):
         return [root], crossing, None
     if axis.startswith("R-"):
         # Entries that pass the lexical check and are walked before R counts the
-        # next one: the 255th stops with no call of its own, the 254th is the last walked.
+        # next one. The four root names take R first (config.toml, config.json,
+        # config.local.toml, config.local.json): the 253rd entry stops with no
+        # call of its own, the 252nd is the last walked.
         written = {"R-missing": [f"parts/none-{i:03}.toml" for i in range(255)],
                    "R-duplicate": ["parts/same.toml"] * 255, "R-cycle": ["config.toml"] * 255}[axis]
         (fixture.config / "parts").mkdir(mode=0o700)
         write_private(fixture.config / "parts/same.toml", b"")
         refs = ", ".join(f'"{r}"' for r in written)
         write_private(fixture.config / "config.toml", f"extends = [{refs}]\n".encode() + plain)
-        last = {"R-missing": '"none-253.toml"', "R-duplicate": '"same.toml"', "R-cycle": '"config.toml"'}[axis]
+        last = {"R-missing": '"none-251.toml"', "R-duplicate": '"same.toml"', "R-cycle": '"config.toml"'}[axis]
 
         def crossing(calls):
             walked = [c for c in calls if c.name in ("openat", "newfstatat", "statx") and last in c.args]
@@ -2573,12 +2575,13 @@ def axis_cap_case(axis, fixture):
             missing = {m[0] for c in calls if (m := re.search(r'"none-\d+\.toml"', c.args))}
             opens = sum(c.name == "openat" for c in walked)
             # The root reads config.toml twice more than the list names it.
-            assert (len(missing), opens) == {"R-missing": (254, 0), "R-duplicate": (0, 254), "R-cycle": (0, 256)}[axis]
+            assert (len(missing), opens) == {"R-missing": (252, 0), "R-duplicate": (0, 252), "R-cycle": (0, 254)}[axis]
             return walked[-1]
         held = held_chain(fixture) | {root + "/parts", root + "/parts/same.toml"}
         return [root], crossing, lambda c: held_recheck(c, held)
     if axis == "R":
-        # config.toml, the absent config.local.toml and 255 refused entries: 257.
+        # config.toml, the absent config.json, config.local.toml and
+        # config.local.json, and 255 refused entries: 259.
         refs = ", ".join(f'"$THEME_{i}"' for i in range(255))
         write_private(fixture.config / "config.toml", f"extends = [{refs}]\n".encode() + plain)
         config = f"<{os.path.realpath(fixture.config / 'config.toml')}>"
@@ -2622,7 +2625,7 @@ def test_live_helper_stops_config_io_past_an_axis_cap(axis, tmp_path):
     snapshot, last-good, marker and sequence keep their bytes.
 
     이것을 실패시키는 것: 목록 항목을 걸러낸 뒤에만 세거나 세지 않는 것(목록이 끝까지 돌고 재목록이 따름), 거부된
-    extends 항목을 R에서 빼는 것(재검증 걷기가 따름), 없는·중복·순환 항목을 걷기 뒤에 세거나 세지 않는 것(255번째가
+    extends 항목을 R에서 빼는 것(재검증 걷기가 따름), 없는·중복·순환 항목을 걷기 뒤에 세거나 세지 않는 것(253번째가
     걸어짐), B 읽기를 남은 여유 + 1바이트로 묶지 않는 것, 상한을 넘은 뒤
     남은 뿌리 후보나 재검증을 이어 가는 것, 상한 초과에서 표식·snapshot·sequence를 쓰는 것.
     """

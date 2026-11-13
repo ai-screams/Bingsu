@@ -42,6 +42,7 @@ pub const FILE_TOO_LARGE: DiagCode = e(102);
 pub const NOT_UTF8: DiagCode = e(103);
 pub const INTEGER_RANGE: DiagCode = e(104);
 pub const NESTING_TOO_DEEP: DiagCode = e(105);
+pub const JSON_SYNTAX: DiagCode = e(106);
 pub const UNKNOWN_KEY: DiagCode = e(201);
 pub const WRONG_TYPE: DiagCode = e(202);
 pub const BAD_VALUE: DiagCode = e(203);
@@ -62,6 +63,7 @@ pub const EXTENDS_TOO_BIG: DiagCode = e(304);
 pub const EXTENDS_BAD_PATH: DiagCode = e(305);
 pub const REQUIRES_NEWER: DiagCode = e(306);
 pub const VERSION_UNKNOWN: DiagCode = e(307);
+pub const TWO_FORMATS: DiagCode = e(308);
 pub const EXEC_KEY_IGNORED: DiagCode = w(401);
 pub const ENV_SEGMENT_IGNORED: DiagCode = w(402);
 pub const SEGMENT_DROPPED: DiagCode = w(403);
@@ -148,6 +150,12 @@ pub const CODES: &[CodeInfo] = &[
         "tables and arrays are nested more than 32 deep here",
         "nesting is capped so reading a file can never run out of stack",
         "flatten the structure",
+    ),
+    stable(
+        JSON_SYNTAX,
+        "this is not valid JSON: {message}",
+        "the file must parse before anything in it is used",
+        "fix the text at this place",
     ),
     stable(
         UNKNOWN_KEY,
@@ -268,6 +276,12 @@ pub const CODES: &[CodeInfo] = &[
         "config version {found} is not known",
         "this bingsu reads version 1",
         "upgrade bingsu, or check `version`",
+    ),
+    stable(
+        TWO_FORMATS,
+        "`{path}` and `{other}` are both here",
+        "one place holds one settings file, and bingsu does not pick one of two",
+        "keep one of the two files",
     ),
     stable(
         ROOTS_NO_LONGER_MATCH,

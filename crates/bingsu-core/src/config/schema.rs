@@ -58,8 +58,18 @@ const fn meta(
     }
 }
 
-/// Keys read per file and not merged (`config::source`).
-pub const META: [KeyDef; 3] = [
+/// Keys read per file and not merged (`config::source`). `$schema` is for
+/// editors (completion and checks against `bingsu config schema`); bingsu
+/// reads nothing from it.
+pub const META: [KeyDef; 4] = [
+    meta(
+        "$schema",
+        Ty::Str,
+        true,
+        "\"https://example.com/bingsu/config-v1.json\"",
+        "JSON Schema for editors; bingsu ignores it.",
+        "편집기가 쓰는 JSON Schema 주소. bingsu는 읽지 않는다.",
+    ),
     meta(
         "version",
         Ty::Int { min: 1, max: 1 },

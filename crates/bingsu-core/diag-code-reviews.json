@@ -31,7 +31,13 @@
   },
   {
     "before": "72b99a3e645916f7f7e4afdca18e1bd448a54f7e6960b8efa2cc2c8070781d8a",
-    "after": "f1309345e434aff56da6d6765c6f9b3f629a64232bfd5d4011e0a7e5069df50b",
+    "after": "2f15c1766e8184aac943e7f1af041a288fee4f3e96ef916bfe6635dc681185bc",
+    "kind": "meaning",
+    "reason": "Adds E106 (a JSON settings file that does not parse, with the reader's {message}) and E308 (one place holds two settings files of different formats, naming both {path} and {other}). Every existing code keeps its number, status, arguments and text: E101 still means invalid TOML only, and E102-E105 already describe any config file. No code is reused or deprecated."
+  },
+  {
+    "before": "2f15c1766e8184aac943e7f1af041a288fee4f3e96ef916bfe6635dc681185bc",
+    "after": "f4a7856e595fd945ec024efc4d2bacd6c43330b6aea1d48ab7d042d926ff86ee",
     "kind": "meaning",
     "reason": "Removes a unit test from the registry file that refused the word `doctor` in a fix text, since the command exists now. No code is added, removed, reused or deprecated, and every code keeps its number, status, arguments and text."
   }

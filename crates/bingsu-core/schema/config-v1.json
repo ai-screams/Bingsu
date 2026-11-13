@@ -2,6 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
+    "$schema": {
+      "type": "string",
+      "examples": ["https://example.com/bingsu/config-v1.json"],
+      "description": "JSON Schema for editors; bingsu ignores it.",
+      "x-bingsu-description-ko": "편집기가 쓰는 JSON Schema 주소. bingsu는 읽지 않는다.",
+      "x-bingsu-level": "expert"
+    },
     "version": {
       "type": "integer",
       "minimum": 1,

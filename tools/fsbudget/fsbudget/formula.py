@@ -371,7 +371,8 @@ class HelperPlan:
     or ("failure-recover",), with
     "collect" added when the screen selects collection. `ax` describes the
     config sources; the product shape covered here is one config.toml with
-    conf.d and config.local.toml absent, no extends, links or approval record.
+    conf.d, config.json, config.local.toml and config.local.json absent, no
+    extends, links or approval record.
     Component counts are path names after "/": runtime, state and config
     (`ax.P`) roots, the folder holding the pinned executable link and the
     folder of its target. `failure-last-good` is a broken config with no
@@ -586,9 +587,10 @@ def _selection_lock(e: dict, names: int) -> None:
 
 def _loader_revalidate(e: dict, k: int) -> None:
     # Loader::revalidate: the observed config.toml walk, each absence (stat and
-    # parent walk), the config root evidence and the held executable file.
+    # parent walk: conf.d, config.json, config.local.toml, config.local.json),
+    # the config root evidence and the held executable file.
     _resolved_open(e, k + 1)
-    for _ in range(2):
+    for _ in range(4):
         _add(e, "metadata")
         _resolved_open(e, k)
     _resolved_recheck(e, k + 1, k)
@@ -1344,14 +1346,17 @@ def _helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     else:
         _store_read(e, p.snapshot_bytes, p.buf)
     _store_read(e, p.sequence_bytes, p.buf)
-    # Loader::roots: conf.d missing and its absence, config.toml stat and
-    # check, config.local.toml stat and absence. Then the read: check,
-    # rewind, read_to_end and revalidation of the opened file.
+    # Loader::roots: conf.d missing and its absence; config.toml and
+    # config.json stat, config.json's absence and config.toml's check;
+    # config.local.toml and config.local.json stat and both absences. Then
+    # the read: check, rewind, read_to_end and revalidation of the opened file.
     _resolved_open(e, k + 1, missing=True)
     _resolved_open(e, k)
-    _add(e, "metadata")
+    _add(e, "metadata", 2)
+    _resolved_open(e, k)
     _resolved_open(e, k + 1)
-    _add(e, "metadata")
+    _add(e, "metadata", 2)
+    _resolved_open(e, k)
     _resolved_open(e, k)
     _resolved_open(e, k + 1)
     _add(e, "rewind")

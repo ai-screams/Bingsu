@@ -1,6 +1,6 @@
 [package]
 name = "bingsu-bench"
-version = "0.0.0"
+version.workspace = true
 description = "M1 measurement code: cost matrix runners and the synthetic strace program"
 publish = false
 edition.workspace = true
