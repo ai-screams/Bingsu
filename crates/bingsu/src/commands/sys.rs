@@ -919,6 +919,28 @@ pub fn rename_at(
     }
 }
 
+/// `linkat(dir, from, dir, to, 0)`: gives the file `from` the second name
+/// `to`, and fails with `EEXIST` when `to` is taken: unlike `renameat` it
+/// never replaces anything, so a name another process made meanwhile stays.
+pub fn link_at(
+    dir: std::os::fd::BorrowedFd<'_>,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    collection_ops(1)?;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let a = std::ffi::CString::new(from.as_bytes())?;
+    let b = std::ffi::CString::new(to.as_bytes())?;
+    // SAFETY: `dir` is open and both names are NUL-terminated; flags 0 do
+    // not follow a symlink at `from`.
+    if unsafe { libc::linkat(dir.as_raw_fd(), a.as_ptr(), dir.as_raw_fd(), b.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 /// Search-only access for a walk descriptor: it can serve as the folder
 /// that `openat` and `mkdirat` resolve names in, and needs only search (x)
 /// permission, never read (r). An ancestor like `/home` at 0711 is

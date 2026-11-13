@@ -100,6 +100,8 @@ mod reload;
 #[cfg(unix)]
 pub(crate) mod runtime_root;
 #[cfg(unix)]
+mod setup;
+#[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
 pub(crate) mod snapshot_store;
 #[cfg(unix)]
@@ -109,6 +111,9 @@ mod source_path;
 pub(crate) mod sys;
 #[cfg(unix)]
 mod trust_record;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) mod tty;
 mod version;
 #[cfg(unix)]
 pub(crate) mod version_manager;
@@ -138,13 +143,17 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("list") => list::run(&a.args[1..]),
         #[cfg(unix)]
+        Some("setup") => setup::run(&a.args[1..]),
+        #[cfg(unix)]
         Some("reload") => reload::run(&a.argv0, &a.args[1..]),
         #[cfg(feature = "bench-stubs")]
         Some("__collect-stub") => ExitCode::from(
             u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
         ),
         _ => {
-            eprintln!("usage: bingsu <config|explain|help|init|list|prompt|reload|--version> ...");
+            eprintln!(
+                "usage: bingsu <config|explain|help|init|list|prompt|reload|setup|--version> ..."
+            );
             ExitCode::from(2)
         }
     }

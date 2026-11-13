@@ -11,4 +11,5 @@ pub mod merge;
 pub mod report;
 pub mod schema;
 pub mod source;
+pub mod starter;
 pub mod tree;
