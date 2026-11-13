@@ -765,6 +765,171 @@ mod tests {
     }
 }
 
+/// The supervisor's and the relay's descriptor tables on macOS, where
+/// `POSIX_SPAWN_CLOEXEC_DEFAULT` alone keeps out what the caller holds
+/// without close-on-exec. The tables come from the kernel (`proc_pidinfo`);
+/// `posix_spawn` returns after the new image is in place, so they are final.
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use std::os::fd::OwnedFd;
+
+    const VNODE: u32 = libc::PROX_FDTYPE_VNODE as u32;
+    const SOCKET: u32 = libc::PROX_FDTYPE_SOCKET as u32;
+    const PIPE: u32 = libc::PROX_FDTYPE_PIPE as u32;
+
+    /// Each open descriptor of `pid` and its kind, by number.
+    fn fds(pid: libc::pid_t) -> Vec<(i32, u32)> {
+        let mut table = [libc::proc_fdinfo {
+            proc_fd: -1,
+            proc_fdtype: 0,
+        }; 64];
+        let size = std::mem::size_of_val(&table) as libc::c_int;
+        // SAFETY: `table` is writable for `size` bytes.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                table.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        // A full buffer may have cut the table short.
+        assert!(n > 0 && n < size, "{n}");
+        let count = n as usize / std::mem::size_of::<libc::proc_fdinfo>();
+        let mut seen: Vec<_> = table[..count]
+            .iter()
+            .map(|f| (f.proc_fd, f.proc_fdtype))
+            .collect();
+        seen.sort_unstable();
+        seen
+    }
+
+    /// The folder `pid` runs in.
+    fn cwd(pid: libc::pid_t) -> String {
+        // SAFETY: a zeroed proc_vnodepathinfo is a valid out-parameter.
+        let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as libc::c_int;
+        // SAFETY: `info` is writable for `size` bytes.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+                size,
+            )
+        };
+        assert_eq!(n, size);
+        let path: Vec<u8> = info
+            .pvi_cdir
+            .vip_path
+            .iter()
+            .flatten()
+            .map(|&c| c as u8)
+            .take_while(|&c| c != 0)
+            .collect();
+        String::from_utf8_lossy(&path).into_owned()
+    }
+
+    /// A descriptor without close-on-exec at `at` or above, as another
+    /// thread or the shell may leave one in the helper.
+    fn decoy(at: i32) -> OwnedFd {
+        let (keep, _write) = pipe().unwrap();
+        // SAFETY: `keep` is open; F_DUPFD leaves the copy inheritable.
+        let fd = unsafe { libc::fcntl(keep.as_raw_fd(), libc::F_DUPFD, at) };
+        assert!(fd >= at, "{fd}");
+        // SAFETY: a fresh duplicate nothing else owns.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: a flag query on an open descriptor.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+        assert_eq!(flags, 0, "the decoy must be inheritable");
+        fd
+    }
+
+    // GATE-CMD-FDS(감독 칸, macOS): 감독은 정확히 {0,1,2,3,4,5}이고 0–2는 /dev/null, 3·4는 허가·결과 통로(소켓),
+    // 5는 lock(여기서는 파이프)이며 폴더 "/"에서 시작한다. 도우미가 close-on-exec 없이 쥔 fd 50도 넘어가지 않는다.
+    // 이것을 실패시키는 것: spawn_with의 POSIX_SPAWN_CLOEXEC_DEFAULT를 빼는 것(fd 50이 넘어감), spawn_supervisor의
+    // lock 이동을 빼는 것(fd 5가 없음), 결과와 lock의 번호를 맞바꾸는 것(4가 파이프, 5가 소켓), spawn_with의
+    // addchdir_np를 빼는 것(시험 프로세스의 폴더에서 시작).
+    #[test]
+    fn test_supervisor_gets_exactly_six_fds() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let decoy = decoy(50);
+        let (grant, _grant_write) = channel().unwrap();
+        let (_results_read, results) = channel().unwrap();
+        let (lock, _lock_write) = pipe().unwrap();
+        let args = [b"sleep".to_vec(), b"5".to_vec()];
+        let mut child = spawn_supervisor(
+            c"/bin/sleep",
+            &args,
+            &grant,
+            &results,
+            &lock,
+            None,
+            u64::MAX,
+        )
+        .unwrap();
+        let seen = fds(child.pid);
+        let folder = cwd(child.pid);
+        let _ = child.signal(libc::SIGKILL);
+        while !child.reap().unwrap() {}
+        drop(decoy);
+        assert_eq!(
+            seen,
+            [
+                (0, VNODE),
+                (1, VNODE),
+                (2, VNODE),
+                (3, SOCKET),
+                (4, SOCKET),
+                (5, PIPE)
+            ]
+        );
+        assert_eq!(folder, "/");
+    }
+
+    // GATE-CMD-FDS(중계 칸, macOS): posix_spawn으로 띄운 중계는 정확히 {0,1,2,3}이고 0은 /dev/null, 1·2는 stdout과
+    // 상태 파이프, 3은 입력 소켓이며 폴더 "/"에서 시작한다. 호출 쪽이 close-on-exec 없이 쥔 fd 60도 넘어가지 않는다.
+    // 이것을 실패시키는 것: spawn_with의 POSIX_SPAWN_CLOEXEC_DEFAULT를 빼는 것(fd 60이 넘어감), spawn의 입력 이동
+    // (fd 3)을 빼는 것, stdout과 상태 파이프의 번호를 입력과 맞바꾸는 것, spawn_with의 addchdir_np를 빼는 것.
+    #[test]
+    fn test_relay_gets_exactly_four_fds() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let decoy = decoy(60);
+        let args = [b"sleep".to_vec(), b"5".to_vec()];
+        let mut s = spawn(c"/bin/sleep", &args, b"input", u64::MAX, &|| true, None).unwrap();
+        let seen = fds(s.child.pid);
+        let folder = cwd(s.child.pid);
+        let _ = s.child.signal(libc::SIGKILL);
+        while !s.child.reap().unwrap() {}
+        drop(decoy);
+        assert_eq!(seen, [(0, VNODE), (1, PIPE), (2, PIPE), (3, SOCKET)]);
+        assert_eq!(folder, "/");
+    }
+
+    // 중계는 빈 환경으로 시작한다. 감독도 같은 posix_spawn 호출의 같은 빈 envp로 시작한다(spawn_with). 최근 macOS는
+    // 다른 프로세스의 환경을 내주지 않으므로(KERN_PROCARGS2와 `ps -E`에 환경이 빠짐) 중계 자리의 env가 stdout에 찍은
+    // 것을 읽는다. 이것을 실패시키는 것: spawn_with가 posix_spawn에 비지 않은 envp를 주는 것.
+    #[test]
+    fn test_relay_starts_with_an_empty_environment() {
+        use std::io::Read as _;
+        use std::time::{Duration, Instant};
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let args = [b"env".to_vec()];
+        let mut s = spawn(c"/usr/bin/env", &args, b"input", u64::MAX, &|| true, None).unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        while !s.child.reap().unwrap() {
+            assert!(Instant::now() < end, "env never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut out = String::new();
+        s.stdout.read_to_string(&mut out).unwrap();
+        assert_eq!(out, "");
+    }
+}
+
 /// C2 timings with the real binaries (Linux): `BINGSU_BIN` names a built
 /// `bingsu`. Run with `--ignored --nocapture`; it prints, never asserts.
 #[cfg(all(test, target_os = "linux"))]
