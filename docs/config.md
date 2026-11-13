@@ -271,8 +271,26 @@ The running version is compared as SemVer says: a pre-release is lower than the 
 `0.1.0-rc.1` does not satisfy `requires = ">=0.1.0"` (or `">=0.1"`), while `0.1.1-rc.1` does satisfy `">=0.1.0"`, and
 `0.1.0` itself satisfies both.
 
-<!-- G2-PENDING #310: paste the real `bingsu config check` output of `requires = ">=0.1.0"` on 0.1.0-rc.1 once #310 is merged -->
+On `0.1.0-rc.1`, `requires = ">=0.1.0"` (and `">=0.1"` the same way) is refused, while `">=0.0.9"` is accepted:
 
+```console
+$ bingsu config check
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+diagnostics: 1 error(s), 0 warning(s), 0 note(s)
+E306: this config requires bingsu >=0.1.0
+  where: ~/.config/bingsu/config.toml:1:12
+  why: the file asks for a newer bingsu
+  fix: upgrade bingsu
+  code: E306 (bingsu help E306)
+
+widths (columns -> layout):
+  (not available while an error remains)
+result: invalid; the prompt keeps the last good settings
+```
+
+With `requires = ">=0.0.9"` the same command ends with `result: valid`.
 ## How commands run
 
 The refresh helper starts with each prompt (not with a redraw, such as after a terminal resize) and runs commands,
