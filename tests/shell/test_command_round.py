@@ -1068,9 +1068,20 @@ def fail_an_edit(session):
     editor.write_text("#!/bin/sh\nprintf '[broken\\n' > \"$1\"\n")
     editor.chmod(0o700)
     session.env["EDITOR"] = str(editor)
-    result = session.run("config", "edit")
-    assert result.returncode == 1, (result.stdout, result.stderr)
-    assert b"were not applied" in result.stderr, result.stderr
+    # A prompt starts a refresh round; a save that meets a running round is
+    # not published ("another refresh is running"), so the marker stays
+    # valid. The save stays on disk, so the next try publishes it. Wait for
+    # the round to end, a bounded number of tries. 이것을 실패시키는 것: 바쁨을 재시도 없이 통과로 읽는 것(표식이
+    # 무효가 되지 않아 뒤 단언이 실패), 상한 없이 기다리는 것.
+    for _ in range(40):
+        session.wait_quiet()
+        result = session.run("config", "edit")
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert b"were not applied" in result.stderr, result.stderr
+        if b"another refresh is running" not in result.stderr:
+            return
+        time.sleep(0.25)
+    raise AssertionError(f"every try met a running refresh: {result.stderr!r}")
 
 
 # 실패한 편집 뒤의 프롬프트(M7 E, 명령 없이): 유효한 설정으로 발행한 뒤 가짜 편집기가 무효 내용을 저장한다.
