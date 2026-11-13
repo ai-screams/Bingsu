@@ -501,7 +501,7 @@ fn helper(base:&Path,mode:&str) {
     let request=commands::refresh::RefreshRequest {
       runtime:commands::runtime_root::Pinned{path:base.join("runtime"),dev:meta.dev(),ino:meta.ino()},
       config_written:base.join("config"),config_canonical:base.join("config"),config_root_shape_only:false,
-      state_root:base.join("state"),home:base.join("home"),me:commands::sys::current_uid(),user:commands::sys::passwd_entry(commands::sys::current_uid()).unwrap().name,version:[0,0,0],build:Some([1;40]),process_started:now,
+      state_root:base.join("state"),home:base.join("home"),me:commands::sys::current_uid(),user:commands::sys::passwd_entry(commands::sys::current_uid()).unwrap().name,version:[0,0,0].into(),build:Some([1;40]),process_started:now,
     };
     // Prime once; this is setup, outside the measured validation interval.
     assert!(matches!(commands::refresh::refresh(request.clone(),&mut Fixed(now)),commands::refresh::RefreshResult::Published{..}|commands::refresh::RefreshResult::Revalidated{..}));
