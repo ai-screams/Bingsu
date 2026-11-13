@@ -83,7 +83,7 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Implementation language | Rust |
 | Record path and shell hooks (M1) | Done |
 | Core renderer (M2: layout, width, colors, per-shell output) | Done, used by `bingsu prompt` |
-| Config, snapshot and refresh helper (M3a) | Done: TOML config files (`config.toml`, `conf.d/*.toml`, `config.local.toml`, `extends`) with a JSON Schema; a background helper compiles them into a snapshot the prompt reads; `bingsu config check`, `config path`, `config use`, `config schema` and `bingsu reload` |
+| Config, snapshot and refresh helper (M3a) | Done: TOML config files (`config.toml`, `conf.d/*.toml`, `config.local.toml`, `extends`; JSON files of the same names since M7) with a JSON Schema; a background helper compiles them into a snapshot the prompt reads; `bingsu config check`, `config path`, `config use`, `config schema` and `bingsu reload` |
 | Background collection (M3b) | Done: the helper runs a separate collector process with time, memory and file limits (and a system-call filter on Linux), and the prompt shows only results finished before it started |
 | Git and folder collection (M3c) | Done: the collector reads git state through bounded, read-only file access (no `git` process) and reports branch or commit, staged, modified, untracked and conflicted counts, ahead/behind and stash, plus whether the folder is read-only or inside a repository; values it cannot finish in time show as unknown (`?`) |
 | Git segment | Shown after the folder in the built-in default theme from the second prompt in a repository |
@@ -282,6 +282,7 @@ accent_l = 0.76
   ```
 
 - `bingsu config schema` prints the JSON Schema; editors that read it complete every key above.
+- A config can also be a JSON file (`config.json`, `config.local.json`, `conf.d/*.json`) that reads like the TOML one; a place that has both forms is an error (E308). See [docs/config.md](docs/config.md#json-config-files).
 - `extends` layers config files, for example a team file under your own. [docs/config.md](docs/config.md) says what a
   shared file may and may not do.
 
@@ -292,7 +293,9 @@ accent_l = 0.76
 | `bingsu config check` | Reads your files and reports mistakes, with a diagnostic code for each |
 | `bingsu help CODE` | Explains a diagnostic code (`bingsu help E201`): what happened, why, how to fix it |
 | `bingsu explain` | Says which segments are hidden or shortened at a width, and why (`--width N`, `--format json`) |
-| `bingsu doctor` | Checks the installation: the executable and the folders above it, the pinned folders, the three binaries |
+| `bingsu doctor` | Checks the installation: the executable and the folders above it, the pinned folders, the three binaries; on a terminal it also measures how wide the terminal draws some characters and what its background is (`--terminal` asks the terminal even when output goes to a pipe) |
+| `bingsu config edit` | Opens your settings file in your editor, then checks it and applies it if it is valid |
+| `bingsu --version` | Prints the version, the full build identity, and whether `bingsu-prompt` and `bingsu-collect` beside it are the same build |
 | `bingsu reload` | Applies the settings now |
 
 ```console

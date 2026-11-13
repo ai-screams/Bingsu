@@ -353,6 +353,30 @@ eval "$(bingsu init zsh)"
 Without a terminal it asks nothing and needs `--yes --icons nerd|unicode --mode auto|dark|light`. On a terminal,
 `--icons` and `--mode` answer their question in advance and `--yes` skips the final confirmation.
 
+### Editing: `bingsu config edit`
+
+`bingsu config edit` opens your settings file in your editor, then runs `config check` on what you saved and, when it is
+valid, applies it the way `reload` does. A file that is not valid is not applied: the prompt keeps drawing with the
+last good settings, and the command exits 1 and says so.
+
+It opens the file `config use` picked, or else the one file of the settings place: `config.toml` or `config.json`, whichever
+is there. With both there it opens neither, points at E308 and exits 1. It does not make a file: when there is none it
+points to `bingsu setup` and exits 1.
+
+The editor is `$VISUAL`, or `$EDITOR` when `$VISUAL` is unset or empty; with neither set the command stops with an
+example and does not try a default. The value is not given to a shell. It is split at spaces with quotes and backslashes
+undone, and `$`, backticks, `;`, `&`, `|`, `<`, `>`, `(` and `)` outside single quotes are refused (point the variable at
+a script instead); `~` and `*` are not expanded. A first word with a `/` must be an absolute path; otherwise it is
+looked up in the absolute entries of `PATH`, in order, and only a regular file with an execute bit is run. The file's
+path is added as the last argument. If the editor ends with a nonzero status or by a signal, nothing is applied.
+
+```console
+<!-- G2-PENDING #303: paste the real output of a valid save and of an invalid save once #303 is merged -->
+```
+
+Two limits. While the editor is open, another shell's prompt can read a half-written file; if that file is invalid, the
+commands of that shell stop until you save a valid one. And a key in a settings file can never choose the editor.
+
 ### Names: `bingsu list`
 
 `bingsu list KIND` prints the names a config accepts, one row per line with the columns split by a tab. It reads the same tables the
@@ -427,8 +451,9 @@ diagnostics. Values of environment variables do not appear in either output.
 
 ### Problems with the installation: `bingsu doctor` and `bingsu help`
 
-`bingsu doctor` checks the installation and the shell setup, one row per check. It only reads: it runs no other
-executable, writes nothing and starts no process. Each row has a status (`ok`, `warn`, `fail`, `unknown`, `skipped`), one
+`bingsu doctor` checks the installation and the shell setup, one row per check. It runs no other executable, writes no
+file and starts no process. The only thing it does besides reading is to ask the terminal two questions (see
+[Terminal rows](#terminal-rows)). Each row has a status (`ok`, `warn`, `fail`, `unknown`, `skipped`), one
 line, and, when there is something to do, a diagnostic code that `bingsu help CODE` explains.
 
 ```console
@@ -453,10 +478,31 @@ result: 4 ok, 1 warning(s), 0 failed, 1 unknown, 1 skipped
 | `shell` | The shell version. Today this is always `unknown`: no shell passes its version to `doctor` yet, and bingsu never guesses a version from a path or a folder name |
 | `seccomp` | Whether the kernel supports seccomp (Linux; the example above is from macOS, where it is skipped). It does not check whether the prompt's own filter was installed |
 | `settings` | A summary of `config check`; a settings folder that fails the safety check is a `fail` |
+| `terminal width` | How many cells the terminal moves the cursor for probe characters, against `width.ambiguous` and `width.emoji` ([below](#terminal-rows)) |
+| `background` | Whether the terminal's background is light or dark, against what the prompt draws for ([below](#terminal-rows)) |
 
 The exit code is 1 when any check fails; warnings, `unknown` and `skipped` give 0. `--format json` prints the same
 rows as a JSON document. The shell evidence a hook can give (hook order, the envelope a hook sent, the circuit
 breaker) is not part of this table yet.
+
+#### Terminal rows
+
+The last two rows ask the terminal. They write a few characters to the screen, read the answers back and clear the line,
+so they run only when standard output is a terminal, or when you pass `--terminal`, which asks the controlling terminal
+(`/dev/tty`) even when the output goes to a pipe. Without a terminal, or when `bingsu` is not the job in the foreground,
+both rows are `skipped`. A terminal that does not answer within about 0.2 seconds gives `unknown`, never a warning.
+Ctrl-C stops the run with exit code 130 after the terminal is back in its normal state.
+
+| Row | What it measures | A warning means |
+| -- | -- | -- |
+| `terminal width` | Writes twelve probe characters one after the other (ASCII, a Hangul syllable, three East Asian ambiguous characters, an emoji, an emoji made by U+FE0F, a joined emoji, a flag, a letter with a combining mark, two Nerd Font glyphs) and asks the cursor position after each. It runs when the terminal is at least 40 columns wide | The terminal draws something in another number of cells than `width.ambiguous` and `width.emoji` say (W613). The row names the characters and the values the terminal fits |
+| `background` | Asks for the background color (OSC 11) and compares light or dark with what the prompt picks. It runs only when `colors.mode` is `auto`; with `dark` or `light` set, the prompt does not guess and the row is `skipped` | The prompt would draw for the other brightness (W614). Set `colors.mode` to `dark` or `light` |
+
+With `--format json` the two rows carry a `details` object with the measured cells per probe and the values that fit
+(`probes`, `recommended`, `inside_tmux`), or the two brightnesses (`terminal`, `prompt`, `colors_mode`).
+Inside `tmux` the answers come from `tmux`, which may differ from the outer terminal; the width row says so.
+
+<!-- G2-PENDING #306-follow-up: add a real `bingsu doctor --terminal` output here after the terminal rows are merged -->
 
 `bingsu help CODE` explains a diagnostic code that `config check`, `explain` or `doctor` printed, in three parts: what
 happened, why, and how to fix it. It does not read your settings. A code it does not know ends with exit code 2.
@@ -475,6 +521,82 @@ How to fix
   Check the spelling against `bingsu config schema`. When a close key exists, the message suggests it.
   A key inside a user segment is written as `segment.<id>.command`, `segment.<id>.text` and so on.
 ```
+
+## JSON config files
+
+A file whose name ends in `.json` is read as JSON and then treated like the TOML one: the same keys, merging, `extends`,
+trust and places in diagnostics. The places are `config.json` or `config.toml`, `conf.d/*.json` and `conf.d/*.toml`
+(read together by name), and `config.local.json` or `config.local.toml`. If both forms of one place exist
+(`config.toml` and `config.json`), bingsu reads neither and reports E308 (`bingsu help E308`); the last good settings stay
+in use. `conf.d/a.toml` and `conf.d/a.json` are different names, so both are read. A file picked with `config use`
+stands in for the whole place, so the two names beside it do not conflict.
+
+The JSON must follow RFC 8259 strictly: no comments, no trailing commas, no `null`, no duplicate keys, an object at
+the top. Anything else is E106. The limits are the same as for TOML (256 KiB per file, 32 levels). A top-level
+`"$schema"` string is accepted for editors and ignored; `bingsu config schema` prints a schema that declares it.
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/ai-screams/Bingsu/main/crates/bingsu-core/schema/config-v1.json",
+  "colors": { "mode": "dark" },
+  "style": { "preset": "lean" },
+  "segment": {
+    "custom/label": { "kind": "text", "text": "work" }
+  },
+  "layout": { "line2": { "left": ["custom/label", "char"] } }
+}
+```
+
+`bingsu config check` accepts this as `config.json` (0 errors, 0 warnings), and the file list names it like any other:
+
+```console
+$ bingsu config check
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.json (trusted)
+diagnostics: 0 error(s), 0 warning(s), 0 note(s)
+result: valid
+```
+
+With a `config.toml` beside it, neither is read:
+
+```console
+$ bingsu config check
+diagnostics: 1 error(s), 0 warning(s), 0 note(s)
+E308: `~/.config/bingsu/config.json` and `~/.config/bingsu/config.toml` are both here
+  why: one place holds one settings file, and bingsu does not pick one of two
+  fix: keep one of the two files
+result: invalid; the prompt keeps the last good settings
+```
+
+## Version: `bingsu --version`
+
+`bingsu --version` says which build this is and whether the two programs beside it come from the same build. It starts
+neither of them: it reads the build mark inside each file, the same mark `bingsu init` reads before it pins the
+program.
+
+```console
+$ bingsu --version
+bingsu 0.1.0-rc.1 (18b26c1e1d6ba89f7f95bc769c5eb8d3afa2c52d8a88a53074fb7eb44f9fa583, aarch64-apple-darwin, rustc 1.98.1 48a229cea)
+bingsu-prompt: same build
+bingsu-collect: same build
+```
+
+The first line is the version, the build identity (64 hex digits), the target and the compiler. Each of the next two
+lines is one of:
+
+| Status | Meaning |
+| -- | -- |
+| `same build` | The file has exactly one build mark and one role mark, the build is this one and the role matches the name |
+| `differs (build ...)` | The marks are whole but belong to another build; the line shows that build's identity |
+| `missing` | There is no file of that name beside `bingsu` |
+| `symlink, not read` | The name is a link, which `init` does not accept either |
+| `not a bingsu-prompt build` (or `bingsu-collect`) | The marks are absent, belong to another role, appear twice, are cut off, or disagree |
+| `unreadable (reason)` | It is not a regular file, is over 64 MiB, or cannot be opened |
+
+The exit code is 0 whatever the two lines say. `same build` looks at the marks only; it does not say that `init` will
+pin the file, because `init` also checks the owner, the permission bits and that the folder is local.
 
 ## Current limits
 
