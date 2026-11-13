@@ -257,14 +257,26 @@ accent_l = 0.76
 ### 4. Go further
 
 - `style.template` replaces a preset with your own template text.
-- `[layout.when.narrow]` draws another layout when the terminal is narrow:
+- `[layout.when.NAME]` draws another layout, or style, for a range of widths. The built-in `narrow` band covers
+  widths under 60; this one adds a `compact` band for 60 to 79 cells that draws the `lean` preset. `bingsu config check`
+  lists the bands, and `bingsu explain --width 70` says which one applies:
 
   ```toml
-  [layout.when.narrow]
-  max_cols = 59
+  [layout.when.compact]
+  max_cols = 79
 
-  [layout.when.narrow.style]
+  [layout.when.compact.style]
   preset = "lean"
+  ```
+
+  ```console
+  $ bingsu config check
+  ...
+  widths (columns -> layout):
+    0-59       narrow
+    60-79      compact
+    80+        (default layout)
+  result: valid
   ```
 
 - `bingsu config schema` prints the JSON Schema; editors that read it complete every key above.

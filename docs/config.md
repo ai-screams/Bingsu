@@ -74,6 +74,8 @@ that shell text can run anything it says. Prefer `command`.
 
 ### `language`
 
+An example segment (add a layout line that draws `custom/deno`; without one `bingsu config check` warns that the segment is not used):
+
 ```toml
 [segment."custom/deno"]
 kind = "language"
@@ -155,7 +157,7 @@ shorten = ["repo"]
 left = ["dir", "git"]
 ```
 
-Your `config.toml`:
+Your `config.toml` (this example needs the team file to exist; without it `bingsu config check` reports that the `extends` entry cannot be used):
 
 ```toml
 extends = ["~/src/team-prompt/team.toml"]
@@ -187,7 +189,7 @@ run without another look, so use it only if you trust everyone who can change th
 ### Turning a segment off
 
 To turn off one of the team's segments, set `enabled = false` in a file of your own that applies after it, for
-example `conf.d/90-mine.toml` (the `conf.d` files apply in name order):
+example `conf.d/90-mine.toml` (the `conf.d` files apply in name order). This is a piece to add to a config that already defines the segment, not a complete file:
 
 ```toml
 [segment."custom/email"]
@@ -236,7 +238,8 @@ The refresh helper is `bingsu` itself, and the prompt is drawn by `bingsu-prompt
 ### match
 
 `match` picks the value from the first line: the group named `value` if the pattern has one, else the first capture
-group, else the whole match. A line the pattern does not match, or an empty pick, shows nothing.
+group, else the whole match. A line the pattern does not match, or an empty pick, shows nothing. These are pieces to add
+to a config; draw the segments in a layout line to see them:
 
 ```toml
 [segment."custom/go"]
@@ -304,8 +307,9 @@ config checker and the renderer read, so a name it prints is a name the config a
 
 `bingsu list presets --preview` draws every preset once as the upper line of the default layout, with your current
 folder; the other values (a branch, a duration, the time) are samples. On a terminal it uses color unless `NO_COLOR` is
-set, and `--icons nerd|light|unicode|ascii` picks the icon set (`unicode` by default). The width is `$COLUMNS`, or 80,
-and never narrower than 60. It starts no command, reads no config and writes nothing.
+set, and `--icons nerd|light|unicode|ascii` picks the icon set (`unicode` by default). The name takes 9 columns and the
+line is drawn for `max(60, $COLUMNS - 9)` cells (71 when `COLUMNS` is not set), so in a terminal narrower than 69
+columns the lines are wider than the terminal. It starts no command, reads no config and writes nothing.
 
 ```console
 $ bingsu list presets --preview --icons unicode
@@ -323,8 +327,9 @@ bracket  [~/projects/api] [main]                                 [2.3s] [12:34]
 `bingsu explain [SEGMENT] [--width N] [--config FILE] [--format json|text]` says what the layout decides at one
 width, in words: which layout band applies, which overflow steps were taken, which segments are hidden and why, and
 which are shortened. It decides with the same code the prompt uses, so the report is what the prompt does with the
-same settings and values. Give a segment name to look at one segment; for a command or language segment it also says
-whether the unit would run and why not (the same words as `config check --explain`).
+same settings and values. Give a segment name to look at one segment; for a command or language segment you defined
+it also says whether the unit would run and why not (the same words as `config check --explain`). The built-in language
+segments (`node`, `python`, `rust`, `go`) have no such part in `explain`; `config check --explain` covers them.
 
 `explain` runs nothing: no command, no collector, no helper, and nothing is written or published. Values a collector
 or a command would bring are not there, so those segments show as `no-value`; read the result as "what the layout does
@@ -376,10 +381,10 @@ result: 4 ok, 1 warning(s), 0 failed, 1 unknown, 1 skipped
 | -- | -- |
 | `executable` | The path bingsu runs from, every link on the way and every folder above it: only you and root (or a group with no other member) may change them |
 | `bingsu on PATH` | Whether the `bingsu` your shell finds on `PATH` is the one running now |
-| `pinned folders` | The runtime, settings, state and log folders `bingsu init` pinned in this shell: changed, removed or replaced folders |
+| `pinned folders` | The folders `bingsu init` pinned in this shell. The runtime folder is checked for being replaced (a different folder at the same path) or removed. The settings, state and log folders get the safety check the helper uses (owner, permissions, links); a state or log folder that does not exist yet is accepted |
 | `one build` | That `bingsu`, `bingsu-prompt` and `bingsu-collect` come from the same build (read from the files, not by running them) |
-| `shell` | The shell version, when a shell passes it (`unknown` otherwise; bingsu never guesses a version from a path) |
-| `seccomp` | Whether the kernel can install the prompt's system call filter (Linux; the example above is from macOS) |
+| `shell` | The shell version. Today this is always `unknown`: no shell passes its version to `doctor` yet, and bingsu never guesses a version from a path or a folder name |
+| `seccomp` | Whether the kernel supports seccomp (Linux; the example above is from macOS, where it is skipped). It does not check whether the prompt's own filter was installed |
 | `settings` | A summary of `config check`; a settings folder that fails the safety check is a `fail` |
 
 The exit code is 1 when any check fails; warnings, `unknown` and `skipped` give 0. `--format json` prints the same
