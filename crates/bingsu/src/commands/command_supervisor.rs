@@ -1115,6 +1115,11 @@ pub(crate) mod tests {
     fn round(g: Grant) -> (Vec<Outcome>, std::time::Duration) {
         let (grant_read, grant_write) = pipe();
         let (result_read, result_write) = pipe();
+        // The results are read while the round runs: the supervisor writes
+        // what fits and waits for room, so a pipe smaller than all of them
+        // (512 bytes on a Mac short of pipe memory, 8 KiB on Linux past the
+        // user's soft limit) must not be left for after the round.
+        let reader = std::thread::spawn(move || results_until_closed(result_read));
         let started = std::time::Instant::now();
         let s = Supervisor::new(
             g,
@@ -1127,7 +1132,7 @@ pub(crate) mod tests {
         let took = started.elapsed();
         drop(s);
         drop((grant_write, result_write));
-        (results(result_read), took)
+        (reader.join().unwrap(), took)
     }
 
     /// `run` again while `again` holds, `tries` runs at most; the last result
@@ -1187,7 +1192,26 @@ pub(crate) mod tests {
         assert!(!late(&[outcome(Reason::Exited(0))], 0));
     }
 
+    /// The results already in a pipe (its read end is non-blocking).
     fn results(fd: OwnedFd) -> Vec<Outcome> {
+        read_results(fd)
+    }
+
+    /// The results as they come, until the write end closes: the read end is
+    /// made blocking, since the supervisor still writes while this reads.
+    fn results_until_closed(fd: OwnedFd) -> Vec<Outcome> {
+        // SAFETY: a flag query on the descriptor this function owns.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        // SAFETY: a flag change on the same descriptor.
+        let set = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+        assert_eq!(set, 0);
+        read_results(fd)
+    }
+
+    /// Reads the result frames until the write end closes (or, on a
+    /// non-blocking read end, until nothing more is there).
+    fn read_results(fd: OwnedFd) -> Vec<Outcome> {
         let mut bytes = Vec::new();
         File::from(fd).read_to_end(&mut bytes).unwrap_or_default();
         let mut out = Vec::new();
