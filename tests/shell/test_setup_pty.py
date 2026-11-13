@@ -135,14 +135,14 @@ def test_ctrl_c_during_the_query_cancels_restores_and_writes_nothing(home):
 
 
 # 이것을 실패시키는 것: SIGTERM에 핸들러를 두지 않는 것(터미널이 raw인 채 죽음), 신호 뒤 복구 경로를
-# 건너뛰는 것.
+# 건너뛰는 것, 복구 뒤 SIGTERM을 다시 올리지 않는 것(종료 상태가 128 + 15가 아님).
 def test_sigterm_during_the_query_restores_the_terminal(home):
     child = spawn(home, "--icons", "nerd", background=True)
     child.expect(QUERY)
     pid = int(re.search(rb"BPID=(\d+)", child.transcript.getvalue()).group(1))
     os.kill(pid, signal.SIGTERM)
     code, before, after, text = finish(child)
-    assert code == 130, text
+    assert code == 128 + signal.SIGTERM, text
     assert before == after, (before, after)
     assert config(home) is None
 
