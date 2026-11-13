@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
     for (unsigned long fd = 0; fd < scan; fd++) {
         if (fcntl((int)fd, F_GETFD) >= 0) {
             count++;
-            /* The refresh helper also holds the environment frame socket at fd 4. */
+            /* The refresh helper also holds the environment frame pipe (macOS: socket) at fd 4. */
             if (fd >= (collect ? 6 : 3) && (collect || fd != 4)) unexpected++;
         }
     }

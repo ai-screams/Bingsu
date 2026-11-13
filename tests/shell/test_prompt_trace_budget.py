@@ -537,52 +537,50 @@ def test_real_trace_needs_collector_exec_allowance(debian_trace, monkeypatch):
         assert_prompt_trace_budget(debian_trace, DEBIAN_EXE, DEBIAN_ROOTS)
 
 
+# The Linux front hands the environment over a pipe; only macOS uses a socket
+# pair. The front's call table and its network check both refuse these calls,
+# and the error names the inserted ones.
+# 이것을 실패시키는 것: Linux 앞단의 소켓 호출을 허용하는 것(호출 표에 넣고 network 검사에서 빼는 것:
+# macOS 모양의 socketpair·SO_SNDBUF 채널, 파이프에 건 setsockopt, socket·connect가 통과한다).
+@pytest.mark.parametrize("mutation,calls", [
+    ("none", []), ("socket-channel", ["socketpair", "setsockopt"]), ("socketpair", ["socketpair"]),
+    ("setsockopt-on-pipe", ["setsockopt"]), ("socket", ["socket"]), ("connect", ["connect"]),
+])
+def test_linux_front_makes_no_socket_calls(debian_trace, mutation, calls):
+    lines = list(debian_trace)
+    replay_env_pipe(lines, "1947")
+    at = next(i for i, l in enumerate(lines) if l.startswith("1947 pipe2([200<pipe:[909090]>"))
+    if mutation == "socket-channel":
+        lines[at:at + 3] = [
+            "1947 socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0, [200<socket:[909090]>, 201<socket:[909091]>]) = 0",
+            "1947 setsockopt(201<socket:[909091]>, SOL_SOCKET, SO_SNDBUF, [65536], 4) = 0",
+            '1947 write(201<socket:[909091]>, "BNGENV01", 64) = 64',
+            "1947 close(201<socket:[909091]>) = 0",
+        ]
+        close = next(i for i, l in enumerate(lines) if l == "1947 close(200<pipe:[909090]>) = 0")
+        lines[close] = "1947 close(200<socket:[909090]>) = 0"
+    elif mutation == "socketpair":
+        lines.insert(at, "1947 socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0, [202<socket:[808080]>, 203<socket:[808081]>]) = 0")
+    elif mutation == "setsockopt-on-pipe":
+        lines.insert(at + 1, "1947 setsockopt(201<pipe:[909090]>, SOL_SOCKET, SO_SNDBUF, [65536], 4) = -1 ENOTSOCK (Socket operation on non-socket)")
+    elif mutation == "socket":
+        lines.insert(at, "1947 socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0) = 202<socket:[808080]>")
+    elif mutation == "connect":
+        lines.insert(at, '1947 connect(3<socket:[808080]>, {sa_family=AF_UNIX, sun_path="/x"}, 5) = -1 ENOENT (No such file or directory)')
+    if mutation == "none":
+        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
+        return
+    with pytest.raises(AssertionError) as caught:
+        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
+    assert all(f"name='{name}'" in str(caught.value) for name in calls), caught.value
+
+
 def test_real_trace_rejects_followed_missing_ancestor(debian_trace):
     lines = [line.replace("|AT_SYMLINK_NOFOLLOW", "")
              if f'"{DEBIAN_BASE}/cfg-t",' in line and "statx(" in line else line
              for line in debian_trace]
     assert lines != debian_trace
     with pytest.raises(AssertionError, match="helper path"):
-        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
-
-
-# 이것을 실패시키는 것: 앞단의 소켓 호출을 이름만 보고 허용하는 것. 환경 소켓의 모양(AF_UNIX stream,
-# 쓰기 쪽 SO_SNDBUF 한 프레임)을 벗어난 socketpair·setsockopt, 실패한 setsockopt, socket·connect, 두 번째
-# 소켓 쌍은 거부한다.
-@pytest.mark.parametrize("mutation", [
-    "none", "other-family", "dgram", "other-option", "other-size", "option-on-reader",
-    "extra-socket", "connect", "second-pair", "option-failed",
-])
-def test_front_network_calls_are_only_the_environment_socket(debian_trace, mutation):
-    lines = list(debian_trace)
-    replay_env_socket(lines, "1947")
-    at = next(i for i, l in enumerate(lines) if " socketpair(" in l)
-    if mutation == "other-family":
-        lines[at] = lines[at].replace("socketpair(AF_UNIX,", "socketpair(AF_INET,")
-    elif mutation == "dgram":
-        lines[at] = lines[at].replace("SOCK_STREAM|", "SOCK_DGRAM|")
-    elif mutation == "other-option":
-        lines[at + 1] = lines[at + 1].replace("SO_SNDBUF", "SO_RCVBUF")
-    elif mutation == "other-size":
-        lines[at + 1] = lines[at + 1].replace("[65536]", "[8192]")
-    elif mutation == "option-on-reader":
-        lines[at + 1] = lines[at + 1].replace("setsockopt(201<", "setsockopt(200<")
-    elif mutation == "extra-socket":
-        lines.insert(at, "1947 socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0) = 202<socket:[909092]>")
-    elif mutation == "connect":
-        lines.insert(at + 2, '1947 connect(201<socket:[909091]>, {sa_family=AF_UNIX, sun_path="/x"}, 5) = -1 ENOENT (No such file or directory)')
-    elif mutation == "option-failed":
-        lines[at + 1] = lines[at + 1].replace(") = 0", ") = -1 ENOBUFS (No buffer space available)")
-    elif mutation == "second-pair":
-        lines[at:at] = [l.replace("909090", "808080").replace("909091", "808081").replace("200<", "210<").replace("201<", "211<")
-                        for l in lines[at:at + 2]]
-    if mutation == "none":
-        assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
-        return
-    # socket and connect are not front calls at all; the others pass the call
-    # table by name and must fail on their arguments.
-    match = None if mutation in ("extra-socket", "connect") else "root network or process calls|one front environment socket"
-    with pytest.raises(AssertionError, match=match):
         assert_prompt_trace_budget(lines, DEBIAN_EXE, DEBIAN_ROOTS)
 
 
@@ -3133,9 +3131,7 @@ def test_front_axis_capture_counter(monkeypatch, arch, mutation):
 @pytest.mark.parametrize('mutation', [
     'none', 'extra-read', 'missing-read', 'missing-pipe', 'missing-close',
     'extra-pipe', 'wrong-size', 'non-eof', 'late-pipe',
-    'env-retry', 'env-short', 'env-open-writer', 'env-no-spawn',
-    'env-other-family', 'env-dgram', 'env-other-option', 'env-other-size', 'env-option-on-reader',
-    'env-no-option', 'env-extra-socket', 'env-extra-option', 'env-poll-writer',
+    'env-retry', 'env-short', 'env-open-writer', 'env-no-spawn', 'env-poll-writer',
 ])
 def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     lines, pinned, store, attempts = front_axis_control()
@@ -3158,7 +3154,7 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     pipe = '1 pipe2([90<pipe:[525252]>, 91<pipe:[525252]>], O_CLOEXEC) = 0'
     read = '1 read(90<pipe:[525252]>, "", 4) = 0'
     close = '1 close(90<pipe:[525252]>) = 0'
-    env_before, env_after = env_socket_replay(1)
+    env_before, env_after = env_pipe_replay(1)
     channel = ([pipe] if libc == 'musl' and spawn else [])
     if spawn:
         channel = env_before + channel + ['1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 2'] + env_after
@@ -3184,42 +3180,24 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     elif mutation == 'non-eof':
         channel = [l.replace('"", 4) = 0', '"x", 4) = 1') for l in channel]
     # 이것을 실패시키는 것: 환경 프레임 쓰기를 재시도하는 것, 일부만 받아들인 쓰기를 통과시키는 것,
-    # 쓰기 쪽을 생성 전에 닫지 않는 것, 도우미를 띄우지 않는 회차에 환경 소켓을 만드는 것, 다른 family·type의
-    # socketpair, SO_SNDBUF 아닌 옵션·다른 크기·읽는 쪽 fd의 setsockopt, 보내기 버퍼를 빼는 것, 다른 소켓을 여는 것.
+    # 쓰기 쪽을 생성 전에 닫지 않는 것, 도우미를 띄우지 않는 회차에 환경 파이프를 만드는 것.
     elif mutation == 'env-retry' and spawn:
-        channel.insert(channel.index(env_before[2]), env_before[2])
+        channel.insert(channel.index(env_before[1]), env_before[1])
     elif mutation == 'env-short' and spawn:
         channel = [l.replace(', 64) = 64', ', 64) = 32') for l in channel]
     elif mutation == 'env-open-writer' and spawn:
-        writer_close = channel.pop(channel.index(env_before[3]))
+        writer_close = channel.pop(channel.index(env_before[2]))
         channel.append(writer_close)
     elif mutation == 'env-no-spawn' and not spawn:
         channel = env_before + env_after
-    elif mutation == 'env-other-family' and spawn:
-        channel = [l.replace('socketpair(AF_UNIX,', 'socketpair(AF_INET,') for l in channel]
-    elif mutation == 'env-dgram' and spawn:
-        channel = [l.replace('SOCK_STREAM|SOCK_CLOEXEC', 'SOCK_DGRAM|SOCK_CLOEXEC') for l in channel]
-    elif mutation == 'env-other-option' and spawn:
-        channel = [l.replace('SO_SNDBUF', 'SO_RCVBUF') for l in channel]
-    elif mutation == 'env-other-size' and spawn:
-        channel = [l.replace('[65536]', '[8192]') for l in channel]
-    elif mutation == 'env-option-on-reader' and spawn:
-        channel = [l.replace('setsockopt(201<', 'setsockopt(200<') for l in channel]
-    elif mutation == 'env-no-option' and spawn:
-        channel = [l for l in channel if ' setsockopt(' not in l]
-    elif mutation == 'env-extra-socket' and spawn:
-        channel.insert(0, '1 socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0) = 202<socket:[909092]>')
-    elif mutation == 'env-extra-option' and spawn:
-        channel.insert(0, '1 setsockopt(3<socket:[777]>, SOL_SOCKET, SO_RCVBUF, [1], 4) = 0')
+    # 이것을 실패시키는 것: 환경 파이프 검사를 이름 목록의 호출로만 좁히는 것(쓰기 쪽 poll이 빠져나간다).
     elif mutation == 'env-poll-writer' and spawn:
         channel.insert(channel.index(env_before[2]),
-                       '1 poll([{fd=201<socket:[909091]>, events=POLLOUT}], 1, 10) = 1 ([{fd=201<socket:[909091]>, revents=POLLOUT}])')
+                       '1 poll([{fd=201<pipe:[909090]>, events=POLLOUT}], 1, 10) = 1 ([{fd=201<pipe:[909090]>, revents=POLLOUT}])')
     boundary = next(i for i, l in enumerate(lines) if 'PR_SET_SECCOMP' in l)
     lines[boundary + (mutation == 'late-pipe'):boundary + (mutation == 'late-pipe')] = channel
     evidence = {}
-    env_mutations = ('env-retry', 'env-short', 'env-open-writer', 'env-other-family', 'env-dgram', 'env-other-option',
-                     'env-other-size', 'env-option-on-reader', 'env-no-option', 'env-extra-socket', 'env-extra-option',
-                     'env-poll-writer')
+    env_mutations = ('env-retry', 'env-short', 'env-open-writer', 'env-poll-writer')
     env_mutation = mutation in env_mutations and spawn or mutation == 'env-no-spawn' and not spawn
     changed = (mutation in ('extra-read', 'extra-pipe') or env_mutation
                or libc == 'musl' and spawn and mutation not in ('none', 'env-no-spawn', *env_mutations)
@@ -3231,32 +3209,29 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     else:
         budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
                                    arch=arch, libc=libc, evidence=evidence)
-        from fsbudget.formula import ENV_SOCKET_PRIMITIVES
+        from fsbudget.formula import ENV_PIPE_PRIMITIVES
         expected = Counter({'pipe2': 1, 'read': 1, 'close': 2} if libc == 'musl' and spawn else {})
         if spawn:
-            expected.update(ENV_SOCKET_PRIMITIVES)
+            expected.update(ENV_PIPE_PRIMITIVES)
         assert evidence['spawn_pipe_counts'] == expected
         assert evidence['spawn_pipe_expected'] == expected
 
 
-def env_socket_replay(pid):
-    """The current bootstrap's environment socket, for captures and synthetic
-    traces from before it: socketpair, SO_SNDBUF on the write end, the frame
-    write and the write end's close before the helper spawn; the read end's
-    close after it."""
-    return ([f'{pid} socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0, '
-             f'[200<socket:[909090]>, 201<socket:[909091]>]) = 0',
-             f'{pid} setsockopt(201<socket:[909091]>, SOL_SOCKET, SO_SNDBUF, [65536], 4) = 0',
-             f'{pid} write(201<socket:[909091]>, "BNGENV01", 64) = 64',
-             f'{pid} close(201<socket:[909091]>) = 0'],
-            [f'{pid} close(200<socket:[909090]>) = 0'])
+def env_pipe_replay(pid):
+    """The current bootstrap's environment pipe (U-9h), for captures and
+    synthetic traces from before it: pipe2, the frame write and the write
+    end's close before the helper spawn; the read end's close after it."""
+    return ([f'{pid} pipe2([200<pipe:[909090]>, 201<pipe:[909090]>], O_NONBLOCK|O_CLOEXEC) = 0',
+             f'{pid} write(201<pipe:[909090]>, "BNGENV01", 64) = 64',
+             f'{pid} close(201<pipe:[909090]>) = 0'],
+            [f'{pid} close(200<pipe:[909090]>) = 0'])
 
 
-def replay_env_socket(lines, pid):
+def replay_env_pipe(lines, pid):
     spawn = next(i for i, l in enumerate(lines) if l.split()[0] == pid and ' clone(' in l and 'CLONE_VFORK' in l)
     done = spawn if '<unfinished' not in lines[spawn] else next(
         i for i in range(spawn, len(lines)) if lines[i].split()[0] == pid and 'clone resumed>' in lines[i])
-    before, after = env_socket_replay(pid)
+    before, after = env_pipe_replay(pid)
     lines[done + 1:done + 1] = after
     lines[spawn:spawn] = before
 
@@ -3280,7 +3255,7 @@ def test_front_axis_archived_capture(capture, base, arch, mutation):
     attempts = budget.front_attempt_plan('normal', 3008)
     maps_close = next(i for i, l in enumerate(lines) if ' close(3</proc/' in l and '/maps>' in l)
     pid = lines[maps_close].split()[0]
-    replay_env_socket(lines, pid)
+    replay_env_pipe(lines, pid)
     maps_close = next(i for i, l in enumerate(lines) if ' close(3</proc/' in l and '/maps>' in l)
     # Legacy E4 captured two maps reads. Current A2 release front has three
     # (keep/unchanged.strace pid 1130); CI x86_64 has three too (A2 report).

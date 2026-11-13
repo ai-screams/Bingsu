@@ -108,38 +108,6 @@ NETWORK_OR_PROCESS = {
     "getsockname", "getpeername", "clone", "clone3", "fork", "vfork", "execve", "execveat",
     "kill", "tkill", "tgkill", "wait4", "waitid", "pidfd_open", "pidfd_send_signal",
 }
-# The front's command environment socket (prompt_spawn.rs env_socket_ends): an
-# AF_UNIX stream pair, close-on-exec and non-blocking, with SO_SNDBUF of one
-# whole frame on its write end. These two calls of exactly this shape are the
-# only %network calls the front makes; every other socket call stays forbidden.
-# strace -y prints `N<socket:[inode]>`, -yy `N<UNIX-STREAM:[inode->peer]>`.
-ENV_SOCKET_END = r"\d+<(?:socket:\[\d+\]|UNIX-STREAM:\[\d+->\d+\])>"
-ENV_SOCKETPAIR = re.compile(rf"AF_UNIX, SOCK_STREAM\|SOCK_CLOEXEC\|SOCK_NONBLOCK, 0, \[({ENV_SOCKET_END}), ({ENV_SOCKET_END})\]")
-ENV_SEND_BUFFER = 65_536  # bingsu_core::command::env_frame::FRAME_MAX
-
-
-def env_socket_calls(front):
-    """The front's environment socketpair and its SO_SNDBUF setsockopt, when
-    both have exactly the allowed shape: (socketpair, setsockopt, read end,
-    write end) per pair. A call of another family, type, option, size or
-    descriptor is not returned and stays a forbidden network call."""
-    found = []
-    for pair in (c for c in front if c.name == "socketpair"):
-        # A failed socketpair prints no descriptors, so it never matches.
-        match = ENV_SOCKETPAIR.fullmatch(pair.args)
-        if not match:
-            continue
-        read_end, write_end = match.groups()
-        options = [c for c in front if c.name == "setsockopt"
-                   and args_of(c) == [write_end, "SOL_SOCKET", "SO_SNDBUF", f"[{ENV_SEND_BUFFER}]", "4"]
-                   and c.ret == "0"]
-        # A second matching option is not returned: the callers reject it as
-        # a stray network call or by the setsockopt count.
-        if options:
-            found.append((pair, options[0], read_end, write_end))
-    return found
-
-
 SPAWN_CALL = re.compile(r"^(\d+)\s+(?:clone3?|fork|vfork)\(")
 RETURN = re.compile(r"\)\s+=\s+(\d+)$")
 RESUMED_SPAWN = re.compile(r"^(\d+)\s+<\.\.\. (?:clone3?|fork|vfork) resumed>.*\)\s+=\s+(\d+)$")
@@ -371,7 +339,7 @@ socket connect
 }
 ROOT_CALLS = {r[0] for r in _ROWS if r[0] != "-"} | set("""
 execve clone clone3 vfork arch_prctl set_tid_address getrlimit prlimit64
-read readv pread64 close fcntl poll ppoll ioctl pipe2 socketpair setsockopt open openat openat2
+read readv pread64 close fcntl poll ppoll ioctl pipe2 open openat openat2
 access faccessat faccessat2 fstat newfstatat stat statx readlink readlinkat
 getdents64 prctl getuid getpid fstatfs fgetxattr getxattr setitimer
 """.split()) | {
@@ -1047,17 +1015,9 @@ def _assert_prompt_trace_budget(lines, exe, pinned, collector_limit, global_inpu
     # 이것을 실패시키는 것: root의 다른 exec, 네트워크·signal·wait 호출 또는 표 밖 write/exit를 허용하는 것.
     initial = front[0]
     assert initial.name == "execve" and QUOTED.findall(args_of(initial)[1])[1] == "prompt"
-    # The environment socket pair is the one exception, with its exact shape
-    # and at most one per prompt (env_socket_calls).
-    # 이것을 실패시키는 것: 다른 family·type의 socketpair, SO_SNDBUF 아닌 setsockopt, 다른 fd의 setsockopt,
-    # socket·connect를 앞단에 허용하는 것.
-    env_socket = env_socket_calls(front)
-    assert len(env_socket) <= 1, ("one front environment socket", env_socket)
-    env_indexes = {c.index for pair, option, _, _ in env_socket for c in (pair, option)}
-    stray = [c for c in front[1:] if c.name in NETWORK_OR_PROCESS - SPAWNS and c.index not in env_indexes]
+    stray = [c for c in front[1:] if c.name in NETWORK_OR_PROCESS - SPAWNS]
     assert not stray, ("root network or process calls", stray)
-    seen = {c.name for c in front[1:] if c.name in NETWORK_OR_PROCESS | {"write", "exit", "exit_group"}
-            and c.index not in env_indexes} - SPAWNS
+    seen = {c.name for c in front[1:] if c.name in NETWORK_OR_PROCESS | {"write", "exit", "exit_group"}} - SPAWNS
     # A front deadline attempt ends before its record write.
     assert seen == ADAPTER_CALLS or front_deadline and seen <= ADAPTER_CALLS, ("root syscall table", seen, ADAPTER_CALLS)
     cwd = prompt_cwd(initial)
@@ -2783,48 +2743,46 @@ def front_fact_kind(call):
     raise AssertionError(('unexpected front facts primitive', call))
 
 
-def front_env_socket_calls(front, boundary, spawns):
-    """Exact environment socket of the front: only with a helper spawn, before the filter."""
-    pairs = [c for c in front if c.name == 'socketpair']
-    # 이것을 실패시키는 것: 도우미를 띄우지 않는 회차에도 환경 소켓을 만드는 것(env-no-spawn).
-    assert len(pairs) == len(spawns), ('front environment socket count', pairs, spawns)
-    exact = env_socket_calls(front)
-    # A socketpair or setsockopt of another shape is not in `exact`, so it is
-    # left out of the counted primitives below. A setsockopt on another
-    # descriptor would not be counted at all.
-    # 이것을 실패시키는 것: 환경 소켓 밖의 setsockopt를 받는 것(env-extra-option).
-    assert len([c for c in front if c.name == 'setsockopt']) == len(exact), ('front setsockopt', exact)
+def front_env_pipe_calls(front, boundary, spawns):
+    """Exact environment pipe of the front: only with a helper spawn, before the filter."""
+    pipes = [c for c in front if c.name == 'pipe2' and c.args.endswith('O_NONBLOCK|O_CLOEXEC')]
+    # 이것을 실패시키는 것: 도우미를 띄우지 않는 회차에도 환경 파이프를 만드는 것(env-no-spawn).
+    assert len(pipes) == len(spawns), ('front environment pipe count', pipes, spawns)
     accounted = []
-    for pair, option, read_fd, write_fd in exact:
+    for pipe in pipes:
+        match = re.fullmatch(r'\[(\d+)<pipe:\[(\d+)\]>, (\d+)<pipe:\[\2\]>\], O_NONBLOCK\|O_CLOEXEC', pipe.args)
+        assert match and pipe.ret == '0', ('front environment pipe creation', pipe)
+        reader, inode, writer = match.groups()
+        read_fd, write_fd = (f'{fd}<pipe:[{inode}]>' for fd in (reader, writer))
         # Every call that names either end, wherever in its arguments: a poll,
-        # select or sendmsg on the socket is not in the allowed shape.
+        # select or splice on the pipe is not in the allowed shape.
         # 이것을 실패시키는 것: 이름 목록에 든 호출만 보는 것(쓰기 쪽 poll이 끼어도 통과, env-poll-writer).
         names = re.compile(rf"(?<![0-9])(?:{re.escape(read_fd)}|{re.escape(write_fd)})")
-        channel = [c for c in front if c is not pair and names.search(c.args)]
+        channel = [c for c in front if c is not pipe and names.search(c.args)]
         shape = [(c.name, args_of(c)[0] if args_of(c) else '') for c in channel]
-        # Send buffer, write, write-end close, spawn, read-end close, all before the filter. A
-        # retried write is also caught by the primitive count below.
+        # Write, write-end close, spawn, read-end close, all before the filter. A retried
+        # write is also caught by the primitive count below.
         # 이것을 실패시키는 것: 쓰기 쪽을 생성 뒤에 닫는 것(test_prompt_trace_budget.py의 env-open-writer).
-        assert (shape == [('setsockopt', write_fd), ('write', write_fd), ('close', write_fd), ('close', read_fd)]
-                and pair.index < channel[0].index < channel[1].index < channel[2].index < spawns[0].index
-                < channel[3].index < boundary), ('front environment socket sequence', pair, channel, spawns)
-        write = channel[1]
+        assert (shape == [('write', write_fd), ('close', write_fd), ('close', read_fd)]
+                and pipe.index < channel[0].index < channel[1].index < spawns[0].index < channel[2].index < boundary), (
+            'front environment pipe sequence', pipe, channel, spawns)
+        write = channel[0]
         # 이것을 실패시키는 것: 일부만 받아들인 쓰기를 통과시키는 것(env-short).
         assert write.ret == args_of(write)[2], ('one write takes the whole frame', write)
-        accounted.extend([pair, *channel])
+        accounted.extend([pipe, *channel])
     return accounted
 
 
 def front_spawn_pipe_calls(front, boundary, libc, evidence):
     """Exact parent error channel, never a general pipe exemption."""
     from collections import Counter
-    from fsbudget.formula import ENV_SOCKET_PRIMITIVES, POSIX_SPAWN_PRIMITIVES
+    from fsbudget.formula import ENV_PIPE_PRIMITIVES, POSIX_SPAWN_PRIMITIVES
     spawns = successful_spawns(front)
     assert len(spawns) <= 1, ('front helper spawns', spawns)
     expected = Counter(POSIX_SPAWN_PRIMITIVES[libc]) if spawns else Counter()
-    accounted = front_env_socket_calls(front, boundary, spawns)
+    accounted = front_env_pipe_calls(front, boundary, spawns)
     if spawns:
-        expected.update(ENV_SOCKET_PRIMITIVES)
+        expected.update(ENV_PIPE_PRIMITIVES)
     pipes = [c for c in front if c.name == 'pipe2' and c.index not in {a.index for a in accounted}]
     error_pipes = POSIX_SPAWN_PRIMITIVES[libc].get('pipe2', 0) if spawns else 0
     assert len(pipes) == error_pipes, ('front spawn pipe count', pipes, expected)
@@ -3183,7 +3141,7 @@ def test_redraw_spawns_no_process_and_reads_no_config_source(child_capture, tmp_
     assert len({c.pid for c in trace}) == 1, "a redraw is one process"
     assert not config_calls("redraw", trace)
     # 이것을 실패시키는 것: 도우미를 띄우지 않는 redraw에서도 환경 파이프를 만드는 것.
-    assert not [c for c in trace if c.name in {"pipe", "pipe2", "socketpair"}], "a redraw makes no environment socket"
+    assert not [c for c in trace if c.name in {"pipe", "pipe2"}], "a redraw makes no environment pipe"
 
 
 BRANCH = "redrawbranch"
@@ -3622,50 +3580,44 @@ def check_front_receives_shell_pipes(after, initial, pipes, exe):
     assert set(SHELL_PIPE_FDS) <= marked, ("the front's F_SETFD loop must mark every shell pipe", sorted(marked))
 
 
-def front_env_socket(trace, front):
-    """The front's one environment socket: (read end as the helper's fd 4
-    names it, e.g. `socket:[123]`, write calls on the write end)."""
-    exact = env_socket_calls([c for c in trace if c.pid == front])
-    assert len(exact) == 1, ("one front environment socket", exact)
-    _, _, read_end, write_end = exact[0]
-    reader = read_end.split("<", 1)[1][:-1]
-    return reader, [c for c in trace if c.pid == front and c.name == "write" and args_of(c)[0] == write_end]
-
-
 def helper_fd_table(after, exe, initial):
     """The helper's table at execve: fds 0-2 on the spawn's own /dev/null and
-    fd 4 the read end of the front's environment socket."""
+    fd 4 the read end of the front's environment pipe (pipe2 with O_NONBLOCK)."""
     from fsbudget.attribute import fd_table_at_exec
     front = exec_pid(after, exe, "prompt")
-    reader, _ = front_env_socket(after, front)
+    env_pipes = [re.fullmatch(r'\[(\d+)<pipe:\[(\d+)\]>, (\d+)<pipe:\[\2\]>\], O_NONBLOCK\|O_CLOEXEC', c.args)
+                 for c in after if c.pid == front and c.name == "pipe2" and c.ret == "0"
+                 and c.args.endswith("O_NONBLOCK|O_CLOEXEC")]
+    assert len(env_pipes) == 1 and env_pipes[0], ("one front environment pipe", env_pipes)
+    inode = env_pipes[0][2]
     helper = fd_summary(fd_table_at_exec(after, exec_pid(after, exe, "__refresh-v1"), initial))
     assert helper == {**{fd: SPAWNED_DEV_NULL for fd in (0, 1, 2)},
-                      4: (reader, False, "spawn-action")}, helper
+                      4: (f"pipe:[{inode}]", False, "spawn-action")}, helper
     return helper
 
 
 # 이것을 실패시키는 것: 앞단의 fcntl(F_SETFD) 루프를 건너뛰는 것(fd 3–9·1025가 도우미 exec에 남는다),
 # fd 2의 addopen을 지우는 것(bash 훅의 2>/dev/null이 경로를 같게 만들어도 출처가 셸 상속이 된다),
-# 환경 소켓의 adddup2를 지우는 것(fd 4가 없다), 도우미가 완전한 프레임 뒤에 EOF 읽기를 더 하는 것,
+# 환경 파이프의 adddup2를 지우는 것(fd 4가 없다), 도우미가 완전한 프레임 뒤에 EOF 읽기를 더 하는 것,
 # 도우미가 fd 4를 NSS 뒤에 읽는 것(첫 open보다 늦다).
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace runtime gate")
 def test_helper_fds_after_env(tmp_path):
     """GATE-FDS.1: at the helper's execve its table is exactly fds 0-2 on the
-    spawn's own /dev/null and fd 4 the front's environment socket, while the
+    spawn's own /dev/null and fd 4 the front's environment pipe, while the
     shell holds pipe write ends at 3-9 and 1025."""
     after, initial, fixture, pipes = shell_fd_capture("unchanged", tmp_path)
     try:
         exe = str(fixture.inst.exe)
         check_front_receives_shell_pipes(after, initial, pipes, exe)
-        reader = helper_fd_table(after, exe, initial)[4][0]
+        inode = helper_fd_table(after, exe, initial)[4][0]
         # U-9i: the helper reads the whole frame in one read and closes fd 4,
         # before its own first open (the loader's and stack guard's come before
         # main; on the cold init path there is no fd 4).
         helper = exec_pid(after, exe, "__refresh-v1")
         calls = [c for c in after if c.pid == helper and c.index > next(
             e.index for e in after if e.pid == helper and e.name == "execve")]
-        on_env = [c for c in calls if args_of(c) and args_of(c)[0] == f"4<{reader}>"]
-        front_write, = front_env_socket(after, exec_pid(after, exe, "prompt"))[1]
+        on_env = [c for c in calls if args_of(c) and args_of(c)[0] == f"4<{inode}>"]
+        front_write, = [c for c in after if c.name == "write" and args_of(c)[0].endswith(f"<{inode}>")]
         assert [(c.name, c.ret) for c in on_env] == [("read", front_write.ret), ("close", "0")], on_env
         first_open = next(c.index for c in calls if c.name in OPENS and not SYSTEM_PATHS.fullmatch(call_paths(c)[0]))
         assert on_env[-1].index < first_open, ("fd 4 is read before the helper opens anything", on_env)
@@ -3724,8 +3676,15 @@ def env_prompt(tmp_path, env):
         raise
 
 
-def helper_env_reads(trace, helper, reader):
-    return [c for c in trace if c.pid == helper and c.name == "read" and args_of(c)[0] == f"4<{reader}>"]
+def env_pipe_of(trace, front):
+    """The front's environment pipe: (inode, write calls on it)."""
+    pipe, = [c for c in trace if c.pid == front and c.name == "pipe2" and c.args.endswith("O_NONBLOCK|O_CLOEXEC")]
+    inode = re.fullmatch(r'\[\d+<(pipe:\[\d+\])>, \d+<\1>\], O_NONBLOCK\|O_CLOEXEC', pipe.args)[1]
+    return inode, [c for c in trace if c.pid == front and c.name == "write" and args_of(c)[0].endswith(f"<{inode}>")]
+
+
+def helper_env_reads(trace, helper, inode):
+    return [c for c in trace if c.pid == helper and c.name == "read" and args_of(c)[0] == f"4<{inode}>"]
 
 
 # 이것을 실패시키는 것: 환경을 도우미 envp로도 넘기는 것(도우미의 로더가 카나리를 올린다).
@@ -3745,8 +3704,8 @@ def test_ld_preload_not_loaded_into_helper(tmp_path):
         names = sorted(p.name.rsplit("-", 1)[0] for p in canaries.iterdir())
         # Non-vacuity: the shell's LD_PRELOAD reached the front's loader, and the helper ran.
         assert names == ["prompt"], names
-        reader, _ = front_env_socket(trace, front)
-        reads = helper_env_reads(trace, helper, reader)
+        inode, _ = env_pipe_of(trace, front)
+        reads = helper_env_reads(trace, helper, inode)
         assert len(reads) == 1 and "LD_PRELOAD=" in reads[0].args, ("the entry still reaches the helper as bytes", reads)
         # Positive control: the same library given to the helper through envp is loaded there.
         direct = subprocess.run([str(fixture.inst.exe), "__refresh-v1", "--ctx", "1", "--record", "B1"],
@@ -3766,8 +3725,8 @@ def test_helper_ignores_xdg_runtime_dir_from_env(tmp_path):
     repo.mkdir()
     trace, fixture, front, helper = env_prompt(tmp_path, {"XDG_RUNTIME_DIR": str(repo)})
     try:
-        reader, writes = front_env_socket(trace, front)
-        reads = helper_env_reads(trace, helper, reader)
+        inode, writes = env_pipe_of(trace, front)
+        reads = helper_env_reads(trace, helper, inode)
         # Non-vacuity: the value reached the helper, as frame bytes.
         assert len(reads) == 1 and f"XDG_RUNTIME_DIR={repo}" in reads[0].args, reads
         # Neither the front nor the helper names the folder outside the frame itself.
@@ -3785,9 +3744,9 @@ def test_oversize_env_block_means_no_env(tmp_path):
     of file, which is no environment for the round."""
     trace, fixture, front, helper = env_prompt(tmp_path, {"BINGSU_BIG": "x" * (70 * 1024)})
     try:
-        reader, writes = front_env_socket(trace, front)
+        inode, writes = env_pipe_of(trace, front)
         assert writes == [], writes
-        reads = helper_env_reads(trace, helper, reader)
+        reads = helper_env_reads(trace, helper, inode)
         assert [c.ret for c in reads] == ["0"], reads
     finally:
         remove_fixture(fixture)

@@ -1,19 +1,22 @@
 //! The command environment the prompt hands the refresh helper: the shell's
 //! environ entries (`NAME=VALUE\0`, as the shell passed them) in one frame of
 //! magic, body length, CRC32C and body. The prompt writes it with one write
-//! into an empty Unix stream socket pair whose read end the helper gets at
-//! [`FD`]; the helper's envp stays empty, so its dynamic loader never sees
-//! these bytes. Neither side parses the body here, and the helper never
-//! derives a location from it.
+//! into an empty pipe (Linux) or Unix stream socket pair (macOS) whose read
+//! end the helper gets at [`FD`]; the helper's envp stays empty, so its
+//! dynamic loader never sees these bytes. Neither side parses the body here,
+//! and the helper never derives a location from it.
 
-/// The helper descriptor the prompt hands the socket's read end to.
+/// The helper descriptor the prompt hands the read end to.
 pub const FD: i32 = 4;
 const MAGIC: &[u8; 8] = b"BNGENV01";
 const DOMAIN: &[u8] = b"bingsu-env-frame-v1\0";
 /// Magic, body length (u32 little endian), CRC32C over domain, magic, length and body.
 pub const HEADER: usize = 16;
-/// The whole frame, header included. The prompt sets its socket's send
-/// buffer to this size, so a frame this size fits one non-blocking write.
+/// The whole frame, header included: the default pipe capacity on Linux
+/// (`F_GETPIPE_SZ`) and the send buffer the prompt sets on its macOS socket,
+/// so a frame this size fits one non-blocking write. A Linux user holding
+/// more than pipe-user-pages-soft (64 MiB of pipes) gets two-page pipes
+/// (8 KiB), which cut a larger frame; the helper then reports it cut.
 pub const FRAME_MAX: usize = 65_536;
 /// What is left for the entries.
 pub const BODY_MAX: usize = FRAME_MAX - HEADER;
