@@ -3135,7 +3135,7 @@ def test_front_axis_capture_counter(monkeypatch, arch, mutation):
     'extra-pipe', 'wrong-size', 'non-eof', 'late-pipe',
     'env-retry', 'env-short', 'env-open-writer', 'env-no-spawn',
     'env-other-family', 'env-dgram', 'env-other-option', 'env-other-size', 'env-option-on-reader',
-    'env-no-option', 'env-extra-socket', 'env-extra-option',
+    'env-no-option', 'env-extra-socket', 'env-extra-option', 'env-poll-writer',
 ])
 def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     lines, pinned, store, attempts = front_axis_control()
@@ -3211,11 +3211,15 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
         channel.insert(0, '1 socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0) = 202<socket:[909092]>')
     elif mutation == 'env-extra-option' and spawn:
         channel.insert(0, '1 setsockopt(3<socket:[777]>, SOL_SOCKET, SO_RCVBUF, [1], 4) = 0')
+    elif mutation == 'env-poll-writer' and spawn:
+        channel.insert(channel.index(env_before[2]),
+                       '1 poll([{fd=201<socket:[909091]>, events=POLLOUT}], 1, 10) = 1 ([{fd=201<socket:[909091]>, revents=POLLOUT}])')
     boundary = next(i for i, l in enumerate(lines) if 'PR_SET_SECCOMP' in l)
     lines[boundary + (mutation == 'late-pipe'):boundary + (mutation == 'late-pipe')] = channel
     evidence = {}
     env_mutations = ('env-retry', 'env-short', 'env-open-writer', 'env-other-family', 'env-dgram', 'env-other-option',
-                     'env-other-size', 'env-option-on-reader', 'env-no-option', 'env-extra-socket', 'env-extra-option')
+                     'env-other-size', 'env-option-on-reader', 'env-no-option', 'env-extra-socket', 'env-extra-option',
+                     'env-poll-writer')
     env_mutation = mutation in env_mutations and spawn or mutation == 'env-no-spawn' and not spawn
     changed = (mutation in ('extra-read', 'extra-pipe') or env_mutation
                or libc == 'musl' and spawn and mutation not in ('none', 'env-no-spawn', *env_mutations)

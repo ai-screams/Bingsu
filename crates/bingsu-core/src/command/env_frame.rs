@@ -12,9 +12,8 @@ const MAGIC: &[u8; 8] = b"BNGENV01";
 const DOMAIN: &[u8] = b"bingsu-env-frame-v1\0";
 /// Magic, body length (u32 little endian), CRC32C over domain, magic, length and body.
 pub const HEADER: usize = 16;
-/// The whole frame, header included: the default pipe capacity measured on
-/// Linux (`F_GETPIPE_SZ`) and accepted by one non-blocking write on macOS,
-/// so a frame this size fits one write into an empty pipe.
+/// The whole frame, header included. The prompt sets its socket's send
+/// buffer to this size, so a frame this size fits one non-blocking write.
 pub const FRAME_MAX: usize = 65_536;
 /// What is left for the entries.
 pub const BODY_MAX: usize = FRAME_MAX - HEADER;

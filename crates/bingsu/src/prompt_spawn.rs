@@ -307,6 +307,11 @@ mod tests {
     fn frame_of(entries: &[&[u8]]) -> Option<Vec<u8>> {
         bingsu_core::command::env_frame::encode(entries.iter().copied())
     }
+    /// The length of the frame `spawn` hands over: this process's environment.
+    fn env_frame_len() -> i32 {
+        let frame = bingsu_core::command::env_frame::encode(super::environ_entries()).unwrap();
+        i32::try_from(frame.len()).unwrap()
+    }
     use super::*;
     use std::{
         fs,
@@ -367,10 +372,12 @@ mod tests {
         // fds 0-2 and the environment socket at 4, nothing else.
         assert_eq!(&report[..5], &[4, 0, 0, 1, 1]);
         // The parent's BINGSU_ATTACK reaches the helper only as frame bytes (report[4]: not in envp).
-        // 이것을 실패시키는 것: adddup2를 빼는 것(fd 4가 없어 -1), 쓰기를 빼는 것(0바이트).
-        assert!(
-            report[8] > 16 && report[9] == 1,
-            "frame on fd 4: {report:?}"
+        // 이것을 실패시키는 것: adddup2를 빼는 것(fd 4가 없어 -1), 쓰기를 빼는 것(0바이트), 프레임 일부만
+        // 넘기는 것(파이프로 되돌리면 파이프 메모리가 모자란 macOS에서 512바이트만 간다).
+        assert_eq!(
+            (report[8], report[9]),
+            (env_frame_len(), 1),
+            "the whole frame on fd 4: {report:?}"
         );
         // 이것을 실패시키는 것: fd 0–2 중 하나의 addopen을 지우는 것(시험 부모의 stdout·stderr가 남는다).
         assert_eq!(report[7], 3, "fds 0-2 must be the spawn's own /dev/null");
@@ -534,9 +541,10 @@ mod tests {
         spawn(exe.as_os_str(), &raw).unwrap();
         let report = crate::commands::n3_test::wait_report(&base.join("probe"));
         assert_eq!(&report[..5], &[4, 0, 0, 1, 1], "{report:?}");
-        assert!(
-            report[8] > 16 && report[9] == 1,
-            "frame on fd 4: {report:?}"
+        assert_eq!(
+            (report[8], report[9]),
+            (env_frame_len(), 1),
+            "the whole frame on fd 4: {report:?}"
         );
         fs::remove_dir_all(base).unwrap();
     }
@@ -569,11 +577,38 @@ mod tests {
     // 65,537바이트 프레임이 되어 쓰기가 일부만 받아들이고, 도우미 쪽에 바이트가 남는다. 소켓 대신 파이프로
     // 되돌리는 것(파이프 커널 메모리가 상한에 닿은 macOS는 새 파이프가 512바이트에서 늘지 않는다), 보내기
     // 버퍼를 넓히지 않는 것(macOS의 Unix stream 기본값은 8 KiB).
+    // The two checks below hold whatever the machine's pipe state: the read
+    // end is a socket, and the write end's send buffer takes a whole frame.
+    // 이것을 실패시키는 것: 파이프로 되돌리는 것(S_ISSOCK 아님, getsockopt 실패), 보내기 버퍼를 넓히지 않는 것
+    // (macOS 기본 8 KiB; Linux 기본값은 한 프레임보다 커서 이 단언만으로는 잡히지 않는다).
     #[test]
     fn max_env_frame_fits_one_write() {
         use bingsu_core::command::env_frame::{BODY_MAX, FRAME_MAX};
         let max = entry(BODY_MAX);
         let [read, write] = super::env_socket_ends().unwrap();
+        // SAFETY: all-zero storage for the stat fstat writes.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `read` is open and `st` is writable.
+        assert_eq!(unsafe { libc::fstat(read, &mut st) }, 0);
+        assert_eq!(
+            st.st_mode & libc::S_IFMT,
+            libc::S_IFSOCK,
+            "the read end is a socket"
+        );
+        let mut size: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `write` is open; `size` and `len` are writable and sized for an int.
+        let rc = unsafe {
+            libc::getsockopt(
+                write,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&mut size as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        assert!(size as usize >= FRAME_MAX, "send buffer {size}");
         assert_eq!(
             super::write_frame(write, frame_of(&[max.as_slice()]).as_deref()),
             FRAME_MAX as isize
