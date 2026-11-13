@@ -214,6 +214,48 @@ fn explain_with_invalid_files_uses_the_published_settings() {
     schema(&[&j]);
 }
 
+// Without `--width`, explain decides at `COLUMNS` and says so in both forms; a missing or wrong
+// value keeps 80 and the "assumed" note.
+// 이것을 실패시키는 것: COLUMNS를 읽지 않는 것(40칸의 narrow 대신 80칸), text·JSON에서 출처를 빼거나 틀리게
+// 적는 것, 스키마가 `columns`를 모르는 것, 0이나 숫자 아닌 COLUMNS를 폭으로 받는 것.
+#[test]
+fn without_width_explain_reads_columns() {
+    let e = Env::new("cli_json", "columns");
+    let file = e.put("layout.toml", LAYOUT);
+    let shown = file.to_str().unwrap();
+    let run = |columns: Option<&str>, json: bool| {
+        let mut args = vec!["explain", "--config", shown];
+        if json {
+            args.extend(["--format", "json"]);
+        }
+        let mut c = e.cmd(&args);
+        if let Some(v) = columns {
+            c.env("COLUMNS", v);
+        }
+        let o = c.current_dir("/").output().unwrap();
+        assert_eq!(o.status.code(), Some(0), "{columns:?}: {}", text(&o.stderr));
+        text(&o.stdout)
+    };
+    let t = run(Some("40"), false);
+    assert!(t.contains("width: 40 cells (from COLUMNS)\n"), "{t}");
+    assert!(t.contains("layout: band `narrow`\n"), "{t}");
+    let j = run(Some("40"), true);
+    assert!(j.contains("\"width\":40,\"width_source\":\"columns\""), "{j}");
+    schema(&[&j]);
+    for bad in [None, Some("0"), Some("wide")] {
+        let t = run(bad, false);
+        assert!(
+            t.contains("width: 80 cells (assumed; give --width N)\n"),
+            "{bad:?}: {t}"
+        );
+        let j = run(bad, true);
+        assert!(
+            j.contains("\"width\":80,\"width_source\":\"default\""),
+            "{bad:?}: {j}"
+        );
+    }
+}
+
 // 이것을 실패시키는 것: 모르는 형식·중복·값 없는 `--format`을 받는 것.
 #[test]
 fn a_wrong_format_exits_2() {
