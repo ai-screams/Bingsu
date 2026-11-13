@@ -1259,12 +1259,15 @@ jobs:
     timeout-minutes: 45
     env:
       # Decision U3: GATE_RATIO_P50 and GATE_RATIO_P95 are the largest
-      # accepted candidate/base ratios of p50 and p95; GATE_SIZE_CAP_BYTES caps
-      # stripped front + collector (decimal bytes, no per-binary cap);
+      # accepted candidate/base ratios of p50 and p95. Size caps of the first
+      # release, in decimal stripped bytes with no per-binary cap:
+      # GATE_SIZE_CAP_BYTES caps front + collector (combined, what a prompt
+      # loads), GATE_INSTALLED_CAP_BYTES caps the three shipped files together.
       # GATE_ENFORCE=true makes a FAIL verdict fail the job; BLOCKED only warns.
       GATE_RATIO_P50: '1.03'
       GATE_RATIO_P95: '1.10'
-      GATE_SIZE_CAP_BYTES: '6000000'
+      GATE_SIZE_CAP_BYTES: '2500000'
+      GATE_INSTALLED_CAP_BYTES: '7000000'
       GATE_ENFORCE: 'true'
       GATE_CASES: no-git,git-clean,git-dirty,prompt-env64k,prompt-env64k-commands,prompt-commands-hit,prompt-commands-max,prompt-commands-max-empty,prompt-commands-redraw,prompt-commands-max-empty-redraw,prompt-text-max,prompt-env-segments
       # M6 C4b-3: the command time fixtures are measured and recorded, not
@@ -1308,7 +1311,8 @@ jobs:
             --rounds 200 --cases "$GATE_CASES" --admission ci-r2 --out "$RUNNER_TEMP/measurements/prompt-pairs.json" || test "$?" -eq 2
       - name: Record the verdict
         run: |
-          args=(--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95" --cap-bytes "$GATE_SIZE_CAP_BYTES" --record-only "$GATE_RECORD_ONLY")
+          args=(--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95" --cap-bytes "$GATE_SIZE_CAP_BYTES"
+                --installed-cap-bytes "$GATE_INSTALLED_CAP_BYTES" --record-only "$GATE_RECORD_ONLY")
           if [ "$GATE_ENFORCE" = true ]; then args+=(--enforce); fi
           status=0
           python3 bench/size_gate.py --measurement "$RUNNER_TEMP/measurements/prompt-pairs.json" \
