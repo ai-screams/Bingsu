@@ -110,7 +110,14 @@ def test_candidate_over_cap_fails_even_without_base_size():
         r = gate.size_gate(base, record, 2_500_000, 7_000_000)
         assert r["status"] == "BLOCKED" and "release size" in r["reason"], record
     without_record = {k: v for k, v in over.items() if k != "installed"}
-    assert gate.size_gate(base, without_record, 2_500_000, 7_000_000)["over"] == ["combined"]
+    r = gate.size_gate(base, without_record, 2_500_000, 7_000_000)
+    assert r["status"] == "FAIL" and r["over"] == ["combined"]
+    # A combined that is not front + collector cannot hide a proven installed overrun, nor pass.
+    bad_combined = {**big, "combined": big["combined"] + 1}
+    r = gate.size_gate(base, bad_combined, 2_500_000, 7_000_000)
+    assert r["status"] == "FAIL" and r["over"] == ["installed"]
+    r = gate.size_gate(base, {**fits, "combined": fits["combined"] + 1}, 2_500_000, 7_000_000)
+    assert r["status"] == "BLOCKED" and r["reason"] == "missing or inconsistent size"
 
 
 # 이것을 실패시키는 것: 200쌍 미만이나 관측 안 된 측정을 PASS로 세는 것, 임계값 미정을 PASS/FAIL로 세는 것.
@@ -293,8 +300,11 @@ def test_pr_job_runs_on_pull_request_trigger():
     assert "GATE_ENFORCE: 'true'" in job and "GATE_RATIO_P50: '1.03'" in job
     assert "GATE_RATIO_P95: '1.10'" in job and "GATE_SIZE_CAP_BYTES: '2500000'" in job
     assert "GATE_INSTALLED_CAP_BYTES: '7000000'" in job
-    assert '--ratio-p50 "$GATE_RATIO_P50" --ratio-p95 "$GATE_RATIO_P95" --cap-bytes "$GATE_SIZE_CAP_BYTES"' in job
-    assert '--installed-cap-bytes "$GATE_INSTALLED_CAP_BYTES"' in job
+    # The verdict step's argument array, word for word (a flag in a comment or given twice fails).
+    args = re.search(r"^ +args=\((.*?)\)$", job, re.M | re.S).group(1).split()
+    assert args == ["--ratio-p50", '"$GATE_RATIO_P50"', "--ratio-p95", '"$GATE_RATIO_P95"',
+                    "--cap-bytes", '"$GATE_SIZE_CAP_BYTES"', "--installed-cap-bytes", '"$GATE_INSTALLED_CAP_BYTES"',
+                    "--record-only", '"$GATE_RECORD_ONLY"'], args
     assert "--admission ci-r2" in job  # rule R2 is requested only here
     assert "--enforce" in job and '"$GATE_ENFORCE" = true' in job
     assert "::warning::prompt gate verdict" in job  # BLOCKED stays visible
@@ -445,6 +455,7 @@ def test_cli_judges_the_release_size(tmp_path, capsys):
     assert report["release_size"]["delta"]["installed"] == 50_000_000 - 2_939_584
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "FAIL" and out["size"]["over"] == ["installed"]
+    assert out["size"]["cap_bytes"] == {"combined": 2_500_000, "installed": 7_000_000}
     assert out["release_size"]["candidate"]["installed"] == 52_048_784
     # The released size itself passes.
     cand.write_text(json.dumps({"stripped_bytes": RELEASE}))

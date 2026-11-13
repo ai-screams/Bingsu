@@ -121,14 +121,16 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | None, installed_cap_
     or its three shipped files together (`installed`, checked by `release_side`)
     exceed `installed_cap_bytes`; no per-binary cap.
 
-    A missing or invalid cap, a missing candidate size or a combined that is not
-    front + collector is BLOCKED; so is an installed that is not the three files'
-    sum, or a bad base size, unless the candidate is over a cap.
+    A missing or invalid cap is BLOCKED. Each cap reads its own evidence: a
+    candidate over one cap FAILs even when the other's evidence (a combined
+    that is not front + collector, an installed that is not the three files'
+    sum) or the base size is bad; a candidate that fits is then BLOCKED.
     """
     def valid(side):
         return (isinstance(side, dict) and all(_size_ok(side.get(k)) for k in SIZE_KEYS)
                 and side["combined"] == side["front"] + side["collector"])
-    if not valid(candidate):
+    release = release_side(candidate)
+    if not valid(candidate) and release is None:
         return _blocked("stripped_bytes", "missing or inconsistent size")
     result = GateResult(metric="stripped_bytes", base=base, candidate=candidate)
     caps = {"combined": cap_bytes, "installed": installed_cap_bytes}
@@ -137,12 +139,15 @@ def size_gate(base: dict, candidate: dict, cap_bytes: int | None, installed_cap_
     if not all(_size_ok(cap) for cap in caps.values()):
         return {**result, "status": "BLOCKED", "reason": "invalid cap"}
     result["cap_bytes"] = caps
-    release = release_side(candidate)
-    sizes = {"combined": candidate["combined"], "installed": None if release is None else release["installed"]}
+    sizes = {"combined": candidate["combined"] if valid(candidate) else None,
+             "installed": None if release is None else release["installed"]}
     # 이것을 실패시키는 것: installed를 판정에서 빼는 것, 경계(상한과 같은 크기)를 넘은 것으로 치는 것,
     # 후보 대신 기준의 크기를 재는 것.
     result["over"] = [k for k in caps if sizes[k] is not None and sizes[k] > caps[k]]
-    # The caps judge the candidate alone; a missing record only blocks a candidate that fits.
+    # The caps judge the candidate alone; missing evidence only blocks a candidate that fits.
+    # 이것을 실패시키는 것: 어긋난 combined가 installed 초과를 BLOCKED로 덮는 것, 그 combined를 통과로 치는 것.
+    if not result["over"] and sizes["combined"] is None:
+        return {**result, "status": "BLOCKED", "reason": "missing or inconsistent size"}
     if not result["over"] and release is None:
         return {**result, "status": "BLOCKED", "reason": "missing or inconsistent release size"}
     if not result["over"] and not valid(base):
@@ -228,7 +233,7 @@ def main(argv=None):
     reasons = sorted({r["reason"] for r in (*time_results.values(), size) if r.get("reason") and r["status"] != "RECORDED"})
     print(json.dumps({"status": verdict, "enforced": args.enforce, "blocked_by": reasons,
                       "time": {c: {k: r.get(k) for k in ("status", "observed_status", "ratio_p50", "ratio_p95", "reason")} for c, r in time_results.items()},
-                      "size": {k: size.get(k) for k in ("status", "over", "reason")},
+                      "size": {k: size.get(k) for k in ("status", "over", "reason", "cap_bytes")},
                       "release_size": {k: release.get(k) for k in ("status", "base", "candidate", "delta", "reason")}}, indent=2))
     # BLOCKED (no usable evidence) is reported in the report and summary but does not fail the run.
     return 1 if args.enforce and verdict == "FAIL" else 0
