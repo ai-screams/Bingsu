@@ -65,7 +65,7 @@ def test_reclaim_after_supervisor_sigkill(tmp_path):
     pidfile.unlink(missing_ok=True)
     session.prompt()
     old = started(pidfile)
-    supervisor, helper = until(lambda: supervisors())[0]
+    supervisor, helper = until(lambda: supervisors(session))[0]
     os.kill(helper, signal.SIGSTOP)
     os.kill(supervisor, signal.SIGKILL)
     os.kill(helper, signal.SIGKILL)
@@ -220,7 +220,7 @@ def leave_a_live_unit(session, pidfile, seconds=3):
     """Kill a running round's supervisor and helper: its unit keeps running in its cgroup."""
     session.prompt()
     old = started(pidfile)
-    supervisor, helper = until(lambda: supervisors())[0]
+    supervisor, helper = until(lambda: supervisors(session))[0]
     os.kill(helper, signal.SIGSTOP)
     os.kill(supervisor, signal.SIGKILL)
     os.kill(helper, signal.SIGKILL)
@@ -262,14 +262,14 @@ def test_round_end_reclaims_only_after_the_supervisor_is_reaped(tmp_path):
     pidfile.unlink(missing_ok=True)
     session.prompt()
     target = started(pidfile)
-    supervisor, _ = until(lambda: [(s, p) for s, p in supervisors() if lock_of(s) is not None])[0]
+    supervisor, _ = until(lambda: [(s, p) for s, p in supervisors(session) if lock_of(s) is not None])[0]
     os.kill(supervisor, signal.SIGSTOP)
     session.wait_quiet(timeout=8)
     assert units(parent(session)) and alive(target), "a round reclaimed without reaping its supervisor"
     # Still stopped, it holds the session lock; once it runs again it ends
     # its unit, and the next round's reclaim under the lock removes it.
     os.kill(supervisor, signal.SIGCONT)
-    assert until(lambda: not any(s == supervisor for s, _ in supervisors()), timeout=3.0)
+    assert until(lambda: not alive(supervisor), timeout=3.0)
     pidfile.unlink()
     session.prompt()
     started(pidfile)
@@ -306,7 +306,7 @@ def test_supervisor_keeps_its_cgroup_parent_from_children(tmp_path):
     pidfile.unlink(missing_ok=True)
     session.prompt()
     target = started(pidfile)
-    supervisor, _ = until(lambda: [(s, p) for s, p in supervisors() if lock_of(s) is not None])[0]
+    supervisor, _ = until(lambda: [(s, p) for s, p in supervisors(session) if lock_of(s) is not None])[0]
     flags = next(l for l in Path(f"/proc/{supervisor}/fdinfo/6").read_text().splitlines() if l.startswith("flags:"))
     fds = sorted(int(n) for n in os.listdir(f"/proc/{target}/fd"))
     assert int(flags.split()[1], 8) & os.O_CLOEXEC, flags
