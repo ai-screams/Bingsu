@@ -66,6 +66,8 @@ mod ctx;
 #[cfg(unix)]
 mod doctor;
 #[cfg(unix)]
+mod doctor_evidence;
+#[cfg(unix)]
 mod editor;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]

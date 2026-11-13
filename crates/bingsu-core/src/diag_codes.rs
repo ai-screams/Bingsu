@@ -87,6 +87,10 @@ pub const ROOTS_NO_LONGER_MATCH: DiagCode = e(604);
 pub const SIBLING_UNVERIFIED: DiagCode = w(605);
 pub const NO_KERNEL_SECCOMP: DiagCode = w(606);
 pub const SETTINGS_INVALID: DiagCode = e(607);
+pub const RECORD_VERSION_UNSUPPORTED: DiagCode = e(608);
+pub const HOOK_ORDER_CHANGED: DiagCode = w(609);
+pub const ENVELOPE_UNEXPECTED: DiagCode = w(610);
+pub const ZSH_TOO_OLD: DiagCode = w(611);
 
 const fn stable(
     code: DiagCode,
@@ -310,6 +314,12 @@ pub const CODES: &[CodeInfo] = &[
         "run `bingsu config check` and fix what it reports",
     ),
     stable(
+        RECORD_VERSION_UNSUPPORTED,
+        "this shell's hook asks for a record version this bingsu does not read",
+        "the hook and the program must speak one record format; a hook from another build is not guessed at",
+        "open a new shell, or run `bingsu init` again in this one",
+    ),
+    stable(
         EXEC_KEY_IGNORED,
         "`{key}` is ignored here",
         "this file is trusted for colors and layout only; execution keys are not allowed",
@@ -404,6 +414,24 @@ pub const CODES: &[CodeInfo] = &[
         "this kernel has no seccomp, so the prompt runs without its system call filter",
         "the filter is an extra guard around the prompt; without kernel support the prompt still draws but has that guard missing",
         "use a kernel built with seccomp; nothing in the settings changes this",
+    ),
+    stable(
+        HOOK_ORDER_CHANGED,
+        "the order of the shell's hook functions is not the one bingsu needs",
+        "the capture hook must run first, so `$?` and the pipe statuses are intact, and the install hook last, so it draws what the other hooks left",
+        "put `bingsu init` at the very end of your shell setup file, then open a new shell",
+    ),
+    stable(
+        ENVELOPE_UNEXPECTED,
+        "the last words the hook gave the prompt call are not the expected ones",
+        "the prompt reads a fixed set of fields; a changed hook or a plugin that rewrote them can make the prompt draw wrong data",
+        "run `bingsu init` again in this shell; if it stays, check what else changes the prompt hooks",
+    ),
+    stable(
+        ZSH_TOO_OLD,
+        "the shell is older than the oldest version bingsu is tested with",
+        "versions below the tested one are not covered by the shell tests, so a hook may misbehave",
+        "use zsh 5.8 or newer",
     ),
     stable(
         TEMPLATE_REPLACES_STYLE,

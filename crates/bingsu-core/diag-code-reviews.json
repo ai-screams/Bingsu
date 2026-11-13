@@ -46,5 +46,11 @@
     "after": "a548633ebee95c7465eb9852edb04fabd87fb01955f9580b15dfcded71ca51f0",
     "kind": "meaning",
     "reason": "Adds E107 (a YAML settings file that does not parse, or breaks a rule every settings file keeps: a key written twice in one mapping, `null` as a value, a top that is not a mapping; the reader's {message}) and E108 (a YAML feature bingsu does not read, named in {feature}: an anchor, an alias, a tag, a second document or a key that is a mapping or a list). Every existing code keeps its number, status, arguments and text: E101 still means invalid TOML only and E106 invalid JSON only; E102-E105 already describe any config file, including the size, encoding, integer range and nesting limits of a YAML file. No code is reused or deprecated."
+  },
+  {
+    "before": "a548633ebee95c7465eb9852edb04fabd87fb01955f9580b15dfcded71ca51f0",
+    "after": "4645eb1407d916cebb9ab2157968912ce66cf6fb57b00a3064fde8196bd94795",
+    "kind": "meaning",
+    "reason": "Adds the shell-evidence findings of `bingsu doctor`: E608 (the shell's hook asks for a record version this bingsu does not read), W609 (the hook functions are not in the order bingsu needs), W610 (the last envelope words are not the expected ones) and W611 (the shell is older than 5.8). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
   }
 ]

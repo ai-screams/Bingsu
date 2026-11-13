@@ -240,6 +240,12 @@ pub const HELP: &[Help] = &[
         "Run `bingsu config check`, fix what it reports, then `bingsu reload`.",
     ),
     h(
+        c::RECORD_VERSION_UNSUPPORTED,
+        "The hook that this shell runs asks for a record or envelope version that this bingsu does not read.\nThe versions are the ones the hook was written with, not what you installed last.",
+        "The hook and the program speak one record format. After an upgrade, a shell that was opened before it still runs the old hook, and bingsu does not guess what an unknown version means.",
+        "Open a new shell, or run `bingsu init` again in this one. Then run `bingsu doctor` from the shell function bingsu_doctor to check.",
+    ),
+    h(
         c::EXEC_KEY_IGNORED,
         "A key that runs something or reaches the environment is set in a shape-only file, so it is dropped.",
         "A shape-only file is read for colors and layout only; it may change how the prompt looks but never what runs.\nThemes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.\nA file in your config folder whose own folder fails the safety check is a different case (W405).",
@@ -334,6 +340,24 @@ pub const HELP: &[Help] = &[
         "The kernel answers that it has no seccomp support.",
         "The prompt installs a system call filter around itself. Without kernel support the prompt still draws, and the filter is the only thing missing.",
         "Nothing in your settings changes this. Run a kernel built with seccomp; `bingsu config check` is not affected.",
+    ),
+    h(
+        c::HOOK_ORDER_CHANGED,
+        "The shell's hook functions are not in the order bingsu needs: `_bingsu_save` first and `_bingsu_install` last in `precmd_functions`, and `_bingsu_preexec` in `preexec_functions`.\nThe message names the function that stands where a bingsu function should.",
+        "The first precmd function must read `$?` and the pipe statuses before anything changes them, and the last one draws the prompt after every other hook has run. Another framework that adds a hook after bingsu moves them.",
+        "Put `bingsu init` at the very end of your shell setup file, then open a new shell. The shell function bingsu_doctor shows the order again.",
+    ),
+    h(
+        c::ENVELOPE_UNEXPECTED,
+        "The last words the hook gave the prompt call do not have the expected fields: a field is missing, out of order, or has a value of another shape.",
+        "The prompt reads a fixed set of fields from the hook (width, status, pipe statuses, jobs, keymap and sometimes the duration). A changed hook or a plugin that rewrites them makes the prompt draw wrong data.",
+        "Run `bingsu init` again in this shell. If the message stays, look for a plugin that changes the prompt hooks.",
+    ),
+    h(
+        c::ZSH_TOO_OLD,
+        "The shell reports a version older than 5.8.",
+        "Shell versions below the oldest one in bingsu's tests are not covered, so a hook can behave in ways nobody checked.",
+        "Use zsh 5.8 or newer, then run `bingsu init` again in it.",
     ),
     h(
         c::TEMPLATE_REPLACES_STYLE,

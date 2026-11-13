@@ -360,6 +360,31 @@ _bingsu_zle_wrap() {
   fi
 }
 
+# User command, not part of any prompt: hands `bingsu doctor` what only this
+# shell knows (spec section 6, doctor). One record on the standard input of the
+# pinned bingsu and nowhere else: nothing is exported, so no child process of
+# the shell can see it. Fields end with 0x1f, list items are joined by 0x1d and
+# the record ends with 0x1e; doctor refuses a record that does not have that
+# shape. The envelope is what the last prompt call was given (`_bingsu_ctx`
+# and `_bingsu_drawn_cols` are set by _bingsu_render, which this does not
+# change); it is empty until a prompt has been drawn. Run as `bingsu_doctor`
+# or `bingsu_doctor --format json`.
+bingsu_doctor() {
+  emulate -L zsh
+  local helper=@HELPER_EXE@ record=@RECORD@ us=$'\x1f' rs=$'\x1e' gs=$'\x1d'
+  helper=${helper#*=}  # the word is name=path; the first = ends the name
+  local -a words pre post
+  (( ${#_bingsu_ctx} )) && words=(--width "$_bingsu_drawn_cols" "${_bingsu_ctx[@]}")
+  # A hook function may have any name. One that holds a separator would make the
+  # record say something else: it is shown with a ? in its place and the last
+  # field says so, so doctor does not judge an order it cannot read.
+  local flag=
+  [[ "${(j::)precmd_functions}${(j::)preexec_functions}" != *[$us$rs$gs]* ]] || flag=1
+  pre=("${(@)precmd_functions//[$us$rs$gs]/?}") post=("${(@)preexec_functions//[$us$rs$gs]/?}")
+  print -rn -- "doctor-evidence-v1${us}zsh${us}${ZSH_VERSION-}${us}${_bingsu_session-}${us}1${us}${record}${us}${(pj:\x1d:)pre}${us}${(pj:\x1d:)post}${us}${(pj:\x1d:)words}${us}${flag}${rs}" |
+    "$helper" doctor --evidence-stdin "$@"
+}
+
 # The widgets need the line editor and its parameters. zsh runs a TRAP function
 # in place of the default action and a value above 0 goes on as an interrupt:
 # TRAPINT without a user trap returns what the signal itself would, TRAPWINCH 0

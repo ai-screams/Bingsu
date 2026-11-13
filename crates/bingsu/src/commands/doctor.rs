@@ -13,6 +13,7 @@ use super::{
     collector::Sibling,
     config_inspect::{Inspection, exit_for, inspect_config, refusal_text},
     ctx::{self, EXIT_FAILED, EXIT_UNFINISHED, EXIT_USAGE, User},
+    doctor_evidence::{self, Given},
     group_policy::SystemGroups,
     init::{
         exe_path::{self, invocation_path},
@@ -34,7 +35,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu doctor [--format json|text]";
+const USAGE: &str = "usage: bingsu doctor [--format json|text] [--evidence-stdin]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Status {
@@ -78,6 +79,7 @@ fn finding(status: Status, text: impl Into<String>, fix: Option<DiagCode>) -> Fi
 
 /// What the checks may read. Nothing here is a process or a write.
 pub(super) struct Ctx {
+    pub evidence: Given,
     pub user: User,
     pub env: TrustedEnv,
     pub exe: Option<PathBuf>,
@@ -114,7 +116,22 @@ pub(super) const ITEMS: &[Item] = &[
     Item {
         id: "shell",
         title: "shell",
-        run: run_shell,
+        run: |c| doctor_evidence::judge_shell(&c.evidence),
+    },
+    Item {
+        id: "hook-compat",
+        title: "hook version",
+        run: |c| doctor_evidence::judge_compat(&c.evidence),
+    },
+    Item {
+        id: "hook-order",
+        title: "hook order",
+        run: |c| doctor_evidence::judge_order(&c.evidence),
+    },
+    Item {
+        id: "envelope",
+        title: "envelope",
+        run: |c| doctor_evidence::judge_envelope(&c.evidence),
     },
     Item {
         id: "seccomp",
@@ -484,19 +501,6 @@ fn run_build_identity(c: &Ctx) -> Finding {
     )
 }
 
-// ---- shell ---------------------------------------------------------------------
-
-fn run_shell(_: &Ctx) -> Finding {
-    // Only the shell can say which shell and version it is. Nothing is read
-    // from the shell variable, a path or a folder name: a version guessed from a name is
-    // wrong after the first upgrade.
-    finding(
-        Status::Unknown,
-        "shell version not confirmed: no shell passed it to this command",
-        None,
-    )
-}
-
 // ---- seccomp -------------------------------------------------------------------
 
 fn judge_seccomp(k: SeccompKernel) -> Finding {
@@ -615,16 +619,49 @@ pub(super) fn exit_of(rows: &[(&Item, Finding)]) -> u8 {
     u8::from(rows.iter().any(|(_, f)| f.status == Status::Fail))
 }
 
-/// `--format json|text`, at most once; `Some(json)`.
-fn parse(args: &[OsString]) -> Option<bool> {
-    match args {
-        [] => Some(false),
-        [flag, value] if flag == "--format" => match value.to_str()? {
-            "json" => Some(true),
-            "text" => Some(false),
-            _ => None,
-        },
-        _ => None,
+/// What the command line asked for.
+#[derive(Debug, PartialEq, Eq)]
+struct Opts {
+    json: bool,
+    /// The shell function hands its evidence on standard input.
+    evidence: bool,
+}
+
+/// `--format json|text` and `--evidence-stdin`, each at most once, in any order.
+fn parse(args: &[OsString]) -> Option<Opts> {
+    let mut o = Opts {
+        json: false,
+        evidence: false,
+    };
+    let (mut format_seen, mut it) = (false, args.iter());
+    while let Some(a) = it.next() {
+        match a.to_str()? {
+            "--evidence-stdin" if !o.evidence => o.evidence = true,
+            "--format" if !format_seen => {
+                format_seen = true;
+                o.json = match it.next()?.to_str()? {
+                    "json" => true,
+                    "text" => false,
+                    _ => return None,
+                };
+            }
+            _ => return None,
+        }
+    }
+    Some(o)
+}
+
+/// The record on standard input, read once: at most `MAX + 1` bytes.
+fn read_evidence() -> Given {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    let read = std::io::stdin()
+        .lock()
+        .take(doctor_evidence::MAX as u64 + 1)
+        .read_to_end(&mut bytes);
+    match read {
+        Ok(_) => doctor_evidence::parse(&bytes),
+        Err(_) => Given::Bad("it could not be read"),
     }
 }
 
@@ -660,9 +697,24 @@ pub(super) fn render_json(rows: &[(&Item, Finding)], error: Option<&str>) -> Str
 }
 
 pub fn run(args: &[OsString]) -> ExitCode {
-    let Some(json) = parse(args) else {
+    let Some(opts) = parse(args) else {
         eprintln!("{USAGE}");
         return ctx::code(EXIT_USAGE);
+    };
+    let json = opts.json;
+    // The evidence comes from the shell function through a pipe. A terminal
+    // on standard input means a person started this by hand: say so, and do
+    // not wait for them to type a record.
+    if opts.evidence && sys::fd_is_tty(0) {
+        eprintln!(
+            "bingsu doctor: --evidence-stdin takes the shell's record; run bingsu_doctor in your shell instead"
+        );
+        return ctx::code(EXIT_USAGE);
+    }
+    let evidence = if opts.evidence {
+        read_evidence()
+    } else {
+        Given::No
     };
     let Some(user) = User::current() else {
         if json {
@@ -674,6 +726,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
         return ctx::code(EXIT_FAILED);
     };
     let c = Ctx {
+        evidence,
         user,
         env: TrustedEnv::capture(),
         exe: std::env::current_exe().ok(),

@@ -390,7 +390,8 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 확인한 bingsu-prompt 대신 bingsu를 부르는 것, 형제가 없을 때
-    // `bingsu prompt`로 돌아가지 않는 것, helper 단어를 빼거나 형제 경로로 쓰는 것.
+    // `bingsu prompt`로 돌아가지 않는 것, helper 단어를 빼거나 형제 경로로 쓰는 것, helper 단어를 프롬프트 호출 줄 밖에서
+    // `bingsu_doctor` 함수 본문 말고 다른 곳에 더하거나 함수에서 두 번 쓰는 것(위치까지 센다).
     #[test]
     fn prompt_call_uses_the_verified_sibling_and_names_the_helper() {
         for shell in [Shell::Zsh, Shell::Bash, Shell::Fish] {
@@ -410,8 +411,28 @@ mod tests {
                 assert_eq!(count(&s, &cli), want, "{shell:?} {prompt_exe:?}");
                 let mut helper = Vec::new();
                 prefixed(shell, HELPER_EXE_PREFIX, b"/bin/bingsu", &mut helper);
-                assert_eq!(count(&s, &helper), 1, "{shell:?} {prompt_exe:?}");
-                assert_eq!(count(&s, HELPER_EXE_PREFIX), 1, "{shell:?}");
+                // Where the word stands is fixed: once on the prompt call
+                // line and, in zsh only, once in the body of `bingsu_doctor`
+                // (the shell function that hands doctor its evidence); nowhere else.
+                let text = String::from_utf8_lossy(&s).into_owned();
+                let helper_text = String::from_utf8_lossy(&helper).into_owned();
+                let (body_start, body_end) = match text.find("\nbingsu_doctor() {") {
+                    Some(i) => (i, i + text[i..].find("\n}\n").expect("function end")),
+                    None => (0, 0),
+                };
+                let in_body = text[body_start..body_end].matches(&helper_text).count();
+                let in_call = text
+                    .lines()
+                    .filter(|l| l.contains(&helper_text) && l.contains(" prompt "))
+                    .count();
+                assert_eq!(in_call, 1, "{shell:?} {prompt_exe:?}");
+                assert_eq!(in_body, usize::from(shell == Shell::Zsh), "{shell:?}");
+                assert_eq!(
+                    count(&s, &helper),
+                    in_call + in_body,
+                    "{shell:?} {prompt_exe:?}: the word stands only on the prompt call and in the doctor function"
+                );
+                assert_eq!(count(&s, HELPER_EXE_PREFIX), in_call + in_body, "{shell:?}");
             }
         }
     }
