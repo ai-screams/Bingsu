@@ -52,6 +52,8 @@ pub(crate) mod command_supervisor;
 #[cfg(unix)]
 mod config;
 #[cfg(unix)]
+mod config_edit;
+#[cfg(unix)]
 mod config_inspect;
 #[cfg(unix)]
 mod config_load;
@@ -59,6 +61,8 @@ mod config_load;
 mod config_use;
 #[cfg(unix)]
 mod ctx;
+#[cfg(unix)]
+mod editor;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 evidence serialization"))]
 mod evidence;
