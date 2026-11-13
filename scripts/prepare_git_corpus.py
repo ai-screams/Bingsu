@@ -374,6 +374,10 @@ def build_workers():
     artifacts = [json.loads(line) for line in result.splitlines()]
     deps = {a["target"]["name"]: p for a in artifacts if a.get("reason") == "compiler-artifact"
             for p in a.get("filenames", []) if p.endswith(".rlib")}
+    # Every folder cargo put a library in: one deps/ up to Cargo 1.99, one
+    # build/<package>/<hash>/out/ per unit from 1.100.
+    folders = sorted({str(Path(p).parent) for a in artifacts if a.get("reason") == "compiler-artifact"
+                      for p in a.get("filenames", []) if p.endswith((".rlib", ".rmeta", ".so", ".dylib"))})
     src = OUT / "src"
     shutil.copytree(ROOT / "crates/bingsu-collect/src", src)
     shutil.copy2(ROOT / "crates/bingsu-collect/collector-syscalls.tsv", OUT)
@@ -398,7 +402,7 @@ def build_workers():
     assert "mod git;" in modules and "mod worker;" in modules
     text = RUST.replace("@MODULES@", modules)
     command = ["rustc", "--edition=2024", "--cfg", "test", "-O", "-C", "lto=fat", "-C", "embed-bitcode=yes",
-               "-L", f"dependency={ROOT / 'target/release/deps'}"]
+               *[arg for folder in folders for arg in ("-L", f"dependency={folder}")]]
     for name in ("bingsu_core", "bingsu_identity", "libc", "gix_config", "gix_ref", "gix_index", "gix_object", "gix_pack", "gix_error", "gix_zlib", "gix_ignore", "gix_attributes", "gix_utils", "gix_revwalk"):
         command += ["--extern", f"{name}={deps[name]}"]
     paths = {}
