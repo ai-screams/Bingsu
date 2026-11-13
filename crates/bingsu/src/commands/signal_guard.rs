@@ -12,6 +12,12 @@
 //! start and the ignore a Ctrl-C still ends bingsu (and the editor with it);
 //! nothing has been applied by then, so the settings stay as they were.
 //!
+//! Threads. Signal handling belongs to the process, so call it from one
+//! thread: while it waits, a child that another thread starts inherits
+//! SIG_IGN for both signals. Calls are serialized by a lock held from the
+//! start to the restore, so two overlapping calls never save each other's
+//! SIG_IGN as the handling to put back.
+//!
 //! The allow for `unsafe` is on `mod signal_guard;` in commands/mod.rs; each
 //! block is one operation with a SAFETY comment.
 // The clippy.toml rules are forbidden here, as in sys.rs.
@@ -23,10 +29,14 @@
 
 use std::io;
 use std::process::{Command, ExitStatus};
+use std::sync::{Mutex, MutexGuard};
 
 /// The signals the terminal sends to the foreground group for Ctrl-C and
 /// Ctrl-\.
 const IGNORED: [libc::c_int; 2] = [libc::SIGINT, libc::SIGQUIT];
+
+/// One wait at a time (see the module comment).
+static WAITING: Mutex<()> = Mutex::new(());
 
 /// Starts `cmd` and waits for it with SIGINT and SIGQUIT ignored in this
 /// process; the previous handling is back when it returns, also on error.
@@ -35,26 +45,35 @@ const IGNORED: [libc::c_int; 2] = [libc::SIGINT, libc::SIGQUIT];
 /// caller reads the status: an editor ended by Ctrl-C has
 /// `ExitStatusExt::signal() == Some(SIGINT)`.
 pub fn run_ignoring_interrupts(cmd: &mut Command) -> io::Result<ExitStatus> {
+    let one = WAITING.lock().unwrap_or_else(|e| e.into_inner());
     let mut child = cmd.spawn()?;
-    let _ignored = Ignored::new();
+    let _ignored = Ignored::new(one);
+    #[cfg(test)]
+    tests::ignored();
     child.wait()
 }
 
 /// SIGINT and SIGQUIT ignored while it lives. Private: built only after
-/// the child has started (see the module comment).
+/// the child has started (see the module comment). It holds the call lock,
+/// which a field releases after `drop` has run, so the restore is always
+/// done before the next call starts.
 struct Ignored {
     previous: Vec<(libc::c_int, libc::sigaction)>,
+    _one: MutexGuard<'static, ()>,
 }
 
 impl Ignored {
-    fn new() -> Ignored {
+    fn new(one: MutexGuard<'static, ()>) -> Ignored {
         let mut previous = Vec::with_capacity(IGNORED.len());
         for sig in IGNORED {
             if let Some(old) = ignore(sig) {
                 previous.push((sig, old));
             }
         }
-        Ignored { previous }
+        Ignored {
+            previous,
+            _one: one,
+        }
     }
 }
 
