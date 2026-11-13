@@ -101,34 +101,44 @@ struct Ctx<'a> {
     via: &'a [SourceId],
     slot: &'a dyn Fn(&[&str]) -> Slot,
     warnings: Vec<Diagnostic>,
-    /// `INDEX_FROM`, or another size in tests.
-    index_from: usize,
+    /// `SCANS_BEFORE_INDEX`, or another count in tests.
+    index_after: usize,
 }
 
-/// A merged table with more entries than this finds keys through an index
-/// instead of a scan, so a source with many keys merges in n log n, not n².
-/// Where the two cost the same: merging two sources that share one table of
-/// n keys took, per merge, 9.9 µs scanned and 10.2 µs indexed at n = 16,
-/// 15.2 and 15.1 µs at 24, 19.6 and 19.3 µs at 32 (release, one Mac). A
-/// hand-written config's tables hold far fewer keys and keep the scan.
-const INDEX_FROM: usize = 24;
+/// While one source table is merged, its keys are looked up by scanning the
+/// merged table until it has scanned this many times; then an index (key to
+/// position) is built and used for the rest. Building the index costs as
+/// much as 26 to 38 scanning lookups in the same table at 25 to 4,000
+/// entries (release, one Mac, four runs, half the keys absent: 100 entries
+/// 2.2 µs against 71 ns a lookup, 1,000 entries 19 µs against 0.52 µs).
+/// Once a source has scanned this many times it has spent about what the
+/// index costs, so a source that sets a few keys of a large table keeps
+/// scanning, one that brings many keys pays at most about twice the cheaper
+/// way, and merging stays n log n instead of n². In one quiet run over 15
+/// merge patterns of 25 to 16,000 keys, 32 stayed within 12% of the fastest
+/// count; 8 made 31 sources of 16 keys over 1,000 keys 1.8 times slower (an
+/// index per source), and building at once made 31 one-key sources over
+/// 1,000 keys about 3 times slower.
+const SCANS_BEFORE_INDEX: usize = 32;
 
-/// Finding an entry of one merged table by key: a scan while the table is
-/// small, an index (key to position) once it has more than `from` entries,
-/// built the first time it is that large. A key added while one source table
-/// is merged is never looked up again in that merge (a source table's keys
-/// are unique), so the index need not follow additions; the next source
-/// builds its own. The entries keep their order; the index only points into
-/// them.
+/// Finding an entry of one merged table by key, for one source table: scans
+/// until `after` of them, then an index built from the table at that moment.
+/// A key added while one source table is merged is never looked up again in
+/// that merge (a source table's keys are unique), so the index need not
+/// follow additions; the next source starts scanning again. The entries keep
+/// their order; the index only points into them.
 struct Keys {
     index: Option<BTreeMap<String, usize>>,
+    /// Lookups this source table has made by scanning so far.
+    scans: usize,
 }
 
 impl Keys {
-    fn find(&mut self, entries: &[MEntry], key: &str, from: usize) -> Option<usize> {
-        // 이것을 실패시키는 것: 색인을 만들지 않는 것(큰 표에서 키마다 전체를 훑음), 지금 크기가 아닌 시작
-        // 크기로 판단하는 것(빈 표에 큰 첫 파일이 들어올 때 색인이 없음).
-        if self.index.is_none() && entries.len() > from {
+    fn find(&mut self, entries: &[MEntry], key: &str, after: usize) -> Option<usize> {
+        // 이것을 실패시키는 것: 색인을 만들지 않는 것, 훑은 횟수를 보지 않고 바로 만드는 것(큰 표에 키 하나만
+        // 덮어쓰는 원본마다 색인을 만듦), `>=` 대신 `>`, 훑은 횟수를 세지 않는 것
+        // (`the_index_starts_after_enough_scans_of_one_source`).
+        if self.index.is_none() && self.scans >= after {
             self.index = Some(
                 entries
                     .iter()
@@ -139,7 +149,10 @@ impl Keys {
         }
         match &self.index {
             Some(index) => index.get(key).copied(),
-            None => entries.iter().position(|m| m.key == key),
+            None => {
+                self.scans += 1;
+                entries.iter().position(|m| m.key == key)
+            }
         }
     }
 }
@@ -175,7 +188,10 @@ fn dropped(key: &str, path: &[&str], n: &Node, cx: &mut Ctx<'_>) {
 /// `path` borrows the keys of the source being merged, so walking it copies
 /// no key; a key is copied only into a new entry.
 fn merge_table<'a>(into: &mut MTable, from: &'a Table, path: &mut Vec<&'a str>, cx: &mut Ctx<'_>) {
-    let mut keys = Keys { index: None };
+    let mut keys = Keys {
+        index: None,
+        scans: 0,
+    };
     for e in &from.entries {
         path.push(&e.key);
         let is_table = matches!(e.node.value, Value::Table(_));
@@ -200,7 +216,7 @@ fn merge_table<'a>(into: &mut MTable, from: &'a Table, path: &mut Vec<&'a str>, 
             span: e.node.span,
             trust: cx.trust,
         };
-        let at = keys.find(&into.entries, &e.key, cx.index_from);
+        let at = keys.find(&into.entries, &e.key, cx.index_after);
         match (at.map(|i| &mut into.entries[i]), &e.node.value) {
             (Some(m), Value::Table(t)) if matches!(m.node.value, MValue::Table(_)) => {
                 if let MValue::Table(mt) = &mut m.node.value {
@@ -226,14 +242,14 @@ fn merge_table<'a>(into: &mut MTable, from: &'a Table, path: &mut Vec<&'a str>, 
 /// Merges the applied sources in apply order, leaving out `skip` (the
 /// shape-only files a later check dropped).
 pub fn merge(report: &LoadReport, skip: &[SourceId], slot: &dyn Fn(&[&str]) -> Slot) -> Merged {
-    merge_with(report, skip, slot, INDEX_FROM)
+    merge_with(report, skip, slot, SCANS_BEFORE_INDEX)
 }
 
 fn merge_with(
     report: &LoadReport,
     skip: &[SourceId],
     slot: &dyn Fn(&[&str]) -> Slot,
-    index_from: usize,
+    index_after: usize,
 ) -> Merged {
     let mut out = Merged::default();
     for id in report.order.iter().filter(|id| !skip.contains(id)) {
@@ -244,7 +260,7 @@ fn merge_with(
             via: &s.via,
             slot,
             warnings: Vec::new(),
-            index_from,
+            index_after,
         };
         merge_table(&mut out.root, &s.tree, &mut Vec::new(), &mut cx);
         out.warnings.append(&mut cx.warnings);
@@ -575,7 +591,8 @@ mod tests {
     }
 
     /// An inline TOML table of up to `width` keys from a pool of 40 names,
-    /// so merged tables cross `INDEX_FROM` and sources share keys.
+    /// so source tables pass `SCANS_BEFORE_INDEX` lookups and sources share
+    /// keys.
     fn table(r: &mut Lcg, depth: u32, width: u64) -> String {
         let mut used = alloc::collections::BTreeSet::new();
         let mut parts = Vec::new();
@@ -629,10 +646,10 @@ mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: 색인을 만들지 않는 것(성능만 달라지는 변이), 문턱을 넘기 전에 만드는 것, 지금 크기가
-    // 아닌 처음 크기로 판단하는 것(합치는 동안 문턱을 넘는 표에 색인이 없음).
+    // 이것을 실패시키는 것: 색인을 만들지 않는 것(성능만 달라지는 변이), 정한 횟수만큼 훑기 전에 만드는 것(큰 표에
+    // 키 하나만 덮어쓰는 원본마다 색인을 만듦), 훑은 횟수를 세지 않는 것.
     #[test]
-    fn the_index_starts_once_the_table_is_past_the_threshold() {
+    fn the_index_starts_after_enough_scans_of_one_source() {
         let entry = |k: &str| MEntry {
             key: String::from(k),
             node: MNode {
@@ -645,18 +662,34 @@ mod tests {
                 },
             },
         };
-        let mut entries: Vec<MEntry> = (0..INDEX_FROM)
-            .map(|i| entry(&alloc::format!("k{i}")))
-            .collect();
-        let mut keys = Keys { index: None };
-        assert_eq!(keys.find(&entries, "k3", INDEX_FROM), Some(3));
-        assert!(keys.index.is_none(), "an index at {INDEX_FROM} entries");
-        // The table grows past the threshold while it is merged.
+        // A large merged table and a source that sets one key: no index.
+        let mut entries: Vec<MEntry> = (0..1000).map(|i| entry(&alloc::format!("k{i}"))).collect();
+        let mut keys = Keys {
+            index: None,
+            scans: 0,
+        };
+        assert_eq!(keys.find(&entries, "k999", SCANS_BEFORE_INDEX), Some(999));
+        assert!(keys.index.is_none(), "an index for one key");
+        // A source that looks up many keys: scans until the count, then an index.
+        for i in 1..SCANS_BEFORE_INDEX {
+            assert_eq!(
+                keys.find(&entries, &alloc::format!("k{i}"), SCANS_BEFORE_INDEX),
+                Some(i)
+            );
+        }
+        assert!(
+            keys.index.is_none(),
+            "an index before {SCANS_BEFORE_INDEX} scans"
+        );
+        // The table grows while it is merged; the index is built from it as it is now.
         entries.push(entry("last"));
-        assert_eq!(keys.find(&entries, "last", INDEX_FROM), Some(INDEX_FROM));
-        assert!(keys.index.is_some(), "no index past {INDEX_FROM} entries");
-        assert_eq!(keys.find(&entries, "k0", INDEX_FROM), Some(0));
-        assert_eq!(keys.find(&entries, "absent", INDEX_FROM), None);
+        assert_eq!(keys.find(&entries, "last", SCANS_BEFORE_INDEX), Some(1000));
+        assert!(
+            keys.index.is_some(),
+            "no index after {SCANS_BEFORE_INDEX} scans"
+        );
+        assert_eq!(keys.find(&entries, "k0", SCANS_BEFORE_INDEX), Some(0));
+        assert_eq!(keys.find(&entries, "absent", SCANS_BEFORE_INDEX), None);
     }
 
     // 버린 env 세그먼트의 경고는 그 세그먼트의 id를 단다. 이것을 실패시키는 것: 경로의 다른 칸(예: `segment`)을
