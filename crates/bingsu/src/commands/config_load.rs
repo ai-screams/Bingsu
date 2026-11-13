@@ -2286,6 +2286,28 @@ mod tests {
         }
     }
 
+    // 실제 읽기 경로에서도 YAML 파일은 256 KiB 상한을 지킨다: loader는 상한보다 한 바이트 더 읽고, core가 그것을
+    // E102로 거부한다. 이것을 실패시키는 것: YAML 길에서 크기 검사를 빼는 것(앞 256 KiB가 조용히 읽힘).
+    #[test]
+    fn an_oversized_yaml_file_is_refused_not_cut() {
+        let fx = Fx::new("yaml-size");
+        let mut big = String::from("segment:\n");
+        while big.len() < 300 * 1024 {
+            big.push_str(&format!(
+                "  custom/s{}: {{kind: text, text: hi}}\n",
+                big.len()
+            ));
+        }
+        fx.put(&fx.root.join("conf.d/big.yaml"), &big);
+        let (r, _) = fx.read(None);
+        assert!(!r.succeeded, "{:?}", r.diagnostics);
+        assert!(
+            codes_of(&r).contains(&codes::FILE_TOO_LARGE),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
     // config use로 고른 파일이 YAML이면 YAML로 읽는다. 이것을 실패시키는 것: 기록된 경로의 형식을 이름으로 고르지
     // 않는 것(E101), 그 파일에 YAML 파서를 주지 않는 것(E107).
     #[test]

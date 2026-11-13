@@ -126,8 +126,8 @@ that cannot be told safely is hidden; `config check --explain` says why.
 The keys that decide what runs or what is shown (`kind`, the command and language keys, `env`, `match`, `enabled`)
 count only from files you trust, each when it passes the safety check:
 
-- `config.toml`, `conf.d/*.toml`, `config.local.toml` and the files they extend inside the config folder, including a
-  link placed there that points to a file elsewhere;
+- `config.toml`, `conf.d/*.toml` (and the YAML files there, see [YAML files](#yaml-files)), `config.local.toml` and
+  the files they extend inside the config folder, including a link placed there that points to a file elsewhere;
 - the file you chose with `bingsu config use`, wherever it is. It stays trusted when it changes in place, for example
   after a `git pull` when it sits in a repository: choose a file in a repository only if you trust everyone who can
   change it.
@@ -140,6 +140,41 @@ every terminal width, also where the layout chosen for a narrow terminal leaves 
 the same way: once a layout from your own files draws it at some width, its value is shown wherever a layout draws
 it, including a theme's layout at a narrow width. Naming a segment only in a theme's layout does not run the command
 or show the variable.
+
+## YAML files
+
+A file whose name ends in `.yaml` or `.yml` takes the same keys as a TOML file and is read the same way, in three
+places: in `conf.d/` (applied in name order together with the `.toml` files there), through `extends`, and as the file
+you choose with `bingsu config use`. The settings folder's own files are still `config.toml` and `config.local.toml`:
+a `config.yaml` beside them is not read, and nothing reports it. Put a YAML file in `conf.d/`, or choose it with
+`bingsu config use`.
+
+```yaml
+# conf.d/50-segments.yaml
+segment:
+  custom/kube:
+    kind: command
+    command: [kubectl, config, current-context]
+    cache: 30s
+  custom/tag:
+    kind: text
+    text: prod
+layout:
+  line1:
+    left: [dir, git, custom/kube, custom/tag]
+```
+
+A setting is read only from what is written where it is used, so these YAML features are refused with E108:
+anchors (`&name`), aliases (`*name`, also as a merge key `<<: *name`), tags (`!tag`, `!!str`), a second document in
+the same file (`---`) and a key that is a mapping or a list. E107 reports the rest of what a YAML settings file cannot
+hold: a syntax error, a key written twice in one mapping, a value that is `null` (`~`, `null` or nothing after the
+colon), a file whose top level is not a mapping, and a NUL character. `bingsu help E107` and `bingsu help E108` explain
+both.
+
+Values follow the YAML 1.2 core schema: `true` and `false` are booleans, numbers (`42`, `0x1F`, `0o17`, `0.74`) are
+numbers, and everything else is a string, including `yes`, `no` and `on`. Quote a value to keep it a string
+(`"214"`). Keys are taken exactly as written, whatever they look like: `~`, `null` and `""` are three different keys,
+and so are `1` and `0x1`. A byte order mark at the start of the file is allowed.
 
 ## Sharing a config with a team
 

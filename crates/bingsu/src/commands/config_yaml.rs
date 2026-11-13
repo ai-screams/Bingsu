@@ -48,22 +48,36 @@ struct Offsets<'a> {
 }
 
 impl<'a> Offsets<'a> {
+    /// A byte order mark at the start is not part of the YAML the parser
+    /// reads (`body`): YAML 1.2 allows one there, as TOML does. The first
+    /// line then starts after it.
     fn new(text: &'a str) -> Self {
         let b = text.as_bytes();
-        let mut lines = vec![0];
+        // 이것을 실패시키는 것: 맨 앞 BOM을 첫 키의 글자로 읽는 것(E201 "unknown key"), 위치를 BOM만큼 당기는 것.
+        let mut lines = vec![if text.starts_with('\u{FEFF}') {
+            '\u{FEFF}'.len_utf8()
+        } else {
+            0
+        }];
         for (i, &c) in b.iter().enumerate() {
             if c == b'\n' || (c == b'\r' && b.get(i + 1) != Some(&b'\n')) {
                 lines.push(i + 1);
             }
         }
+        let byte = lines[0];
         Self {
             text,
             lines,
             line: 0,
             col: 0,
-            byte: 0,
+            byte,
             steps: 0,
         }
+    }
+
+    /// The text after a byte order mark at the start.
+    fn body(&self) -> &'a str {
+        &self.text[self.lines[0]..]
     }
 
     /// The byte of character `col` on line `line` (both from 0), clamped to
@@ -178,7 +192,7 @@ fn parse_with(text: &str, at: &mut Offsets<'_>) -> Result<Table, Vec<SyntaxError
             },
         ));
     }
-    let mut parser = Parser::new_from_str(text);
+    let mut parser = Parser::new_from_str(at.body());
     let mut stack: Vec<Open> = Vec::new();
     let mut root: Option<Table> = None;
     let mut documents = 0;
@@ -615,6 +629,32 @@ segment:
             .collect()
     }
 
+    // 맨 앞 BOM은 TOML처럼 받는다: 첫 키는 BOM 없는 이름이고, 그 줄의 위치(줄:칸)도 TOML과 같다. 이것을 실패시키는
+    // 것: BOM을 첫 키의 글자로 읽는 것(E201 "unknown key `colors`"), 위치를 BOM만큼 앞으로 당기는 것.
+    #[test]
+    fn a_leading_byte_order_mark_reads_as_in_toml() {
+        let plain = compiled("/c/a.yaml", "colors:\n  mode: dark\n");
+        let with = compiled("/c/a.yaml", "\u{FEFF}colors:\n  mode: dark\n");
+        assert_eq!(without_provenance(plain), without_provenance(with));
+        let where_of = |name: &str, text: &str| {
+            let r = read(name, text);
+            let d = &r.diagnostics[0];
+            assert_eq!(d.code, codes::UNKNOWN_KEY, "{name}: {:?}", r.diagnostics);
+            assert_eq!(d.args[0].value, "nope", "{name}");
+            let bingsu_core::diag::Place::Source { span, .. } = d.at else {
+                panic!("{name}: {:?}", d.at)
+            };
+            bingsu_core::diag::line_col(text.as_bytes(), span.start)
+        };
+        let toml = where_of("/c/a.toml", "\u{FEFF}nope = 1\n");
+        assert_eq!(where_of("/c/a.yaml", "\u{FEFF}nope: 1\n"), toml);
+        assert_eq!(
+            toml,
+            (1, 2),
+            "the mark is the first column, as TOML counts it"
+        );
+    }
+
     // 이것을 실패시키는 것: YAML 오류를 E107·E108이 아닌 코드로 내는 것, 읽는 쪽 없이 YAML을 TOML로 읽는 것.
     #[test]
     fn yaml_problems_reach_the_report_with_their_codes() {
@@ -846,6 +886,20 @@ segment:
         }
     }
 
+    // 키는 스칼라의 글자 그대로다(값과 달리 schema로 바꾸지 않음): `~`, `null`, 빈 키는 서로 다르고 `1`과 `0x1`도
+    // 다르다. 이것을 실패시키는 것: 키를 null·수로 읽어 합치는 것(겹치는 키 오류가 나거나 키 이름이 바뀜).
+    #[test]
+    fn keys_are_the_text_of_their_scalar() {
+        let t = parse("~: a\nnull: b\n\"\": c\n1: d\n0x1: e\n'1': f\n").expect_err("'1' repeats 1");
+        assert!(
+            matches!(&t[0].kind, SyntaxErrorKind::Yaml(m) if m.starts_with("duplicate key `1`")),
+            "{t:?}"
+        );
+        let t = parse("~: a\nnull: b\n\"\": c\n1: d\n0x1: e\n").unwrap();
+        let keys: Vec<&str> = t.entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, ["~", "null", "", "1", "0x1"]);
+    }
+
     // 이것을 실패시키는 것: 빈 파일, 주석뿐인 파일, null 하나뿐인 문서를 오류로 내는 것(빈 TOML 파일은 빈 표다).
     #[test]
     fn an_empty_document_is_an_empty_table() {
@@ -900,20 +954,50 @@ segment:
         assert_eq!(at.byte_at(9, 0), 14, "past the last line");
     }
 
-    // 위치를 바이트로 바꾸는 데 드는 걸음은 글 길이에 비례한다. 이것을 실패시키는 것: 뒤로 가는 위치마다 처음부터
-    // 다시 세는 것(블록 mapping이 많으면 n²).
+    // 위치를 바이트로 바꾸는 데 드는 걸음은 글 길이에 비례한다. 줄이 짧은 블록 mapping과, 한 줄에 사건이 많은 flow
+    // mapping·한 줄 implicit pair·여러 바이트 flow list를 잰다. 이것을 실패시키는 것: 뒤로 가는 위치마다 처음부터 다시
+    // 세는 것(블록 mapping이 많으면 n²), 위치마다 그 줄 처음부터 다시 세는 것(`if line != self.line`을 `if true`로:
+    // 긴 한 줄에서 n²).
     #[test]
     fn positions_cost_steps_in_proportion_to_the_text() {
-        let text: String = (0..16_000).map(|i| format!("k{i:05}:\n  v: 1\n")).collect();
-        let mut at = Offsets::new(&text);
-        let t = parse_with(&text, &mut at).unwrap();
-        assert_eq!(t.entries.len(), 16_000);
-        assert!(
-            at.steps <= 2 * text.len(),
-            "{} steps for {} bytes",
-            at.steps,
-            text.len()
-        );
+        let pairs = |n: usize| {
+            (0..n)
+                .map(|i| format!("k{i:05}: {i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let shapes = [
+            (
+                "block mappings",
+                (0..16_000)
+                    .map(|i| format!("k{i:05}:\n  v: 1\n"))
+                    .collect::<String>(),
+            ),
+            (
+                "one-line flow mapping",
+                format!("a: {{{}}}\n", pairs(3_000)),
+            ),
+            (
+                "one-line implicit pairs",
+                format!("a: [{}]\n", pairs(3_000)),
+            ),
+            (
+                "multibyte flow list",
+                format!("a: [{}]\n", vec!["가나다"; 3_000].join(", ")),
+            ),
+        ];
+        for (name, text) in shapes {
+            let mut at = Offsets::new(&text);
+            assert!(parse_with(&text, &mut at).is_ok(), "{name}");
+            // Linear: an implicit pair's mapping starts at its colon and steps
+            // back to its key, about twice the bytes in all.
+            assert!(
+                at.steps <= 4 * text.len(),
+                "{name}: {} steps for {} bytes",
+                at.steps,
+                text.len()
+            );
+        }
     }
 
     // 읽은 트리와 오류의 위치는 core의 다시 검사를 늘 지난다.

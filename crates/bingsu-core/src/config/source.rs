@@ -2082,6 +2082,12 @@ pub(crate) mod tests {
         };
         let e = load(vec![opened("t: x\n")], &mut GivenYaml(Ok(twice)), V).unwrap_err();
         assert_eq!(codes_of(&e), [codes::YAML_SYNTAX]);
+        // The size limit holds on this path too, before the reader sees the
+        // text: a reader that would accept anything is not asked.
+        // 이것을 실패시키는 것: YAML 길에서 크기 검사를 빼고 UTF-8만 보는 것(256 KiB를 넘는 파일의 앞부분이 읽힘).
+        let big = alloc::format!("a: {}\n", "x".repeat(tree::FILE_BYTES_MAX));
+        let e = load(vec![opened(&big)], &mut GivenYaml(Ok(Table::default())), V).unwrap_err();
+        assert_eq!(codes_of(&e), [codes::FILE_TOO_LARGE]);
     }
 
     // 이것을 실패시키는 것: 읽지 못한 비신뢰 뿌리로 전체를 실패시키거나, 신뢰 뿌리의 읽기 실패를 숨기는 것.
