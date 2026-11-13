@@ -371,8 +371,35 @@ looked up in the absolute entries of `PATH`, in order, and only a regular file w
 path is added as the last argument. If the editor ends with a nonzero status or by a signal, nothing is applied.
 
 ```console
-<!-- G2-PENDING #303: paste the real output of a valid save and of an invalid save once #303 is merged -->
+$ bingsu config edit
+(the editor opens ~/.config/bingsu/config.toml; you save `icons = "unicode"`)
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.toml (trusted)
+diagnostics: 0 error(s), 0 warning(s), 0 note(s)
+result: valid
+bingsu: edited; new settings published (generation 1)
 ```
+
+After a save that is not valid, the check says so, nothing is published and the exit code is 1:
+
+```console
+$ bingsu config edit
+(the editor opens the file; you save `colr = 1`)
+diagnostics: 1 error(s), 0 warning(s), 0 note(s)
+E201: unknown key `colr`
+  where: ~/.config/bingsu/config.toml:1:1
+  fix: check the key name
+  code: E201 (bingsu help E201)
+result: invalid; the prompt keeps the last good settings
+bingsu: the saved settings are not valid, so they were not applied; the prompt keeps the previous settings
+bingsu: the settings are not valid, so nothing changed and the prompt keeps the last good settings. Run: bingsu config check
+```
+
+The file you saved stays as it is, so run `bingsu config edit` again to fix it. If another refresh is running at the
+moment you save, the new settings are not published; the command says "another refresh is running, so nothing changed. Try again in a moment", and `bingsu reload` publishes the saved file.
 
 Two limits. While the editor is open, another shell's prompt can read a half-written file; if that file is invalid, the
 commands of that shell stop until you save a valid one. And a key in a settings file can never choose the editor.
