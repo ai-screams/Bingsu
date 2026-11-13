@@ -73,7 +73,7 @@ pub const HELP: &[Help] = &[
     h(
         c::INTEGER_RANGE,
         "A whole number in the file is outside the 64-bit signed range (about 9.2 quintillion up or down).",
-        "TOML integers are 64-bit signed. A larger number cannot be stored without changing its value.",
+        "Integers in config files are 64-bit signed. A larger number cannot be stored without changing its value.",
         "Write a smaller number. Most keys accept far smaller ranges; `bingsu config schema` lists the range of each key.",
     ),
     h(
@@ -81,6 +81,12 @@ pub const HELP: &[Help] = &[
         "Tables or arrays are nested more than 32 levels deep.",
         "The depth is capped so that reading a file can never run out of stack, whoever wrote the file.",
         "Flatten the structure. The config keys are at most a handful of levels deep; `bingsu config schema` shows the shape.",
+    ),
+    h(
+        c::JSON_SYNTAX,
+        "The file is not valid JSON, so bingsu could not read it.\nThe place points at the first character the reader could not accept.",
+        "Nothing in a file is used until the whole file parses. JSON settings are read strictly: no comments, no trailing commas, no `null`, and a key may appear only once in an object.",
+        "Fix the text at the place shown, then run `bingsu config check` to read the file again.",
     ),
     h(
         c::UNKNOWN_KEY,
@@ -201,6 +207,12 @@ pub const HELP: &[Help] = &[
         "The `version` of the file is a number this bingsu does not know.",
         "This bingsu reads config format version 1. Another number means the file was written for a different format.",
         "Set `version` to 1, or upgrade bingsu if the file comes from a newer version.",
+    ),
+    h(
+        c::TWO_FORMATS,
+        "One place holds two settings files in different formats, for example `config.toml` and `config.json` in the settings folder.",
+        "Each place reads one file. Reading both, or picking one, would hide settings you wrote in the other.",
+        "Keep one of the two files (move what you need from the other into it), then run `bingsu config check`.",
     ),
     h(
         c::EXEC_KEY_IGNORED,

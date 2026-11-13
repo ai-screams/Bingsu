@@ -46,7 +46,7 @@ What happened
   A whole number in the file is outside the 64-bit signed range (about 9.2 quintillion up or down).
 
 Why
-  TOML integers are 64-bit signed. A larger number cannot be stored without changing its value.
+  Integers in config files are 64-bit signed. A larger number cannot be stored without changing its value.
 
 How to fix
   Write a smaller number. Most keys accept far smaller ranges; `bingsu config schema` lists the range of each key.
@@ -63,6 +63,20 @@ Why
 
 How to fix
   Flatten the structure. The config keys are at most a handful of levels deep; `bingsu config schema` shows the shape.
+
+----
+
+E106 (error)
+
+What happened
+  The file is not valid JSON, so bingsu could not read it.
+  The place points at the first character the reader could not accept.
+
+Why
+  Nothing in a file is used until the whole file parses. JSON settings are read strictly: no comments, no trailing commas, no `null`, and a key may appear only once in an object.
+
+How to fix
+  Fix the text at the place shown, then run `bingsu config check` to read the file again.
 
 ----
 
@@ -341,6 +355,19 @@ Why
 
 How to fix
   Set `version` to 1, or upgrade bingsu if the file comes from a newer version.
+
+----
+
+E308 (error)
+
+What happened
+  One place holds two settings files in different formats, for example `config.toml` and `config.json` in the settings folder.
+
+Why
+  Each place reads one file. Reading both, or picking one, would hide settings you wrote in the other.
+
+How to fix
+  Keep one of the two files (move what you need from the other into it), then run `bingsu config check`.
 
 ----
 

@@ -22,5 +22,11 @@
     "after": "dc73729b5f611de72093fe88975e9aeadb9228ef36ace3806483291327891bac",
     "kind": "meaning",
     "reason": "N502 is deprecated, not reused: it said a declared user segment of a kind the prompt does not draw yet would show after an upgrade. Language segments are now drawn, so every kind a segment can declare (text, command, env, language) is drawn and the condition can no longer arise; the compile step that emitted it is removed. Its number, severity and texts stay so an old report still reads. No other code changes, and no new code takes its place."
+  },
+  {
+    "before": "dc73729b5f611de72093fe88975e9aeadb9228ef36ace3806483291327891bac",
+    "after": "39e346a331de5e3f311c73f0343844b6b10db1bb4c88c5f9919089721b0f3a4c",
+    "kind": "meaning",
+    "reason": "Adds E106 (a JSON settings file that does not parse, with the reader's {message}) and E308 (one place holds two settings files of different formats, naming both {path} and {other}). Every existing code keeps its number, status, arguments and text: E101 still means invalid TOML only, and E102-E105 already describe any config file. No code is reused or deprecated."
   }
 ]

@@ -231,13 +231,13 @@ fn selection_line(s: &Selection) -> String {
         Selection::Incomplete => {
             "selection: could not read the choice; inspection is incomplete".into()
         }
-        Selection::None => "selection: config.toml in the settings folder".into(),
+        Selection::None => "selection: config.toml or config.json in the settings folder".into(),
         Selection::Chosen(r) => format!(
-            "selection: {} (from bingsu config use; it stands in config.toml's place, conf.d and config.local.toml still apply)",
+            "selection: {} (from bingsu config use; it stands in for config.toml and config.json, conf.d and config.local still apply)",
             ctx::show(&r.path)
         ),
         Selection::Unusable(why) => {
-            format!("selection: record unusable ({why}); config.toml is read")
+            format!("selection: record unusable ({why}); config.toml or config.json is read")
         }
     }
 }

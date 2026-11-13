@@ -5,6 +5,7 @@ E102 stable
 E103 stable
 E104 stable
 E105 stable
+E106 stable
 E201 stable
 E202 stable
 E203 stable
@@ -25,6 +26,7 @@ E304 stable
 E305 stable
 E306 stable
 E307 stable
+E308 stable
 W401 stable
 W402 stable
 W403 stable
