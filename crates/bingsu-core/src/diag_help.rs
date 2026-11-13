@@ -360,6 +360,12 @@ pub const HELP: &[Help] = &[
         "Use zsh 5.8 or newer, then run `bingsu init` again in it.",
     ),
     h(
+        c::COLLECTION_BREAKER_ON,
+        "Collection of git and folder facts is switched off for the folder you are in, in this shell session.\nThe prompt still draws; the segments that need those facts show no value until it is on again.",
+        "The same mount missed its deadline three times in a row (a stopped or very slow mount can do that). The session then stops collecting there for up to five minutes, so a prompt never waits on it. The switch is kept per session and per folder, and the next collection after the wait is a trial.",
+        "Wait about five minutes, or open a new shell. Fix or unmount the stuck mount if it stays. Run `bingsu doctor` from the shell function bingsu_doctor to see whether it is on again.",
+    ),
+    h(
         c::TEMPLATE_REPLACES_STYLE,
         "A `template` is set together with a preset or style options, and the template wins.",
         "A template takes precedence over the style keys, so the keys next to it have no effect.",

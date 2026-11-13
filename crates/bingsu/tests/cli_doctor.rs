@@ -49,6 +49,7 @@ fn a_plain_run_lists_every_check_and_exits_0() {
         "hook version",
         "hook order",
         "envelope",
+        "breaker",
         "seccomp",
         "settings",
     ] {
@@ -872,4 +873,36 @@ fn a_terminal_on_standard_input_is_refused() {
         "{}",
         text(&o.stderr)
     );
+}
+
+// The breaker row reads the session the shell passed: with a session and no record it is ok, without a
+// session of the right shape it says it cannot tell (and shows no other session's state).
+// 이것을 실패시키는 것: 세션 없이 아무 세션의 차단기를 보이는 것, 기록이 없는 것을 경고로 매기는 것, 증거가 없는데 정상으로 매기는 것.
+#[test]
+fn the_breaker_row_needs_the_session() {
+    let e = Env::new("cli_doctor", "breaker");
+    e.put_config("config.toml", "icons = \"ascii\"\n");
+    let _ = e.pinned_words();
+    let (code, t, _) = with_evidence(&e, &record(&GOOD), &[]);
+    assert_eq!(code, Some(0), "{t}");
+    let l = line(&t, "breaker");
+    assert!(
+        l.starts_with("  ok") && l.contains("no breaker record"),
+        "{t}"
+    );
+    let mut f = GOOD;
+    f[3] = "";
+    let (_, t, _) = with_evidence(&e, &record(&f), &[]);
+    let l = line(&t, "breaker");
+    assert!(
+        l.starts_with("  unknown") && l.contains("another session"),
+        "{t}"
+    );
+    let o = e
+        .cmd(&["doctor"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let t = text(&o.stdout);
+    assert!(line(&t, "breaker").starts_with("  unknown"), "{t}");
 }

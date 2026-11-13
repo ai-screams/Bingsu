@@ -23,7 +23,6 @@ pub(super) struct Evidence {
     pub version: Vec<u8>,
     /// The session id init made (32 lowercase hex digits), or what the
     /// shell passed in its place; the breaker check reads it, no other.
-    #[allow(dead_code, reason = "the breaker check of the next change reads it")]
     pub session: Vec<u8>,
     pub ctx: Vec<u8>,
     pub record: Vec<u8>,
@@ -113,6 +112,29 @@ fn without(given: &Given, what: &str) -> Option<Finding> {
 
 fn found(status: Status, text: String, fix: Option<bingsu_core::diag::DiagCode>) -> Finding {
     Finding { status, text, fix }
+}
+
+// ---- the session ---------------------------------------------------------------------
+
+/// The session id the shell passed, in the shape of one (so it can stand in a
+/// path), or the finding that says it is not there. The breaker check reads
+/// the breaker of this session and of no other.
+pub(super) fn session_of(given: &Given) -> Result<Vec<u8>, Finding> {
+    if let Some(f) = without(given, "the collection breaker") {
+        return Err(f);
+    }
+    let Given::Yes(e) = given else {
+        unreachable!("`without` answered every other case")
+    };
+    if super::collection_breaker::session_valid(&e.session) {
+        Ok(e.session.clone())
+    } else {
+        Err(found(
+            Status::Unknown,
+            "the collection breaker is not confirmed: the shell passed no session id of the right shape, and the breaker of another session is never shown in its place".into(),
+            None,
+        ))
+    }
 }
 
 // ---- shell and its version -----------------------------------------------------
