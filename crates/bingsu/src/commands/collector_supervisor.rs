@@ -89,6 +89,13 @@ pub(crate) struct SupervisionReport {
     /// Waits of the exchange loop: polls and stall sleeps.
     #[cfg(test)]
     pub waits: u32,
+    /// Stall sleeps of the exchange loop.
+    #[cfg(test)]
+    pub stalls: u32,
+    /// Stall sleeps that were the first after a write took bytes and lasted
+    /// longer than `STALL_FIRST`: a stall that did not start over.
+    #[cfg(test)]
+    pub stalls_not_restarted: u32,
 }
 
 impl SupervisionReport {
@@ -296,6 +303,10 @@ impl CollectorJob {
             unconfined_decodes: 0,
             #[cfg(test)]
             waits: 0,
+            #[cfg(test)]
+            stalls: 0,
+            #[cfg(test)]
+            stalls_not_restarted: 0,
         };
         let result = Transcript::with_catalog(&self.request, self.catalog);
         if let Ok(mut transcript) = result {
@@ -443,6 +454,9 @@ impl CollectorJob {
         // takes bytes, each sleep at most 1 ms and never past the deadline.
         let mut stall = Duration::ZERO;
         let mut room_said = false;
+        // Whether a write took bytes since the last stall sleep (tests only).
+        #[cfg(test)]
+        let mut took_bytes = false;
         loop {
             let Ok(now) = now_ns() else {
                 return EndReason::Resource;
@@ -459,6 +473,10 @@ impl CollectorJob {
                     Ok(n) => {
                         sent += n;
                         stall = Duration::ZERO;
+                        #[cfg(test)]
+                        {
+                            took_bytes = true;
+                        }
                         if sent == outgoing.len() {
                             if transcript.request_sent().is_err() {
                                 return EndReason::Protocol;
@@ -617,6 +635,10 @@ impl CollectorJob {
                 #[cfg(test)]
                 {
                     report.waits += 1;
+                    report.stalls += 1;
+                    if std::mem::take(&mut took_bytes) && stall > STALL_FIRST {
+                        report.stalls_not_restarted += 1;
+                    }
                 }
                 std::thread::sleep(stall_sleep(stall, now, deadline));
                 continue;
@@ -806,6 +828,10 @@ impl SupervisorHandle {
                 unconfined_decodes: 0,
                 #[cfg(test)]
                 waits: 0,
+                #[cfg(test)]
+                stalls: 0,
+                #[cfg(test)]
+                stalls_not_restarted: 0,
             })
     }
 }

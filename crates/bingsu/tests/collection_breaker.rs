@@ -1047,6 +1047,8 @@ fn e3_verified_no_repo_and_a_only_complete_reset_but_hidden_progress_does_not() 
             unconfined_reads: 0,
             unconfined_decodes: 0,
             waits: 0,
+            stalls: 0,
+            stalls_not_restarted: 0,
         };
         let (progress, reason) = report.breaker_observation();
         ticket.finish(progress, reason, clock(now)).unwrap();
