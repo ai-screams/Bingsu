@@ -17,7 +17,8 @@ pub const PERMIT_FD: u8 = 3;
 /// `EXEC_VERSION`).
 pub const RELAY_VERSION: &str = "1";
 /// Largest permit plus exec frame on fd 3 (U-9d, 16 KB): the supervisor
-/// writes both into an empty pipe in one write before the spawn.
+/// writes both into the empty input channel (a pipe; on macOS a socket pair)
+/// in one write before the spawn.
 pub const RELAY_INPUT_MAX: usize = 16 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Permit {
@@ -366,7 +367,8 @@ impl ExecFrame {
     }
 }
 /// Everything the relay reads from fd 3: permit, then exec frame. Refused
-/// above `cap` bytes so the whole input fits one write into an empty pipe.
+/// above `cap` bytes so the whole input fits one write into the empty input
+/// channel (a pipe; on macOS a socket pair).
 pub fn relay_input(permit: Permit, frame: &ExecFrame, cap: usize) -> Result<Vec<u8>, FrameError> {
     let interpreter = frame
         .interpreter

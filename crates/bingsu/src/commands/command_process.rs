@@ -1,7 +1,7 @@
 //! One relay spawn for the command supervisor (spec section 4 "user command
 //! execution model", row input and output). The relay's permit and exec frame
-//! are written into an empty pipe before the spawn, so a relay that never
-//! reads cannot hold the supervisor. The relay always gets descriptors 0, 1
+//! are written into an empty channel (a pipe; on macOS a socket pair) before
+//! the spawn, so a relay that never reads cannot hold the supervisor. The relay always gets descriptors 0, 1
 //! and 2 from the spawn actions, whatever the supervisor holds there: 0 is
 //! `/dev/null`, 1 the stdout pipe, 2 the status pipe, 3 its input; nothing
 //! else crosses (the supervisor's own descriptors are close-on-exec, and
@@ -34,9 +34,55 @@ fn check(rc: i32) -> io::Result<()> {
     }
 }
 
+/// The channel for a relay's input, `(read, write)`, both close-on-exec. On
+/// Linux a pipe. On macOS a Unix stream socket pair whose write end's send
+/// buffer is set to `INPUT_BUFFER`: a pipe there can be as small as 512 bytes
+/// when the kernel is short of pipe memory, and the input is written whole
+/// before the relay starts, so it must fit. A refused buffer size is left as
+/// the kernel's, so an input that does not fit is refused, never waited for.
+fn input_ends() -> io::Result<(File, File)> {
+    #[cfg(not(target_os = "macos"))]
+    return pipe();
+    #[cfg(target_os = "macos")]
+    {
+        let mut fds = [-1; 2];
+        // SAFETY: two writable ints for the new descriptors.
+        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: both descriptors are newly owned and transferred once.
+        let read = unsafe { File::from_raw_fd(fds[0]) };
+        // SAFETY: the second newly owned descriptor.
+        let write = unsafe { File::from_raw_fd(fds[1]) };
+        for file in [&read, &write] {
+            // SAFETY: live private fd; no unrelated open-file description is changed.
+            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        // SAFETY: the write end made above; reads `INPUT_BUFFER` for its size.
+        let _ = unsafe {
+            libc::setsockopt(
+                write.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&INPUT_BUFFER as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        Ok((read, write))
+    }
+}
+
+/// The send buffer of the input socket on macOS: twice the largest input, for
+/// the kernel's per-message overhead.
+#[cfg(target_os = "macos")]
+const INPUT_BUFFER: libc::c_int = 2 * bingsu_core::handoff::RELAY_INPUT_MAX as libc::c_int;
+
 /// Spawns `exe` with `args` (argv[0] included) in "/", `input` on
-/// descriptor 3. `input` must fit one write into an empty pipe; a shorter
-/// write is an error and nothing is spawned. The relay enters the unit's
+/// descriptor 3. `input` must fit one write into the empty input channel
+/// (`input_ends`); a shorter write is an error and nothing is spawned. The relay enters the unit's
 /// folder itself: a chdir here would run in the spawn and hold the
 /// supervisor on a stopped mount.
 ///
@@ -59,12 +105,14 @@ pub(crate) fn spawn(
             hook();
         }
     });
-    let (input_read, input_write) = pipe()?;
+    let (input_read, input_write) = input_ends()?;
     super::collector_process::nonblocking(&input_write)?;
     // SAFETY: `input` is readable for its length; the pipe is empty.
     let n = unsafe { libc::write(input_write.as_raw_fd(), input.as_ptr().cast(), input.len()) };
     if usize::try_from(n).ok() != Some(input.len()) {
-        return Err(io::Error::other("relay input did not fit the pipe"));
+        return Err(io::Error::other(
+            "relay input did not fit the input channel",
+        ));
     }
     drop(input_write);
     let (stdout, stdout_write) = pipe()?;
@@ -902,5 +950,97 @@ mod timing {
             plain,
         );
         show("reclaim_ns (8 empty unit cgroups)", reclaims);
+    }
+}
+
+#[cfg(test)]
+mod input_channel {
+    use super::*;
+
+    fn mode(file: &File) -> libc::mode_t {
+        // SAFETY: a zeroed stat is a valid out-parameter.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `file` is open and `st` is writable.
+        assert_eq!(unsafe { libc::fstat(file.as_raw_fd(), &mut st) }, 0);
+        st.st_mode & libc::S_IFMT
+    }
+
+    // 이것을 실패시키는 것: macOS에서 입력 통로를 pipe로 두는 것(파이프가 512 B로 줄면 작은 입력도 못 씀), Linux에서
+    // 소켓으로 바꾸는 것(seccomp 표와 Linux의 동작이 바뀜), 양쪽 끝의 close-on-exec를 빼는 것(다른 relay가 쓰기 끝을
+    // 물려받아 EOF가 오지 않음).
+    #[test]
+    fn the_input_channel_is_a_socket_on_macos_and_a_pipe_elsewhere() {
+        let (read, write) = input_ends().unwrap();
+        let want = if cfg!(target_os = "macos") {
+            libc::S_IFSOCK
+        } else {
+            libc::S_IFIFO
+        };
+        assert_eq!((mode(&read), mode(&write)), (want, want));
+        for f in [&read, &write] {
+            // SAFETY: a flag query on an open descriptor.
+            let flags = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        }
+    }
+
+    // 이것을 실패시키는 것: macOS에서 SO_SNDBUF를 올리지 않는 것(이 시험이 도는 어떤 환경에서도 보내는 쪽 버퍼가
+    // 작으면 가장 큰 입력이 한 번에 안 들어감), 버퍼를 가장 큰 입력보다 작게 두는 것.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_input_socket_sends_the_largest_input_in_one_buffer() {
+        let (_read, write) = input_ends().unwrap();
+        let mut size: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `size` and `len` are writable and `len` is its size.
+        let rc = unsafe {
+            libc::getsockopt(
+                write.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&mut size as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert!(
+            usize::try_from(size).unwrap() >= bingsu_core::handoff::RELAY_INPUT_MAX,
+            "{size}"
+        );
+    }
+
+    // 이것을 실패시키는 것: 가장 큰 입력(RELAY_INPUT_MAX)이 비어 있는 입력 통로에 한 번에 안 들어가는 것. 파이프가
+    // 512 B로 줄어든 macOS에서는 pipe를 쓰면 실패한다.
+    #[test]
+    fn the_largest_input_fits_one_write_into_the_empty_channel() {
+        let (_read, write) = input_ends().unwrap();
+        super::super::collector_process::nonblocking(&write).unwrap();
+        let input = vec![b'x'; bingsu_core::handoff::RELAY_INPUT_MAX];
+        // SAFETY: `input` is readable for its length.
+        let n = unsafe { libc::write(write.as_raw_fd(), input.as_ptr().cast(), input.len()) };
+        assert_eq!(usize::try_from(n).ok(), Some(input.len()), "{n}");
+    }
+
+    // A relay stand-in reads the input to the end; the supervisor wrote it all and closed.
+    // 이것을 실패시키는 것: 큰 입력이 중계(`wc -c <&3`)에 온전히 도착하지 않는 것, 쓰기 끝을 닫지 않아 EOF가 오지 않는 것
+    // (10 s 상한에서 실패).
+    #[test]
+    fn a_relay_reads_a_largest_input_to_end_of_file() {
+        use std::io::Read as _;
+        use std::time::{Duration, Instant};
+        let input = vec![b'x'; bingsu_core::handoff::RELAY_INPUT_MAX];
+        let args: Vec<Vec<u8>> = ["sh", "-c", "wc -c <&3"]
+            .iter()
+            .map(|a| a.as_bytes().to_vec())
+            .collect();
+        let mut s = spawn(c"/bin/sh", &args, &input, u64::MAX, &|| true, None).unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        while !s.child.reap().unwrap() {
+            assert!(Instant::now() < end, "the relay never saw end of input");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut out = String::new();
+        s.stdout.read_to_string(&mut out).unwrap();
+        assert_eq!(out.trim(), input.len().to_string());
     }
 }
