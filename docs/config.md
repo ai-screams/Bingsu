@@ -31,6 +31,13 @@ and `icons`. `bingsu list presets --preview` draws each preset once with your cu
 samples; on a terminal it uses color unless `NO_COLOR` is set; `--icons nerd|light|unicode|ascii` picks the icon set,
 `unicode` by default). It starts no command and reads no config.
 
+`bingsu setup` makes a first settings file from two questions: whether you can see Nerd Font symbols, and the color
+mode (it asks the terminal for its background color and shows what it found). It writes
+`$XDG_CONFIG_HOME/bingsu/config.toml` (folder 0700, file 0600) only when there is no such file; when there is, it
+changes nothing and lists the differences from its suggestion. It does not edit your shell startup file: it prints the
+line to add. Without a terminal it asks nothing and needs `--yes --icons nerd|unicode --mode auto|dark|light`; on a
+terminal, `--icons` and `--mode` answer their question in advance and `--yes` skips the final confirmation.
+
 Writing a command segment for other people to use? See
 [Writing a command segment for others](writing-command-segments.md).
 

@@ -1,6 +1,6 @@
 //! The only module in this crate's product code that reads the environment.
 //! Only `init` and the user's own commands (`reload`, `config check|path|use`,
-//! `list presets --preview`) call them:
+//! `list presets --preview`, `setup`) call them:
 //! they run at a trusted moment, `init` pins what it finds into the hook
 //! (spec section 4 "runtime root" 1 and 7, F-01), and the commands find the
 //! same folders for the same user. The prompt path never reads the
@@ -92,6 +92,15 @@ impl TrustedEnv {
             body.push(0);
         }
         (body, std::env::var_os("PWD"))
+    }
+
+    /// `$SHELL`, to name the shell whose startup line `setup` prints.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the user's own command names the shell they run it from"
+    )]
+    pub fn login_shell() -> Option<OsString> {
+        std::env::var_os("SHELL")
     }
 
     /// What `list presets --preview` needs to draw for the user's terminal:
