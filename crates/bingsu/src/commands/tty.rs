@@ -5,18 +5,27 @@
 //!
 //! A query needs the terminal in a mode where the answer is not echoed and
 //! is read without a newline: `Tty::raw` gives a guard ([`RawGuard`]) that
-//! asks one or more queries ([`Terminal`]). The terminal is put back on these
-//! ways out: the guard ends, Ctrl-C (read as the byte 0x03 because `ISIG` is
-//! off), SIGTERM, SIGHUP or SIGINT from outside (a handler sets a flag and
-//! `select` returns early), and a panic (the guard's `Drop`). Other fatal
-//! signals (SIGQUIT, SIGKILL, SIGSEGV...) are not handled: they leave the
-//! terminal raw until `stty sane` or `reset`. One guard at a time in a
-//! process: the flag and the handlers are process-wide. Raw mode also turns
-//! output flow control (IXON) off, so Ctrl-S cannot hold a query's write.
+//! asks one or more queries ([`Terminal`]), only while this process is the
+//! terminal's foreground job. The terminal is put back on these ways out:
+//! the guard ends, Ctrl-C (read as the byte 0x03 because `ISIG` is off),
+//! SIGTERM, SIGHUP or SIGINT from outside (a handler sets a flag and `select`
+//! returns early), and a panic (the guard's `Drop`). Such a signal is raised
+//! again once the old handlers are back, so by default the process still
+//! ends with it; a signal the process ignores (SIGHUP under `nohup`) is left
+//! ignored. Other fatal signals (SIGQUIT, SIGKILL, SIGSEGV...) are not
+//! handled: they leave the terminal raw until `stty sane` or `reset`. One
+//! guard at a time in a process: the flag and the handlers are process-wide.
+//!
+//! Nothing waits past a deadline. Raw mode turns output flow control (IXON)
+//! off, so Ctrl-S cannot stop the output under a query, and writes are
+//! non-blocking: a terminal that takes no output (its queue full) ends the
+//! write at the deadline, and what is still queued is dropped
+//! (`tcflush(TCOFLUSH)`) so half a request never reaches it later.
 //!
 //! Replies carry no query number, so a reply must not be read as the answer
-//! to another query. Before each query the input queue is discarded; once a
-//! query ends silent or cancelled, the guard asks nothing more. A reply that
+//! to another query. Before each query the input queue is discarded (a
+//! Ctrl-C in it is kept as a cancel); once a query ends silent or cancelled,
+//! the guard asks nothing more. A reply that
 //! comes after the time limit would otherwise land on the shell's command
 //! line as typed text, so when no reply came the terminal is read for a
 //! little longer before the query returns. Restoring is `tcsetattr(TCSANOW)`
@@ -29,7 +38,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long the terminal gets to answer. A hypothesis (200 ms): the setup
@@ -40,6 +49,14 @@ pub const REPLY_TIMEOUT: Duration = Duration::from_millis(200);
 /// is thrown away instead of reaching the command line. A starting value
 /// (50 ms), to be set again from the same measurement.
 pub const LATE_REPLY_DRAIN: Duration = Duration::from_millis(50);
+
+/// How long one `Terminal::write` may wait for the terminal to take its
+/// bytes, as a query waits for its reply.
+pub const WRITE_TIMEOUT: Duration = REPLY_TIMEOUT;
+
+/// Input typed between two queries that is looked through for a Ctrl-C (a
+/// few keys at most; more is dropped unread by the query's flush).
+const TYPED_CAP: usize = 256;
 
 /// The longest control sequence reply kept. A cursor position report is at
 /// most 14 bytes (`ESC [`, two numbers of up to five digits, `;`, `R`).
@@ -94,10 +111,11 @@ pub enum Answer {
 /// A terminal that answers queries. `bingsu doctor`'s measurements run on
 /// this, so a fake terminal can test them.
 pub trait Terminal {
-    /// Discards queued input (`tcflush(TCIFLUSH)`), writes `request` and reads
-    /// one reply until `deadline`. On `Silent` or `Cancelled` it reads and
-    /// drops input for `LATE_REPLY_DRAIN` more before it returns, and every
-    /// later query returns the same without asking.
+    /// Discards queued input (`tcflush(TCIFLUSH)`; a Ctrl-C in it, or a
+    /// signal already taken, cancels without writing), writes `request` and
+    /// reads one reply, both until `deadline`. On `Silent` or `Cancelled` it
+    /// reads and drops input for `LATE_REPLY_DRAIN` more before it returns,
+    /// and every later query returns the same without asking.
     fn query(
         &mut self,
         request: &[u8],
@@ -106,7 +124,9 @@ pub trait Terminal {
     ) -> std::io::Result<Answer>;
     /// Writes without asking (probe characters, `\r`, `ESC [ K`), also after
     /// a silent or cancelled query. `ErrorKind::Interrupted` when a signal
-    /// cut the write short.
+    /// cut the write short (later queries are cancelled), and
+    /// `ErrorKind::TimedOut` when the terminal took nothing more for
+    /// `WRITE_TIMEOUT` (what was queued is dropped, later queries are silent).
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "bingsu doctor's terminal measurement writes")
@@ -182,24 +202,64 @@ static STOP: AtomicBool = AtomicBool::new(false);
 /// A guard is alive: `Tty::raw` makes no second one.
 static IN_RAW: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn on_signal(_: libc::c_int) {
+/// The one guard's place in this process. Taking it is one atomic step, so
+/// two threads cannot both take it (a second guard would save the first
+/// one's raw mode as the mode to restore); dropping it, with the guard or
+/// after a failed `Tty::raw`, gives it back.
+struct Slot;
+
+impl Slot {
+    fn take() -> std::io::Result<Self> {
+        IN_RAW
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| Self)
+            .map_err(|_| std::io::Error::other("the terminal is already in raw mode"))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        IN_RAW.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The signals the guard's handler took, one bit each (`1 << sig`): raised
+/// again once the handlers they replaced are back.
+static CAUGHT: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn on_signal(sig: libc::c_int) {
+    CAUGHT.fetch_or(1u64 << (sig & 63), Ordering::SeqCst);
     STOP.store(true, Ordering::SeqCst);
 }
 
 const SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
-/// The terminal as found, and the signal handlers it replaced. Putting both
-/// back is `Drop`.
+/// The terminal as found (its mode and this descriptor's status flags), and
+/// the signal handlers it replaced (`None`: the signal was ignored and is
+/// left so, as under `nohup`). Putting them back is `Drop`.
 struct Raw {
     fd: RawFd,
     saved: libc::termios,
-    old: [libc::sigaction; 3],
+    flags: libc::c_int,
+    old: [Option<libc::sigaction>; 3],
+}
+
+/// Whether this process is the terminal's foreground job. Only that job may
+/// change the terminal or read from it: a background job that ignores
+/// SIGTTOU could change the mode under the foreground shell, and restoring
+/// would throw away what the user typed.
+fn foreground(fd: RawFd) -> bool {
+    // SAFETY: `fd` is open; the call reads the terminal's group.
+    let foreground = unsafe { libc::tcgetpgrp(fd) };
+    // SAFETY: getpgrp takes no arguments and cannot fail.
+    let own = unsafe { libc::getpgrp() };
+    foreground == own
 }
 
 impl Raw {
     /// Switches `fd` to a mode with no echo, no line editing, no signal keys
     /// and no output flow control, where a read returns at once with what is
-    /// there.
+    /// there, and makes its writes non-blocking.
     fn enter(fd: RawFd) -> std::io::Result<Self> {
         let mut saved = std::mem::MaybeUninit::<libc::termios>::uninit();
         // SAFETY: `fd` is an open descriptor and `saved` is writable memory
@@ -209,6 +269,11 @@ impl Raw {
         }
         // SAFETY: tcgetattr returned 0, so it wrote the whole structure.
         let saved = unsafe { saved.assume_init() };
+        // SAFETY: `fd` is open; F_GETFL only reads its status flags.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
         let mut raw = saved;
         raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
         // Ctrl-S would stop the output, and on Linux a write then waits until
@@ -220,9 +285,15 @@ impl Raw {
         raw.c_cc[libc::VMIN] = 0;
         raw.c_cc[libc::VTIME] = 0;
         STOP.store(false, Ordering::SeqCst);
-        // SAFETY: an all-zero `sigaction` is a valid starting value.
-        let mut old: [libc::sigaction; 3] = unsafe { std::mem::zeroed() };
+        let mut old: [Option<libc::sigaction>; 3] = [None; 3];
         for (slot, sig) in old.iter_mut().zip(SIGNALS) {
+            // SAFETY: an all-zero `sigaction` is a valid starting value.
+            let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+            // SAFETY: a null new action only reads the current one into `was`.
+            unsafe { libc::sigaction(sig, std::ptr::null(), &mut was) };
+            if was.sa_sigaction == libc::SIG_IGN {
+                continue;
+            }
             // SAFETY: an all-zero `sigaction` is a valid starting value.
             let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
             act.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
@@ -230,12 +301,26 @@ impl Raw {
             act.sa_flags = 0;
             // SAFETY: `act.sa_mask` is a valid signal set to empty.
             unsafe { libc::sigemptyset(&mut act.sa_mask) };
-            // SAFETY: `act` is initialised and `slot` receives the old action.
-            unsafe { libc::sigaction(sig, &act, slot) };
+            // SAFETY: `act` is initialised and `was` receives the old action.
+            unsafe { libc::sigaction(sig, &act, &mut was) };
+            *slot = Some(was);
         }
-        let this = Self { fd, saved, old };
+        let this = Self {
+            fd,
+            saved,
+            flags,
+            old,
+        };
         // SAFETY: `fd` is open and `raw` is the structure tcgetattr filled.
         if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // A terminal whose reader stopped taking output (a full queue) would
+        // hold a blocking write past any deadline. `fd` is this process's own
+        // open of /dev/tty, so the flag does not reach the shell's
+        // descriptors, which share no open file description with it.
+        // SAFETY: `fd` is open; F_SETFL changes only its status flags.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(this)
@@ -285,45 +370,93 @@ impl Drop for Raw {
                 break;
             }
         }
+        // Blocking again, for `Tty::line` and `Tty::say`.
+        // SAFETY: as above; F_SETFL puts back the flags F_GETFL read.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, self.flags) };
         // The handlers go back after the terminal does.
         for (old, sig) in self.old.iter().zip(SIGNALS) {
-            // SAFETY: `old` is the action `sigaction` returned for `sig`.
-            unsafe { libc::sigaction(sig, old, std::ptr::null_mut()) };
+            if let Some(old) = old {
+                // SAFETY: `old` is the action `sigaction` returned for `sig`.
+                unsafe { libc::sigaction(sig, old, std::ptr::null_mut()) };
+            }
         }
-        IN_RAW.store(false, Ordering::SeqCst);
+        // A signal the guard took now reaches the handler it was meant for:
+        // by default the process ends with it (status 128 + the signal).
+        let caught = CAUGHT.swap(0, Ordering::SeqCst);
+        for sig in SIGNALS {
+            if caught & (1u64 << sig) != 0 {
+                // SAFETY: raises a signal in this process; its handler is the
+                // one this process had before the guard.
+                unsafe { libc::raise(sig) };
+            }
+        }
     }
 }
 
-/// Writes all of `buf` through `write`. A write that a signal interrupted
-/// (EINTR) is not simply tried again: if the signal asked to stop, `false`.
+/// How a write ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sent {
+    All,
+    /// A signal asked to stop.
+    Stopped,
+    /// The terminal took no more before the deadline.
+    TimedOut,
+}
+
+/// Writes all of `buf` through `write`, a non-blocking write. When the
+/// terminal takes nothing now (`WouldBlock`), `wait()` waits until it can
+/// (`false`: the deadline passed, or a stop was asked for). A write that a
+/// signal interrupted (EINTR) is not simply tried again: if the signal asked
+/// to stop, `Stopped`.
 fn write_checked(
     mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
+    mut wait: impl FnMut() -> bool,
     mut buf: &[u8],
-) -> std::io::Result<bool> {
+) -> std::io::Result<Sent> {
+    let stopped = || STOP.load(Ordering::SeqCst);
     while !buf.is_empty() {
         match write(buf) {
             Ok(0) => return Err(std::io::Error::other("the terminal took no bytes")),
             Ok(n) => buf = &buf[n..],
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                if STOP.load(Ordering::SeqCst) {
-                    return Ok(false);
+                if stopped() {
+                    return Ok(Sent::Stopped);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if !wait() {
+                    return Ok(if stopped() {
+                        Sent::Stopped
+                    } else {
+                        Sent::TimedOut
+                    });
                 }
             }
             Err(e) => return Err(e),
         }
     }
-    Ok(true)
+    Ok(Sent::All)
 }
 
 /// Waits until `fd` can be read or `until` passes. `false`: time ran out or
-/// a signal asked to stop (only when `stoppable`). `select`, not `poll`: macOS
-/// `poll` does not support `/dev/tty` (it reports the descriptor invalid at
-/// once).
+/// a signal asked to stop (only when `stoppable`).
+fn readable(fd: RawFd, stoppable: bool) -> impl Fn(Instant) -> bool {
+    ready(fd, stoppable, false)
+}
+
+/// Waits until `fd` can be written (stoppable), as `readable`.
+fn writable(fd: RawFd) -> impl Fn(Instant) -> bool {
+    ready(fd, true, true)
+}
+
+/// Waits until `fd` can be written (`write`) or read, or `until` passes.
+/// `select`, not `poll`: macOS `poll` does not support `/dev/tty` (it reports
+/// the descriptor invalid at once).
 #[allow(
     clippy::unnecessary_fallible_conversions,
     reason = "`tv_usec` is 32 bits on macOS and 64 on Linux; one spelling for both"
 )]
-fn readable(fd: RawFd, stoppable: bool) -> impl Fn(Instant) -> bool {
+fn ready(fd: RawFd, stoppable: bool, write: bool) -> impl Fn(Instant) -> bool {
     move |until| loop {
         if stoppable && STOP.load(Ordering::SeqCst) {
             return false;
@@ -344,16 +477,13 @@ fn readable(fd: RawFd, stoppable: bool) -> impl Fn(Instant) -> bool {
         // SAFETY: `Tty::open` refuses a descriptor at or above FD_SETSIZE, so
         // `fd` fits the set, and `set` is initialised.
         unsafe { libc::FD_SET(fd, &mut set) };
-        // SAFETY: `set` and `tv` are valid for the call; no write or error sets.
-        let n = unsafe {
-            libc::select(
-                fd + 1,
-                &mut set,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut tv,
-            )
+        let (reads, writes): (*mut libc::fd_set, *mut libc::fd_set) = if write {
+            (std::ptr::null_mut(), &mut set)
+        } else {
+            (&mut set, std::ptr::null_mut())
         };
+        // SAFETY: `set` and `tv` are valid for the call; one set, no error set.
+        let n = unsafe { libc::select(fd + 1, reads, writes, std::ptr::null_mut(), &mut tv) };
         if n > 0 {
             return true;
         }
@@ -421,6 +551,21 @@ fn flush_input(fd: RawFd) -> std::io::Result<()> {
     Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
 }
 
+/// Drops what was written to the terminal and not sent yet: a request cut
+/// short (half an escape sequence), or a whole one whose reply would later
+/// land on the command line as typed text. The terminal's queue is shared,
+/// so other output still waiting in it goes too.
+fn discard_output(fd: RawFd) {
+    for _ in 0..RESTORE_TRIES {
+        // SAFETY: `fd` is the open terminal; the call only drops queued output.
+        if unsafe { libc::tcflush(fd, libc::TCOFLUSH) } == 0
+            || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+        {
+            return;
+        }
+    }
+}
+
 /// One `write(2)` on `fd`: the bytes taken.
 fn write_once(fd: RawFd, b: &[u8]) -> std::io::Result<usize> {
     // SAFETY: `fd` is open and `b` is a valid slice.
@@ -439,6 +584,8 @@ enum Spent {
 pub struct RawGuard<'a> {
     tty: &'a Tty,
     _raw: Raw,
+    /// After `_raw`: the place is given back once the terminal is restored.
+    _slot: Slot,
     spent: Option<Spent>,
 }
 
@@ -464,6 +611,38 @@ impl RawGuard<'_> {
         }
         result
     }
+
+    /// Whether the input waiting now holds a Ctrl-C (0x03). Reads at most
+    /// `TYPED_CAP` bytes without waiting; the query's flush drops the rest.
+    fn typed_cancel(&self) -> bool {
+        let mut f = &self.tty.file;
+        let mut chunk = [0u8; 64];
+        let mut read = 0;
+        while read < TYPED_CAP {
+            match f.read(&mut chunk) {
+                Ok(n) if n > 0 => {
+                    if chunk[..n].contains(&0x03) {
+                        return true;
+                    }
+                    read += n;
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Writes `bytes` until `deadline`. On a timeout what is still queued is
+    /// dropped (`discard_output`).
+    fn send(&self, bytes: &[u8], deadline: Instant) -> std::io::Result<Sent> {
+        let fd = self.tty.file.as_raw_fd();
+        let wait = writable(fd);
+        let sent = write_checked(|b| write_once(fd, b), || wait(deadline), bytes)?;
+        if sent == Sent::TimedOut {
+            discard_output(fd);
+        }
+        Ok(sent)
+    }
 }
 
 impl Terminal for RawGuard<'_> {
@@ -479,15 +658,24 @@ impl Terminal for RawGuard<'_> {
             None => {}
         }
         let fd = self.tty.file.as_raw_fd();
-        // What came before this query (typed keys, a late reply to an
-        // earlier one) is not its answer.
-        flush_input(fd)?;
-        let mut result = if write_checked(|b| write_once(fd, b), request)? {
-            let wait = readable(fd, true);
-            let mut f = &self.tty.file;
-            read_reply(end, || wait(deadline), |b| f.read(b))
-        } else {
+        // A Ctrl-C typed since the last query is a cancel, not input to throw
+        // away; and once a stop is recorded no request goes out, so no reply
+        // can come after the terminal is restored.
+        let mut result = if STOP.load(Ordering::SeqCst) || self.typed_cancel() {
             Answer::Cancelled
+        } else {
+            // What came before this query (typed keys, a late reply to an
+            // earlier one) is not its answer.
+            flush_input(fd)?;
+            match self.send(request, deadline)? {
+                Sent::All => {
+                    let wait = readable(fd, true);
+                    let mut f = &self.tty.file;
+                    read_reply(end, || wait(deadline), |b| f.read(b))
+                }
+                Sent::Stopped => Answer::Cancelled,
+                Sent::TimedOut => Answer::Silent,
+            }
         };
         if !matches!(result, Answer::Reply(_)) {
             result = self.drain(result);
@@ -502,12 +690,16 @@ impl Terminal for RawGuard<'_> {
     }
 
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        let fd = self.tty.file.as_raw_fd();
-        if write_checked(|b| write_once(fd, b), bytes)? {
-            Ok(())
-        } else {
-            self.spent = Some(Spent::Cancelled);
-            Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        match self.send(bytes, Instant::now() + WRITE_TIMEOUT)? {
+            Sent::All => Ok(()),
+            Sent::Stopped => {
+                self.spent = Some(Spent::Cancelled);
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            }
+            Sent::TimedOut => {
+                self.spent = Some(Spent::Silent);
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }
         }
     }
 
@@ -541,14 +733,7 @@ impl Tty {
         if unsafe { libc::tcgetattr(file.as_raw_fd(), t.as_mut_ptr()) } != 0 {
             return None;
         }
-        // Only the foreground job may change the terminal or read from it. A
-        // background job that ignores SIGTTOU could change the mode under the
-        // foreground shell, and restoring would throw away what the user typed.
-        // SAFETY: the descriptor is open; the call reads the terminal's group.
-        let foreground = unsafe { libc::tcgetpgrp(file.as_raw_fd()) };
-        // SAFETY: getpgrp takes no arguments and cannot fail.
-        let own = unsafe { libc::getpgrp() };
-        (foreground == own).then_some(Self { file })
+        foreground(file.as_raw_fd()).then_some(Self { file })
     }
 
     pub fn say(&self, text: &str) {
@@ -576,17 +761,20 @@ impl Tty {
     }
 
     /// The terminal in raw mode until the guard is dropped. An error when
-    /// the mode cannot be set, or while another guard in this process is
-    /// alive (the signal flag and handlers are process-wide).
+    /// this process is no longer the foreground job (it may have been moved
+    /// to the background after `open`), when the mode cannot be set, or
+    /// while another guard in this process is alive (the signal flag and
+    /// handlers are process-wide).
     pub fn raw(&self) -> std::io::Result<RawGuard<'_>> {
-        if IN_RAW.load(Ordering::SeqCst) {
-            return Err(std::io::Error::other("the terminal is already in raw mode"));
+        if !foreground(self.file.as_raw_fd()) {
+            return Err(std::io::Error::other("not the terminal's foreground job"));
         }
+        let slot = Slot::take()?;
         let raw = Raw::enter(self.file.as_raw_fd())?;
-        IN_RAW.store(true, Ordering::SeqCst);
         Ok(RawGuard {
             tty: self,
             _raw: raw,
+            _slot: slot,
             spent: None,
         })
     }
@@ -825,9 +1013,10 @@ mod tests {
                     }
                 }
             },
+            || true,
             b"abcdef",
         );
-        assert!(matches!(got, Ok(true)));
+        assert!(matches!(got, Ok(Sent::All)));
         assert_eq!(calls, 3);
         // A stop request during an interrupted write ends it.
         let mut calls = 0;
@@ -841,12 +1030,57 @@ mod tests {
                 }
                 Err(Error::from(ErrorKind::Interrupted))
             },
+            || true,
             b"abc",
         );
         STOP.store(false, Ordering::SeqCst);
-        assert!(matches!(got, Ok(false)));
+        assert!(matches!(got, Ok(Sent::Stopped)));
         assert_eq!(calls, 1);
-        assert!(write_checked(|_| Err(Error::from_raw_os_error(libc::EIO)), b"x").is_err());
+        assert!(
+            write_checked(|_| Err(Error::from_raw_os_error(libc::EIO)), || true, b"x").is_err()
+        );
+        // 이것을 실패시키는 것: 터미널이 지금 받지 않을 때(WouldBlock) 기다리지 않고 오류로 끝내는 것, 기다림이
+        // 마감으로 끝났는데 계속 쓰는 것, 마감과 정지 요청을 바꿔 알리는 것.
+        let (mut calls, mut waits) = (0, 0);
+        let got = write_checked(
+            |b| {
+                calls += 1;
+                if calls == 1 {
+                    Err(Error::from(ErrorKind::WouldBlock))
+                } else {
+                    Ok(b.len())
+                }
+            },
+            || {
+                waits += 1;
+                true
+            },
+            b"abc",
+        );
+        assert!(matches!(got, Ok(Sent::All)));
+        assert_eq!((calls, waits), (2, 1));
+        for stop in [false, true] {
+            let mut calls = 0;
+            let got = write_checked(
+                |_| {
+                    calls += 1;
+                    // Bounded, so that a loop that ignores the deadline ends in an error.
+                    if calls > 3 {
+                        return Err(Error::from_raw_os_error(libc::EIO));
+                    }
+                    Err(Error::from(ErrorKind::WouldBlock))
+                },
+                || {
+                    STOP.store(stop, Ordering::SeqCst);
+                    false
+                },
+                b"abc",
+            );
+            STOP.store(false, Ordering::SeqCst);
+            let want = if stop { Sent::Stopped } else { Sent::TimedOut };
+            assert!(matches!(got, Ok(s) if s == want), "{got:?}");
+            assert_eq!(calls, 1);
+        }
     }
 
     /// Real pseudo-terminals: a parent test plays the terminal on the master
@@ -867,6 +1101,14 @@ mod tests {
             /// terminal's descriptors (held until `finish` reaps the child).
             _spawns: std::sync::MutexGuard<'static, ()>,
             master: Option<File>,
+            /// The test's own copy of the slave: the terminal's mode stays
+            /// readable after the child ends (a last close would reset it).
+            /// macOS revokes the slave when the child, the session's
+            /// controlling process, ends; there the master reads the same
+            /// mode.
+            slave: OwnedFd,
+            /// The slave's mode before the child started.
+            mode_before: Vec<u8>,
             child: Child,
             /// What the child wrote and `expect` has not matched yet.
             unread: Vec<u8>,
@@ -916,6 +1158,12 @@ mod tests {
                 unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
                 0
             );
+            let keep = slave.try_clone().unwrap();
+            let mode_before = mode_of(if cfg!(target_os = "macos") {
+                master.as_raw_fd()
+            } else {
+                keep.as_raw_fd()
+            });
             let child = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -932,6 +1180,8 @@ mod tests {
             Pty {
                 _spawns: spawns,
                 master: Some(master),
+                slave: keep,
+                mode_before,
                 child,
                 unread: Vec::new(),
                 all: Vec::new(),
@@ -998,6 +1248,20 @@ mod tests {
                 self.pump(d, |_| false);
             }
 
+            /// Waits up to `limit` for the child to end without reading the
+            /// master, as a terminal that stopped taking output. `true`: it
+            /// ended.
+            pub(super) fn wait_unread(&mut self, limit: Duration) -> bool {
+                let until = Instant::now() + limit;
+                while Instant::now() < until {
+                    if self.child.try_wait().unwrap().is_some() {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                false
+            }
+
             /// Closes the master: the terminal goes away.
             pub(super) fn hang_up(&mut self) {
                 self.master = None;
@@ -1006,6 +1270,27 @@ mod tests {
             /// Waits for the child, which must pass. Its `ANSWER` lines, and
             /// everything it wrote to the terminal.
             pub(super) fn finish(mut self) -> (Vec<String>, Vec<u8>) {
+                let (lines, status, out, err) = self.end();
+                assert!(status.success(), "{lines:?} {out}\n{err}");
+                (lines, self.all)
+            }
+
+            /// Whether the terminal's mode now is the one from before the
+            /// child started.
+            pub(super) fn mode_restored(&self) -> bool {
+                let fd = if cfg!(target_os = "macos") {
+                    self.master.as_ref().unwrap().as_raw_fd()
+                } else {
+                    self.slave.as_raw_fd()
+                };
+                mode_of(fd) == self.mode_before
+            }
+
+            /// Waits for the child. Its `ANSWER` lines, how it ended, and its
+            /// whole output and error output.
+            pub(super) fn end(
+                &mut self,
+            ) -> (Vec<String>, std::process::ExitStatus, String, String) {
                 let until = Instant::now() + WAIT;
                 let status = loop {
                     if let Some(status) = self.child.try_wait().unwrap() {
@@ -1036,14 +1321,13 @@ mod tests {
                     .unwrap()
                     .read_to_string(&mut err)
                     .unwrap();
-                assert!(status.success(), "{out}\n{err}");
                 let lines = out
                     .lines()
                     // libtest's "test ... " has no newline before the test's output.
                     .filter_map(|l| l.split_once("ANSWER "))
                     .map(|(_, a)| a.to_owned())
                     .collect();
-                (lines, self.all)
+                (lines, status, out, err)
             }
         }
 
@@ -1062,10 +1346,15 @@ mod tests {
         }
 
         fn mode() -> Vec<u8> {
+            mode_of(0)
+        }
+
+        /// The terminal mode on `fd`, as bytes.
+        fn mode_of(fd: RawFd) -> Vec<u8> {
             // SAFETY: all-zero storage for tcgetattr to fill.
             let mut t: libc::termios = unsafe { std::mem::zeroed() };
-            // SAFETY: fd 0 is the terminal; `t` is writable.
-            assert_eq!(unsafe { libc::tcgetattr(0, &mut t) }, 0);
+            // SAFETY: `fd` is a terminal; `t` is writable.
+            assert_eq!(unsafe { libc::tcgetattr(fd, &mut t) }, 0);
             // SAFETY: a plain C structure read as its bytes.
             unsafe {
                 std::slice::from_raw_parts(
@@ -1227,13 +1516,16 @@ mod tests {
             say(&format!("restored {}", mode() == before));
         }
 
-        // 이것을 실패시키는 것: 질의 전에 입력을 비우지 않는 것(앞 질의 뒤에 온 위치 보고를 다음 질의의 답으로 읽음).
+        // More queued input than the Ctrl-C check reads (`TYPED_CAP`), then a
+        // stale report. 이것을 실패시키는 것: 질의 전에 입력을 비우지 않는 것(남은 입력과 앞 질의 뒤에 온 위치 보고를
+        // 다음 질의가 읽음).
         #[test]
         fn a_reply_queued_before_a_query_is_not_its_answer() {
             let mut t = start("stale_child", 80);
             t.expect(CPR);
             t.send(b"\x1b[3;1R");
             t.idle(Duration::from_millis(100));
+            t.send(&[b'z'; 2 * TYPED_CAP]);
             t.send(b"\x1b[3;9R");
             t.expect(CPR);
             t.send(b"\x1b[4;1R");
@@ -1249,17 +1541,7 @@ mod tests {
             say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
             // Waits until the stale report is queued, so the next query
             // starts with it in the input.
-            let until = Instant::now() + WAIT;
-            loop {
-                let mut queued: libc::c_int = 0;
-                // SAFETY: fd 0 is the terminal; `queued` is a writable int.
-                assert_eq!(unsafe { libc::ioctl(0, libc::FIONREAD, &mut queued) }, 0);
-                if queued > 0 {
-                    break;
-                }
-                assert!(Instant::now() < until, "the stale report never came");
-                std::thread::sleep(Duration::from_millis(2));
-            }
+            wait_queued(2 * TYPED_CAP + b"\x1b[3;9R".len());
             say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
         }
 
@@ -1297,20 +1579,48 @@ mod tests {
         }
 
         // 이것을 실패시키는 것: guard가 살아 있는데 둘째 guard를 만드는 것, guard가 끝난 뒤 새 guard를 막는 것,
-        // 새 guard에서 앞 guard의 정지 표시를 지우지 않는 것(SIGINT 뒤 새 guard의 질의가 바로 취소됨).
+        // 새 guard에서 앞 guard의 정지 표시를 지우지 않는 것(SIGINT 뒤 새 guard의 질의가 바로 취소됨), 정지가
+        // 기록된 뒤에도 요청을 쓰는 것(터미널이 요청을 둘 봄), 받은 신호를 원래 처리기로 다시 올리지 않는 것,
+        // 원래 처리기를 되돌리지 않는 것(다시 올린 신호가 guard의 처리기로 감).
         #[test]
         fn one_guard_at_a_time_and_a_new_one_starts_clean() {
             let mut t = start("guards_child", 80);
             t.expect(CPR);
-            t.expect(CPR);
             t.send(b"\x1b[5;1R");
-            let (lines, _) = t.finish();
-            assert_eq!(lines, ["second refused", "cancelled", r"reply \x1b[5;1R"]);
+            let (lines, all) = t.finish();
+            assert_eq!(
+                lines,
+                [
+                    "second refused",
+                    "cancelled",
+                    "the old handler ran 1",
+                    r"reply \x1b[5;1R"
+                ]
+            );
+            assert_eq!(all.windows(CPR.len()).filter(|w| *w == CPR).count(), 1);
+        }
+
+        static OLD_HANDLER_RAN: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+
+        extern "C" fn count_signal(_: libc::c_int) {
+            OLD_HANDLER_RAN.fetch_add(1, Ordering::SeqCst);
+        }
+
+        /// Gives `sig` this test's own handler, as an application would have.
+        fn hook(sig: libc::c_int, handler: extern "C" fn(libc::c_int)) {
+            // SAFETY: an all-zero `sigaction` is a valid starting value.
+            let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
+            act.sa_sigaction = handler as usize;
+            // SAFETY: `act` is initialised; the old action is not wanted.
+            let rc = unsafe { libc::sigaction(sig, &act, std::ptr::null_mut()) };
+            assert_eq!(rc, 0);
         }
 
         #[test]
         #[ignore = "child: asks on a pseudo-terminal"]
         fn guards_child() {
+            hook(libc::SIGINT, count_signal);
             let tty = take_terminal();
             let other = Tty::open().unwrap();
             {
@@ -1324,14 +1634,173 @@ mod tests {
                 unsafe { libc::raise(libc::SIGINT) };
                 say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
             }
+            say(&format!(
+                "the old handler ran {}",
+                OLD_HANDLER_RAN.load(Ordering::SeqCst)
+            ));
             let mut g = other.raw().unwrap();
             say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
         }
 
+        // A signal the guard took ends the process the way it would have,
+        // after the terminal is back. 이것을 실패시키는 것: 신호를 다시 올리지 않는 것(정상 종료), 터미널을
+        // 되돌리기 전에 다시 올리는 것(raw인 채 죽음).
+        #[test]
+        fn a_signal_ends_the_process_after_the_terminal_is_restored() {
+            use std::os::unix::process::ExitStatusExt;
+            let mut t = start("signal_child", 80);
+            let (lines, status, out, err) = t.end();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
+            assert_eq!(lines, ["cancelled"]);
+            assert!(t.mode_restored());
+            assert!(
+                !t.all.windows(CPR.len()).any(|w| w == CPR),
+                "no request after the stop"
+            );
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn signal_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            // SAFETY: raises SIGTERM in this process; the guard's handler takes it.
+            unsafe { libc::raise(libc::SIGTERM) };
+            say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
+            drop(g);
+            say("still running");
+        }
+
+        /// The handler `sig` has now.
+        fn disposition(sig: libc::c_int) -> libc::sighandler_t {
+            // SAFETY: an all-zero `sigaction` is a valid value to fill.
+            let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+            // SAFETY: a null new action only reads the current one.
+            let rc = unsafe { libc::sigaction(sig, std::ptr::null(), &mut was) };
+            assert_eq!(rc, 0);
+            was.sa_sigaction
+        }
+
+        // A signal the process ignores (SIGHUP under nohup) stays ignored.
+        // 이것을 실패시키는 것: 무시하던 신호에도 guard의 처리기를 거는 것(그 신호로 질의가 취소되고, guard
+        // 동안 처리기가 바뀜).
+        #[test]
+        fn an_ignored_signal_stays_ignored() {
+            let mut t = start("ignored_child", 80);
+            t.expect(CPR);
+            t.send(b"\x1b[6;1R");
+            let (lines, _) = t.finish();
+            assert_eq!(
+                lines,
+                [
+                    "ignored during true",
+                    r"reply \x1b[6;1R",
+                    "ignored after true"
+                ]
+            );
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn ignored_child() {
+            // SAFETY: sets this process's SIGHUP disposition to ignore.
+            unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
+            let tty = take_terminal();
+            {
+                let mut g = tty.raw().unwrap();
+                say(&format!(
+                    "ignored during {}",
+                    disposition(libc::SIGHUP) == libc::SIG_IGN
+                ));
+                // SAFETY: raises SIGHUP in this process, which ignores it.
+                unsafe { libc::raise(libc::SIGHUP) };
+                say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
+            }
+            say(&format!(
+                "ignored after {}",
+                disposition(libc::SIGHUP) == libc::SIG_IGN
+            ));
+        }
+
+        // 이것을 실패시키는 것: 다음 질의의 입력 비우기가 질의 사이에 누른 Ctrl-C를 버리는 것(사용자의 취소가
+        // 사라지고 요청이 또 나감).
+        #[test]
+        fn ctrl_c_between_queries_cancels_the_next() {
+            let mut t = start("ctrl_c_between_child", 80);
+            t.expect(CPR);
+            t.send(b"\x1b[3;1R");
+            t.idle(Duration::from_millis(100));
+            t.send(b"\x03");
+            let (lines, all) = t.finish();
+            assert_eq!(lines, [r"reply \x1b[3;1R", "cancelled"]);
+            assert_eq!(all.windows(CPR.len()).filter(|w| *w == CPR).count(), 1);
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn ctrl_c_between_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
+            wait_queued(1);
+            say(&ask_unanswered(&mut g, CPR, ReplyEnd::Csi(b'R')));
+        }
+
+        /// Waits until the terminal has `bytes` of input queued for this
+        /// process.
+        fn wait_queued(bytes: usize) {
+            let until = Instant::now() + WAIT;
+            loop {
+                let mut queued: libc::c_int = 0;
+                // SAFETY: fd 0 is the terminal; `queued` is a writable int.
+                assert_eq!(unsafe { libc::ioctl(0, libc::FIONREAD, &mut queued) }, 0);
+                if usize::try_from(queued).unwrap_or(0) >= bytes {
+                    return;
+                }
+                assert!(Instant::now() < until, "nothing came");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        // A job moved to the background after it opened the terminal.
+        // 이것을 실패시키는 것: raw()에서 전경 작업인지 다시 보지 않는 것(SIGTTOU를 무시하는 배경 작업이 남의
+        // 터미널을 raw로 바꿈).
+        #[test]
+        fn a_background_job_gets_no_guard() {
+            let t = start("background_child", 80);
+            let (lines, _) = t.finish();
+            assert_eq!(lines, ["background refused true"]);
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn background_child() {
+            use std::os::unix::process::CommandExt;
+            let tty = take_terminal();
+            // SAFETY: sets this process's SIGTTOU disposition to ignore.
+            unsafe { libc::signal(libc::SIGTTOU, libc::SIG_IGN) };
+            let mut other = Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap();
+            let group = libc::pid_t::try_from(other.id()).unwrap();
+            // SAFETY: fd 0 is this session's terminal; `group` is a group in it.
+            assert_eq!(unsafe { libc::tcsetpgrp(0, group) }, 0);
+            say(&format!("background refused {}", tty.raw().is_err()));
+            // SAFETY: getpgrp takes no arguments and cannot fail.
+            let own = unsafe { libc::getpgrp() };
+            // SAFETY: as above, back to this process's own group.
+            assert_eq!(unsafe { libc::tcsetpgrp(0, own) }, 0);
+            other.kill().unwrap();
+            other.wait().unwrap();
+        }
+
         // Ctrl-S before the guard stops the output. 이것을 실패시키는 것: raw 모드에서 IXON을 끄지 않는 것
-        // (Linux: 질의의 쓰기가 Ctrl-Q까지 멈춰, 시험이 1.5초 뒤 Ctrl-Q를 보낼 때까지 걸림). macOS에서는 이 변이가
-        // 살아남는다: 작은 쓰기는 멈춘 출력 큐에 들어가 돌아오고 질의는 마감에 silent로 끝나며, IXON을 꺼도
-        // macOS는 이미 멈춘 출력을 다시 열지 않는다(Linux는 다시 열어 답이 온다).
+        // (Linux: 출력이 다시 열리지 않아 쓰기가 마감에 걸리고 답이 오지 않음). macOS에서는 이 변이가 살아남는다:
+        // IXON을 꺼도 macOS는 이미 멈춘 출력을 다시 열지 않아 두 경우 모두 마감에 silent로 끝난다. 마감을 넘지
+        // 않는 것은 non-blocking 쓰기가 지킨다.
         #[test]
         fn ctrl_s_before_the_guard_does_not_hold_a_query() {
             let mut t = start("ctrl_s_child", 80);
@@ -1348,12 +1817,11 @@ mod tests {
                 t.send(b"\x11");
             }
             let (lines, _) = t.finish();
-            assert_eq!(lines.len(), 2, "{lines:?}");
-            assert!(
-                lines[0] == r"reply \x1b[2;2R" || lines[0] == "silent",
-                "{lines:?}"
-            );
-            assert_eq!(lines[1], "within the deadline true", "{lines:?}");
+            if cfg!(target_os = "linux") {
+                assert_eq!(lines, [r"reply \x1b[2;2R"]);
+            } else {
+                assert_eq!(lines, ["silent", "within the deadline true"]);
+            }
         }
 
         #[test]
@@ -1361,12 +1829,17 @@ mod tests {
         fn ctrl_s_child() {
             let tty = take_terminal();
             let mut g = tty.raw().unwrap();
-            let start = Instant::now();
-            say(&ask_unanswered(&mut g, CPR, ReplyEnd::Csi(b'R')));
-            say(&format!(
-                "within the deadline {}",
-                start.elapsed() < REPLY_TIMEOUT + LATE_REPLY_DRAIN + Duration::from_millis(700)
-            ));
+            if cfg!(target_os = "linux") {
+                // Output starts again with IXON off, so the reply comes.
+                say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
+            } else {
+                let start = Instant::now();
+                say(&ask_unanswered(&mut g, CPR, ReplyEnd::Csi(b'R')));
+                say(&format!(
+                    "within the deadline {}",
+                    start.elapsed() < REPLY_TIMEOUT + LATE_REPLY_DRAIN + Duration::from_millis(700)
+                ));
+            }
         }
 
         // 이것을 실패시키는 것: guard의 Drop이 터미널 설정을 되돌리지 않는 것(panic으로 끝난 질의 뒤 raw로 남음).
@@ -1388,6 +1861,190 @@ mod tests {
             }));
             say(&format!("panicked {}", caught.is_err()));
             say(&format!("restored {}", mode() == before));
+        }
+
+        /// Fills the terminal's output queue through a second, non-blocking
+        /// open of /dev/tty, as a terminal that stopped reading would leave
+        /// it. The bytes written.
+        fn fill_output() -> usize {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let filler = OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open("/dev/tty")
+                .unwrap();
+            let chunk = [b'x'; 4096];
+            let mut filled = 0;
+            loop {
+                match (&filler).write(&chunk) {
+                    Ok(n) => filled += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return filled,
+                    Err(e) => panic!("{e}"),
+                }
+                assert!(filled < 64 << 20, "the queue never filled");
+            }
+        }
+
+        fn nonblocking(fd: RawFd) -> bool {
+            // SAFETY: `fd` is open; F_GETFL only reads its status flags.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            flags & libc::O_NONBLOCK != 0
+        }
+
+        // A terminal that stopped taking output. 이것을 실패시키는 것: raw 모드에서 쓰기를 non-blocking으로
+        // 두지 않는 것(질의의 쓰기가 터미널이 큐를 비울 때까지 멈춤: 시험이 3초 뒤 master를 읽을 때까지 걸림),
+        // 마감에 남은 출력을 버리지 않는 것(터미널이 나중에 채운 바이트를 모두 받음), 셸과 같은 open file
+        // description을 쓰는 것(셸의 표준 입력에 O_NONBLOCK이 샘), guard가 끝난 뒤 상태 플래그를 되돌리지 않는 것.
+        #[test]
+        fn a_full_output_queue_does_not_hold_a_query() {
+            let mut t = start("full_queue_query_child", 80);
+            let ended = t.wait_unread(Duration::from_secs(3));
+            let (lines, all) = t.finish();
+            assert!(ended, "{lines:?}");
+            assert_eq!(lines.len(), 5, "{lines:?}");
+            assert_eq!(
+                &lines[1..],
+                [
+                    "silent within the deadline true",
+                    "stdin nonblocking false",
+                    "flags restored true",
+                    "restored true"
+                ]
+            );
+            let filled: usize = lines[0].strip_prefix("filled ").unwrap().parse().unwrap();
+            assert!(
+                all.len() < filled,
+                "{} of {filled} reached the terminal",
+                all.len()
+            );
+            assert!(!all.contains(&0x1b), "no request reached the terminal");
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn full_queue_query_child() {
+            let tty = take_terminal();
+            let before = mode();
+            let flags = {
+                // SAFETY: the terminal's descriptor is open.
+                unsafe { libc::fcntl(tty.file.as_raw_fd(), libc::F_GETFL) }
+            };
+            {
+                let mut g = tty.raw().unwrap();
+                say(&format!("filled {}", fill_output()));
+                let start = Instant::now();
+                let answer = ask_unanswered(&mut g, CPR, ReplyEnd::Csi(b'R'));
+                say(&format!(
+                    "{answer} within the deadline {}",
+                    start.elapsed() < REPLY_TIMEOUT + LATE_REPLY_DRAIN + Duration::from_millis(700)
+                ));
+                say(&format!("stdin nonblocking {}", nonblocking(0)));
+            }
+            say(&format!(
+                "flags restored {}",
+                // SAFETY: as above.
+                unsafe { libc::fcntl(tty.file.as_raw_fd(), libc::F_GETFL) } == flags
+            ));
+            say(&format!("restored {}", mode() == before));
+        }
+
+        // A terminal that is slow, not stuck: the query waits for room and
+        // gets through. 이것을 실패시키는 것: 쓸 자리를 읽을 수 있음으로 기다리는 것(select의 읽기 집합; 요청이
+        // 끝내 나가지 않아 마감에 silent).
+        #[test]
+        fn a_queue_that_drains_in_time_lets_the_query_through() {
+            let mut t = start("draining_queue_child", 80);
+            assert!(!t.wait_unread(Duration::from_millis(300)));
+            t.expect(CPR);
+            t.send(b"\x1b[7;1R");
+            let (lines, _) = t.finish();
+            assert_eq!(lines, [r"reply \x1b[7;1R"]);
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn draining_queue_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            fill_output();
+            say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
+        }
+
+        // 이것을 실패시키는 것: Terminal::write가 마감 없이 막히는 것, 마감에 걸린 쓰기 뒤에도 질의하는 것(터미널이
+        // 받지 않는 요청을 또 씀).
+        #[test]
+        fn a_full_output_queue_does_not_hold_a_write() {
+            let mut t = start("full_queue_write_child", 80);
+            let ended = t.wait_unread(Duration::from_secs(3));
+            let (lines, _) = t.finish();
+            assert!(ended, "{lines:?}");
+            assert_eq!(
+                lines,
+                ["timed out within the deadline true", "silent at once true"]
+            );
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn full_queue_write_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            fill_output();
+            let start = Instant::now();
+            let kind = g.write(b"abc").err().map(|e| e.kind());
+            say(&format!(
+                "{} within the deadline {}",
+                if kind == Some(std::io::ErrorKind::TimedOut) {
+                    "timed out"
+                } else {
+                    "written"
+                },
+                start.elapsed() < WRITE_TIMEOUT + Duration::from_millis(700)
+            ));
+            let start = Instant::now();
+            let answer = ask_unanswered(&mut g, CPR, ReplyEnd::Csi(b'R'));
+            say(&format!(
+                "{answer} at once {}",
+                start.elapsed() < LATE_REPLY_DRAIN
+            ));
+        }
+
+        // Two threads ask for a guard at the same moment, many times: one
+        // gets it. 이것을 실패시키는 것: 자리 잡기를 읽기와 쓰기 둘로 나누는 것(두 스레드가 함께 비어 있음을
+        // 보고 둘 다 guard를 얻음; 확률적으로 잡히며, 측정은 PR 본문).
+        #[test]
+        fn two_threads_get_one_guard() {
+            let t = start("two_threads_child", 80);
+            let (lines, _) = t.finish();
+            assert_eq!(lines, ["rounds 200, not exactly one guard 0"]);
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn two_threads_child() {
+            let tty = take_terminal();
+            let mut bad = 0;
+            for _ in 0..200 {
+                let start = std::sync::Barrier::new(2);
+                let tried = std::sync::Barrier::new(2);
+                let got = std::thread::scope(|s| {
+                    let one = || {
+                        start.wait();
+                        let guard = tty.raw();
+                        // Both hold what they got until both have tried.
+                        tried.wait();
+                        guard.is_ok()
+                    };
+                    let a = s.spawn(one);
+                    let b = s.spawn(one);
+                    [a.join().unwrap(), b.join().unwrap()]
+                });
+                if got.iter().filter(|ok| **ok).count() != 1 {
+                    bad += 1;
+                }
+            }
+            say(&format!("rounds 200, not exactly one guard {bad}"));
         }
 
         // 이것을 실패시키는 것: 0칸(모름)을 Some(0)으로 알리는 것, 다른 값을 읽는 것.
