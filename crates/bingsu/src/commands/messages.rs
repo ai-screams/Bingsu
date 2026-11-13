@@ -101,23 +101,23 @@ const EN: [(MsgId, &str); 36] = [
     ),
     (
         MsgId::NoExePath,
-        "bingsu: could not find the path you ran bingsu from; using the resolved executable path. Check your PATH and open a new shell or evaluate your bingsu init line again",
+        "bingsu: could not find the path you ran bingsu from; using the resolved executable path. Run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::Tamperable,
-        "bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions, then open a new shell or evaluate your bingsu init line again",
+        "bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions (bingsu doctor shows which folder), then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::TamperUnknown,
-        "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists, then open a new shell or evaluate your bingsu init line again",
+        "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists (bingsu doctor shows what could not be read), then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::NoRuntimeRoot,
-        "bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions, then open a new shell or evaluate your bingsu init line again",
+        "bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions (bingsu doctor shows the folder and why), then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::UnconfirmedRoot,
-        "bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Check the path and its permissions, then open a new shell or evaluate your bingsu init line again",
+        "bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Run: bingsu doctor, check the path and its permissions, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::ShapeOnlyConfigRoot,
@@ -149,7 +149,7 @@ const EN: [(MsgId, &str); 36] = [
     ),
     (
         MsgId::NoSandbox,
-        "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Check that your system permits seccomp filters, then open a new shell",
+        "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor to see the filter state, then open a new shell",
     ),
     (
         MsgId::ColdInitUnfinished,
@@ -197,15 +197,15 @@ const EN: [(MsgId, &str); 36] = [
     ),
     (
         MsgId::NoticeBadArgs,
-        "bingsu: the shell hook and the bingsu program do not match, so a minimal prompt is drawn. Open a new shell or evaluate your bingsu init line again",
+        "bingsu: the shell hook and the bingsu program do not match, so a minimal prompt is drawn. Run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::NoticeInternal,
-        "bingsu: the prompt hit an internal error, so a minimal prompt is drawn. Open a new shell",
+        "bingsu: the prompt hit an internal error, so a minimal prompt is drawn. Run: bingsu doctor, then open a new shell",
     ),
     (
         MsgId::NoticeRuntimeRoot,
-        "bingsu: the runtime folder changed, so the prompt runs without saved state. Open a new shell or evaluate your bingsu init line again",
+        "bingsu: the runtime folder changed, so the prompt runs without saved state. Run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
     ),
     (
         MsgId::NoticeOversize,
@@ -229,11 +229,11 @@ const EN: [(MsgId, &str); 36] = [
     ),
     (
         MsgId::NoticeGeneric,
-        "bingsu: a status notice is waiting. Run: bingsu config check",
+        "bingsu: this bingsu does not know the prompt status it got, so a notice cannot be shown. The hook and the program may be from different versions: run bingsu doctor",
     ),
     (
         MsgId::NoRecord,
-        "bingsu: the prompt gave no usable answer, so a minimal prompt is drawn. Open a new shell or evaluate your bingsu init line again",
+        "bingsu: the prompt gave no answer in time, so a minimal prompt is drawn. If this keeps happening, run: bingsu doctor",
     ),
 ];
 
@@ -247,11 +247,201 @@ pub fn en(id: MsgId) -> &'static str {
 mod tests {
     use super::*;
 
-    // 이것을 실패시키는 것: 아직 없는 doctor 명령을 고정 안내에 다시 넣는 것.
+    /// The words the user sees, id by id, in full. A change of a message
+    /// is made here too, on purpose: the other tests read the table itself.
+    const PINNED: [(MsgId, &str); 36] = [
+        (
+            MsgId::UnsupportedShell,
+            "bingsu: unsupported shell. Supported: zsh, bash, fish",
+        ),
+        (
+            MsgId::NoHome,
+            "bingsu: cannot read the account home folder; prompt not installed",
+        ),
+        (
+            MsgId::NoExePath,
+            "bingsu: could not find the path you ran bingsu from; using the resolved executable path. Run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
+        ),
+        (
+            MsgId::Tamperable,
+            "bingsu: the bingsu executable or a folder above it can be changed by another user. Check its ownership and write permissions (bingsu doctor shows which folder), then open a new shell or evaluate your bingsu init line again",
+        ),
+        (
+            MsgId::TamperUnknown,
+            "bingsu: could not confirm that the bingsu executable and the folders above it are safe from other users. Check their ownership, write permissions and access lists (bingsu doctor shows what could not be read), then open a new shell or evaluate your bingsu init line again",
+        ),
+        (
+            MsgId::NoRuntimeRoot,
+            "bingsu: no usable runtime folder; the prompt runs without saved state. Check your runtime or cache folder permissions (bingsu doctor shows the folder and why), then open a new shell or evaluate your bingsu init line again",
+        ),
+        (
+            MsgId::UnconfirmedRoot,
+            "bingsu: a settings, state or log folder path could not be confirmed; that folder is not used. Run: bingsu doctor, check the path and its permissions, then open a new shell or evaluate your bingsu init line again",
+        ),
+        (
+            MsgId::ShapeOnlyConfigRoot,
+            "bingsu: could not confirm that the settings folder and the folders above it are safe from other users; its colors and layout apply, but nothing in it runs",
+        ),
+        (
+            MsgId::BashTooOld,
+            "bingsu: bash 5.1 or newer is required; this shell keeps its own prompt. Upgrade bash, then open a new bash",
+        ),
+        (
+            MsgId::LateHookZsh,
+            "bingsu: another prompt hook runs after bingsu; put the bingsu init line last in your .zshrc",
+        ),
+        (
+            MsgId::LateHookBash,
+            "bingsu: another prompt hook runs after bingsu; put the bingsu init line last in your .bashrc",
+        ),
+        (
+            MsgId::TrustInvalid,
+            "bingsu: settings verification failed; configured commands are paused. Run: bingsu config check, then bingsu reload",
+        ),
+        (
+            MsgId::TrustMismatch,
+            "bingsu: saved settings and their verification do not match; configured commands are paused. Run: bingsu config check, then bingsu reload",
+        ),
+        (
+            MsgId::TrustClock,
+            "bingsu: settings verification time could not be confirmed; configured commands are paused. Run: bingsu reload",
+        ),
+        (
+            MsgId::NoSandbox,
+            "bingsu: the prompt could not start its system call filter, so it draws a minimal prompt. Run: bingsu doctor to see the filter state, then open a new shell",
+        ),
+        (
+            MsgId::ColdInitUnfinished,
+            "bingsu: reading your settings did not finish in time; the prompt starts with the built-in look and takes your settings when they are ready",
+        ),
+        (
+            MsgId::ColdInitInvalid,
+            "bingsu: your settings are not valid, so the prompt starts with the built-in look. Run: bingsu config check",
+        ),
+        (
+            MsgId::ReloadInvalid,
+            "bingsu: the settings are not valid, so nothing changed and the prompt keeps the last good settings. Run: bingsu config check",
+        ),
+        (
+            MsgId::ReloadBusy,
+            "bingsu: another refresh is running, so nothing changed. Try again in a moment",
+        ),
+        (
+            MsgId::ReloadIncomplete,
+            "bingsu: the settings could not be read to the end, so nothing changed. Run: bingsu config check",
+        ),
+        (
+            MsgId::ReloadOverCap,
+            "bingsu: the settings need more file reads than one refresh may make, so nothing is published. Use fewer entries in conf.d or extends",
+        ),
+        (
+            MsgId::DeadlineReached,
+            "bingsu: did not finish in time; nothing more was changed",
+        ),
+        (
+            MsgId::UseSavedUnfinished,
+            "bingsu: your choice was saved, but applying it is not finished; the next prompt applies it, or run: bingsu reload",
+        ),
+        (
+            MsgId::UseSavedInvalid,
+            "bingsu: your choice was saved, but the settings it gives are not valid and the prompt keeps the last good settings. Run: bingsu config check",
+        ),
+        (
+            MsgId::RootsFromEnvironment,
+            "bingsu: the folders were found from the environment now, not from what init pinned in this shell, so they may differ from the ones your prompt uses. Run: eval \"$(bingsu init <shell>)\" again",
+        ),
+        (
+            MsgId::UseShapeOnlyRoot,
+            "bingsu: not using {path}: it is inside the settings folder, which could not be confirmed safe, so nothing in it runs. Run: bingsu config check",
+        ),
+        (
+            MsgId::NoticeBadArgs,
+            "bingsu: the shell hook and the bingsu program do not match, so a minimal prompt is drawn. Run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
+        ),
+        (
+            MsgId::NoticeInternal,
+            "bingsu: the prompt hit an internal error, so a minimal prompt is drawn. Run: bingsu doctor, then open a new shell",
+        ),
+        (
+            MsgId::NoticeRuntimeRoot,
+            "bingsu: the runtime folder changed, so the prompt runs without saved state. Run: bingsu doctor, then open a new shell or evaluate your bingsu init line again",
+        ),
+        (
+            MsgId::NoticeOversize,
+            "bingsu: the prompt grew too large, so a minimal prompt is drawn. Use a shorter layout",
+        ),
+        (
+            MsgId::NoticeTrustUnverified,
+            "bingsu: settings are not verified yet; configured commands are paused. Run: bingsu reload",
+        ),
+        (
+            MsgId::NoticeTrustExpired,
+            "bingsu: settings verification is out of date; configured commands are paused. Run: bingsu reload",
+        ),
+        (
+            MsgId::NoticeConfigLastGood,
+            "bingsu: your settings are not valid, so the prompt keeps the last good settings. Run: bingsu config check",
+        ),
+        (
+            MsgId::NoticeConfigDefault,
+            "bingsu: your settings are not valid, so the prompt uses the built-in look. Run: bingsu config check",
+        ),
+        (
+            MsgId::NoticeGeneric,
+            "bingsu: this bingsu does not know the prompt status it got, so a notice cannot be shown. The hook and the program may be from different versions: run bingsu doctor",
+        ),
+        (
+            MsgId::NoRecord,
+            "bingsu: the prompt gave no answer in time, so a minimal prompt is drawn. If this keeps happening, run: bingsu doctor",
+        ),
+    ];
+
+    // 이것을 실패시키는 것: 표의 문구를 이 표 밖에서 몰래 바꾸는 것(사용자에게 보이는 글이 우연히 바뀜), 표가 이
+    // 표와 한 id라도 다른 것.
     #[test]
-    fn guidance_uses_available_commands() {
+    fn every_message_is_pinned_in_full() {
+        assert_eq!(PINNED.len(), ALL.len());
+        for (id, text) in PINNED {
+            assert_eq!(en(id), text, "{id:?}");
+        }
         for id in ALL {
-            assert!(!en(id).contains("doctor"), "{id:?}");
+            assert!(PINNED.iter().any(|(i, _)| *i == id), "{id:?} is not pinned");
+        }
+    }
+
+    // `bingsu doctor` answers environment and installation questions only: the lines that name it are these,
+    // and no other line sends the user there. 이것을 실패시키는 것: 설정 문제 줄에 `doctor`가 끼거나, 환경 문제 줄에서 빠지는 것.
+    #[test]
+    fn only_environment_messages_point_to_doctor() {
+        use MsgId::*;
+        let want = [
+            NoExePath,
+            Tamperable,
+            TamperUnknown,
+            NoRuntimeRoot,
+            UnconfirmedRoot,
+            NoSandbox,
+            NoticeBadArgs,
+            NoticeInternal,
+            NoticeRuntimeRoot,
+            NoticeGeneric,
+            NoRecord,
+        ];
+        let got: Vec<MsgId> = ALL
+            .into_iter()
+            .filter(|id| en(*id).contains("bingsu doctor"))
+            .collect();
+        assert_eq!(got, want);
+        // The command exists: the words after "Run: " or "run " name `bingsu doctor` exactly.
+        for id in got {
+            let t = en(id);
+            assert!(
+                t.contains("Run: bingsu doctor")
+                    || t.contains("run bingsu doctor")
+                    || t.contains("bingsu doctor shows")
+                    || t.contains("run: bingsu doctor"),
+                "{id:?}: {t}"
+            );
         }
     }
 
