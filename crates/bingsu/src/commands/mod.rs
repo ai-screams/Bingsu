@@ -102,6 +102,13 @@ pub(crate) mod runtime_root;
 #[cfg(unix)]
 mod setup;
 #[cfg(unix)]
+#[allow(unsafe_code)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "config edit calls it in the next change")
+)]
+mod signal_guard;
+#[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code, reason = "N2 connects publication"))]
 pub(crate) mod snapshot_store;
 #[cfg(unix)]
