@@ -51,6 +51,41 @@ use std::path::{Path, PathBuf};
 /// The built-in source's key: no file has inode 0.
 pub const BUILTIN_KEY: FileKey = FileKey { dev: 0, ino: 0 };
 
+/// The two names of the settings folder's own file, TOML first. Both stand
+/// in one place: `config edit` opens the one the reader reads.
+pub(crate) fn root_names(root: &Path) -> [PathBuf; 2] {
+    [root.join("config.toml"), root.join("config.json")]
+}
+
+/// Which of a place's two names is its file, by the reader's rule: one name
+/// present is the file, both present are an error (E308) and neither is
+/// read, none present leaves the place empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TwoNames {
+    Neither,
+    First,
+    Second,
+    Both,
+}
+
+/// Picks the file of a place from its two names. Both names are looked at,
+/// first then second, whatever the first shows: the helper observes each
+/// one, and its call count is part of its budget.
+pub(crate) fn pick_name(names: [&Path; 2], present: impl Fn(&Path) -> bool) -> TwoNames {
+    let (first, second) = (present(names[0]), present(names[1]));
+    match (first, second) {
+        (false, false) => TwoNames::Neither,
+        (true, false) => TwoNames::First,
+        (false, true) => TwoNames::Second,
+        (true, true) => TwoNames::Both,
+    }
+}
+
+/// A name counts as present when anything is there, a dangling link too.
+pub(crate) fn name_present(p: &Path) -> bool {
+    !std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// What `init` pinned and who the user is.
 pub struct Places {
     /// Canonical and written roots with checked parent/link/target evidence.
@@ -616,7 +651,7 @@ impl Loader {
         let mut paths: Vec<Vec<PathBuf>> = Vec::new();
         match &self.record {
             Some(r) => paths.push(vec![r.path.clone()]),
-            None => paths.push(vec![root.join("config.toml"), root.join("config.json")]),
+            None => paths.push(root_names(&root).to_vec()),
         }
         let listed = (|| -> std::io::Result<Listing> {
             let meter = &mut *self.meter.borrow_mut();
@@ -670,25 +705,21 @@ impl Loader {
             // 이것을 실패시키는 것: 없는 이름의 부재를 관찰하지 않는 것(새로 생긴 파일을 helper가 놓침), 둘 다 있을
             // 때 하나를 고르는 것.
             let p = if let [first, second] = place.as_slice() {
-                let absent = |p: &Path| {
-                    std::fs::symlink_metadata(p)
-                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-                };
-                match (absent(first), absent(second)) {
-                    (true, true) => {
+                match pick_name([first, second], name_present) {
+                    TwoNames::Neither => {
                         self.observe_absence(first);
                         self.observe_absence(second);
                         continue;
                     }
-                    (false, true) => {
+                    TwoNames::First => {
                         self.observe_absence(second);
                         first.clone()
                     }
-                    (true, false) => {
+                    TwoNames::Second => {
                         self.observe_absence(first);
                         second.clone()
                     }
-                    (false, false) => {
+                    TwoNames::Both => {
                         self.two_formats(&mut out, first, second);
                         continue;
                     }
@@ -1320,6 +1351,88 @@ mod tests {
                 "{d:?}"
             );
             assert!(!applied_names(&r).iter().any(|n| n == toml || n == json));
+        }
+    }
+
+    // 이것을 실패시키는 것: 네 경우의 답을 바꾸는 것, 첫 이름이 있을 때 둘째 이름을 보지 않는 것(helper가
+    // 다른 형식의 파일이 새로 생긴 것을 관찰하지 못하고 호출 수가 바뀜), 둘째를 먼저 보는 것.
+    #[test]
+    fn the_name_rule_looks_at_both_names_in_order() {
+        let (a, b) = (Path::new("/c/config.toml"), Path::new("/c/config.json"));
+        for (has, want) in [
+            (&[][..], TwoNames::Neither),
+            (&[a][..], TwoNames::First),
+            (&[b][..], TwoNames::Second),
+            (&[a, b][..], TwoNames::Both),
+        ] {
+            let seen = std::cell::RefCell::new(Vec::new());
+            let got = pick_name([a, b], |p| {
+                seen.borrow_mut().push(p.to_path_buf());
+                has.contains(&p)
+            });
+            assert_eq!(got, want, "{has:?}");
+            assert_eq!(*seen.borrow(), [a, b], "{has:?}");
+        }
+    }
+
+    // 이것을 실패시키는 것: 끊긴 링크를 없는 이름으로 치는 것(링크를 따라가는 stat), 없는 이름을 있다고 하는 것.
+    #[test]
+    fn a_name_is_present_when_anything_is_there() {
+        let fx = Fx::new("name-present");
+        let file = fx.put(&fx.root.join("config.toml"), "");
+        let dangling = fx.root.join("config.json");
+        std::os::unix::fs::symlink(fx.base.join("nowhere"), &dangling).unwrap();
+        assert!(name_present(&file));
+        assert!(name_present(&dangling));
+        assert!(!name_present(&fx.root.join("config.local.toml")));
+    }
+
+    // `config edit`가 여는 파일은 로더가 읽는 파일이다: 실제 폴더에서 네 경우(TOML만, JSON만, 둘 다, 없음)를
+    // 만들고 둘의 답을 견준다. 이것을 실패시키는 것: 한쪽만 이름·있음 판정·규칙을 바꾸는 것.
+    #[test]
+    fn config_edit_opens_the_file_the_loader_reads() {
+        use crate::commands::config_edit::{Place, place};
+        for (toml, json) in [(true, false), (false, true), (true, true), (false, false)] {
+            let fx = Fx::new(&format!("edit-agrees-{toml}-{json}"));
+            let [t, j] = root_names(&fx.root);
+            if toml {
+                fx.put(&t, "");
+            }
+            if json {
+                fx.put(&j, "{}");
+            }
+            let roots = fx.loader(None).roots(b"");
+            let loaded: Vec<(bool, String)> = roots
+                .iter()
+                .filter_map(|r| match r {
+                    Root::File(m) => {
+                        Some((false, String::from_utf8_lossy(&m.display).into_owned()))
+                    }
+                    Root::TwoFormats { .. } => Some((true, String::new())),
+                    Root::Read(_) => None,
+                })
+                .collect();
+            let edit = place(&fx.root, name_present);
+            match (toml, json) {
+                (true, false) => {
+                    assert_eq!(loaded, [(false, t.display().to_string())]);
+                    assert_eq!(edit, Place::One(t));
+                }
+                (false, true) => {
+                    assert_eq!(loaded, [(false, j.display().to_string())]);
+                    assert_eq!(edit, Place::One(j));
+                }
+                (true, true) => {
+                    assert_eq!(loaded, [(true, String::new())]);
+                    assert_eq!(edit, Place::Both(t, j));
+                }
+                (false, false) => {
+                    // The loader reads nothing; edit opens the default name,
+                    // which it then finds missing.
+                    assert_eq!(loaded, []);
+                    assert_eq!(edit, Place::One(t));
+                }
+            }
         }
     }
 
