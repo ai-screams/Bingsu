@@ -368,7 +368,7 @@ fn read_pin(c: &Ctx) -> Pin {
         let path = roots.runtime.map(|r| r.path).unwrap_or_default();
         return Pin::Matches(path);
     }
-    let Some(pin) = pinned::runtime_pin(bytes) else {
+    let Some(pin) = pinned::runtime_pin(bytes, &c.user.pw.home) else {
         return Pin::Garbled;
     };
     match std::fs::symlink_metadata(&pin.path) {
@@ -631,9 +631,10 @@ fn parse(args: &[OsString]) -> Option<bool> {
 /// The JSON document of a run: the same rows as the text, as data. A
 /// finding's `fix` is its diagnostic code. No value of the environment is in
 /// a `Finding`, so none can be here.
-pub(super) fn render_json(rows: &[(&Item, Finding)]) -> String {
+pub(super) fn render_json(rows: &[(&Item, Finding)], error: Option<&str>) -> String {
     use bingsu_core::diag_json::{SCHEMA, Writer};
-    let code = exit_of(rows);
+    // A run that could not make its checks is invalid too (`error` says why).
+    let code = if error.is_some() { 1 } else { exit_of(rows) };
     let mut w = Writer::new();
     w.begin_object();
     w.key("schema").number(u64::from(SCHEMA));
@@ -653,6 +654,7 @@ pub(super) fn render_json(rows: &[(&Item, Finding)]) -> String {
     }
     w.end_array();
     w.key("exit_code").number(u64::from(code));
+    w.key("error").opt_string(error);
     w.end_object();
     w.finish()
 }
@@ -664,11 +666,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
     };
     let Some(user) = User::current() else {
         if json {
-            return super::config_inspect::fail_json(
-                "doctor",
-                "the account or its home folder cannot be read",
-                EXIT_FAILED,
-            );
+            let doc = render_json(&[], Some("the account or its home folder cannot be read"));
+            let _ = ctx::print(&doc);
+            return ctx::code(EXIT_FAILED);
         }
         eprintln!("bingsu doctor: the account or its home folder cannot be read");
         return ctx::code(EXIT_FAILED);
@@ -680,7 +680,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
     };
     let rows: Vec<(&Item, Finding)> = ITEMS.iter().map(|i| (i, (i.run)(&c))).collect();
     let out = if json {
-        render_json(&rows)
+        render_json(&rows, None)
     } else {
         render(&rows)
     };
@@ -886,6 +886,16 @@ mod tests {
         assert!(
             t.contains("result: 1 ok, 1 warning(s), 0 failed, 0 unknown, 0 skipped"),
             "{t}"
+        );
+    }
+
+    // 이것을 실패시키는 것: 점검을 못 한 실행의 JSON에서 `items`·`exit_code`·`error`를 빼거나 result를 valid로 두는 것.
+    #[test]
+    fn a_run_that_could_not_check_still_has_the_whole_shape() {
+        let doc = render_json(&[], Some("cannot read the account"));
+        assert_eq!(
+            doc,
+            "{\"schema\":1,\"command\":\"doctor\",\"result\":\"invalid\",\"items\":[],\"exit_code\":1,\"error\":\"cannot read the account\"}\n"
         );
     }
 

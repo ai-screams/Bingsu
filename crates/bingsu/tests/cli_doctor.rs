@@ -460,3 +460,89 @@ fn a_wrong_format_exits_2() {
         assert!(o.stdout.is_empty(), "{args:?}");
     }
 }
+
+// A value that is not init's gives no folder path and no "gone" verdict: the check says it cannot read the value.
+// 이것을 실패시키는 것: 전체 해석이 실패한 BINGSU_ROOTS에서 런타임 폴더 경로를 뽑아 "사라짐"·"바뀜"으로 판정하거나 그 경로를 출력하는 것.
+#[test]
+fn a_value_that_is_not_inits_gives_no_path() {
+    let e = Env::new("cli_doctor", "notinits");
+    let mut words = e.pinned_words();
+    // Right framing and every word valid, but the home is another user's: not what init wrote for this account.
+    for w in &mut words {
+        if w.starts_with(b"--home=") {
+            *w = b"--home=/nonexistent/other-user".to_vec();
+        }
+    }
+    let o = e.cmd_pinned(&["doctor"], &frame(&words)).output().unwrap();
+    let t = text(&o.stdout);
+    let l = line(&t, "pinned folders");
+    assert!(
+        l.starts_with("  fail") && l.contains("E604") && l.contains("not a value init wrote"),
+        "{t}"
+    );
+    assert!(
+        !t.contains(e.base.to_str().unwrap()) || !l.contains(e.base.to_str().unwrap()),
+        "{l}"
+    );
+    assert!(!l.contains("gone") && !l.contains("inode"), "{l}");
+    let (_, doc) = {
+        let mut c = e.cmd_pinned(&["doctor", "--format", "json"], &frame(&words));
+        let o = c.output().unwrap();
+        (o.status.code(), text(&o.stdout))
+    };
+    assert!(!doc.contains("run/bingsu"), "{doc}");
+}
+
+// The doctor document says invalid exactly when a check failed or none could be made.
+// 이것을 실패시키는 것: fail 항목이 있는데 valid·종료 0을 받는 스키마, 점검을 못 한 문서가 items·exit_code 없이 통과하는 것,
+// 일반 실패 문서가 doctor 이름으로 통과하는 것.
+#[test]
+fn the_schema_ties_result_and_exit_code_to_the_items() {
+    let item = |status: &str| {
+        format!(
+            "{{\"id\":\"x\",\"title\":\"x\",\"status\":\"{status}\",\"text\":\"t\",\"fix\":null}}"
+        )
+    };
+    let doc = |result: &str, items: &str, code: u8, error: &str| {
+        format!(
+            "{{\"schema\":1,\"command\":\"doctor\",\"result\":\"{result}\",\"items\":[{items}],\"exit_code\":{code},\"error\":{error}}}"
+        )
+    };
+    let ok = [
+        doc("valid", &item("ok"), 0, "null"),
+        doc(
+            "valid",
+            &format!("{},{}", item("warn"), item("unknown")),
+            0,
+            "null",
+        ),
+        doc(
+            "invalid",
+            &format!("{},{}", item("ok"), item("fail")),
+            1,
+            "null",
+        ),
+        doc("invalid", "", 1, "\"cannot read the account\""),
+    ];
+    let bad = [
+        doc("valid", &item("fail"), 0, "null"),
+        doc(
+            "valid",
+            &format!("{},{}", item("ok"), item("fail")),
+            1,
+            "null",
+        ),
+        doc("invalid", &item("fail"), 0, "null"),
+        doc("invalid", &item("ok"), 1, "null"),
+        doc("valid", "", 0, "\"cannot read the account\""),
+        r#"{"schema":1,"command":"doctor","result":"invalid","diagnostics":[],"error":"x"}"#
+            .to_owned(),
+        r#"{"schema":1,"command":"doctor","result":"invalid","items":[],"exit_code":1}"#.to_owned(),
+    ];
+    for d in &ok {
+        json_schema::validate(None, &[d]).unwrap_or_else(|e| panic!("{e}\n{d}"));
+    }
+    for d in &bad {
+        assert!(json_schema::validate(None, &[d]).is_err(), "accepted: {d}");
+    }
+}

@@ -268,7 +268,7 @@
       "description": "bingsu doctor: one item per check, in the order the text shows them. `fix` is the diagnostic code that explains the way out (bingsu help <code>), null when there is nothing to do. `result` is invalid when a check failed (exit 1); a warning or an unknown is not a failure.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "command", "result", "items", "exit_code"],
+      "required": ["schema", "command", "result", "items", "exit_code", "error"],
       "properties": {
         "schema": { "const": 1 },
         "command": { "const": "doctor" },
@@ -288,8 +288,28 @@
             }
           }
         },
-        "exit_code": { "enum": [0, 1] }
-      }
+        "exit_code": { "enum": [0, 1] },
+        "error": { "description": "Why no check could be made (the account could not be read), else null. Then items is empty.", "type": ["string", "null"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "error": { "type": "string" } }, "required": ["error"] },
+              {
+                "properties": {
+                  "items": {
+                    "contains": { "properties": { "status": { "const": "fail" } }, "required": ["status"] }
+                  }
+                },
+                "required": ["items"]
+              }
+            ]
+          },
+          "then": { "properties": { "result": { "const": "invalid" }, "exit_code": { "const": 1 } } },
+          "else": { "properties": { "result": { "const": "valid" }, "exit_code": { "const": 0 } } }
+        }
+      ]
     },
     "failure": {
       "description": "A run that could not give its result: the settings have errors (listed in diagnostics) or could not be read at all (error). The exit code is the same as in text mode.",
@@ -298,7 +318,7 @@
       "required": ["schema", "command", "result", "diagnostics", "error"],
       "properties": {
         "schema": { "const": 1 },
-        "command": { "enum": ["explain", "config-check", "doctor"] },
+        "command": { "enum": ["explain", "config-check"] },
         "result": { "const": "invalid" },
         "diagnostics": { "$ref": "#/$defs/diagnostics" },
         "error": { "type": ["string", "null"] }
