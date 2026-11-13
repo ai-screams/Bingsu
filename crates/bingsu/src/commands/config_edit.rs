@@ -56,12 +56,37 @@ fn editor_outcome(result: std::io::Result<std::process::ExitStatus>) -> Result<(
     }
 }
 
-/// The file to open: the file `config use` chose when there is one, else
-/// `config.toml` in the settings folder.
-fn target(selection: &Selection, written_root: &std::path::Path) -> PathBuf {
+/// Which settings file stands in the one place `config.toml` / `config.json`
+/// of the settings folder, by the rule the reader uses: one name present is
+/// the file, two present are an error (E308), none present is the default
+/// name, which the caller finds missing.
+#[derive(Debug, PartialEq, Eq)]
+enum Place {
+    One(PathBuf),
+    Both(PathBuf, PathBuf),
+}
+
+fn place(root: &std::path::Path, present: impl Fn(&std::path::Path) -> bool) -> Place {
+    let (toml, json) = (root.join("config.toml"), root.join("config.json"));
+    match (present(&toml), present(&json)) {
+        (true, true) => Place::Both(toml, json),
+        (false, true) => Place::One(json),
+        _ => Place::One(toml),
+    }
+}
+
+/// A name counts as present when anything is there, a dangling link too, as
+/// the reader counts it.
+fn is_present(p: &std::path::Path) -> bool {
+    !std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// The file to open: the file `config use` chose when there is one, else the
+/// file of the settings place.
+fn target(selection: &Selection, written_root: &std::path::Path) -> Place {
     match selection {
-        Selection::Chosen(r) => r.path.clone(),
-        _ => written_root.join("config.toml"),
+        Selection::Chosen(r) => Place::One(r.path.clone()),
+        _ => place(written_root, is_present),
     }
 }
 
@@ -84,7 +109,17 @@ pub fn run(exe: &OsStr) -> ExitCode {
         );
         return ctx::code(EXIT_UNFINISHED);
     }
-    let file = target(&inspected.selection, &inspected.root_written);
+    let file = match target(&inspected.selection, &inspected.root_written) {
+        Place::One(f) => f,
+        Place::Both(a, b) => {
+            eprintln!(
+                "bingsu: {} and {} are both here, so no file is opened. Keep one of them (bingsu help E308)",
+                ctx::show(&a),
+                ctx::show(&b)
+            );
+            return ctx::code(EXIT_FAILED);
+        }
+    };
     if let Selection::Unusable(why) = &inspected.selection {
         eprintln!(
             "bingsu: the file chosen with `config use` cannot be used ({why}); opening {}",
@@ -197,6 +232,24 @@ mod tests {
 
     // 이것을 실패시키는 것: 기다림 오류(ECHILD: 편집기가 자동 회수됨)를 편집기의 정상 종료로 읽고 적용하는 것,
     // 신호로 끝났거나 0이 아닌 상태를 적용하는 것, 오류 문구에서 "nothing was applied"를 빼는 것.
+    // 이것을 실패시키는 것: json만 있을 때 `config.toml`을 고르는 것, 둘 다 있을 때 하나를 고르는 것, 둘 다 없을 때
+    // 기본 이름을 `config.toml`이 아닌 것으로 하는 것.
+    #[test]
+    fn the_place_is_picked_by_the_readers_rule() {
+        let root = std::path::Path::new("/c");
+        let has = |names: &'static [&'static str]| {
+            move |p: &std::path::Path| names.iter().any(|n| p == root.join(n))
+        };
+        let (t, j) = (root.join("config.toml"), root.join("config.json"));
+        assert_eq!(place(root, has(&["config.toml"])), Place::One(t.clone()));
+        assert_eq!(place(root, has(&["config.json"])), Place::One(j.clone()));
+        assert_eq!(
+            place(root, has(&["config.toml", "config.json"])),
+            Place::Both(t.clone(), j)
+        );
+        assert_eq!(place(root, has(&[])), Place::One(t));
+    }
+
     #[test]
     fn only_a_successful_end_can_be_applied() {
         assert_eq!(editor_outcome(Ok(ExitStatus::from_raw(0))), Ok(()));

@@ -197,6 +197,46 @@ fn no_settings_file_means_no_editor_and_no_new_file() {
     assert!(!f.e.config_dir().join("config.toml").exists());
 }
 
+// 이것을 실패시키는 것: `config.json`만 있는 사용자에게 "파일 없음"을 말하거나 `config.toml`을 만드는 것(그 곁에 두
+// 형식이 생겨 다음 읽기가 E308로 멈춤), json 파일을 편집기에 넘기지 않는 것, json 저장을 JSON으로 읽지 않는 것.
+#[test]
+fn a_json_only_place_opens_the_json_file() {
+    let f = Fixture::new("json-only");
+    std::fs::remove_file(f.e.config_dir().join("config.toml")).unwrap();
+    f.e.put_config("config.json", "{\"icons\": \"ascii\"}\n");
+    let editor = f.script.to_str().unwrap().to_owned();
+    let (code, stdout, stderr) = out(&f.run("{\"icons\": \"unicode\"}\n", &editor));
+    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    let json = f.e.config_dir().join("config.json");
+    assert_eq!(
+        std::fs::read_to_string(&json).unwrap(),
+        "{\"icons\": \"unicode\"}\n"
+    );
+    assert!(!f.e.config_dir().join("config.toml").exists());
+    let log = std::fs::read_to_string(&f.log).unwrap();
+    assert!(log.starts_with(&format!("{}\n", json.display())), "{log}");
+    // A JSON save that does not parse is refused like a TOML one (E106).
+    let (code, stdout, _) = out(&f.run("{not json", &editor));
+    assert_eq!(code, Some(1), "{stdout}");
+    assert!(stdout.contains("E106"), "{stdout}");
+}
+
+// 이것을 실패시키는 것: 두 이름이 다 있는데 하나를 열거나 편집기를 띄우는 것, 안내에 두 파일 이름과 E308을 빼는 것.
+#[test]
+fn both_formats_in_one_place_open_nothing() {
+    let f = Fixture::new("both");
+    f.e.put_config("config.json", "{}\n");
+    let editor = f.script.to_str().unwrap().to_owned();
+    let (code, stdout, stderr) = out(&f.run(OTHER, &editor));
+    assert_eq!((code, stdout.as_str()), (Some(1), ""));
+    assert!(
+        stderr.contains("config.toml") && stderr.contains("config.json") && stderr.contains("E308"),
+        "{stderr}"
+    );
+    assert!(!f.log.exists(), "the editor must not start");
+    assert_eq!(f.config(), VALID);
+}
+
 // 이것을 실패시키는 것: `config use`로 고른 파일 대신 `config.toml`을 여는 것.
 #[test]
 fn the_file_chosen_with_config_use_is_the_one_opened() {
