@@ -44,6 +44,19 @@ const SHELL: &[u8] = b"/bin/sh";
 const NEUTRAL: &str = "neutral";
 pub(crate) const NEUTRAL_REFUSED: &str =
     "command round: the neutral folder is not empty, the user's and 0500; its units do not run";
+/// A unit that did not start, said once for the round: the supervisor could
+/// not spawn the relay, the relay could not execute the program, or the
+/// unit's exit status was lost. The supervisor has no log of its own and the
+/// result carries no finer reason, so the helper says what it knows.
+const SPAWN_FAILED: &str = "command round: a unit did not start (the relay could not be spawned, it could not execute the program, or its exit status was lost)";
+
+/// The one line for a round in which a unit could not be started.
+fn spawn_failed_note(results: &[Outcome]) -> Option<&'static str> {
+    results
+        .iter()
+        .any(|o| matches!(o.reason, wire::Reason::SpawnFailed))
+        .then_some(SPAWN_FAILED)
+}
 
 /// What the helper knows before it decides on a round.
 pub(crate) struct Inputs<'a> {
@@ -1195,6 +1208,9 @@ impl Round {
             let _ = sys::write_fd(self.grant_pipe.as_raw_fd(), &done);
         }
         self.publish_results(&mut report, &unresolved);
+        // The note joins the round's own, which `abandon` returns: a note put
+        // on the report first would be overwritten by that.
+        self.notes.extend(spawn_failed_note(&report.results));
         report.notes = self.abandon();
         report
     }
@@ -1568,6 +1584,34 @@ fn wait(child: &mut OwnedChild, deadline: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 이것을 실패시키는 것: 시작하지 못한 단위가 있어도 알리지 않는 것, 시작한 단위(정상 종료·시간 초과)만 있는데
+    // 알리는 것.
+    #[test]
+    fn a_unit_that_could_not_start_is_said_once() {
+        let outcome = |reason| Outcome {
+            origin: Origin::Config,
+            index: 0,
+            reason,
+            approved_at: 1,
+            ended_at: 2,
+            stdout: Vec::new(),
+        };
+        assert_eq!(spawn_failed_note(&[]), None);
+        assert_eq!(
+            spawn_failed_note(&[
+                outcome(wire::Reason::Exited(0)),
+                outcome(wire::Reason::Timeout)
+            ]),
+            None
+        );
+        let failed = [
+            outcome(wire::Reason::SpawnFailed),
+            outcome(wire::Reason::SpawnFailed),
+            outcome(wire::Reason::Exited(0)),
+        ];
+        assert_eq!(spawn_failed_note(&failed), Some(SPAWN_FAILED));
+    }
     use bingsu_core::snapshot::Identity;
 
     fn runnable(id: &str, env_allow: &[&str]) -> (String, plan::Runnable) {

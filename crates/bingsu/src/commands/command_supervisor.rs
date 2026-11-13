@@ -484,7 +484,7 @@ impl Supervisor {
             .chain(relay_args.into_iter().map(<[u8]>::to_vec))
             .collect();
         // Checked right before posix_spawn, after every preparation step
-        // (pipes, input, descriptors, actions). A poll and a spawn cannot be
+        // (channels, input, descriptors, actions). A poll and a spawn cannot be
         // one step, so the guarantee is: once the helper's death is observed
         // no new spawn follows, and a unit spawned before that is ended at the
         // loop's next poll of the grant pipe.
