@@ -25,6 +25,8 @@ E304 stable
 E305 stable
 E306 stable
 E307 stable
+E604 stable
+E607 stable
 W401 stable
 W402 stable
 W403 stable
@@ -36,6 +38,11 @@ W408 stable
 W409 stable
 W410 stable
 W411 stable
+W601 stable
+W602 stable
+W603 stable
+W605 stable
+W606 stable
 N501 stable
 N502 deprecated 0.0.0
 N503 stable
