@@ -53,7 +53,7 @@ fn embedded_identity(bytes: &[u8]) -> String {
 }
 
 // 이것을 실패시키는 것: 첫 줄의 형식(버전, 전체 정체, target, rustc 판)을 바꾸거나 정체를 파일에 든 값과 다르게
-// 내는 것, 형제 줄을 빼거나 순서를 바꾸는 것, 형제를 실행하는 것(복사한 bingsu는 실행되면 사용법 오류로 끝남).
+// 내는 것, 형제 줄을 빼거나 순서를 바꾸는 것.
 #[test]
 fn version_names_this_build_and_reads_the_siblings() {
     let (folder, exe) = install("lines");
@@ -86,6 +86,38 @@ fn version_names_this_build_and_reads_the_siblings() {
             "bingsu-collect: symlink, not read"
         ]
     );
+}
+
+// 형제는 읽기만 하고 실행하지 않는다. 형제 이름 자리에 실행되면 흔적 파일을 남기는 스크립트를 둔다.
+// 이것을 실패시키는 것: 형제를 실행하는 것(예: 상태를 알려고 `bingsu-prompt`를 돌려 보는 것).
+#[test]
+fn version_never_runs_a_sibling() {
+    use std::os::unix::fs::PermissionsExt;
+    let (folder, exe) = install("no-run");
+    let trace = folder.0.join("ran");
+    for name in ["bingsu-prompt", "bingsu-collect"] {
+        let script = folder.0.join(name);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' {name} >> '{}'\n",
+                trace.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The script itself works: run directly, it leaves the trace.
+        assert!(Command::new(&script).status().unwrap().success());
+    }
+    std::fs::remove_file(&trace).unwrap();
+    assert_eq!(
+        &version(&exe)[1..],
+        [
+            "bingsu-prompt: not a bingsu-prompt build",
+            "bingsu-collect: not a bingsu-collect build"
+        ]
+    );
+    assert!(!trace.exists(), "{:?}", std::fs::read_to_string(&trace));
 }
 
 // 이것을 실패시키는 것: --version 뒤의 낱말을 무시하는 것.

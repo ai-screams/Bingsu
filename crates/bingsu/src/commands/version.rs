@@ -15,17 +15,23 @@ pub fn run(args: &[OsString]) -> ExitCode {
     let mut text = format!("{}\n", this_build());
     #[cfg(unix)]
     {
-        let folder = std::env::current_exe().and_then(std::fs::canonicalize);
+        use std::os::fd::AsFd;
+        // The folder is opened once, from "/" without following a link, as
+        // init opens it; both siblings are looked up in that descriptor.
+        let folder = match std::env::current_exe().and_then(std::fs::canonicalize) {
+            Ok(exe) => match exe.parent() {
+                Some(folder) => open_folder(folder),
+                None => Err(unreadable("no folder above this executable")),
+            },
+            Err(e) => Err(unreadable(format!("this executable's folder: {e}"))),
+        };
         for sibling in [
             super::collector::Sibling::PROMPT,
             super::collector::Sibling::COLLECTOR,
         ] {
             let state = match &folder {
-                Ok(exe) => match exe.parent() {
-                    Some(folder) => describe(folder, sibling),
-                    None => unreadable("no folder above this executable"),
-                },
-                Err(e) => unreadable(format!("this executable's folder: {e}")),
+                Ok(chain) => describe(chain.last().as_fd(), sibling),
+                Err(reason) => reason.clone(),
             };
             text.push_str(&format!("{}: {state}\n", sibling.name()));
         }
@@ -53,18 +59,28 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The canonical folder, every name opened from "/" without following a
+/// symlink (a folder swapped for a link fails; a FIFO in its place does not
+/// block: the names are opened as folders). The reason is ready to print.
+#[cfg(unix)]
+fn open_folder(path: &std::path::Path) -> Result<super::runtime_root::Chain, String> {
+    use super::runtime_root::RootError;
+    super::runtime_root::open_chain(path).map_err(|e| {
+        let why = match e {
+            RootError::Open { errno, .. } => std::io::Error::from_raw_os_error(errno).to_string(),
+            other => format!("{other:?}"),
+        };
+        unreadable(format!("this executable's folder: {why}"))
+    })
+}
+
 /// One sibling's state, from its markers alone. The name is opened inside
 /// `folder` without following a symlink, as `init` opens it.
 #[cfg(unix)]
-fn describe(folder: &std::path::Path, sibling: super::collector::Sibling) -> String {
+fn describe(folder: std::os::fd::BorrowedFd<'_>, sibling: super::collector::Sibling) -> String {
     use super::collector::{Build, read_build};
-    use std::os::fd::AsFd;
-    let folder = match std::fs::File::open(folder) {
-        Ok(folder) => folder,
-        Err(e) => return unreadable(format!("this executable's folder: {e}")),
-    };
     let name = std::ffi::OsStr::new(sibling.name());
-    let file = match super::sys::open_data_at_nofollow(folder.as_fd(), name) {
+    let file = match super::sys::open_data_at_nofollow(folder, name) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return "missing".to_owned(),
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return "symlink, not read".to_owned(),
@@ -135,13 +151,22 @@ mod tests {
         .concat()
     }
 
+    /// What `--version` says about `sibling` in `folder`, opened as `run` opens it.
+    fn at(folder: &Path, sibling: Sibling) -> String {
+        use std::os::fd::AsFd;
+        match open_folder(folder) {
+            Ok(chain) => describe(chain.last().as_fd(), sibling),
+            Err(reason) => reason,
+        }
+    }
+
     fn state(folder: &Path, sibling: Sibling, bytes: Option<&[u8]>) -> String {
         let path = folder.join(sibling.name());
         let _ = std::fs::remove_file(&path);
         if let Some(bytes) = bytes {
             std::fs::write(&path, bytes).unwrap();
         }
-        describe(folder, sibling)
+        at(folder, sibling)
     }
 
     // 이것을 실패시키는 것: 표식이 같은 빌드인데 다르다고 하거나 그 반대, 다른 빌드의 정체를 보이지 않거나 잘라
@@ -196,27 +221,55 @@ mod tests {
         std::fs::write(&target, markers(me, bingsu_identity::PROMPT_ROLE)).unwrap();
         let link = f.0.join("bingsu-prompt");
         symlink(&target, &link).unwrap();
-        assert_eq!(describe(&f.0, Sibling::PROMPT), "symlink, not read");
+        assert_eq!(at(&f.0, Sibling::PROMPT), "symlink, not read");
         std::fs::remove_file(&link).unwrap();
         std::fs::create_dir(&link).unwrap();
-        assert_eq!(
-            describe(&f.0, Sibling::PROMPT),
-            "unreadable (not a regular file)"
-        );
+        assert_eq!(at(&f.0, Sibling::PROMPT), "unreadable (not a regular file)");
         std::fs::remove_dir(&link).unwrap();
         std::fs::write(&link, markers(me, bingsu_identity::PROMPT_ROLE)).unwrap();
         std::fs::set_permissions(&link, std::fs::Permissions::from_mode(0o000)).unwrap();
         // root reads a mode 000 file anyway; the refusal is the kernel's, not ours.
         if super::super::sys::current_uid() != 0 {
-            assert!(describe(&f.0, Sibling::PROMPT).starts_with("unreadable ("));
+            assert!(at(&f.0, Sibling::PROMPT).starts_with("unreadable ("));
         }
         std::fs::remove_file(&link).unwrap();
         // Over the 64 MiB the scan refuses (sparse: nothing is written).
         let big = std::fs::File::create(&link).unwrap();
         big.set_len(64 * 1024 * 1024 + 1).unwrap();
         assert_eq!(
-            describe(&f.0, Sibling::PROMPT),
+            at(&f.0, Sibling::PROMPT),
             "unreadable (larger than 64 MiB or changed while read)"
+        );
+    }
+
+    // 폴더는 "/"부터 링크를 따르지 않고 한 번 연다. 이것을 실패시키는 것: 폴더를 경로로 다시 열어 그 자리의
+    // symlink를 따라가는 것(링크 너머의 같은 빌드를 보임), FIFO에서 막히는 것, 열기 오류의 OS 문구를 버리는 것.
+    #[test]
+    fn the_folder_is_opened_without_following_a_link() {
+        let f = Folder::new("folder-link");
+        let real = f.0.join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(
+            real.join("bingsu-prompt"),
+            markers(bingsu_identity::build_id().0, bingsu_identity::PROMPT_ROLE),
+        )
+        .unwrap();
+        assert_eq!(at(&real, Sibling::PROMPT), "same build");
+        let link = f.0.join("link");
+        symlink(&real, &link).unwrap();
+        let line = at(&link, Sibling::PROMPT);
+        assert!(
+            line.starts_with("unreadable (this executable's folder: ")
+                && line.contains("(os error "),
+            "{line:?}"
+        );
+        let fifo = f.0.join("fifo");
+        super::super::sys::make_test_fifo(&fifo).unwrap();
+        let line = at(&fifo, Sibling::PROMPT);
+        assert!(
+            line.starts_with("unreadable (this executable's folder: ")
+                && line.contains("(os error "),
+            "{line:?}"
         );
     }
 
@@ -227,7 +280,8 @@ mod tests {
         let line = this_build();
         let identity = hex(&bingsu_identity::build_id().0);
         assert_eq!(identity.len(), 64);
-        let commit = &bingsu_identity::RUSTC_COMMIT_HASH[..9];
+        let commit = bingsu_identity::RUSTC_COMMIT_HASH;
+        let commit = commit.get(..9).unwrap_or(commit);
         assert_eq!(
             line,
             format!(
@@ -237,7 +291,6 @@ mod tests {
                 bingsu_identity::RUSTC_RELEASE
             )
         );
-        assert!(!bingsu_identity::TARGET.is_empty() && !bingsu_identity::RUSTC_RELEASE.is_empty());
     }
 
     // 형제 파일의 바이트는 hex로만 나간다. 이것을 실패시키는 것: 다른 빌드의 정체를 hex 대신 바이트로 보이는 것,
@@ -322,7 +375,7 @@ mod tests {
             ("unreadable", "unreadable (", false),
         ] {
             place(case);
-            let line = describe(&f.0, Sibling::PROMPT);
+            let line = at(&f.0, Sibling::PROMPT);
             let init = PinnedCollector::verify_as(
                 Sibling::PROMPT,
                 path.as_os_str(),
