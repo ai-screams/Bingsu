@@ -145,7 +145,10 @@ jobs:
           # test_command_round.py runs in the filter-calls release step and the
           # macOS gate step, where every test it selects is asserted as passed.
           # While recording (record_observations), -s shows the OBSERVE-PTY lines in the job log.
-          docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w \
+          # /root is a root-owned 0700 folder of the runner, so the pytest
+          # folder (/root/pytest) stays after the container for a failed run.
+          sudo install -d -o 0 -g 0 -m 0700 "$RUNNER_TEMP/pty-root"
+          docker run --rm --cap-add SYS_PTRACE -v "$PWD:/w" -w /w -v "$RUNNER_TEMP/pty-root:/root" \
             -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 \
             -e CI=true -e BINGSU_SHAPE_ONLY_FIXTURE \
             -e BINGSU_TEST_SHELLS="${{ matrix.shells }}" -e BINGSU_RECORD_OBSERVATIONS -e LC_ALL=C.UTF-8 \
@@ -178,6 +181,21 @@ jobs:
                 --deselect tests/shell/test_prompt_env_paths.py::test_helper_ignores_xdg_runtime_dir_from_env \
                 --deselect tests/shell/test_prompt_env_paths.py::test_oversize_env_block_means_no_env \
                 --deselect tests/shell/test_snapshot_refresh.py::test_chmod_g_w_on_blocked_mount_approves_no_unit_past_t "$@"' sh ${BINGSU_RECORD_OBSERVATIONS:+-s}
+      # A failed run keeps its pytest folders for two days: the files up to
+      # 1 MiB (the helper's refresh.log and state), not the binary copies.
+      - name: Pack the failed run's test folders
+        if: failure()
+        run: |
+          sudo sh tests/shell/pack-failed-run.sh "$RUNNER_TEMP/pytest-folders.tgz" "$RUNNER_TEMP/pty-root/pytest"
+          sudo chown "$(id -u)" "$RUNNER_TEMP/pytest-folders.tgz"
+      - name: Upload the failed run's test folders
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pytest-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest-folders.tgz
+          retention-days: 2
+          if-no-files-found: ignore
       # Python only: recorded traces and the workflow files, no shell and no binary.
       # 이것을 실패시키는 것: 이 파일을 다른 칸으로 옮기거나 빼는 것, skip을 통과로 세는 것.
       - name: Shell-independent tests
@@ -738,6 +756,12 @@ jobs:
       - run: brew install bash fish
       # One interpreter for every step: a venv with the hash-pinned test
       # dependencies, and the Homebrew shells first in PATH.
+      # macOS stops growing new pipes past 512 bytes once pipe kernel memory
+      # is at its system-wide cap, which cuts the prompt's environment frame;
+      # the job log records the runner's state here and on a failure.
+      - name: Record pipe capacity
+        run: |
+          python3 -c 'import os, fcntl; r, w = os.pipe(); fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK); print("pipe capacity: a new pipe took", os.write(w, bytes(65536)), "of 65536 bytes in one non-blocking write")'
       - name: Set up the test environment
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
@@ -870,7 +894,22 @@ jobs:
         # macOS collector job prepares its release siblings and runs the file.
         # tmux is a Linux image row: this job installs none, and the test
         # fails as BLOCKED without it.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --ignore tests/shell/test_builtin_round.py --ignore tests/shell/test_command_cgroup.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp="$RUNNER_TEMP/pty-pytest" --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --ignore tests/shell/test_builtin_round.py --ignore tests/shell/test_command_cgroup.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+      # A failed run keeps its pytest folders for two days: the files up to
+      # 1 MiB (the helper's refresh.log and state), not the binary copies.
+      - name: Pack the failed run's test folders
+        if: failure()
+        run: |
+          python3 -c 'import os, fcntl; r, w = os.pipe(); fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK); print("pipe capacity: a new pipe took", os.write(w, bytes(65536)), "of 65536 bytes in one non-blocking write")'
+          tests/shell/pack-failed-run.sh "$RUNNER_TEMP/pytest-folders.tgz" "$RUNNER_TEMP/pty-pytest" "$RUNNER_TEMP/command-round-pytest" "$RUNNER_TEMP/shell-gates-pytest"
+      - name: Upload the failed run's test folders
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pytest-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest-folders.tgz
+          retention-days: 2
+          if-no-files-found: ignore
 
   shell-macos-shells:
     name: Shell PTY (macOS Homebrew ${{ matrix.shell }})
@@ -893,6 +932,12 @@ jobs:
       - run: brew install bash fish
       # One interpreter for every step: a venv with the hash-pinned test
       # dependencies, and the Homebrew shells first in PATH.
+      # macOS stops growing new pipes past 512 bytes once pipe kernel memory
+      # is at its system-wide cap, which cuts the prompt's environment frame;
+      # the job log records the runner's state here and on a failure.
+      - name: Record pipe capacity
+        run: |
+          python3 -c 'import os, fcntl; r, w = os.pipe(); fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK); print("pipe capacity: a new pipe took", os.write(w, bytes(65536)), "of 65536 bytes in one non-blocking write")'
       - name: Set up the test environment
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
@@ -937,4 +982,19 @@ jobs:
         # macOS collector job prepares its release siblings and runs the file.
         # tmux is a Linux image row: this job installs none, and the test
         # fails as BLOCKED without it.
-        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --ignore tests/shell/test_builtin_round.py --ignore tests/shell/test_command_cgroup.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+        run: '"$BINGSU_PY" -m pytest tests/shell tests/golden/record/test_overrides.py tests/golden/record/test_mixed_versions.py -q -rf -p no:cacheprovider --basetemp="$RUNNER_TEMP/pty-pytest" --ignore tests/shell/test_collector_no_spawn_macos.py --ignore tests/shell/test_collector_security.py --ignore tests/shell/test_gate_acceptance.py --ignore tests/shell/test_prompt_trace_budget.py --ignore tests/shell/test_command_round.py --ignore tests/shell/test_builtin_round.py --ignore tests/shell/test_command_cgroup.py --durations=0 --durations-min=0.1 --deselect tests/shell/test_zsh_screen.py::test_prompt_inside_tmux ${BINGSU_RECORD_OBSERVATIONS:+-s}'
+      # A failed run keeps its pytest folders for two days: the files up to
+      # 1 MiB (the helper's refresh.log and state), not the binary copies.
+      - name: Pack the failed run's test folders
+        if: failure()
+        run: |
+          python3 -c 'import os, fcntl; r, w = os.pipe(); fcntl.fcntl(w, fcntl.F_SETFL, os.O_NONBLOCK); print("pipe capacity: a new pipe took", os.write(w, bytes(65536)), "of 65536 bytes in one non-blocking write")'
+          tests/shell/pack-failed-run.sh "$RUNNER_TEMP/pytest-folders.tgz" "$RUNNER_TEMP/pty-pytest" "$RUNNER_TEMP/command-round-pytest" "$RUNNER_TEMP/shell-gates-pytest"
+      - name: Upload the failed run's test folders
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pytest-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest-folders.tgz
+          retention-days: 2
+          if-no-files-found: ignore

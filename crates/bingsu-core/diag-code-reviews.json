@@ -25,7 +25,13 @@
   },
   {
     "before": "dc73729b5f611de72093fe88975e9aeadb9228ef36ace3806483291327891bac",
-    "after": "39e346a331de5e3f311c73f0343844b6b10db1bb4c88c5f9919089721b0f3a4c",
+    "after": "72b99a3e645916f7f7e4afdca18e1bd448a54f7e6960b8efa2cc2c8070781d8a",
+    "kind": "meaning",
+    "reason": "Adds the findings of `bingsu doctor`: W601 (a folder on the way to the executable can be changed by another user), W602 (the bingsu on PATH is not the running one), W603 (no folders pinned in this shell), E604 (a pinned folder is not the same now), W605 (the collector or prompt executable beside bingsu is missing or from another build), W606 (the kernel has no seccomp) and E607 (the settings have an error). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
+  },
+  {
+    "before": "72b99a3e645916f7f7e4afdca18e1bd448a54f7e6960b8efa2cc2c8070781d8a",
+    "after": "2f15c1766e8184aac943e7f1af041a288fee4f3e96ef916bfe6635dc681185bc",
     "kind": "meaning",
     "reason": "Adds E106 (a JSON settings file that does not parse, with the reader's {message}) and E308 (one place holds two settings files of different formats, naming both {path} and {other}). Every existing code keeps its number, status, arguments and text: E101 still means invalid TOML only, and E102-E105 already describe any config file. No code is reused or deprecated."
   }

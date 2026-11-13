@@ -5,6 +5,7 @@
   "oneOf": [
     { "$ref": "#/$defs/explain" },
     { "$ref": "#/$defs/configCheck" },
+    { "$ref": "#/$defs/doctor" },
     { "$ref": "#/$defs/failure" }
   ],
   "$defs": {
@@ -262,6 +263,53 @@
           }
         }
       }
+    },
+    "doctor": {
+      "description": "bingsu doctor: one item per check, in the order the text shows them. `fix` is the diagnostic code that explains the way out (bingsu help <code>), null when there is nothing to do. `result` is invalid when a check failed (exit 1); a warning or an unknown is not a failure.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "command", "result", "items", "exit_code", "error"],
+      "properties": {
+        "schema": { "const": 1 },
+        "command": { "const": "doctor" },
+        "result": { "enum": ["valid", "invalid"] },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title", "status", "text", "fix"],
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "status": { "enum": ["ok", "warn", "fail", "unknown", "skipped"] },
+              "text": { "type": "string" },
+              "fix": { "type": ["string", "null"], "maxLength": 4, "pattern": "^[EWN][0-9]{3}$" }
+            }
+          }
+        },
+        "exit_code": { "enum": [0, 1] },
+        "error": { "description": "Why no check could be made (the account could not be read), else null. Then items is empty.", "type": ["string", "null"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "error": { "type": "string" } }, "required": ["error"] },
+              {
+                "properties": {
+                  "items": {
+                    "contains": { "properties": { "status": { "const": "fail" } }, "required": ["status"] }
+                  }
+                },
+                "required": ["items"]
+              }
+            ]
+          },
+          "then": { "properties": { "result": { "const": "invalid" }, "exit_code": { "const": 1 } } },
+          "else": { "properties": { "result": { "const": "valid" }, "exit_code": { "const": 0 } } }
+        }
+      ]
     },
     "failure": {
       "description": "A run that could not give its result: the settings have errors (listed in diagnostics) or could not be read at all (error). The exit code is the same as in text mode.",
