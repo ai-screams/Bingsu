@@ -60,6 +60,8 @@ mod config_load;
 #[cfg(unix)]
 mod config_use;
 #[cfg(unix)]
+mod config_yaml;
+#[cfg(unix)]
 mod ctx;
 #[cfg(unix)]
 mod doctor;

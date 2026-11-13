@@ -40,5 +40,11 @@
     "after": "f4a7856e595fd945ec024efc4d2bacd6c43330b6aea1d48ab7d042d926ff86ee",
     "kind": "meaning",
     "reason": "Removes a unit test from the registry file that refused the word `doctor` in a fix text, since the command exists now. No code is added, removed, reused or deprecated, and every code keeps its number, status, arguments and text."
+  },
+  {
+    "before": "f4a7856e595fd945ec024efc4d2bacd6c43330b6aea1d48ab7d042d926ff86ee",
+    "after": "a548633ebee95c7465eb9852edb04fabd87fb01955f9580b15dfcded71ca51f0",
+    "kind": "meaning",
+    "reason": "Adds E107 (a YAML settings file that does not parse, or breaks a rule every settings file keeps: a key written twice in one mapping, `null` as a value, a top that is not a mapping; the reader's {message}) and E108 (a YAML feature bingsu does not read, named in {feature}: an anchor, an alias, a tag, a second document or a key that is a mapping or a list). Every existing code keeps its number, status, arguments and text: E101 still means invalid TOML only and E106 invalid JSON only; E102-E105 already describe any config file, including the size, encoding, integer range and nesting limits of a YAML file. No code is reused or deprecated."
   }
 ]

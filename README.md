@@ -69,7 +69,8 @@ bingsu is designed to start from a single set of color tokens and generate all o
 
 - A web **Studio** for live previews and a segment catalog, a terminal **wizard** for the basics,
   and a local Studio that can preview on your real terminal (also over SSH port forwarding).
-- **TOML** config with a JSON Schema for editor completion (works today). Reading JSON, and YAML where it can be done safely, is planned.
+- **TOML** config with a JSON Schema for editor completion, JSON config files, and YAML files in `conf.d`, through
+  `extends` and with `bingsu config use`, without anchors, aliases or tags (all work today).
 - Layered configs with `extends`, share links, and a `bingsu.lock` file for reproducible setups.
 
 ## Status

@@ -834,7 +834,7 @@ READ_MEASUREMENT = r'''
 # the dependency key and the extern name: a tree that does not depend on one
 # (an older base tip) does not get it, and a tree that does fails loudly if
 # the build did not produce it.
-CLI_LIBRARIES = (("bingsu-match", "bingsu_match"),)
+CLI_LIBRARIES = (("bingsu-match", "bingsu_match"), ("yaml-rust2", "yaml_rust2"))
 
 
 def cli_libraries(source):

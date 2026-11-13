@@ -39,7 +39,7 @@ use crate::commands::trust_record::{Record, RecordEvidence};
 use bingsu_core::config::source::{
     ExtendsRef, FileKey, Found, OpenError, Opened, Resolver, Root, RootMeta, Status, Trust,
 };
-use bingsu_core::config::tree::FILE_BYTES_MAX;
+use bingsu_core::config::tree::{FILE_BYTES_MAX, SyntaxError, Table};
 use bingsu_core::fs_trust::{GroupOracle, Refusal};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -122,7 +122,11 @@ fn config_names(
         .into_iter()
         .filter(|n| {
             let n = n.as_bytes();
-            (n.ends_with(b".toml") || n.ends_with(b".json")) && !n.starts_with(b".")
+            // 이것을 실패시키는 것: conf.d에서 `.yaml`이나 `.yml`을 빼는 것.
+            [&b".toml"[..], b".json", b".yaml", b".yml"]
+                .iter()
+                .any(|ext| n.ends_with(ext))
+                && !n.starts_with(b".")
         })
         .collect();
     names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
@@ -874,6 +878,10 @@ impl Resolver for Loader {
         self.read_candidate(c)
     }
 
+    fn parse_yaml(&mut self, text: &str) -> Result<Table, Vec<SyntaxError>> {
+        super::config_yaml::parse(text)
+    }
+
     fn open_root(&mut self, m: &RootMeta) -> Result<Opened, OpenError> {
         if let Some(e) = self.unread.remove(&m.key) {
             return Err(e);
@@ -1236,6 +1244,42 @@ mod tests {
             "{:?}",
             r.diagnostics
         );
+    }
+
+    // YAML 설정은 conf.d의 `.yaml`·`.yml`(이름순으로 다른 형식과 섞임)과 extends로만 읽는다. 뿌리 이름
+    // config.yaml·config.local.yaml은 읽지 않으므로 helper의 파일 확인도 늘지 않는다. 이것을 실패시키는 것: conf.d에서
+    // `.yaml`이나 `.yml`을 빼는 것, YAML 파일을 TOML로 읽는 것(E101), 읽는 쪽에 YAML 파서를 주지 않는 것(E107),
+    // 뿌리 config.yaml을 읽는 것.
+    #[test]
+    fn yaml_files_are_read_from_conf_d_and_extends_only() {
+        let fx = Fx::new("yaml-places");
+        fx.put(&fx.root.join("config.yaml"), "colors: {mode: light}\n");
+        fx.put(
+            &fx.root.join("config.local.yaml"),
+            "colors: {mode: light}\n",
+        );
+        fx.put(&fx.root.join("conf.d/b.toml"), "");
+        fx.put(
+            &fx.root.join("conf.d/a.yaml"),
+            "segment:\n  custom/k: {kind: command, command: [k]}\nlayout:\n  line1:\n    left: [custom/k, dir]\nextends: [shared.yml]\n",
+        );
+        fx.put(
+            &fx.root.join("conf.d/shared.yml"),
+            "colors:\n  mode: dark\n",
+        );
+        fx.put(&fx.root.join("conf.d/c.yml"), "# nothing yet\n");
+        let (r, l) = fx.read(None);
+        assert!(r.succeeded, "{:?}", r.diagnostics);
+        assert_eq!(
+            applied_names(&r),
+            ["(built-in)", "shared.yml", "a.yaml", "b.toml", "c.yml"]
+        );
+        assert_eq!(
+            trust_of(&r, "a.yaml"),
+            Some((Trust::Executable, Status::Applied))
+        );
+        assert!(l.untrusted.is_empty());
+        assert!(codes_of(&r).is_empty(), "{:?}", r.diagnostics);
     }
 
     // 한 자리에 두 형식이 함께 있으면 어느 것도 읽지 않고 읽기 전체가 실패한다(E308). 이것을 실패시키는 것: 둘 중
@@ -2240,6 +2284,46 @@ mod tests {
             assert!(l.read_candidate(c).is_err());
             assert_eq!(l.verified(&[], false), Verified::Incomplete, "{change}");
         }
+    }
+
+    // 실제 읽기 경로에서도 YAML 파일은 256 KiB 상한을 지킨다: loader는 상한보다 한 바이트 더 읽고, core가 그것을
+    // E102로 거부한다. 이것을 실패시키는 것: YAML 길에서 크기 검사를 빼는 것(앞 256 KiB가 조용히 읽힘).
+    #[test]
+    fn an_oversized_yaml_file_is_refused_not_cut() {
+        let fx = Fx::new("yaml-size");
+        let mut big = String::from("segment:\n");
+        while big.len() < 300 * 1024 {
+            big.push_str(&format!(
+                "  custom/s{}: {{kind: text, text: hi}}\n",
+                big.len()
+            ));
+        }
+        fx.put(&fx.root.join("conf.d/big.yaml"), &big);
+        let (r, _) = fx.read(None);
+        assert!(!r.succeeded, "{:?}", r.diagnostics);
+        assert!(
+            codes_of(&r).contains(&codes::FILE_TOO_LARGE),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    // config use로 고른 파일이 YAML이면 YAML로 읽는다. 이것을 실패시키는 것: 기록된 경로의 형식을 이름으로 고르지
+    // 않는 것(E101), 그 파일에 YAML 파서를 주지 않는 것(E107).
+    #[test]
+    fn a_selected_yaml_file_is_read_as_yaml() {
+        let fx = Fx::new("selected-yaml");
+        let chosen = fx.put(&fx.home.join("chosen.yaml"), "colors:\n  mode: dark\n");
+        let md = std::fs::metadata(&chosen).unwrap();
+        let record = Record {
+            dev: md.dev(),
+            ino: md.ino(),
+            path: chosen.clone(),
+        };
+        let (r, _) = fx.read(Some(record));
+        assert!(r.succeeded, "{:?}", r.diagnostics);
+        assert!(codes_of(&r).is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(applied_names(&r), ["(built-in)", "chosen.yaml"]);
     }
 
     // 이것을 실패시키는 것: config use가 conf.d·local까지 대체하거나 선택 파일의 부재를 숨기는 것.

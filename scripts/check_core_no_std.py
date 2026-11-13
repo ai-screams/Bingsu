@@ -85,6 +85,22 @@ BINGSU_GRAPH = {
          "unicode-gencat", "unicode-perl", "unicode-script", "unicode-segment"),
         ("lib",),
     ),
+    # YAML config files (conf.d, extends, config use): yaml-rust2's event
+    # parser without its `encoding` feature, and the crates it depends on
+    # (arraydeque is the scanner's token queue; hashlink and hashbrown serve
+    # its YAML value type, which bingsu does not use). No build script and no
+    # proc-macro. hashbrown's features are the workspace resolution (the
+    # collector's Git crates use it too).
+    ("yaml-rust2", "0.13.0", CRATES_IO): ((), ("lib",)),
+    ("arraydeque", "0.5.1", CRATES_IO): (("default", "std"), ("lib",)),
+    ("hashlink", "0.12.2", CRATES_IO): ((), ("lib",)),
+    ("hashbrown", "0.17.1", CRATES_IO): (
+        ("allocator-api2", "default", "default-hasher", "equivalent", "inline-more", "raw-entry"),
+        ("lib",),
+    ),
+    ("foldhash", "0.2.0", CRATES_IO): ((), ("lib",)),
+    ("equivalent", "1.0.2", CRATES_IO): ((), ("lib",)),
+    ("allocator-api2", "0.2.21", CRATES_IO): (("alloc",), ("lib",)),
 }
 # The dedicated prompt binary: the same graph without the CLI.
 PROMPT_GRAPH = {

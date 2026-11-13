@@ -167,6 +167,14 @@ pub trait Resolver {
             trust: r.trust,
         })
     }
+
+    /// Parses the text of a YAML file (`tree::Format::Yaml`), already within
+    /// the size limit and UTF-8. Core keeps no YAML parser; the reader that
+    /// opens files supplies one, and core checks what it returns
+    /// (`tree::check_parsed`) before the tree is used.
+    fn parse_yaml(&mut self, _text: &str) -> Result<Table, Vec<tree::SyntaxError>> {
+        tree::parse_as(tree::Format::Yaml, &[])
+    }
 }
 
 /// What became of a file met in the walk.
@@ -264,6 +272,12 @@ fn syntax_diag(id: SourceId, e: &tree::SyntaxError) -> Diagnostic {
         }
         SyntaxErrorKind::Json(m) => {
             Diagnostic::new(codes::JSON_SYNTAX, at).arg("message", m.clone())
+        }
+        SyntaxErrorKind::Yaml(m) => {
+            Diagnostic::new(codes::YAML_SYNTAX, at).arg("message", m.clone())
+        }
+        SyntaxErrorKind::YamlUnsupported(f) => {
+            Diagnostic::new(codes::YAML_UNSUPPORTED, at).arg("feature", f.clone())
         }
     }
 }
@@ -428,8 +442,15 @@ impl Walk<'_> {
         let i = self.known(opened.key).unwrap_or(self.nodes.len());
         let id = SourceId(i as u32);
         let mut problems = Vec::new();
-        let format = tree::format_of(&opened.display);
-        let mut tree = match tree::parse_as(format, &opened.bytes) {
+        let parsed = match tree::format_of(&opened.display) {
+            // 이것을 실패시키는 것: 읽는 쪽이 돌려준 YAML 트리를 core가 다시 검사하지 않는 것.
+            tree::Format::Yaml => tree::checked_text(&opened.bytes).and_then(|text| {
+                let parsed = self.resolver.parse_yaml(text);
+                tree::check_parsed(text, parsed)
+            }),
+            format => tree::parse_as(format, &opened.bytes),
+        };
+        let mut tree = match parsed {
             Ok(t) => t,
             Err(es) => {
                 problems.extend(es.iter().map(|e| syntax_diag(id, e)));
@@ -1985,9 +2006,21 @@ pub(crate) mod tests {
                 SyntaxErrorKind::Toml("bad syntax".into()),
                 codes::TOML_SYNTAX,
             ),
+            (SyntaxErrorKind::Json("bad".into()), codes::JSON_SYNTAX),
+            (SyntaxErrorKind::Yaml("bad".into()), codes::YAML_SYNTAX),
+            (
+                SyntaxErrorKind::YamlUnsupported("anchor".into()),
+                codes::YAML_UNSUPPORTED,
+            ),
         ] {
+            let feature = matches!(kind, SyntaxErrorKind::YamlUnsupported(_));
             let d = syntax_diag(SourceId(2), &tree::SyntaxError { span, kind });
             assert_eq!(d.code, code);
+            // 이것을 실패시키는 것: E108에 무엇을 거부했는지(`{feature}`)를 싣지 않는 것.
+            if feature {
+                assert_eq!(d.args[0].name, "feature");
+                assert_eq!(d.args[0].value, "anchor");
+            }
             assert_eq!(
                 d.at,
                 Place::Source {
@@ -1996,6 +2029,65 @@ pub(crate) mod tests {
                 }
             );
         }
+    }
+
+    /// A resolver whose YAML reader returns `tree` for any text.
+    struct GivenYaml(Result<Table, Vec<tree::SyntaxError>>);
+    impl Resolver for GivenYaml {
+        fn open(&mut self, _: &Opened, _: &ExtendsRef) -> Result<Opened, OpenError> {
+            panic!("no extends here")
+        }
+        fn parse_yaml(&mut self, _: &str) -> Result<Table, Vec<tree::SyntaxError>> {
+            self.0.clone()
+        }
+    }
+
+    // YAML은 이름으로 고르고, 읽는 쪽이 준 트리를 core가 다시 검사한 뒤에 쓴다. 이것을 실패시키는 것: `.yaml`을 TOML로
+    // 읽는 것, 읽는 쪽이 없을 때 조용히 빈 표로 두는 것, 읽는 쪽의 트리를 검사 없이 쓰는 것.
+    #[test]
+    fn yaml_goes_to_the_reader_and_comes_back_checked() {
+        let opened = |text: &str| Opened {
+            key: FileKey { dev: 1, ino: 9 },
+            bytes: text.as_bytes().to_vec(),
+            trust: Trust::Executable,
+            display: b"/c/conf.d/a.yaml".to_vec(),
+        };
+        let codes_of = |e: &LoadError| e.errors.iter().map(|d| d.code).collect::<Vec<_>>();
+        // No reader: an error, never an empty file.
+        let e = load(vec![opened("theme: x\n")], &mut files(&[]), V).unwrap_err();
+        assert_eq!(codes_of(&e), [codes::YAML_SYNTAX]);
+        // The reader's tree is used.
+        let entry = |key: &str, at: u32| tree::Entry {
+            key: key.into(),
+            key_span: Span {
+                start: at,
+                end: at + 1,
+            },
+            node: tree::Node {
+                value: Value::Str("x".into()),
+                span: Span {
+                    start: at + 3,
+                    end: at + 4,
+                },
+            },
+        };
+        let good = Table {
+            entries: vec![entry("t", 0)],
+        };
+        let g = load(vec![opened("t: x\n")], &mut GivenYaml(Ok(good)), V).unwrap();
+        assert_eq!(g.files[0].tree.entries[0].key, "t");
+        // A tree that breaks a rule is not.
+        let twice = Table {
+            entries: vec![entry("t", 0), entry("t", 0)],
+        };
+        let e = load(vec![opened("t: x\n")], &mut GivenYaml(Ok(twice)), V).unwrap_err();
+        assert_eq!(codes_of(&e), [codes::YAML_SYNTAX]);
+        // The size limit holds on this path too, before the reader sees the
+        // text: a reader that would accept anything is not asked.
+        // 이것을 실패시키는 것: YAML 길에서 크기 검사를 빼고 UTF-8만 보는 것(256 KiB를 넘는 파일의 앞부분이 읽힘).
+        let big = alloc::format!("a: {}\n", "x".repeat(tree::FILE_BYTES_MAX));
+        let e = load(vec![opened(&big)], &mut GivenYaml(Ok(Table::default())), V).unwrap_err();
+        assert_eq!(codes_of(&e), [codes::FILE_TOO_LARGE]);
     }
 
     // 이것을 실패시키는 것: 읽지 못한 비신뢰 뿌리로 전체를 실패시키거나, 신뢰 뿌리의 읽기 실패를 숨기는 것.
