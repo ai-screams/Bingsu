@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The graphs of bingsu-core (which is `no_std`) and of the shipped `bingsu`
-are pinned (spec section 1, F-05; decisions 2026-10-14).
+are pinned.
 
 `no_std` keeps std's file, environment, process, clock, network and thread
 APIs out of core's own source, but a dependency may still use std and hand
