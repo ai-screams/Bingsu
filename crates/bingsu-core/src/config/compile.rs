@@ -370,7 +370,9 @@ struct Layout {
 
 /// The bands of `when` (the `layout.when` table) that are on: a band with
 /// `enabled = false` is left out of the band choice, the width table and the
-/// compiled variants, so its widths draw the default layout. `layouts` and
+/// compiled variants, so its widths go to the next band that fits them and
+/// only then to the default layout (the first band that fits wins,
+/// `bands::select`). `layouts` and
 /// `bands_of` both walk bands through this, which keeps a band's index the
 /// same in both. The band count limit and the layout budget still count
 /// every band written, off or not.
@@ -2642,8 +2644,9 @@ mod tests {
         assert_eq!(names, [Some("narrow")]);
     }
 
-    // `layout.when.<band>.enabled = false` turns a band off: its widths draw the default layout,
-    // here the user's lines at 59 as at 60. Without the key, or with `true`, nothing changes.
+    // `layout.when.<band>.enabled = false` turns a band off: its widths go to the next band that
+    // fits, else to the default layout (here the user's lines at 59 as at 60, the built-in narrow
+    // being the only band). Without the key, or with `true`, nothing changes.
     // 이것을 실패시키는 것: 꺼진 구간을 구간 고르기·폭 표(bands_of)에 남기는 것, 그 variant를 컴파일(layouts)에
     // 남기는 것, 59/60 경계에서 다른 variant를 고르는 것, 꺼진 구간에 N504·W407을 내는 것, `true`를 끔으로 읽는 것.
     #[test]
@@ -2688,6 +2691,38 @@ mod tests {
             &[],
         );
         assert_eq!(explicit.snapshot.unwrap().variants, c_on.variants);
+    }
+
+    // The first band that fits a width still wins: with narrow off, a band of the user's that
+    // also covers 59 columns is chosen there, and the default layout only past it.
+    // 이것을 실패시키는 것: 꺼진 구간의 폭을 다른 구간을 보지 않고 바로 기본 레이아웃으로 보내는 것.
+    #[test]
+    fn a_band_turned_off_leaves_its_widths_to_the_next_band() {
+        let wide =
+            "[layout.when.wide]\nmax_cols = 79\n[layout.when.wide.line1]\nleft = [\"dir\"]\n";
+        let runs = |r: &crate::config::report::ConfigReport| -> Vec<(u16, u16, Option<String>)> {
+            r.widths
+                .iter()
+                .map(|w| (w.from, w.to, w.band.clone()))
+                .collect()
+        };
+        let s = |t: &str| Some(String::from(t));
+        let on = read(wide, &[]);
+        assert_eq!(
+            runs(&on),
+            [
+                (0, 59, s("narrow")),
+                (60, 79, s("wide")),
+                (80, u16::MAX, None)
+            ]
+        );
+        let off = read(
+            &alloc::format!("{wide}[layout.when.narrow]\nenabled = false\n"),
+            &[],
+        );
+        assert_eq!(runs(&off), [(0, 79, s("wide")), (80, u16::MAX, None)]);
+        let c = off.snapshot.unwrap();
+        assert_eq!(crate::bands::select(&c.band_order, &c.bands, 59), Some(0));
     }
 
     // Only a trusted file turns a band off: from a theme the key is dropped with W401 and the band

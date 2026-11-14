@@ -149,8 +149,9 @@ widths under 60, and it has its own template: there the prompt shows the host, t
 and the duration and the prompt character below, whatever `[layout.line1]` and `[layout.line2]` say. Your lines are
 used from 60 columns on, and `bingsu config check` notes the widths where they are not (N504).
 
-To draw your own lines under 60 columns too, turn the band off. Its widths then draw the default layout, which is your
-`[layout]` lines at every width:
+To draw your own lines under 60 columns too, turn the band off. A width then goes to the first band that fits it, as
+always, and to the default layout (your `[layout]` lines) only when no band does. With the built-in theme alone, no
+other band fits, so your lines are drawn at every width:
 
 ```toml
 [layout.when.narrow]

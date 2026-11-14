@@ -352,8 +352,8 @@ pub const KEYS: &[KeyDef] = &[
         "layout.when.*.enabled",
         Ty::Bool,
         Advanced,
-        "Use this band; false turns it off, so its widths draw the default layout.",
-        "이 구간을 씀. false면 끄고 그 폭에서 기본 레이아웃을 그림.",
+        "Use this band; false turns it off: its widths go to the next band that fits, else the default layout.",
+        "이 구간을 씀. false면 끄고, 그 폭은 맞는 다음 구간이, 없으면 기본 레이아웃이 그림.",
     )
     // Trusted files only: turning a band off changes which layout is reached
     // at which width, and a new key starts sensitive.

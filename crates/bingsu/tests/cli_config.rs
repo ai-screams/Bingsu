@@ -245,7 +245,9 @@ fn a_band_turned_off_leaves_the_width_table_and_explain() {
     e.put_config("config.toml", lines);
     let (_, stdout, _) = out(&e.run(&["config", "check"]));
     assert!(
-        stdout.contains("set `layout.when.narrow.enabled = false` in a trusted file"),
+        stdout.contains(
+            "turn the band off with `layout.when.narrow.enabled = false` in a trusted file"
+        ),
         "{stdout}"
     );
 }
