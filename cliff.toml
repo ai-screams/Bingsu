@@ -61,6 +61,8 @@ sort_commits = "newest"
 # not to the end of the body. Turn it into a pull request link here, so the changelog needs no GitHub API token and never shows the number twice.
 commit_preprocessors = [
     { pattern = '(?m)[ \t]*\(#([0-9]+)\)$', replace = " ([#${1}](https://github.com/ai-screams/Bingsu/pull/${1}))" },
+    # An issue number right after the type ("feat(layout): [#38] ...") would show beside the pull request link.
+    { pattern = '^([a-z]+(?:\([^)]*\))?!?: )\[#[0-9]+\] ', replace = "${1}" },
 ]
 
 commit_parsers = [
@@ -72,7 +74,6 @@ commit_parsers = [
     { message = "^doc", group = "Documentation" },
     { message = "^revert", group = "Reverted" },
     { message = "^build", group = "Build" },
-    { message = "^chore\\(release\\)", skip = true },
     { message = "^chore\\(deps\\)", group = "Dependencies" },
     { message = "^chore", group = "Miscellaneous" },
     { message = "^test", skip = true },
