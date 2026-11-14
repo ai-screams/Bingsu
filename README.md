@@ -83,7 +83,7 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | Implementation language | Rust |
 | Record path and shell hooks (M1) | Done |
 | Core renderer (M2: layout, width, colors, per-shell output) | Done, used by `bingsu prompt` |
-| Config, snapshot and refresh helper (M3a) | Done: TOML config files (`config.toml`, `conf.d/*.toml`, `config.local.toml`, `extends`; JSON files of the same names since M7) with a JSON Schema; a background helper compiles them into a snapshot the prompt reads; `bingsu config check`, `config path`, `config use`, `config schema` and `bingsu reload` |
+| Config, snapshot and refresh helper (M3a) | Done: TOML config files (`config.toml`, `conf.d/*.toml`, `config.local.toml`, `extends`) with a JSON Schema; a background helper compiles them into a snapshot the prompt reads; `bingsu config check`, `config path`, `config use`, `config schema` and `bingsu reload` |
 | Background collection (M3b) | Done: the helper runs a separate collector process with time, memory and file limits (and a system-call filter on Linux), and the prompt shows only results finished before it started |
 | Git and folder collection (M3c) | Done: the collector reads git state through bounded, read-only file access (no `git` process) and reports branch or commit, staged, modified, untracked and conflicted counts, ahead/behind and stash, plus whether the folder is read-only or inside a repository; values it cannot finish in time show as unknown (`?`) |
 | Git segment | Shown after the folder in the built-in default theme from the second prompt in a repository |
