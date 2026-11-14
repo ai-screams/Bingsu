@@ -3,13 +3,15 @@
 //! memory from the compiled config the helper holds (never by decoding the
 //! published snapshot again), the supervisor spawned before the helper's
 //! filter, and, once the marker is installed, the one grant, the results
-//! and the done frame. The helper keeps the grant pipe's write end until it
-//! has every result, so its end of file tells the supervisor the helper is
-//! gone. Results are checked and dropped here; publishing them is C4.
+//! and the done frame. The helper keeps the grant channel's write end until
+//! it has every result, so its end of file tells the supervisor the helper
+//! is gone. The grant and result channels are pipes, Unix stream socket
+//! pairs on macOS (`command_process::channel`). Results are checked and
+//! dropped here; publishing them is C4.
 use super::{
     builtin_probe::{self, Action, Planned},
     collection_store::close_only_lock,
-    collector_process::{OwnedChild, now_ns, pipe},
+    collector_process::{OwnedChild, now_ns},
     command_process, exec_path,
     group_policy::SystemGroups,
     helper::NoEnv,
@@ -668,8 +670,8 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         units: Vec::new(),
         probes: Vec::new(),
     };
-    let (grant_read, grant_pipe) = pipe().map_err(|_| Skip::Failed)?;
-    let (results, results_write) = pipe().map_err(|_| Skip::Failed)?;
+    let (grant_read, grant_pipe) = command_process::channel().map_err(|_| Skip::Failed)?;
+    let (results, results_write) = command_process::channel().map_err(|_| Skip::Failed)?;
     super::collector_process::nonblocking(&grant_pipe).map_err(|_| Skip::Failed)?;
     super::collector_process::nonblocking(&results).map_err(|_| Skip::Failed)?;
     let exe = CString::new(i.exe.as_bytes()).map_err(|_| Skip::Failed)?;
@@ -916,9 +918,10 @@ fn units(
 }
 
 /// Writes all of `bytes` to the non-blocking `fd` by `until_ns`, waiting in
-/// `poll` when the pipe is full: the supervisor reads the grant while it
-/// arrives, and a pipe can be smaller than the frame (pipe-user-pages-soft
-/// leaves 4 KB pipes, m6-C1a).
+/// `poll` when the channel is full: the supervisor reads the grant while it
+/// arrives, and a channel can be smaller than the frame (a Linux pipe past
+/// pipe-user-pages-soft, m6-C1a). The wait relies on `POLLOUT` being exact,
+/// which is why macOS gets a socket (`command_process::channel`).
 fn send(fd: i32, bytes: &[u8], until_ns: u64) -> bool {
     send_with(
         bytes,
@@ -1583,6 +1586,7 @@ fn wait(child: &mut OwnedChild, deadline: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::collector_process::pipe;
     use super::*;
 
     // 이것을 실패시키는 것: 시작하지 못한 단위가 있어도 알리지 않는 것, 시작한 단위(정상 종료·시간 초과)만 있는데
@@ -2109,6 +2113,46 @@ mod tests {
         );
         assert!(!sent);
         assert_eq!(waits, 0, "the deadline passed during the write");
+    }
+
+    /// CPU time of this thread.
+    fn thread_cpu() -> std::time::Duration {
+        // SAFETY: an all-zero timespec is a valid value for the call to fill.
+        let mut t: libc::timespec = unsafe { std::mem::zeroed() };
+        // SAFETY: `t` is writable; the clock id is a constant.
+        let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        assert_eq!(rc, 0);
+        std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    }
+
+    // 회차의 허가·결과 통로는 command_process::channel로 만든다(macOS는 소켓). prepare를 끝까지 도는 단위 시험이
+    // 없어 소스로 본다. 이것을 실패시키는 것: 둘 중 하나를 파이프로 만드는 것(macOS에서 512바이트 파이프가 가득
+    // 차면 감독과 도우미가 마감까지 돎).
+    #[test]
+    fn a_round_makes_its_channels_with_channel() {
+        let src = include_str!("command_grant.rs").replace("\r\n", "\n");
+        let body = &src[src.find("pub(crate) fn prepare(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert_eq!(body.matches("command_process::channel()").count(), 2);
+        assert!(!body.contains("pipe()"));
+    }
+
+    // 읽는 쪽이 읽지 않는 동안 send는 마감까지 기다리되 CPU를 쓰지 않는다. 이것을 실패시키는 것: macOS에서
+    // 통로를 파이프로 되돌리는 것(커널 파이프 메모리가 모자라 파이프가 512바이트에 머문 Mac에서는 poll이 가득 찬
+    // 파이프를 쓰기 가능이라 하고 write는 EAGAIN이라, 마감까지 CPU를 다 씀). 파이프가 정상으로 커지는 Mac과
+    // Linux에서는 그 변이가 이 시험으로는 잡히지 않고, 통로 종류 시험(command_process)이 잡는다.
+    #[test]
+    fn a_grant_waiting_for_its_reader_uses_no_cpu() {
+        let (_read, write) = command_process::channel().unwrap();
+        super::super::collector_process::nonblocking(&write).unwrap();
+        // More than any channel takes, so the write waits.
+        let frame = vec![7u8; 1 << 20];
+        let (cpu, wall) = (thread_cpu(), std::time::Instant::now());
+        let until = now_ns().unwrap() + 300_000_000;
+        assert!(!send(write.as_raw_fd(), &frame, until));
+        let (cpu, wall) = (thread_cpu() - cpu, wall.elapsed());
+        assert!(wall >= std::time::Duration::from_millis(290), "{wall:?}");
+        assert!(cpu * 5 < wall, "cpu {cpu:?} over {wall:?}");
     }
 
     // 마감이 지난 뒤에는 빈 파이프라도 쓰지 않는다. 이것을 실패시키는 것: send의 쓰기 전 마감 검사를 지우는 것.

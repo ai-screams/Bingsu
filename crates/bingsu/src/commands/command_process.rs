@@ -34,13 +34,16 @@ fn check(rc: i32) -> io::Result<()> {
     }
 }
 
-/// The channel for a relay's input, `(read, write)`, both close-on-exec. On
-/// Linux a pipe. On macOS a Unix stream socket pair whose write end's send
-/// buffer is set to `INPUT_BUFFER`: a pipe there can be as small as 512 bytes
-/// when the kernel is short of pipe memory, and the input is written whole
-/// before the relay starts, so it must fit. A refused buffer size is left as
-/// the kernel's, so an input that does not fit is refused, never waited for.
-fn input_ends() -> io::Result<(File, File)> {
+/// A one-way channel between the helper, the supervisor and the relay,
+/// `(read, write)`, both close-on-exec. On Linux a pipe. On macOS a Unix
+/// stream socket pair: a pipe there can be as small as 512 bytes when the
+/// kernel is short of pipe memory, and then `poll` reports a full pipe as
+/// writable (XNU counts at least 16 KiB of room for `POLLOUT`) while every
+/// write fails with EAGAIN, so a writer that waits in `poll` spins until its
+/// deadline. A socket's `POLLOUT` is exact. An end that closes reads as on a
+/// pipe: `POLLIN`/`POLLHUP` and end of file for the reader, `EPIPE` for the
+/// writer.
+pub(crate) fn channel() -> io::Result<(File, File)> {
     #[cfg(not(target_os = "macos"))]
     return pipe();
     #[cfg(target_os = "macos")]
@@ -61,6 +64,20 @@ fn input_ends() -> io::Result<(File, File)> {
                 return Err(io::Error::last_os_error());
             }
         }
+        Ok((read, write))
+    }
+}
+
+/// The channel for a relay's input (`channel`). On macOS the write end's
+/// send buffer is set to `INPUT_BUFFER`: the input is written whole before
+/// the relay starts, so it must fit. A refused buffer size is left as the
+/// kernel's, so an input that does not fit is refused, never waited for.
+fn input_ends() -> io::Result<(File, File)> {
+    #[cfg(not(target_os = "macos"))]
+    return channel();
+    #[cfg(target_os = "macos")]
+    {
+        let (read, write) = channel()?;
         // SAFETY: the write end made above; reads `INPUT_BUFFER` for its size.
         let _ = unsafe {
             libc::setsockopt(
@@ -965,6 +982,84 @@ mod input_channel {
         st.st_mode & libc::S_IFMT
     }
 
+    // 이것을 실패시키는 것: macOS에서 감독 통로(허가·결과)를 파이프로 두는 것(512바이트에 머문 파이프는 가득 차도
+    // poll이 쓰기 가능이라 해 쓰는 쪽이 마감까지 CPU를 다 씀), Linux에서 소켓으로 바꾸는 것(seccomp 표와 strace
+    // 게이트가 보는 Linux 동작이 바뀜), 양쪽 끝의 close-on-exec를 빼는 것.
+    #[test]
+    fn the_supervisor_channel_is_a_socket_on_macos_and_a_pipe_elsewhere() {
+        let (read, write) = channel().unwrap();
+        let want = if cfg!(target_os = "macos") {
+            libc::S_IFSOCK
+        } else {
+            libc::S_IFIFO
+        };
+        assert_eq!((mode(&read), mode(&write)), (want, want));
+        for f in [&read, &write] {
+            // SAFETY: a flag query on an open descriptor.
+            let flags = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        }
+    }
+
+    /// What one end sees when the other closes: (poll revents for the
+    /// reader, the reads, the writer's poll revents and write error).
+    fn closing(make: fn() -> io::Result<(File, File)>, data: bool) -> (i16, Vec<isize>, i16, i32) {
+        let (read, write) = make().unwrap();
+        if data {
+            // SAFETY: three readable bytes into an empty channel.
+            let n = unsafe { libc::write(write.as_raw_fd(), b"abc".as_ptr().cast(), 3) };
+            assert_eq!(n, 3);
+        }
+        drop(write);
+        let mut p = [libc::pollfd {
+            fd: read.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: one valid pollfd.
+        assert_eq!(unsafe { libc::poll(p.as_mut_ptr(), 1, 1_000) }, 1);
+        let mut buf = [0u8; 16];
+        let reads = (0..2)
+            .map(|_| {
+                // SAFETY: `buf` is writable for its length.
+                unsafe { libc::read(read.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) }
+            })
+            .collect();
+        let (read2, write2) = make().unwrap();
+        drop(read2);
+        let mut q = [libc::pollfd {
+            fd: write2.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        }];
+        // SAFETY: one valid pollfd.
+        assert_eq!(unsafe { libc::poll(q.as_mut_ptr(), 1, 1_000) }, 1);
+        // SAFETY: one readable byte; SIGPIPE is ignored by the Rust runtime.
+        let n = unsafe { libc::write(write2.as_raw_fd(), b"x".as_ptr().cast(), 1) };
+        assert_eq!(n, -1);
+        let errno = io::Error::last_os_error().raw_os_error().unwrap();
+        (p[0].revents, reads, q[0].revents, errno)
+    }
+
+    // 감독은 허가 통로의 끝(EOF)을 "도우미가 죽음"으로, 도우미는 결과 통로의 끝을 "감독이 끝남"으로 읽는다. 소켓이
+    // 닫히는 모습은 파이프와 같아야 한다: 읽는 쪽은 POLLIN·POLLHUP와 남은 바이트 뒤 0, 쓰는 쪽은 POLLHUP와 EPIPE.
+    // 이것을 실패시키는 것: 통로를 datagram 소켓으로 만드는 것(닫혀도 read가 0을 주지 않음), 닫는 쪽을 shutdown만
+    // 하는 것.
+    #[test]
+    fn a_closed_channel_end_reads_as_a_closed_pipe() {
+        // No other test's child may inherit an end before close-on-exec is
+        // set (macOS sets it after socketpair): a copy keeps the end open.
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        for data in [false, true] {
+            let got = closing(channel, data);
+            assert_eq!(got, closing(pipe, data), "{data}");
+            let reads: &[isize] = if data { &[3, 0] } else { &[0, 0] };
+            assert_eq!(got.1, reads);
+            assert_ne!(got.0 & (libc::POLLIN | libc::POLLHUP), 0);
+            assert_eq!(got.3, libc::EPIPE);
+        }
+    }
+
     // 이것을 실패시키는 것: macOS에서 입력 통로를 pipe로 두는 것(파이프가 512 B로 줄면 작은 입력도 못 씀), Linux에서
     // 소켓으로 바꾸는 것(seccomp 표와 Linux의 동작이 바뀜), 양쪽 끝의 close-on-exec를 빼는 것(다른 relay가 쓰기 끝을
     // 물려받아 EOF가 오지 않음).
@@ -1026,6 +1121,7 @@ mod input_channel {
     // (10 s 상한에서 실패).
     #[test]
     fn a_relay_reads_a_largest_input_to_end_of_file() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
         use std::io::Read as _;
         use std::time::{Duration, Instant};
         let input = vec![b'x'; bingsu_core::handoff::RELAY_INPUT_MAX];
