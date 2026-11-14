@@ -169,13 +169,14 @@ def test_command_session_runs_the_collection(tmp_path, _native_boot_required):
 # 믿을 수 있는 레이아웃이 그리지 않는 단위(NotInTrustedLayout)도 실행된다.
 def test_not_run_unit_never_runs(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
+    session.level = "debug"
     canary = session.base / "never"
     session.put(f"[segment.\"custom/probe\"]\nkind='command'\ncommand=['/usr/bin/touch', '{canary}']\n"
                 "[layout.line2]\nleft=['char']\n")
     ready(session)
-    for _ in range(5):
-        session.prompt()
-    session.wait_quiet()
+    # At least one round ran to its end before "nothing ran" means anything
+    # (this layout has no command round to log: its refresh is what ended).
+    settled_refreshes(session, 3)
     assert not canary.exists()
 
 
@@ -204,10 +205,17 @@ def test_supervisor_lookup_sees_only_its_session(tmp_path, _native_boot_required
         s.put(config(["/bin/sleep", "1"], "timeout='1s'\n"))
         sessions.append(ready(s))
     a, b = sessions
-    a.prompt()
-    b.prompt()
-    both = until(lambda: (supervisors(a), supervisors(b)) if supervisors(a) and supervisors(b) else None)
-    assert both, "each session runs a supervisor"
+    both = None
+    for n in range(6):
+        if n:
+            for s in sessions:
+                forget_results(s)
+        a.prompt()
+        b.prompt()
+        both = until(lambda: (supervisors(a), supervisors(b)) if supervisors(a) and supervisors(b) else None)
+        if both:
+            break
+    assert both, ("each session runs a supervisor", a.log(), b.log())
     mine, theirs = both
     assert not {pid for pid, _ in mine} & {pid for pid, _ in theirs}, both
     for s in sessions:
@@ -224,7 +232,10 @@ def test_one_supervisor_per_session(tmp_path, _native_boot_required):
         s.put(config(["/bin/sleep", "1"], "timeout='1s'\n"))
         sessions.append(ready(s))
     most = {}
-    for _ in range(10):
+    # Ten prompts at least, and on until both sessions have shown a supervisor:
+    # a round that ended early on a slow runner started none, and counting
+    # fewer than two sessions would be no test.
+    for i in range(60):
         for s in sessions:
             s.prompt()
         time.sleep(0.05)
@@ -235,10 +246,12 @@ def test_one_supervisor_per_session(tmp_path, _native_boot_required):
                 per[lock] = per.get(lock, 0) + 1
         for lock, n in per.items():
             most[lock] = max(most.get(lock, 0), n)
+        if i >= 9 and len(most) == 2:
+            break
     for s in sessions:
         s.wait_quiet()
     # Each session ran one, and never two at once.
-    assert len(most) == 2 and set(most.values()) == {1}, most
+    assert len(most) == 2 and set(most.values()) == {1}, (most, [s.log() for s in sessions])
 
 
 # 생존 신호(U-1): 출력 없는 대상도 도우미가 죽으면 끝난다. 이것을 실패시키는 것: 감독이 허가 파이프 EOF에서
@@ -247,9 +260,8 @@ def test_target_ends_soon_after_helper_death(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     session.put(config(["/bin/sleep", "5"], "timeout='1s'\n"))
     ready(session)
-    session.prompt()
-    found = until(lambda: [(s, p, c) for s, p in supervisors(session) for c in children(s)])
-    assert found, "no running target"
+    found = prompt_until(session, lambda: [(s, p, c) for s, p in supervisors(session) for c in children(s)],
+                         what="a running target")
     supervisor, helper, target = found[0]
     os.kill(helper, signal.SIGKILL)
     killed = time.monotonic()
@@ -267,9 +279,8 @@ def test_lock_held_while_supervisor_alive(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
     session.put(config(["/bin/sleep", "1"], "timeout='1s'\n"))
     ready(session)
-    session.prompt()
-    found = until(lambda: [(s, p) for s, p in supervisors(session) if lock_of(s) is not None])
-    assert found, "no supervisor"
+    found = prompt_until(session, lambda: [(s, p) for s, p in supervisors(session) if lock_of(s) is not None],
+                         what="a supervisor holding the lock")
     supervisor, helper = found[0]
     os.kill(supervisor, signal.SIGSTOP)
     try:
@@ -284,8 +295,7 @@ def test_lock_held_while_supervisor_alive(tmp_path, _native_boot_required):
         os.kill(supervisor, signal.SIGCONT)
     # It sees the helper gone (end of file), ends its child and exits.
     assert until(lambda: gone(supervisor), timeout=3.0)
-    session.prompt()
-    assert until(lambda: supervisors(session)), "the next prompt starts a supervisor again"
+    prompt_until(session, lambda: supervisors(session), what="a supervisor after the next prompt")
     session.wait_quiet()
 
 
@@ -343,8 +353,9 @@ def test_collected_repo_root_excludes_its_bin(tmp_path, _native_boot_required):
     session.init()
     session.wait_quiet()
     session.pwd = sub
-    session.prompt()
-    session.wait_quiet()
+    # The control unit running proves a round reached the command round; only
+    # then does "the other one did not run" say anything.
+    rounds_until(session, outside.exists, limit=8)
     assert outside.exists(), ("the control unit never ran", session.log())
     assert not canary.exists(), ("a PATH folder under the collected repository root ran", session.log())
 
@@ -373,10 +384,8 @@ def test_repository_bins_stay_out_without_a_collection(tmp_path, _native_boot_re
                 "[layout.line1]\nleft=['custom/a','custom/b','custom/c','char']\n")
     session.pwd = sub
     ready(session)
-    for _ in range(2):
-        session.prompt()
-    session.wait_quiet()
-    assert until(lambda: outside.exists()), ("the control unit never ran", session.log())
+    rounds_until(session, outside.exists, limit=8)
+    assert outside.exists(), ("the control unit never ran", session.log())
     assert not ran_outer.exists() and not ran_inner.exists(), ("a repository's PATH folder ran", session.log())
 
 
@@ -401,10 +410,8 @@ def test_a_repository_link_to_elsewhere_keeps_its_bin_out(tmp_path, _native_boot
                 "[layout.line1]\nleft=['custom/a','custom/b','char']\n")
     session.pwd = repo / "docs"
     ready(session)
-    for _ in range(2):
-        session.prompt()
-    session.wait_quiet()
-    assert until(lambda: outside.exists()), ("the control unit never ran", session.log())
+    rounds_until(session, outside.exists, limit=8)
+    assert outside.exists(), ("the control unit never ran", session.log())
     assert not ran.exists(), ("the repository's bin ran through its link", session.log())
 
 
@@ -424,16 +431,14 @@ def test_shell_folder_stands_for_the_repository(tmp_path, _native_boot_required)
                 "[layout.line2]\nleft=['custom/a','custom/b','char']\n")
     session.pwd = proj
     ready(session)
-    for _ in range(2):
-        session.prompt()
-    session.wait_quiet()
-    assert until(lambda: outside.exists()), "the control unit outside the shell folder never ran"
+    rounds_until(session, outside.exists, limit=8)
+    assert outside.exists(), ("the control unit outside the shell folder never ran", session.log())
     assert not inside.exists(), "a PATH folder under the shell folder ran"
 
 
 def neutral_round(tmp_path, damage):
     session = CommandSession(tmp_path / "s")
-    session.level = "info"
+    session.level = "debug"
     canary = tmp_path / "ran"
     session.put(config(["/usr/bin/touch", str(canary)]))
     session.init()
@@ -451,8 +456,10 @@ def neutral_round(tmp_path, damage):
         folder.mkdir(mode=0o700)
         folder.chmod(0o500)
         os.chown(folder, 65534, 65534)
-    for _ in range(3):
-        session.prompt()
+    # A round that ran: the unit ran (an untouched folder), or the round said it
+    # refused the folder (a damaged one). Nothing is judged before one did.
+    refused = b"neutral folder is not empty"
+    rounds_until(session, lambda: canary.exists() or refused in session.log(), limit=8)
     session.wait_quiet()
     return session, canary
 
@@ -481,9 +488,9 @@ def test_unit_cannot_write_in_the_neutral_folder(tmp_path, _native_boot_required
     denied = tmp_path / "denied"
     session.put(config(["/bin/sh", "-c", f'touch left || touch "{denied}"']))
     ready(session)
-    session.prompt()
+    rounds_until(session, denied.exists, limit=8)
     session.wait_quiet()
-    assert until(lambda: denied.exists()), "the unit never tried"
+    assert denied.exists(), ("the unit never tried", session.log())
     assert list(session.neutral().iterdir()) == []
 
 
@@ -491,13 +498,25 @@ def test_unit_cannot_write_in_the_neutral_folder(tmp_path, _native_boot_required
 # 이것을 실패시키는 것: Run::finished가 stdout EOF까지 기다리게 하는 것(회차가 자손의 3초를 기다림).
 def test_stdout_holder_does_not_block_prompt(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
+    session.level = "debug"
     session.put(config(["/bin/sh", "-c", "/bin/sleep 3 & echo held"]))
     ready(session)
-    started = time.monotonic()
-    session.prompt()
-    prompt_s = time.monotonic() - started
-    session.wait_quiet(timeout=10)
-    round_s = time.monotonic() - started
+    # The times mean something only for a round that ran the unit: one that
+    # ended early on a slow runner is short whatever the unit holds. Measure
+    # again after such a round.
+    for attempt in range(4):
+        if attempt:
+            forget_results(session)
+        done = finished_rounds(session)
+        started = time.monotonic()
+        session.prompt()
+        prompt_s = time.monotonic() - started
+        session.wait_quiet(timeout=10)
+        round_s = time.monotonic() - started
+        if finished_rounds(session) > done:
+            break
+    else:
+        raise AssertionError("no round ran the unit", session.log())
     assert prompt_s < 0.5, prompt_s
     # Well before the helper's 2 s deadline, where a wait on stdout would end.
     assert round_s < 1.0, round_s
@@ -514,7 +533,6 @@ def test_macos_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_r
                     for i in range(3))
     session.put(units + "[layout.line2]\nleft=['custom/u0','custom/u1','custom/u2','char']\n")
     ready(session)
-    session.prompt()
 
     def running():
         table = processes()
@@ -524,8 +542,7 @@ def test_macos_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_r
                 return [p for p, _ in kids]
         return None
 
-    kids = until(running, timeout=2.0)
-    assert kids, [(s, children(s)) for s, _ in supervisors(session)]
+    kids = prompt_until(session, running, what="three running targets")
     for k in kids:
         assert children(k) == [], "a target has a child of its own"
     session.wait_quiet()
@@ -549,9 +566,9 @@ def test_macos_group_grandchild_ends_with_the_round(tmp_path, _native_boot_requi
     session = CommandSession(tmp_path / "s")
     session.put(config(["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}"]))
     ready(session)
-    session.prompt()
-    pid = until(lambda: alive_pid(pidfile))
-    assert pid, "the unit never ran"
+    rounds_until(session, lambda: alive_pid(pidfile), limit=8)
+    pid = alive_pid(pidfile)
+    assert pid, ("the unit never ran", session.log())
     session.wait_quiet()
     assert until(lambda: gone(pid), timeout=1.0), "a grandchild in the relay's group outlived the round"
 
@@ -564,11 +581,8 @@ def test_macos_group_grandchild_ends_when_the_helper_dies(tmp_path, _native_boot
     session = CommandSession(tmp_path / "s")
     session.put(config(["/bin/sh", "-c", f"/bin/sleep 30 & echo $! > {pidfile}; /bin/sleep 30"], "timeout='1s'\n"))
     ready(session)
-    session.prompt()
-    pid = until(lambda: alive_pid(pidfile))
-    assert pid, "the unit never ran"
-    found = until(lambda: supervisors(session))
-    assert found, "no supervisor"
+    found = prompt_until(session, lambda: alive_pid(pidfile) and supervisors(session), what="a unit with its supervisor")
+    pid = alive_pid(pidfile)
     os.kill(found[0][1], signal.SIGKILL)
     assert until(lambda: gone(pid), timeout=0.5), "a grandchild outlived the helper's death"
     session.wait_quiet()
@@ -606,14 +620,17 @@ def test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep(tmp_path, _nat
     tool = tmp_path / "bin" / "tool"
     script(tool, "/bin/sleep 1")
     session = CommandSession(tmp_path / "s")
+    session.level = "debug"
     session.put(config([str(tool)], "timeout='1s'\n"))
     ready(session)
     folder = scripts_folder(session)
     other = folder / f"{session_tag(OTHER)}-{'0' * 32}"
-    session.prompt()
-    found = until(lambda: [(s, p) for s, p in supervisors(session)
-                           if any(f.name.startswith(session_tag(SESSION)) for f in folder.iterdir())])
-    assert found, "no supervisor with a copy"
+
+    def copied():
+        # The folder is read first (cheap); `ps` only once a copy is there.
+        return folder.exists() and any(f.name.startswith(session_tag(SESSION)) for f in folder.iterdir())
+
+    found = prompt_until(session, lambda: copied() and supervisors(session), what="a supervisor with a copy")
     supervisor, helper = found[0]
     other.write_bytes(b"x")
     os.kill(supervisor, signal.SIGSTOP)
@@ -643,8 +660,8 @@ def test_no_session_runs_nothing_and_says_so(tmp_path, _native_boot_required):
     canary = tmp_path / "ran"
     session.put(config(["/usr/bin/touch", str(canary)]))
     ready(session)
-    session.prompt()
-    session.wait_quiet()
+    # The refusal is logged by a round that reached the command round.
+    rounds_until(session, lambda: b"no session value from the shell" in session.log(), limit=8)
     assert not canary.exists()
     assert b"no session value from the shell" in session.log(), session.log()
 
@@ -663,7 +680,6 @@ def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_re
                     for i in range(3))
     session.put(units + "[layout.line2]\nleft=['custom/u0','custom/u1','custom/u2','char']\n")
     ready(session)
-    session.prompt()
     sleep = os.path.realpath("/bin/sleep")
 
     def running():
@@ -677,8 +693,7 @@ def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_re
                 return kids
         return None
 
-    kids = until(running, timeout=2.0)
-    assert kids, [(s, children(s)) for s, _ in supervisors(session)]
+    kids = prompt_until(session, running, what="three running targets")
     for k in kids:
         assert children(k) == [], "a target has a child of its own"
         # The supervisor spawned `bingsu __exec-v2` as this pid, and the relay
@@ -731,6 +746,60 @@ def supervised_rounds(session, limit=8):
     raise AssertionError(f"no round ran and published the units in {limit} prompts")
 
 
+def finished_rounds(session):
+    """How many rounds ran to the end of the command round (debug log)."""
+    assert session.level == "debug"
+    return session.log().count(ROUND_FINISHED)
+
+
+def settled_rounds(session, more=1, limit=8):
+    """Prompts until `more` further rounds ran the command round to its end;
+    how many prompts that took. A round that ended early ("refresh
+    incomplete" on a slow runner) ran nothing, so a test that wants a round
+    to have happened must wait for one: asserting that nothing ran after a
+    round that never ran would pass without having looked."""
+    target = finished_rounds(session) + more
+    for n in range(1, limit + 1):
+        rounds(session, 1)
+        if finished_rounds(session) >= target:
+            return n
+    raise AssertionError(f"fewer than {more} round(s) finished in {limit} prompts", session.log())
+
+
+def refreshes_done(session):
+    """How many refreshes ran to the end (debug log): the helper says
+    "refresh revalidated" or "refresh published" for one, "refresh incomplete"
+    for one that did not. A round with no unit to run logs no command round."""
+    assert session.level == "debug"
+    log = session.log()
+    return log.count(b"refresh revalidated") + log.count(b"refresh published")
+
+
+def settled_refreshes(session, more=1, limit=8):
+    """`settled_rounds` for rounds that run no unit."""
+    target = refreshes_done(session) + more
+    for n in range(1, limit + 1):
+        rounds(session, 1)
+        if refreshes_done(session) >= target:
+            return n
+    raise AssertionError(f"fewer than {more} refresh(es) ended in {limit} prompts", session.log())
+
+
+def prompt_until(session, find, limit=6, window=2.0, what="what the test waits for"):
+    """Prompts, then watches `window` seconds for `find()` to hold, and again
+    after a prompt whose round did not run it, up to `limit` prompts. The
+    published results are forgotten before a repeat: a unit that ran past its
+    timeout is a failure the response keeps 10 s, and it would not run again."""
+    for n in range(limit):
+        if n:
+            forget_results(session)
+        session.prompt()
+        value = until(find, timeout=window)
+        if value:
+            return value
+    raise AssertionError(f"{what} did not happen in {limit} prompts", session.log())
+
+
 def rounds_until(session, check, limit=5):
     """Rounds until `check()` holds; how many ran, at most `limit`. A round
     that decided nothing (its collection answered late, so no language was
@@ -777,12 +846,16 @@ def test_cache_hit_runs_nothing(tmp_path, _native_boot_required):
 # 두는 것.
 def test_no_cache_runs_every_round(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
+    session.level = "debug"
     counter = session.base / "runs"
     session.put(config(counting(counter)))
     ready(session)
-    before = runs(counter)
-    rounds(session, 3)
-    assert runs(counter) == before + 3, (before, runs(counter))
+    before, done = runs(counter), finished_rounds(session)
+    settled_rounds(session, 3)
+    # Every round that ran to its end ran the unit again, however many the
+    # prompts made on a slow runner.
+    ended = finished_rounds(session) - done
+    assert ended >= 3 and runs(counter) == before + ended, (before, ended, runs(counter), session.log())
 
 
 # 실패(종료 0이 아님)는 10초 동안 다시 실행하지 않는다. 이것을 실패시키는 것: 실패 항목을 쓰지 않는 것, 실패를
@@ -834,8 +907,9 @@ def test_round_robin_reaches_every_unit(tmp_path, _native_boot_required):
     left = ", ".join(f"'custom/u{i:02}'" for i in range(12))
     session.put(segments + f"[layout.line2]\nleft=[{left}, 'char']\n")
     ready(session)
-    rounds(session, 2)
-    assert sorted(p.name for p in marks.iterdir()) == [f"u{i:02}" for i in range(12)]
+    every = [f"u{i:02}" for i in range(12)]
+    rounds_until(session, lambda: sorted(p.name for p in marks.iterdir()) == every, limit=8)
+    assert sorted(p.name for p in marks.iterdir()) == every, session.log()
 
 
 # 실행 파일을 찾지 못한 단위도 시도로 남긴다(10초 실패 항목). 그래서 찾지 못하는 단위 8개가 회차 상한을 차지해도
@@ -852,8 +926,8 @@ def test_unresolved_units_do_not_hold_the_round(tmp_path, _native_boot_required)
     left = ", ".join([f"'custom/m{i}'" for i in range(8)] + [f"'custom/r{i}'" for i in range(2)])
     session.put(missing + real + f"[layout.line2]\nleft=[{left}, 'char']\n")
     ready(session)
-    rounds(session, 3)
-    assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"]
+    rounds_until(session, lambda: sorted(p.name for p in marks.iterdir()) == ["r0", "r1"], limit=8)
+    assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"], session.log()
 
 
 # relay 입력 상한(16 KiB)을 넘는 환경의 단위도 실패 항목으로 남겨 순서를 넘긴다. 이것을 실패시키는 것: units()의
@@ -870,8 +944,8 @@ def test_oversize_units_do_not_hold_the_round(tmp_path, _native_boot_required):
     session.put(big + real + f"[layout.line2]\nleft=[{left}, 'char']\n")
     session.env["BINGSU_BIG"] = "x" * (20 * 1024)
     ready(session)
-    rounds(session, 3)
-    assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"]
+    rounds_until(session, lambda: sorted(p.name for p in marks.iterdir()) == ["r0", "r1"], limit=8)
+    assert sorted(p.name for p in marks.iterdir()) == ["r0", "r1"], session.log()
 
 
 # 명령만 있는 레이아웃(수집 없음)도 발행 뒤 GC 회수를 돌린다. 그래서 cwd를 여럿 다녀 예약이 예산을 채워도 다음
@@ -887,9 +961,12 @@ def test_command_only_rounds_reclaim_the_store_budget(tmp_path, _native_boot_req
         folder = (session.base / f"cwd{i:02}").resolve()
         folder.mkdir()
         session.pwd = folder
-        rounds(session, 1)
-        bound = [p for p in root.rglob("collections-v1/*/store/command") if os.fsencode(folder) in p.read_bytes()]
-        assert bound, f"no command response for the folder of round {i}"
+
+        def bound():
+            return [p for p in root.rglob("collections-v1/*/store/command") if os.fsencode(folder) in p.read_bytes()]
+
+        rounds_until(session, bound, limit=6)
+        assert bound(), (f"no command response for the folder of round {i}", session.log())
 
 
 # C4c: 도우미가 `match`로 고른 값을 발행하고 앞단은 그 값을 그린다. 이것을 실패시키는 것: 도우미가 결과 항목에
@@ -1045,13 +1122,20 @@ def test_command_table_names_real_tests():
 # 없으면 감독도 없었다. 이것을 실패시키는 것: prepare의 NoUnits 조기 반환을 지우는 것.
 def test_round_without_units_starts_no_supervisor(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path / "s")
+    session.level = "debug"
     session.put("[layout.line2]\nleft=['char']\n")
     ready(session)
     root = Path(session.env["XDG_RUNTIME_DIR"]) / "bingsu"
     seen = []
-    for _ in range(3):
+    # A round with no unit has no command round to log: prompt until a refresh ran to its end.
+    target = refreshes_done(session) + 1
+    for _ in range(8):
         session.prompt()
         seen += [p for p, _ in supervisors(session)]
+        if refreshes_done(session) >= target:
+            break
+    else:
+        raise AssertionError("no refresh ran to its end", session.log())
     session.wait_quiet()
     assert seen == []
     assert list(root.glob("command-*.lock")) == [] and not session.neutral().exists()
