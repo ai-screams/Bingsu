@@ -1,4 +1,4 @@
-# bingsu prompt for fish 3.6+ (spec section 5). init redefines every
+# bingsu prompt for fish 3.6+. init redefines every
 # function on each run.
 set -q _bingsu_session; or set -g _bingsu_session @SESSION@
 set -q _bingsu_seq; or set -g _bingsu_seq 0

@@ -1,4 +1,4 @@
-# bingsu hooks for bash 5.1+ (spec section 5). init redefines every
+# bingsu hooks for bash 5.1+. init redefines every
 # function on each run; hook registration happens once.
 : "${_bingsu_session:=@SESSION@}"
 # Both may come from the environment. Only init's own shapes are kept: a
@@ -74,7 +74,7 @@ _bingsu_call() {
 
 # Hook state is reset on every init, never inherited: an environment value
 # for _bingsu_t0 or _bingsu_t1 would make the first duration wrong, and
-# either one goes through $(( )) (spec section 5).
+# either one goes through $(( )).
 _bingsu_s=0 _bingsu_t1= _bingsu_ps1= _bingsu_dead_cn=
 _bingsu_p=()
 # _bingsu_t0 is a one-element array: PS0 assigns it inside $(( )), and under
@@ -88,8 +88,7 @@ _bingsu_t0=('')
 # tests/shell/probes/bash_ps0_posix.py (1 = expanded, 0 = literal): expanded
 # on bash 5.1.16, 5.2.37 and 5.3.20.
 _bingsu_ps0_posix=1
-# Arithmetic assignment without a subshell; ${x:0:0} prints nothing
-# (spec section 5 "bash execution start time"). _bingsu_t0 must be set (an
+# Arithmetic assignment without a subshell; ${x:0:0} prints nothing. _bingsu_t0 must be set (an
 # unset one skips the assignment), so it is emptied above, never unset.
 # With EPOCHREALTIME unset the arithmetic would fail and bash would skip
 # every command line (bash 5.1 and 5.3), so the outer ${…+…} drops the
@@ -131,7 +130,7 @@ fi
 # Capture hook, first in PROMPT_COMMAND. Nothing may run before the first
 # assignment, or $? and PIPESTATUS are lost. The end time is read here too,
 # so hooks between this one and the install hook do not count as command
-# time (spec section 5).
+# time.
 # Both hooks return 0: bash restores $? before each PROMPT_COMMAND element,
 # so a hook's return value reaches no other hook, and a non-zero return only
 # risks errexit (`set -e` would end the interactive shell). bingsu itself
@@ -146,7 +145,7 @@ _bingsu_save() {
 }
 
 # Install hook, last in PROMPT_COMMAND. Options are read right before
-# installing (spec section 3). nocasematch is saved and restored.
+# installing. nocasematch is saved and restored.
 _bingsu_install() {
   local nm=0 exp=0 exp0=0 pst km=emacs jc='\j'
   local -a ctx

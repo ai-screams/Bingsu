@@ -1,5 +1,5 @@
-# bingsu record reader (spec section 3) and status receive semantics
-# (spec section 5). Embedded by `bingsu init fish`; @KNOWN_CODES@ is
+# bingsu record reader and status receive semantics.
+# Embedded by `bingsu init fish`; @KNOWN_CODES@ is
 # replaced with the known non-ok status strings as quoted words.
 set -g _bingsu_f
 set -g _bingsu_disp ''
