@@ -156,29 +156,36 @@ def resolve_tag(tag: str, ref_json: dict, fetch_tag) -> str:
 
 
 def required_contexts(rules: list) -> list:
-    names = []
+    """(context, integration id or None) of every required status check."""
+    found = []
     for rule in rules:
         if rule.get("type") == "required_status_checks":
-            names += [c["context"] for c in rule["parameters"]["required_status_checks"]]
-    if not names:
+            found += [(c["context"], c.get("integration_id")) for c in rule["parameters"]["required_status_checks"]]
+    if not found:
         raise ReleaseError("the branch rules list no required status checks")
-    return sorted(set(names))
+    return sorted(set(found), key=lambda item: (item[0], item[1] or 0))
 
 
 def check_failures(required: list, runs: list) -> list:
+    """Each required check needs a run of its name from the app the rule names
+    (any app when the rule names none); the newest run of every such app must
+    be complete and not failed, so a second app cannot cover for a failing one."""
     latest: dict = {}
     for run in runs:
-        if run["name"] not in latest or run["id"] > latest[run["name"]]["id"]:
-            latest[run["name"]] = run
+        key = (run["name"], run.get("app_id"))
+        if key not in latest or run["id"] > latest[key]["id"]:
+            latest[key] = run
     problems = []
-    for name in required:
-        run = latest.get(name)
-        if run is None:
-            problems.append(f"{name}: no check run on this commit")
-        elif run["status"] != "completed":
-            problems.append(f"{name}: {run['status']}")
-        elif run["conclusion"] not in OK_CONCLUSIONS:
-            problems.append(f"{name}: {run['conclusion']}")
+    for name, app in required:
+        label = name if app is None else f"{name} (app {app})"
+        mine = [r for (n, a), r in sorted(latest.items(), key=lambda kv: kv[1]["id"]) if n == name and (app is None or a == app)]
+        if not mine:
+            problems.append(f"{label}: no check run on this commit")
+        for run in mine:
+            if run["status"] != "completed":
+                problems.append(f"{label}: {run['status']}")
+            elif run["conclusion"] not in OK_CONCLUSIONS:
+                problems.append(f"{label}: {run['conclusion']}")
     return problems
 
 
@@ -212,7 +219,7 @@ def run_gate(tag: str, sha: str, repo: str, branch: str = "main") -> list:
     rules = json.loads(gh_api(f"{base}/rules/branches/{branch}", "--paginate", "--slurp"))
     rules = [rule for page in rules for rule in (page if isinstance(page, list) else [page])]
     lines = gh_api(f"{base}/commits/{sha}/check-runs?per_page=100", "--paginate", "--jq",
-                   ".check_runs[] | {id, name, status, conclusion}")
+                   ".check_runs[] | {id, name, status, conclusion, app_id: .app.id}")
     runs = [json.loads(line) for line in lines.splitlines() if line.strip()]
     return evaluate_gate(
         tag, sha, ref_json, lambda tag_sha: json.loads(gh_api(f"{base}/git/tags/{tag_sha}")), compare, rules, runs
@@ -361,6 +368,18 @@ def pack_payload(folder: Path, out: Path) -> None:
     out.write_bytes(_tar_bytes(_folder_files(folder, PRODUCTS), "", 0))
 
 
+def _check_mode(name: str, mode: int) -> None:
+    """A member's own permission bits: the executables carry their execute
+    bits, nothing carries special bits or group/other write."""
+    base = name.rsplit("/", 1)[-1]
+    if mode & 0o7000 or mode & 0o022:
+        raise ReleaseError(f"{name!r} has unsafe mode {mode & 0o7777:o}")
+    if base in PRODUCTS and mode & 0o111 != 0o111:
+        raise ReleaseError(f"{name!r} is not executable in the archive (mode {mode & 0o777:o})")
+    if base in DOCS and mode & 0o111:
+        raise ReleaseError(f"{name!r} is executable in the archive (mode {mode & 0o777:o})")
+
+
 def _write_member(dest: Path, name: str, data: bytes) -> None:
     path = dest / name
     path.write_bytes(data)
@@ -369,26 +388,29 @@ def _write_member(dest: Path, name: str, data: bytes) -> None:
 
 def unpack_payload(archive: Path, dest: Path) -> None:
     """The three executables of a payload tar; anything else, any link and any
-    name outside the three fails. Nothing is run."""
-    dest.mkdir(parents=True, exist_ok=True)
-    seen = []
+    name outside the three fails, and every member is checked before any is
+    written. Nothing is run."""
+    entries = []
     with tarfile.open(archive, "r:") as tar:
         for member in tar.getmembers():
             if not member.isreg() or member.name not in PRODUCTS or member.size > MAX_MEMBER:
                 raise ReleaseError(f"unexpected payload member {member.name!r} ({member.type!r})")
-            seen.append(member.name)
-            _write_member(dest, member.name, tar.extractfile(member).read())
-    if sorted(seen) != sorted(PRODUCTS):
-        raise ReleaseError(f"payload holds {sorted(seen)}")
+            _check_mode(member.name, member.mode)
+            entries.append((member.name, tar.extractfile(member).read()))
+    if sorted(name for name, _ in entries) != sorted(PRODUCTS):
+        raise ReleaseError(f"payload holds {sorted(name for name, _ in entries)}")
+    dest.mkdir(parents=True, exist_ok=True)
+    for name, data in entries:
+        _write_member(dest, name, data)
 
 
 def extract_archive(archive: Path, dest: Path, version: str, target: str) -> Path:
     """Unpack a release archive by reading members, never by `extractall`:
-    the top folder, then exactly the six files, regular, bounded in size."""
+    the top folder, then exactly the six files, regular, bounded in size, with
+    sane permission bits in the archive. All are checked before any is written."""
     top = top_name(version, target)
     want = set(PRODUCTS + DOCS)
-    dest.mkdir(parents=True, exist_ok=True)
-    seen = []
+    entries = []
     if archive.name.endswith(".tar.gz"):
         with tarfile.open(archive, "r:gz") as tar:
             for member in tar.getmembers():
@@ -397,26 +419,32 @@ def extract_archive(archive: Path, dest: Path, version: str, target: str) -> Pat
                 base = member.name[len(top) + 1:] if member.name.startswith(top + "/") else None
                 if not member.isreg() or base not in want or member.size > MAX_MEMBER:
                     raise ReleaseError(f"unexpected archive member {member.name!r} ({member.type!r})")
-                seen.append(base)
-                (dest / top).mkdir(exist_ok=True)
-                _write_member(dest / top, base, tar.extractfile(member).read())
+                _check_mode(base, member.mode)
+                entries.append((base, tar.extractfile(member).read()))
     elif archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
             for info in zf.infolist():
-                kind = stat.S_IFMT(info.external_attr >> 16)
-                if info.is_dir() and info.filename == top + "/":
+                mode = info.external_attr >> 16
+                kind = stat.S_IFMT(mode)
+                if info.filename == top + "/":
+                    if kind not in (0, stat.S_IFDIR) or not info.is_dir():
+                        raise ReleaseError(f"{info.filename!r} is not a folder (mode type {kind:o})")
                     continue
                 base = info.filename[len(top) + 1:] if info.filename.startswith(top + "/") else None
-                if kind not in (0, stat.S_IFREG) or base not in want or info.file_size > MAX_MEMBER:
+                if kind != stat.S_IFREG or base not in want or info.file_size > MAX_MEMBER:
                     raise ReleaseError(f"unexpected archive member {info.filename!r} (mode type {kind:o})")
-                seen.append(base)
-                (dest / top).mkdir(exist_ok=True)
-                _write_member(dest / top, base, zf.read(info))
+                _check_mode(base, mode)
+                entries.append((base, zf.read(info)))
     else:
         raise ReleaseError(f"unknown archive type {archive.name!r}")
-    if sorted(seen) != sorted(want):
-        raise ReleaseError(f"archive holds {sorted(seen)}, expected {sorted(want)}")
-    return dest / top
+    seen = sorted(base for base, _ in entries)
+    if seen != sorted(want):
+        raise ReleaseError(f"archive holds {seen}, expected {sorted(want)}")
+    folder = dest / top
+    folder.mkdir(parents=True, exist_ok=True)
+    for base, data in entries:
+        _write_member(folder, base, data)
+    return folder
 
 
 # --- SHA256SUMS -------------------------------------------------------------

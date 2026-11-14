@@ -13,6 +13,7 @@ import io
 import json
 import pathlib
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -108,9 +109,13 @@ def ref(kind="commit", sha=SHA, tag="v0.1.0"):
 
 
 def rules(*contexts):
+    """Each context is a name, or (name, integration id)."""
+    checks = []
+    for context in contexts:
+        name, app = (context, None) if isinstance(context, str) else context
+        checks.append({"context": name} if app is None else {"context": name, "integration_id": app})
     return [{"type": "pull_request", "parameters": {}},
-            {"type": "required_status_checks",
-             "parameters": {"required_status_checks": [{"context": c} for c in contexts]}}]
+            {"type": "required_status_checks", "parameters": {"required_status_checks": checks}}]
 
 
 def runs(**by_name):
@@ -148,6 +153,27 @@ def test_gate_rejects_missing_running_and_failed_checks():
     assert any("Test: failure" in p for p in gate(run=rerun))
     old_failure = [{"id": 0, "name": "Test", "status": "completed", "conclusion": "failure"}] + GOOD_RUNS
     assert gate(run=old_failure) == []
+
+
+# 이것을 실패시키는 것: 필수 check의 출처 앱(integration_id)을 버리고 이름과 가장 큰 id로만 고르는 것
+# (앱 A의 실패 뒤에 앱 B의 같은 이름 성공이 오면 통과), 규칙이 앱을 정하지 않을 때 다른 앱의 실패를 가리는 것.
+def test_gate_pins_the_app_a_required_check_comes_from():
+    def run(id, app, conclusion):
+        return {"id": id, "name": "Test", "status": "completed", "conclusion": conclusion, "app_id": app}
+
+    named = rules(("Test", 15368))
+    both = [run(1, 15368, "failure"), run(2, 999, "success")]
+    assert any("Test (app 15368): failure" in p for p in gate(rule=named, run=both))
+    assert any("no check run" in p for p in gate(rule=named, run=[run(2, 999, "success")]))
+    assert gate(rule=named, run=[run(1, 15368, "success"), run(2, 999, "failure")]) == []
+    # no app named: every app's newest run of the name must be fine
+    assert gate(rule=rules("Test"), run=[run(1, 15368, "success"), run(2, 999, "success")]) == []
+    assert any("failure" in p for p in gate(rule=rules("Test"), run=both))
+    assert any("failure" in p for p in gate(rule=rules("Test"), run=list(reversed(both))))
+    later_failure = [run(1, 15368, "success"), run(2, 999, "failure")]
+    assert any("failure" in p for p in gate(rule=rules("Test"), run=later_failure))
+    # a rerun of the same app replaces its earlier run
+    assert gate(rule=named, run=[run(1, 15368, "failure"), run(3, 15368, "success")]) == []
 
 
 # 이것을 실패시키는 것: 규칙에 필수 check가 하나도 없는 것을 통과로 세는 것.
@@ -406,34 +432,67 @@ def test_extract_rejects_unsafe_tar(tmp_path, mutate):
     assert not (tmp_path / "evil").exists() and not (tmp_path.parent / "evil").exists()
 
 
+def zip_info(name, kind=stat.S_IFREG, mode=None):
+    info = zipfile.ZipInfo(name)
+    if mode is None:
+        base = name.rsplit("/", 1)[-1]
+        mode = 0o755 if base in rt.PRODUCTS else 0o644
+    info.external_attr = (kind | mode) << 16
+    return info
+
+
+def build_zip(archive, top, extra=None, extra_kind=stat.S_IFREG, replace=None, top_kind=stat.S_IFDIR, mode_of=None):
+    """The good archive, with one entry added (`extra`) or one replaced (`replace`: name -> (kind, mode))."""
+    replace = replace or {}
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(zip_info(top + "/", top_kind, 0o755), b"")
+        for name in rt.PRODUCTS + rt.DOCS:
+            kind, mode = replace.get(name, (stat.S_IFREG, None))
+            zf.writestr(zip_info(f"{top}/{name}", kind, mode), b"/etc/passwd" if kind != stat.S_IFREG else b"x")
+        if extra:
+            zf.writestr(zip_info(extra, extra_kind, 0o644), b"/etc/passwd")
+
+
 def test_extract_rejects_unsafe_zip(tmp_path):
     top = rt.top_name(VERSION, MAC)
     archive = tmp_path / rt.archive_name(VERSION, MAC)
-
-    def build(extra=None, link=False, link_as=None):
-        with zipfile.ZipFile(archive, "w") as zf:
-            zf.writestr(zipfile.ZipInfo(top + "/"), b"")
-            for name in rt.PRODUCTS + rt.DOCS:
-                info = zipfile.ZipInfo(f"{top}/{name}")
-                if name == link_as:
-                    info.external_attr = 0o120777 << 16
-                zf.writestr(info, b"/etc/passwd" if name == link_as else b"x")
-            if extra:
-                info = zipfile.ZipInfo(extra)
-                if link:
-                    info.external_attr = 0o120777 << 16
-                zf.writestr(info, b"/etc/passwd")
-
-    build()
+    build_zip(archive, top)
     assert rt.extract_archive(archive, tmp_path / "ok", VERSION, MAC).name == top
-    for extra, link in (("../evil", False), (f"{top}/extra", False), (f"{top}/link", True)):
-        build(extra, link)
+    for number, kwargs in enumerate((
+        {"extra": "../evil"},
+        {"extra": f"{top}/extra"},
+        {"extra": f"{top}/link", "extra_kind": stat.S_IFLNK},
+        # 이것을 실패시키는 것: 기대한 이름의 항목이 링크여도 받아들이는 것(모드 종류를 보지 않는 것).
+        {"replace": {"bingsu": (stat.S_IFLNK, 0o755)}},
+        # 이것을 실패시키는 것: 상위 폴더 항목을 이름 끝의 `/`만 보고 받아들이는 것(그 이름의 symlink가 통과).
+        {"top_kind": stat.S_IFLNK},
+        {"top_kind": stat.S_IFREG},
+    )):
+        build_zip(archive, top, **kwargs)
         with pytest.raises(rt.ReleaseError):
-            rt.extract_archive(archive, tmp_path / f"bad{link}{len(extra)}", VERSION, MAC)
-    # 이것을 실패시키는 것: 기대한 이름의 항목이 링크여도 받아들이는 것(모드 종류를 보지 않는 것).
-    build(link_as="bingsu")
-    with pytest.raises(rt.ReleaseError):
-        rt.extract_archive(archive, tmp_path / "bad-link-name", VERSION, MAC)
+            rt.extract_archive(archive, tmp_path / f"bad{number}", VERSION, MAC)
+        assert not (tmp_path / f"bad{number}").exists(), "nothing is written for a refused archive"
+
+
+# 이것을 실패시키는 것: 풀기 전에 압축 안의 모드를 보지 않고 실행 파일에 0755를 덮어 쓰는 것(0644로 든 압축이 통과),
+# setuid·group/other 쓰기·문서의 실행 비트를 받아들이는 것.
+@pytest.mark.parametrize("name,mode", [("bingsu", 0o644), ("bingsu-prompt", 0o600), ("bingsu-collect", 0o655),
+                                       ("bingsu", 0o4755), ("bingsu", 0o775), ("README.md", 0o755), ("LICENSE-MIT", 0o666)])
+def test_extract_checks_the_modes_inside_the_archive(tmp_path, name, mode):
+    top = rt.top_name(VERSION, MAC)
+    zipped = tmp_path / rt.archive_name(VERSION, MAC)
+    build_zip(zipped, top, replace={name: (stat.S_IFREG, mode)})
+    with pytest.raises(rt.ReleaseError, match="mode|executable"):
+        rt.extract_archive(zipped, tmp_path / "z", VERSION, MAC)
+    tarred = tmp_path / rt.archive_name(VERSION, LINUX)
+    members = good_members(rt.top_name(VERSION, LINUX))
+    for info, _ in members:
+        if info.name.endswith("/" + name):
+            info.mode = mode
+    tar_gz(tarred, members)
+    with pytest.raises(rt.ReleaseError, match="mode|executable"):
+        rt.extract_archive(tarred, tmp_path / "t", VERSION, LINUX)
+    assert not (tmp_path / "t").exists() and not (tmp_path / "z").exists()
 
 
 def test_payload_roundtrip_and_rejections(tmp_path):
@@ -450,6 +509,18 @@ def test_payload_roundtrip_and_rejections(tmp_path):
     (folder / "extra").write_bytes(b"x")
     with pytest.raises(rt.ReleaseError):
         rt.pack_payload(folder, tmp_path / "again.tar")
+
+
+# 이것을 실패시키는 것: payload tar 안의 모드를 보지 않는 것(0644로 든 실행 파일이 통과).
+def test_payload_unpack_rejects_a_non_executable_member(tmp_path):
+    with tarfile.open(tmp_path / "p.tar", "w") as tar:
+        for name in rt.PRODUCTS:
+            info = tar_info(name, size=1)
+            info.mode = 0o644 if name == "bingsu" else 0o755
+            tar.addfile(info, io.BytesIO(b"x"))
+    with pytest.raises(rt.ReleaseError, match="executable"):
+        rt.unpack_payload(tmp_path / "p.tar", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
 
 
 # 이것을 실패시키는 것: 서명 job이 payload의 digest를 build 기록과 대조하지 않는 것.
@@ -662,6 +733,31 @@ def test_verify_files_checks_the_recorded_sums_digest(tmp_path):
     args = ["verify-files", "--dir", str(out), "--version", VERSION, "--targets", ",".join(ALL_TARGETS)]
     assert rt.main(args + ["--sums-sha256", good]) == 0
     assert rt.main(args + ["--sums-sha256", "0" * 64]) == 1
+
+
+# 이것을 실패시키는 것: checkout 밖(`$RUNNER_TEMP/release`)에서 부르는 gh release·attestation에 --repo를 빼는 것
+# ("not a git repository"로 늘 실패), gh api에서 repos/ 경로를 빼는 것.
+def test_every_gh_call_names_its_repository():
+    text = workflow_text().replace("\\\n", " ")
+    calls = re.findall(r"(?m)\bgh (release|attestation|api|run|workflow|pr|issue)\b([^\n]*)", text)
+    assert calls
+    for kind, rest in calls:
+        if kind == "api":
+            assert "repos/" in rest, rest
+        else:
+            assert '--repo "$GITHUB_REPOSITORY"' in rest, (kind, rest)
+    assert sum(1 for kind, _ in calls if kind == "release") == 2
+
+
+# 이것을 실패시키는 것: 인증서를 가져온 뒤에 저장소 코드(release_tool.py)를 도는 것, stage를 가져오기 뒤로 옮기는 것.
+def test_signing_job_runs_no_repository_code_after_the_certificate_import():
+    body = jobs()["sign-macos"]
+    cut = body.index("import-codesign-certs")
+    before, after = body[:cut], body[cut:]
+    assert "release_tool.py stage" in before and "release_tool.py payload-unpack" in before
+    assert "release_tool.py" not in after and "python3 scripts" not in after
+    for tool in ("codesign", "ditto", "notarytool"):
+        assert tool in after
 
 
 def test_verify_depends_on_package_and_publish_on_verify():

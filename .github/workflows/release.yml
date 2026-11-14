@@ -194,12 +194,17 @@ jobs:
           name: build-aarch64-apple-darwin
           path: ${{ runner.temp }}/build
           digest-mismatch: error
-      # The bytes are read and checked against the build's record. Nothing
-      # from the archive runs here: this job holds the signing key.
-      - name: Unpack the payload (no execution)
+      # The bytes are read and checked against the build's record, and the
+      # folder an archive holds is staged. Nothing from the archive runs here,
+      # and no repository code runs once the certificate is imported: after the
+      # import only `codesign`, `ditto`, `shasum` and `notarytool` are used.
+      - name: Unpack the payload and stage the archive folder (no execution)
         run: |
+          set -euo pipefail
           python3 scripts/release_tool.py payload-unpack --payload "$RUNNER_TEMP/build/payload.tar" \
             --manifest "$RUNNER_TEMP/build/manifest.json" --out "$RUNNER_TEMP/bin"
+          python3 scripts/release_tool.py stage --payload "$RUNNER_TEMP/bin" --docs . --out "$RUNNER_TEMP/stage" \
+            --version "$VERSION" --target "$TARGET"
       - name: Import the signing certificate
         uses: apple-actions/import-codesign-certs@77ba2a2a8f5cfc8c405ebf3159f767c323e238f9 # v7.1.0
         with:
@@ -219,18 +224,17 @@ jobs:
       - name: Sign with the hardened runtime and a secure timestamp
         run: |
           set -euo pipefail
+          folder="$RUNNER_TEMP/stage/bingsu-$VERSION-$TARGET"
           for name in bingsu bingsu-prompt bingsu-collect; do
-            codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$RUNNER_TEMP/bin/$name"
-            codesign --verify --strict --verbose=2 "$RUNNER_TEMP/bin/$name"
+            codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$folder/$name"
+            codesign --verify --strict --verbose=2 "$folder/$name"
           done
       # --norsrc/--noextattr/--noqtn keep ditto from adding __MACOSX entries:
       # verify accepts the six files and nothing else.
       - id: zip
-        name: Stage and zip
+        name: Zip
         run: |
           set -euo pipefail
-          python3 scripts/release_tool.py stage --payload "$RUNNER_TEMP/bin" --docs . --out "$RUNNER_TEMP/stage" \
-            --version "$VERSION" --target "$TARGET"
           mkdir "$RUNNER_TEMP/signed"
           zip="$RUNNER_TEMP/signed/bingsu-$VERSION-$TARGET.zip"
           ditto -c -k --keepParent --norsrc --noextattr --noqtn "$RUNNER_TEMP/stage/bingsu-$VERSION-$TARGET" "$zip"
@@ -551,8 +555,8 @@ jobs:
           }
           read -r id state <<< "$(row)"
           case "$id $state" in
-            "none "*) gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}" bingsu-* SHA256SUMS ;;
-            *" true") gh release upload "$TAG" --clobber bingsu-* SHA256SUMS ;;
+            "none "*) gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}" bingsu-* SHA256SUMS ;;
+            *" true") gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber bingsu-* SHA256SUMS ;;
             *) echo "release $TAG is already published, or listed twice" >&2; exit 1 ;;
           esac
           read -r id state <<< "$(row)"
