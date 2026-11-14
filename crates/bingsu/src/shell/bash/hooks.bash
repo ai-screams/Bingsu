@@ -1,10 +1,10 @@
 # bingsu hooks for bash 5.1+ (spec section 5). init redefines every
-# function on each run; hook registration happens once (F-23).
+# function on each run; hook registration happens once.
 : "${_bingsu_session:=@SESSION@}"
 # Both may come from the environment. Only init's own shapes are kept: a
 # 32-digit lowercase hex session and a short decimal counter (the counter
 # goes through $(( )), which evaluates subscripts such as a[$(cmd)]).
-# nocasematch would let `case` accept uppercase hex (F-18): save, clear,
+# nocasematch would let `case` accept uppercase hex: save, clear,
 # restore, as the reader does. The sets are spelled out, never ranges: with
 # globasciiranges off a range follows the locale's collation ([0-9] takes
 # U+0661 under fa_IR, [a-f] takes é under en_US).
@@ -146,7 +146,7 @@ _bingsu_save() {
 }
 
 # Install hook, last in PROMPT_COMMAND. Options are read right before
-# installing (spec section 3). nocasematch is saved and restored (F-18).
+# installing (spec section 3). nocasematch is saved and restored.
 _bingsu_install() {
   local nm=0 exp=0 exp0=0 pst km=emacs jc='\j'
   local -a ctx
@@ -165,7 +165,7 @@ _bingsu_install() {
   _bingsu_t0= _bingsu_t1=
   _bingsu_call "${ctx[@]}"
   if _bingsu_frame "$_bingsu_rec"; then
-    # Upper line (record change plan 12, R-04): joined by a constant newline, only
+    # Upper line: joined by a constant newline, only
     # when it is not empty, before the escaping below so it covers both. The
     # local has a bingsu name: `local` fails on a name the user made readonly.
     local _bingsu_ps1_out=${_bingsu_f[2]}
@@ -203,11 +203,11 @@ _bingsu_install() {
   return 0
 }
 
-# Register once (F-23). Function bodies above are redefined on every init.
+# Register once. Function bodies above are redefined on every init.
 # Registration is decided by PROMPT_COMMAND itself, not by a flag: a flag
 # can arrive from the environment and silently switch bingsu off. A scalar
 # PROMPT_COMMAND is element 0 and stays in the middle. nocasematch would
-# make the name comparison case-insensitive (F-18).
+# make the name comparison case-insensitive.
 _bingsu_nm=0 _bingsu_reg=1
 if shopt -q nocasematch; then _bingsu_nm=1; shopt -u nocasematch; fi
 for _bingsu_h in ${PROMPT_COMMAND[@]+"${PROMPT_COMMAND[@]}"}; do
