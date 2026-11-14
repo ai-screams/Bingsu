@@ -1,0 +1,560 @@
+name: Release
+
+# A `v*` tag push builds, signs and verifies the release files and leaves a
+# DRAFT release; a person publishes it. `workflow_dispatch` is the dry run: the
+# same build, package and verify jobs, no signing, no attestation, no release.
+# A pull request that touches this workflow or its tool runs the dry run too,
+# so a change here is seen end to end before it reaches main (a manual
+# dispatch needs the file on the default branch).
+#
+# Trust, in order:
+#   meta        tag equals the crates' version; the tagged commit is on main
+#               and passed every required check (`release_tool.py gate`, again
+#               in sign-macos and publish before they act)
+#   build       secretless; the only job that compiles
+#   sign-macos  environment `release`; reads the build's bytes, never runs them
+#   package     secretless; deterministic archives and SHA256SUMS
+#   verify      secretless; runs the archives as a user would get them
+#   publish     environment `release`; attests the bytes verify accepted, drafts
+#
+# Runner tools that are not downloaded here (gh, git, jq, python3, rustup,
+# codesign, notarytool, docker) come from the runner image; their versions are
+# in each job's log. Tools this workflow downloads are pinned and checksummed.
+# The gate is code of the tagged commit, so it is a check, not a boundary: the
+# boundary is the tag ruleset (only administrators create `v*`) and the
+# environment approval.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release_tool.py
+      - scripts/test_release_tool.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_RUST: "1.99.1"
+  TARGETS: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,aarch64-apple-darwin
+
+jobs:
+  meta:
+    name: Tag and commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: The checkout is the commit this run was started for
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - id: meta
+        run: python3 scripts/release_tool.py meta --root .
+      - name: The tagged commit is on main and passed the required checks
+        if: steps.meta.outputs.dry_run == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: python3 scripts/release_tool.py gate --tag "$TAG" --sha "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+      - name: Say what a dry run skips
+        if: steps.meta.outputs.dry_run == 'true'
+        run: echo "Dry run, so no commit gate, signing, notarization, attestation or release." >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: The checkout is the commit this run was started for
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      # CARGO_PROFILE_*, RUSTFLAGS and friends are inputs of the build identity:
+      # a release is built with none of them.
+      - name: No build setting from the environment
+        run: |
+          if env | grep -E '^(CARGO_PROFILE_|CARGO_ENCODED_RUSTFLAGS=|RUSTFLAGS=|CARGO_BUILD_RUSTFLAGS=)'; then
+            echo "a release build must not set these" >&2
+            exit 1
+          fi
+      - name: Install musl-tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get -o Acquire::Retries=5 update -q
+          sudo apt-get -o Acquire::Retries=5 install -y -q --no-install-recommends musl-tools
+      # The toolchain action falls back to a rustup download when rustup is
+      # missing; the runner images have it, so a missing one stops the job.
+      - name: rustup is on the runner
+        run: command -v rustup
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ env.RELEASE_RUST }}
+          targets: ${{ matrix.target }}
+      - name: Build the three executables
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            export CC=musl-gcc
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+          fi
+          rustc --version --verbose
+          cargo build --locked --release --target "$TARGET" -p bingsu -p bingsu-prompt -p bingsu-collect
+      - name: Collect the payload, check the link and the build line
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/payload"
+          out="$RUNNER_TEMP/out"
+          mkdir "$payload" "$out"
+          for name in bingsu bingsu-prompt bingsu-collect; do
+            cp "target/$TARGET/release/$name" "$payload/$name"
+          done
+          if [ "$RUNNER_OS" = Linux ]; then
+            python3 scripts/release_tool.py static --dir "$payload"
+          fi
+          python3 scripts/release_tool.py payload-pack --dir "$payload" --out "$out/payload.tar"
+          python3 scripts/release_tool.py build-manifest --dir "$payload" --payload "$out/payload.tar" \
+            --out "$out/manifest.json" --target "$TARGET" --version "$VERSION" --rustc "$RELEASE_RUST"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-${{ matrix.target }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  sign-macos:
+    name: Sign and notarize (macOS)
+    needs: [meta, build]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      archive_sha256: ${{ steps.zip.outputs.sha256 }}
+    env:
+      TARGET: aarch64-apple-darwin
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: The checkout is the commit this run was started for
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      # Before any secret is read: the commit was reviewed and passed CI.
+      - name: The tagged commit is on main and passed the required checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: python3 scripts/release_tool.py gate --tag "$TAG" --sha "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-aarch64-apple-darwin
+          path: ${{ runner.temp }}/build
+          digest-mismatch: error
+      # The bytes are read and checked against the build's record. Nothing
+      # from the archive runs here: this job holds the signing key.
+      - name: Unpack the payload (no execution)
+        run: |
+          python3 scripts/release_tool.py payload-unpack --payload "$RUNNER_TEMP/build/payload.tar" \
+            --manifest "$RUNNER_TEMP/build/manifest.json" --out "$RUNNER_TEMP/bin"
+      - name: Import the signing certificate
+        uses: apple-actions/import-codesign-certs@77ba2a2a8f5cfc8c405ebf3159f767c323e238f9 # v7.1.0
+        with:
+          p12-file-base64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          p12-password: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+      - name: Select the Developer ID identity of the team
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          list="$(security find-identity -v -p codesigning | grep 'Developer ID Application' | grep -F "($APPLE_TEAM_ID)" || true)"
+          if [ "$(printf '%s\n' "$list" | grep -c .)" != 1 ]; then
+            echo "expected exactly one Developer ID Application identity of the team" >&2
+            exit 1
+          fi
+          printf 'SIGN_IDENTITY=%s\n' "$(printf '%s' "$list" | awk '{print $2}')" >> "$GITHUB_ENV"
+      - name: Sign with the hardened runtime and a secure timestamp
+        run: |
+          set -euo pipefail
+          for name in bingsu bingsu-prompt bingsu-collect; do
+            codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$RUNNER_TEMP/bin/$name"
+            codesign --verify --strict --verbose=2 "$RUNNER_TEMP/bin/$name"
+          done
+      # --norsrc/--noextattr/--noqtn keep ditto from adding __MACOSX entries:
+      # verify accepts the six files and nothing else.
+      - id: zip
+        name: Stage and zip
+        run: |
+          set -euo pipefail
+          python3 scripts/release_tool.py stage --payload "$RUNNER_TEMP/bin" --docs . --out "$RUNNER_TEMP/stage" \
+            --version "$VERSION" --target "$TARGET"
+          mkdir "$RUNNER_TEMP/signed"
+          zip="$RUNNER_TEMP/signed/bingsu-$VERSION-$TARGET.zip"
+          ditto -c -k --keepParent --norsrc --noextattr --noqtn "$RUNNER_TEMP/stage/bingsu-$VERSION-$TARGET" "$zip"
+          echo "sha256=$(shasum -a 256 "$zip" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      # The submission id is written down before the wait, so a cancelled or
+      # timed-out job leaves the id to look up (`xcrun notarytool info <id>`).
+      - name: Notarize the zip
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          xcrun notarytool store-credentials bingsu-notary --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" >/dev/null
+          zip="$RUNNER_TEMP/signed/bingsu-$VERSION-$TARGET.zip"
+          xcrun notarytool submit "$zip" --keychain-profile bingsu-notary --output-format json > "$RUNNER_TEMP/notary-submit.json"
+          id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/notary-submit.json")"
+          echo "Notarization submission \`$id\`" >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          xcrun notarytool wait "$id" --keychain-profile bingsu-notary --timeout 60m --output-format json > "$RUNNER_TEMP/notary-result.json"
+          set -e
+          status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$RUNNER_TEMP/notary-result.json")"
+          echo "Notarization status: $status" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" != Accepted ]; then
+            xcrun notarytool log "$id" --keychain-profile bingsu-notary || true
+            exit 1
+          fi
+      # Nothing after this step changes the zip's bytes.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-aarch64-apple-darwin
+          path: ${{ runner.temp }}/signed
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  package:
+    name: Package
+    needs: [meta, build, sign-macos]
+    if: >-
+      !cancelled() && needs.build.result == 'success'
+      && (needs.sign-macos.result == 'success' || (needs.sign-macos.result == 'skipped' && needs.meta.outputs.dry_run == 'true'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      files_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      sums_sha256: ${{ steps.digest.outputs.sums }}
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      DRY_RUN: ${{ needs.meta.outputs.dry_run }}
+      SIGNED_SHA256: ${{ needs.sign-macos.outputs.archive_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: The checkout is the commit this run was started for
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: build-*
+          path: ${{ runner.temp }}/builds
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: env.DRY_RUN == 'false'
+        with:
+          name: signed-aarch64-apple-darwin
+          path: ${{ runner.temp }}/signed
+          digest-mismatch: error
+      - name: Make the archives and SHA256SUMS
+        run: |
+          set -euo pipefail
+          tool=scripts/release_tool.py
+          mtime="$(git log -1 --format=%ct HEAD)"
+          files="$RUNNER_TEMP/release"
+          mkdir "$files"
+          for target in ${TARGETS//,/ }; do
+            work="$RUNNER_TEMP/work/$target"
+            if [ "$target" = aarch64-apple-darwin ] && [ "$DRY_RUN" = false ]; then
+              zip="bingsu-$VERSION-$target.zip"
+              test "$(sha256sum "$RUNNER_TEMP/signed/$zip" | cut -d' ' -f1)" = "$SIGNED_SHA256"
+              cp "$RUNNER_TEMP/signed/$zip" "$files/$zip"
+              continue
+            fi
+            python3 "$tool" payload-unpack --payload "$RUNNER_TEMP/builds/build-$target/payload.tar" \
+              --manifest "$RUNNER_TEMP/builds/build-$target/manifest.json" --out "$work/payload"
+            python3 "$tool" stage --payload "$work/payload" --docs . --out "$work/stage" --version "$VERSION" --target "$target"
+            case "$target" in *apple-darwin) suffix=zip ;; *) suffix=tar.gz ;; esac
+            python3 "$tool" package --folder "$work/stage/bingsu-$VERSION-$target" --out "$files/bingsu-$VERSION-$target.$suffix" \
+              --version "$VERSION" --target "$target" --mtime "$mtime"
+          done
+          python3 "$tool" sums --dir "$files" --version "$VERSION" --targets "$TARGETS"
+          python3 "$tool" verify-files --dir "$files" --version "$VERSION" --targets "$TARGETS"
+          {
+            if [ "$DRY_RUN" = true ]; then
+              echo "macOS zip is unsigned (dry run). Skipped: signing, notarization, attestation, release."
+            fi
+            echo '```'
+            cat "$files/SHA256SUMS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - id: digest
+        run: echo "sums=$(sha256sum "$RUNNER_TEMP/release/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  verify:
+    name: Verify (${{ matrix.name }})
+    needs: [meta, package]
+    if: ${{ !cancelled() && needs.package.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      verified_sums_sha256: ${{ steps.done.outputs.sums }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            kind: runner
+          - name: linux aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            kind: runner
+          - name: min-u22
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            kind: container
+          - name: macos-15
+            runner: macos-15
+            target: aarch64-apple-darwin
+            kind: runner
+          - name: macos-26
+            runner: macos-26
+            target: aarch64-apple-darwin
+            kind: runner
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      DRY_RUN: ${{ needs.meta.outputs.dry_run }}
+      SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: The checkout is the commit this run was started for
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.package.outputs.files_artifact_id }}
+          path: ${{ runner.temp }}/release
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-${{ matrix.target }}
+          path: ${{ runner.temp }}/build
+          digest-mismatch: error
+      - name: The files are the ones package made
+        run: |
+          set -euo pipefail
+          python3 scripts/release_tool.py verify-files --dir "$RUNNER_TEMP/release" --version "$VERSION" \
+            --targets "$TARGETS" --sums-sha256 "$SUMS_SHA256"
+          cd "$RUNNER_TEMP/release"
+          if [ "$RUNNER_OS" = macOS ]; then shasum -a 256 -c SHA256SUMS; else sha256sum -c SHA256SUMS; fi
+      - name: Unpack the archive and run what is in it
+        run: |
+          set -euo pipefail
+          python3 scripts/release_tool.py verify-archive --dir "$RUNNER_TEMP/release" --version "$VERSION" \
+            --target "$TARGET" --rustc "$RELEASE_RUST" --manifest "$RUNNER_TEMP/build/manifest.json" \
+            --extract-to "$RUNNER_TEMP/extract"
+      - name: Signature of the three files (tag run)
+        if: env.DRY_RUN == 'false' && runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          folder="$RUNNER_TEMP/extract/bingsu-$VERSION-$TARGET"
+          for name in bingsu bingsu-prompt bingsu-collect; do
+            codesign --verify --strict --verbose=2 "$folder/$name"
+            codesign -dv "$folder/$name" 2>&1 | grep -F 'Authority=Developer ID Application'
+          done
+      # The format of spctl's answer for a bare executable is fixed by the
+      # signing rehearsal; until then the answer is recorded, not judged.
+      - name: Gatekeeper's answer for a quarantined copy (tag run, recorded)
+        if: env.DRY_RUN == 'false' && runner.os == 'macOS'
+        run: |
+          folder="$RUNNER_TEMP/extract/bingsu-$VERSION-$TARGET"
+          cp "$folder/bingsu" "$RUNNER_TEMP/quarantined"
+          xattr -w com.apple.quarantine "0081;$(printf '%x' "$(date +%s)");Safari;" "$RUNNER_TEMP/quarantined"
+          { echo '```'; spctl --assess --type execute -vv "$RUNNER_TEMP/quarantined" 2>&1 || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Install zsh
+        if: matrix.kind == 'runner' && runner.os == 'Linux'
+        run: |
+          sudo apt-get -o Acquire::Retries=5 update -q
+          sudo apt-get -o Acquire::Retries=5 install -y -q --no-install-recommends zsh
+      # The archive's own executables, copied into the test installs by the
+      # tests. The new shell's hook must call the verified `bingsu-prompt`.
+      - name: PTY tests with the archive's executables
+        if: matrix.kind == 'runner'
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r tests/shell/requirements.txt
+          export BINGSU_BIN="$RUNNER_TEMP/extract/bingsu-$VERSION-$TARGET/bingsu"
+          export BINGSU_TEST_SHELLS=zsh
+          "$RUNNER_TEMP/venv/bin/python" -m pytest tests/shell/test_init_words.py \
+            -k "words_arrive_intact or prompt_sibling_needs or collector_pin_requires" \
+            -q -rA -p no:cacheprovider --basetemp="$RUNNER_TEMP/pty" | tee "$RUNNER_TEMP/pty.txt"
+          grep -E '^PASSED .*test_words_arrive_intact' "$RUNNER_TEMP/pty.txt"
+          grep -F 'PASSED tests/shell/test_init_words.py::test_prompt_sibling_needs_its_role_and_build[real]' "$RUNNER_TEMP/pty.txt"
+      - name: PTY tests in the minimum-shell image
+        if: matrix.kind == 'container'
+        env:
+          FOLDER_IN_IMAGE: /x/bingsu-${{ needs.meta.outputs.version }}-x86_64-unknown-linux-musl
+        run: |
+          set -euo pipefail
+          tests/shell/containers/check-digests.sh
+          docker build -f tests/shell/containers/min-u22.Dockerfile -t bingsu-min-u22 tests/shell/containers
+          # As in shell.yml: the container runs as root, so init is given a
+          # root-owned copy of the executables, as an installed one would be.
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/extract:/x:ro" -w /w \
+            -e FOLDER_IN_IMAGE -e BINGSU_BIN=/usr/local/bin/bingsu -e PYTHONDONTWRITEBYTECODE=1 -e CI=true \
+            -e BINGSU_TEST_SHELLS=zsh -e LC_ALL=C.UTF-8 bingsu-min-u22 sh -c '
+              install -m 0755 "$FOLDER_IN_IMAGE/bingsu" "$FOLDER_IN_IMAGE/bingsu-prompt" "$FOLDER_IN_IMAGE/bingsu-collect" /usr/local/bin/ &&
+              exec python3 -m pytest tests/shell/test_init_words.py \
+                -k "words_arrive_intact or prompt_sibling_needs or collector_pin_requires" \
+                -q -rA -p no:cacheprovider --basetemp=/root/pytest' | tee "$RUNNER_TEMP/pty.txt"
+          grep -E '^PASSED .*test_words_arrive_intact' "$RUNNER_TEMP/pty.txt"
+          grep -F 'PASSED tests/shell/test_init_words.py::test_prompt_sibling_needs_its_role_and_build[real]' "$RUNNER_TEMP/pty.txt"
+      - id: done
+        run: echo "sums=$SUMS_SHA256" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Attest and draft the release
+    needs: [meta, package, verify]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      checks: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+      SUMS_SHA256: ${{ needs.package.outputs.sums_sha256 }}
+      VERIFIED_SUMS_SHA256: ${{ needs.verify.outputs.verified_sums_sha256 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: The checkout is the commit this run was started for
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: The tagged commit is on main and passed the required checks
+        run: python3 scripts/release_tool.py gate --tag "$TAG" --sha "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.package.outputs.files_artifact_id }}
+          path: ${{ runner.temp }}/release
+          digest-mismatch: error
+      # The digest of SHA256SUMS ties the files to what package made and what
+      # every verify cell accepted; attestation then signs those bytes only.
+      - name: These are the bytes verify accepted
+        run: |
+          set -euo pipefail
+          test -n "$SUMS_SHA256"
+          test "$VERIFIED_SUMS_SHA256" = "$SUMS_SHA256"
+          python3 scripts/release_tool.py verify-files --dir "$RUNNER_TEMP/release" --version "$VERSION" \
+            --targets "$TARGETS" --sums-sha256 "$SUMS_SHA256"
+          (cd "$RUNNER_TEMP/release" && sha256sum -c SHA256SUMS)
+      - id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release/*.tar.gz
+            ${{ runner.temp }}/release/*.zip
+            ${{ runner.temp }}/release/SHA256SUMS
+      # The action's own bundle, checked against this run's workflow, commit
+      # and tag. An old archive attested by an earlier run does not pass the
+      # source constraints; it is not re-attested here.
+      - name: Verify the attestation just made
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          for file in "$RUNNER_TEMP"/release/*; do
+            gh attestation verify "$file" --bundle "$BUNDLE" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF"
+          done
+      # A draft that exists is resumed only when it is still a draft, and its
+      # assets must end up exactly the verified files (name, size, digest).
+      - name: Draft the release
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release"
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          python3 "$GITHUB_WORKSPACE/scripts/release_tool.py" notes --tag "$TAG" --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/notes.md"
+          row() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+            jq -rs --arg tag "$TAG" 'add | map(select(.tag_name == $tag)) | if length == 0 then "none" elif length == 1 then "\(.[0].id) \(.[0].draft)" else "many" end' "$RUNNER_TEMP/releases.json"
+          }
+          read -r id state <<< "$(row)"
+          case "$id $state" in
+            "none "*) gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}" bingsu-* SHA256SUMS ;;
+            *" true") gh release upload "$TAG" --clobber bingsu-* SHA256SUMS ;;
+            *) echo "release $TAG is already published, or listed twice" >&2; exit 1 ;;
+          esac
+          read -r id state <<< "$(row)"
+          test "$state" = true
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$id/assets?per_page=100" | jq -s 'add' > "$RUNNER_TEMP/assets.json"
+          python3 "$GITHUB_WORKSPACE/scripts/release_tool.py" assets-check --json "$RUNNER_TEMP/assets.json" \
+            --dir . --version "$VERSION" --targets "$TARGETS"
+          echo "Draft release \`$TAG\` holds the verified files; publish it from the releases page." >> "$GITHUB_STEP_SUMMARY"

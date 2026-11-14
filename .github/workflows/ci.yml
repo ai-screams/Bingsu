@@ -1488,3 +1488,10 @@ jobs:
           BINGSU_REQUIRE_NONROOT_TESTS: "1"
         run: |
           "$RUNNER_TEMP/venv/bin/python" -m pytest bench/tests -q -rs -p no:cacheprovider
+      # The release workflow's decisions (tag and version, commit gate, build
+      # line, static link, archives, SHA256SUMS, the workflow's shape). The
+      # tests are Python only; they sit in this job because it already has the
+      # hash-pinned test environment.
+      - name: Release tool tests
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m pytest scripts/test_release_tool.py -q -rs -p no:cacheprovider
