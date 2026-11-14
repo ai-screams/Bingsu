@@ -1,5 +1,6 @@
 """Product lifecycle evidence; builds belong to the native test jobs."""
 import contextlib
+import json
 from contextlib import nullcontext
 from pathlib import Path
 import re
@@ -350,8 +351,14 @@ ROLES = {"front", "helper", "collector"}
 def lingering_zombies(grace=0.25):
     """Zombies with a role parent that are still there after `grace` seconds.
 
-    A collector that just exited stays a zombie until the helper's next reap
-    poll (1 ms); only one that outlives the grace was left unreaped."""
+    A collector that just exited stays a zombie until its helper's
+    collect-supervisor thread reaps it, at the end of a sequence: the
+    response pipe's end of file ends the exchange, the transcript is
+    finished, a result waits for the helper's main thread to confirm its
+    confinement (limits and filter), the result is published, and only then
+    the reap loop polls every 1 ms (collector_supervisor.rs `run`). The grace
+    covers that sequence and the threads' scheduling; only a zombie that
+    outlives it was left unreaped."""
     seen = set(zombie_children(ROLES))
     end = time.monotonic() + grace
     while seen and time.monotonic() < end:
@@ -361,8 +368,11 @@ def lingering_zombies(grace=0.25):
 
 
 def zombie_report(pids):
-    """Each lingering zombie with its parent's name, state and wait channel, read when the census
-    fails: a parent asleep in its reap poll is late, one stopped or blocked elsewhere never reaped."""
+    """Each lingering zombie with its parent's name, state and wait channel, and each thread of
+    the parent, read when the census fails. The process state is only the main thread's; the
+    reaping happens on the helper's collect-supervisor thread, so every thread's name, state and
+    wait channel is listed, with its kernel stack where /proc lets this user read it. The files
+    are read one after another, so a thread can move on (or end) between two reads."""
     def status(pid):
         try:
             return dict(line.split(":", 1) for line in Path(f"/proc/{pid}/status").read_text().splitlines()
@@ -370,11 +380,25 @@ def zombie_report(pids):
         except OSError:
             return {}
 
-    def wchan(pid):
+    def read(path):
         try:
-            return Path(f"/proc/{pid}/wchan").read_text()
-        except OSError:
-            return "?"
+            return Path(path).read_text().strip()
+        except OSError as error:
+            return f"? ({error.strerror})"
+
+    def threads(pid):
+        try:
+            tasks = sorted(Path(f"/proc/{pid}/task").iterdir(), key=lambda t: int(t.name))
+        except (OSError, ValueError):
+            return []
+        rows = []
+        for task in tasks:
+            stat = read(task / "stat")
+            rows.append({"tid": task.name, "name": read(task / "comm"),
+                         # The state letter follows the command name's closing parenthesis.
+                         "state": stat.rsplit(")", 1)[1].split()[0] if ")" in stat else stat,
+                         "wchan": read(task / "wchan"), "stack": read(task / "stack").splitlines()})
+        return rows
     rows = []
     for pid in pids:
         zombie = status(pid)
@@ -382,7 +406,8 @@ def zombie_report(pids):
         about = status(parent)
         rows.append({"zombie": pid, "name": zombie.get("Name", "gone").strip(), "parent": parent,
                      "parent_name": about.get("Name", "gone").strip(), "parent_state": about.get("State", "gone").strip(),
-                     "parent_wchan": wchan(parent)})
+                     "parent_argv": read(f"/proc/{parent}/cmdline").split("\0")[:2],
+                     "parent_wchan": read(f"/proc/{parent}/wchan"), "parent_threads": threads(parent)})
     return rows
 
 
@@ -477,8 +502,13 @@ def test_n_prompts_leave_zero_zombies_including_killed_children(tmp_path, capsys
                     # A stalled collector cannot leave the stopped mount on its own: gone means killed.
                     killed_collectors |= seen - set(collectors)
                     live_samples += bool(role_processes({"helper"}))
-                    assert not (left := lingering_zombies()), ("zombies left under a role process", index, left,
-                                                                zombie_report(left))
+                    if left := lingering_zombies():
+                        # Read at once, while the parent still holds the zombie, and printed whole: an
+                        # assertion message is cut short in the job log.
+                        report = zombie_report(left)
+                        with capsys.disabled():
+                            print("\nlingering zombies:\n" + json.dumps(report, indent=1))
+                    assert not left, ("zombies left under a role process", index, left)
                     # 이것을 실패시키는 것: 죽인 collector만 회수하지 않고 회수했다고 보고하는 것(도우미가 끝나며 좀비가 여기로 온다).
                     assert not (orphaned := reap_orphans()), ("collectors their helper exited without reaping", index, orphaned)
                 poll(lambda: not role_processes(ROLES), helper_lifetime_s() + 1, "role processes outlived the lifetime")
