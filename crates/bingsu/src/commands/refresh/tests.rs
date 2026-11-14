@@ -2225,7 +2225,7 @@ fn scan_time_chmod_or_replace_keeps_marker() {
 }
 
 mod axes {
-    //! Helper I/O axes over whole refresh rounds .
+    //! Helper I/O axes over whole refresh rounds.
     use super::*;
     use crate::commands::io_meter::{
         self, AXIS_CAPS, AxisCaps, AxisExceeded, HelperAxis, TestCaps,
