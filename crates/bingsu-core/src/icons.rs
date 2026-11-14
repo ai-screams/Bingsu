@@ -1,4 +1,4 @@
-//! Icons by name (ADR-0009: themes name icons, never code points) and the
+//! Icons by name (themes name icons, never code points) and the
 //! glyph width table for private use code points. The width is the
 //! cells a terminal advances, which for a Nerd Font glyph is 1 whatever the
 //! font draws (UNVERIFIED per terminal; `doctor` measures with CPR in M7).
@@ -144,7 +144,7 @@ pub struct Resolved {
     pub text: &'static str,
     pub width: u8,
     /// The set actually used when the requested one broke the one-cell rule
-    /// under the profile (ADR-0009 automatic fallback; `config check` shows
+    /// under the profile (automatic fallback; `config check` shows
     /// it from M3).
     pub fell_back_to: Option<IconSet>,
 }
