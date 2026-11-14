@@ -393,6 +393,11 @@ same settings and values. Give a segment name to look at one segment; for a comm
 it also says whether the unit would run and why not (the same words as `config check --explain`). The built-in language
 segments (`node`, `python`, `rust`, `go`) have no such part in `explain`; `config check --explain` covers them.
 
+Without `--width`, `explain` decides at `COLUMNS` when it holds a whole number from 1 to 65535, else at the width
+of the terminal its output goes to, else at 80 columns. The `width:` line says which (`from COLUMNS`,
+`from the terminal`, `assumed`), and so does `width_source` in the JSON form. Shells keep `COLUMNS` to themselves
+unless it is exported, so in a terminal the width usually comes from the terminal; through a pipe it is 80.
+
 `explain` runs nothing: no command, no collector, no helper, and nothing is written or published. Values a collector
 or a command would bring are not there, so those segments show as `no-value`; read the result as "what the layout does
 with the values a prompt has".

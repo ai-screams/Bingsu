@@ -180,6 +180,21 @@ def test_the_pinned_helper_gets_nothing_in_its_environment(tmp_path, before):
     assert b"doctor-evidence-v1" in (tmp_path / "helper.stdin").read_bytes()
 
 
+# 이것을 실패시키는 것: 내보내지 않은 COLORFGBG를 증거의 봉투에 싣지 않는 것(doctor가 환경만 보고 어둡다고 가정함), 그 값을
+# 환경으로도 내보내는 것(고정 bingsu의 환경에 COLORFGBG가 있음), 실제 doctor가 그 마지막 단어 쌍을 낯선 필드로 거절하는 것.
+def test_an_unexported_brightness_hint_travels_in_the_envelope_only(tmp_path):
+    s, _ = start(tmp_path, recording=True, tag="rec")
+    s.run("COLORFGBG='0;15'; bingsu_doctor")
+    s.close()
+    rec = (tmp_path / "rec" / "helper.stdin").read_bytes()
+    assert rec.split(b"\x1f")[8].endswith(b"\x1d--colorfgbg\x1d0;15"), rec
+    assert b"COLORFGBG" not in (tmp_path / "rec" / "helper.env").read_bytes()
+    s, _ = start(tmp_path, tag="real")
+    t = doctor(s, tmp_path, before="COLORFGBG='0;15'")
+    s.close()
+    assert line(t, "envelope").startswith("  ok"), t
+
+
 HOSTILE = "setopt ksh_arrays sh_word_split glob_subst rc_expand_param no_unset ksh_glob sh_glob posix_builtins"
 
 

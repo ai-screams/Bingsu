@@ -123,6 +123,8 @@ mod source_path;
 #[allow(unsafe_code)]
 pub(crate) mod sys;
 #[cfg(unix)]
+mod terminal;
+#[cfg(unix)]
 mod trust_record;
 #[cfg(unix)]
 #[allow(unsafe_code)]

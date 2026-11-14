@@ -93,6 +93,8 @@ pub const HOOK_ORDER_CHANGED: DiagCode = w(609);
 pub const ENVELOPE_UNEXPECTED: DiagCode = w(610);
 pub const ZSH_TOO_OLD: DiagCode = w(611);
 pub const COLLECTION_BREAKER_ON: DiagCode = w(612);
+pub const TERMINAL_WIDTH_DIFFERS: DiagCode = w(613);
+pub const TERMINAL_BACKGROUND_DIFFERS: DiagCode = w(614);
 
 const fn stable(
     code: DiagCode,
@@ -440,6 +442,18 @@ pub const CODES: &[CodeInfo] = &[
         "collection is switched off for this folder in this shell session",
         "the same mount missed its deadline three times in a row, so this session stops collecting there for a while; the prompt still draws",
         "wait about five minutes or open a new shell; the shell function bingsu_doctor shows whether it is still on",
+    ),
+    stable(
+        TERMINAL_WIDTH_DIFFERS,
+        "this terminal draws some characters in other widths than the settings assume",
+        "a width that differs from the terminal's makes the prompt's right edge and its lines drift by a cell or more",
+        "set `width.ambiguous` and `width.emoji` to what the terminal draws, or change the terminal's own setting",
+    ),
+    stable(
+        TERMINAL_BACKGROUND_DIFFERS,
+        "the terminal's background is the other brightness than the prompt draws for",
+        "with `colors.mode` set to auto, the prompt picks light or dark colors from a hint that the terminal and the shell may not agree on",
+        "set `colors.mode` to dark or light to match the terminal",
     ),
     stable(
         TEMPLATE_REPLACES_STYLE,
