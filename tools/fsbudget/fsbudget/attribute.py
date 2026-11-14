@@ -1,4 +1,4 @@
-"""Attribute calls to roles (spec section 8 "role attribution") and enforce
+"""Attribute calls to roles and enforce
 the fsb marker windows fail-closed: a failed or unbalanced marker, or a
 gated-role filesystem call outside a window, is an error.
 
@@ -760,7 +760,7 @@ def collector_attribute(lines: list[str], pinned: dict, *, helper_kill: bool = F
     descriptors = _Descriptors()
     counts = defaultdict(lambda: defaultdict(int))
     helper_calls = []
-    # Conservation (M6 ruling Q7): every call is counted in exactly one role
+    # Conservation: every call is counted in exactly one role
     # or left out under one of these names; a path that drops a call fails.
     excluded = defaultdict(int)
     entered = 0

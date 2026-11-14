@@ -1,4 +1,4 @@
-"""zsh on a modelled screen (spec section 7, screen and layer 3 rows): the
+"""zsh on a modelled screen: the
 real binary and the built-in default theme in a PTY, judged cell by cell.
 These rows pin today's behaviour before the hooks grow widgets. Text that
 depends on the machine (host name, folder) is never compared: a row is judged

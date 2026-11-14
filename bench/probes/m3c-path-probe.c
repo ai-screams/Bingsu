@@ -1,7 +1,7 @@
 /* X-11 independent syscall oracle. The helper/test harness prepares argv[1].
  * cc -Wall -Wextra -Werror bench/probes/m3c-path-probe.c -o /tmp/m3c-path-probe
  * /tmp/m3c-path-probe <fixture-root> [--force-absent]
- * Current-runtime + forced fallback are required; minimum OS is decision 24.
+ * Current-runtime + forced fallback are required; the oldest OS is not run here.
  */
 #include <AvailabilityMacros.h>
 #include <errno.h>

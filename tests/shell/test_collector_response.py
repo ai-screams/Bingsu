@@ -137,8 +137,8 @@ def test_post_filter_has_no_new_path_or_metadata_effects(trace_binary, tmp_path,
                           boundary, trace_binary, pinned, begin.pid, cwd)
     counts = budget.assert_collection_trace(front, boundary, pinned, cwd, required=True)
     # No collection folder: one ENOENT open. With a store: three folders, the
-    # two collection copies and the command response (C4b ruling Q1: opened
-    # with them, here absent, so its open fails ENOENT and adds nothing more).
+    # two collection copies and the command response (opened with them; here
+    # absent, so its open fails ENOENT and adds nothing more).
     assert counts["openat"] == (1 if mode == "absent" else 6)
     assert sum(c.name == "write" for c in front if c.index > boundary) == 1
     table = {r[0] for r in budget._ROWS if r[0] != "-"}

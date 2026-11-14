@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M1 end-to-end timings (spec section 8): empty prompt, redraw, init
+# M1 end-to-end timings: empty prompt, redraw, init
 # generator and init added time per shell. Warm, 300 runs, /usr/bin/true
 # floor. Needs hyperfine (-N, 1.13 or later), zsh and fish; bash is timed
 # only when the bash on PATH is 5.1 or later (otherwise the meta line says

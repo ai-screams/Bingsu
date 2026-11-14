@@ -596,7 +596,7 @@ def session_tag(value):
     return hashlib.sha256(value.encode()).hexdigest()[:32]
 
 
-# C2 판정 Q1: macOS 스크립트 단위는 helper가 만든 사본으로 돌고, 감독이 끝나면 사본은 지워진다. 이것을
+# macOS 스크립트 단위는 helper가 만든 사본으로 돌고, 감독이 끝나면 사본은 지워진다. 이것을
 # 실패시키는 것: Round::end의 remove_all 호출을 지우는 것(사본이 남음), 사본 대신 원본 경로를 허가에 넣는 것
 # (relay가 0600이 아닌 원본을 거부해 카나리가 없음).
 @macos_only
@@ -612,7 +612,7 @@ def test_macos_script_runs_from_a_copy_that_is_then_removed(tmp_path, _native_bo
     assert list(scripts_folder(session).iterdir()) == []
 
 
-# C2 판정 Q1: 감독이 살아 있는 동안 helper가 끝나면 사본은 남고, 같은 세션의 다음 회차(세션 잠금을 얻은
+# macOS에서 감독이 살아 있는 동안 helper가 끝나면 사본은 남고, 같은 세션의 다음 회차(세션 잠금을 얻은
 # helper)가 지운다. 다른 세션 태그의 파일은 남는다. 이것을 실패시키는 것: Round::end의 wait 결과 검사를 지우는
 # 것(멈춘 감독 아래 사본이 지워짐), prepare의 sweep을 지우는 것(남은 사본이 그대로), sweep의 접두사 비교를 지우는 것.
 @macos_only
@@ -732,7 +732,7 @@ def supervised_rounds(session, limit=8):
     (debug log); a round that never reached the command round ("refresh
     incomplete" under load) ran nothing and does not count (m6-T9). A round
     whose publication was deferred ran the units, counts, and the next round
-    runs them again (C4 ruling P1)."""
+    runs them again."""
     assert session.level == "debug"
     ran = 0
     for _ in range(limit):
@@ -842,7 +842,7 @@ def test_cache_hit_runs_nothing(tmp_path, _native_boot_required):
     assert b"cached-value" in command_response(session)
 
 
-# cache가 없으면 기본 0이라 회차마다 실행한다(C4 판정 P3). 이것을 실패시키는 것: 기본 캐시 기간을 0보다 크게
+# cache가 없으면 기본 0이라 회차마다 실행한다. 이것을 실패시키는 것: 기본 캐시 기간을 0보다 크게
 # 두는 것.
 def test_no_cache_runs_every_round(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)

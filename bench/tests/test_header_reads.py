@@ -1,5 +1,5 @@
 """The size sweep's read count follows ceil(size / BUF) with no end-check
-read (spec section 8 read-count rule; spec section 9 M1 row (7)). Linux only
+read. Linux only
 (strace); FSB_REQUIRE_STRACE=1 turns the skip into a failure."""
 import json
 import re

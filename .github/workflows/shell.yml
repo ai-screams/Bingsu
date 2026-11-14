@@ -312,7 +312,7 @@ jobs:
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[builtin_probe]' "$RUNNER_TEMP/cell-helper.txt"
           grep -Fx 'PASSED tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula[builtin_fast]' "$RUNNER_TEMP/cell-helper.txt"
       # The survivor fixture depends on the kernel and FUSE: a skip there is
-      # BLOCKED and recorded, not failed (plan C3, X-04).
+      # BLOCKED and recorded, not failed (X-04).
       - name: Record the survivor fixture result
         if: success() || failure()
         run: |
