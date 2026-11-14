@@ -264,8 +264,11 @@ segment, whether it runs and which file each key came from.
 ### Asking for a bingsu version: `requires`
 
 A config can say which bingsu it needs with a top-level `requires`, for example `requires = ">=0.2"`. The only form
-accepted is `>=MAJOR.MINOR` or `>=MAJOR.MINOR.PATCH`. When the running bingsu is older, the file is not read and
-`bingsu config check` reports E306 with the version asked for; the prompt keeps drawing with the last good settings.
+accepted is `>=MAJOR.MINOR` or `>=MAJOR.MINOR.PATCH`. When the running bingsu is older, `bingsu config check` reports E306
+with the version asked for, and what happens next depends on the file's trust. A trusted file makes the whole read fail:
+the prompt keeps drawing with the last good settings. A file that is trusted for colors and layout only is dropped on
+its own, with a warning (W406), and the other files are applied. `bingsu config check --explain` shows which each file
+is.
 
 The running version is compared as SemVer says: a pre-release is lower than the release with the same numbers. So
 `0.1.0-rc.1` does not satisfy `requires = ">=0.1.0"` (or `">=0.1"`), while `0.1.1-rc.1` does satisfy `">=0.1.0"`, and
@@ -357,6 +360,11 @@ the config it reads.
 
 ## Commands that help with a config
 
+The outputs below were copied from real runs, with the home folder written as `~` (and the path of a development build
+shortened). A line in parentheses in the `config edit` examples says what the editor did. One kind of line is left out of
+the `config check`, `config edit` and `doctor` examples: in a shell that has not run `bingsu init`, each command also
+prints on standard error a notice that it found its folders from the environment now, not from what `init` pinned.
+
 ### First settings: `bingsu setup`
 
 `bingsu setup` makes a first settings file from two questions: whether you can see Nerd Font symbols, and the color
@@ -394,9 +402,11 @@ is there. With both there it opens neither, points at E308 and exits 1. It does 
 points to `bingsu setup` and exits 1.
 
 The editor is `$VISUAL`, or `$EDITOR` when `$VISUAL` is unset or empty; with neither set the command stops with an
-example and does not try a default. The value is not given to a shell. It is split at spaces with quotes and backslashes
-undone, and `$`, backticks, `;`, `&`, `|`, `<`, `>`, `(` and `)` outside single quotes are refused (point the variable at
-a script instead); `~` and `*` are not expanded. A first word with a `/` must be an absolute path; otherwise it is
+example and does not try a default. The value is not given to a shell. It is split at spaces. Single quotes keep
+everything inside them. Inside double quotes everything is kept except `$` and a backquote, which are refused. Outside
+quotes `$`, a backquote, `;`, `&`, `|`, `<`, `>`, `(` and `)` are refused unless a backslash comes right before them (the
+backslash is dropped and the character stays plain text); to run something that needs them, point the variable at a
+script. `~` and `*` are not expanded. A first word with a `/` must be an absolute path; otherwise it is
 looked up in the absolute entries of `PATH`, in order, and only a regular file with an execute bit is run. The file's
 path is added as the last argument. If the editor ends with a nonzero status or by a signal, nothing is applied.
 
@@ -409,6 +419,9 @@ files, in the order they apply:
   1. (built-in) (trusted)
   2. ~/.config/bingsu/config.toml (trusted)
 diagnostics: 0 error(s), 0 warning(s), 0 note(s)
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
 result: valid
 bingsu: edited; new settings published (generation 1)
 ```
@@ -418,11 +431,21 @@ After a save that is not valid, the check says so, nothing is published and the 
 ```console
 $ bingsu config edit
 (the editor opens the file; you save `colr = 1`)
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.toml (trusted)
 diagnostics: 1 error(s), 0 warning(s), 0 note(s)
 E201: unknown key `colr`
   where: ~/.config/bingsu/config.toml:1:1
+  why: unknown keys are errors, so a typo is never silently ignored
   fix: check the key name
   code: E201 (bingsu help E201)
+
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
 result: invalid; the prompt keeps the last good settings
 bingsu: the saved settings are not valid, so they were not applied; the prompt keeps the previous settings
 bingsu: the settings are not valid, so nothing changed and the prompt keeps the last good settings. Run: bingsu config check
@@ -577,12 +600,13 @@ What each status means on these rows:
 | `ok` | The terminal drew every probe in the number of cells the settings say (`terminal width`), or its background is the brightness the prompt draws for (`background`) |
 | `warn` | W613 for width, W614 for background; `bingsu help W613` and `bingsu help W614` say what to set |
 | `unknown` | The terminal did not answer in time, answered with something that is not a cursor position, or the cursor left the line while measuring; or the control characters moved the cursor by an unexpected number of cells, so the measurement is not trusted; or the settings could not be read |
-| `skipped` | Nothing was asked: standard output is not a terminal (and `--terminal` is not given), there is no controlling terminal, the terminal is under 40 columns wide, or `colors.mode` is not `auto` (background only) |
+| `skipped` | Nothing was asked. For both rows: standard output is not a terminal (and `--terminal` is not given), or there is no controlling terminal. For `terminal width` alone: the terminal is under 40 columns wide. For `background` alone: `colors.mode` is not `auto`. A narrow terminal does not stop the background question |
 
 The usage is `bingsu doctor [--format json|text] [--terminal]`; the two options may come in either order, once each.
 
-With `--format json` the two rows carry a `details` object with the measured cells per probe and the values that fit
-(`probes`, `recommended`, `inside_tmux`), or the two brightnesses (`terminal`, `prompt`, `colors_mode`).
+With `--format json` a row that finished its measurement carries a `details` object: the measured cells per probe and the
+values that fit (`probes`, `recommended`, `inside_tmux`) for `terminal width`, or the two brightnesses (`terminal`,
+`prompt`, `colors_mode`) for `background`. A skipped row, or a measurement that got no usable answer, has no `details`.
 Inside `tmux` the answers come from `tmux`, which may differ from the outer terminal; the width row says so.
 
 `bingsu help CODE` explains a diagnostic code that `config check`, `explain` or `doctor` printed, in three parts: what
@@ -628,15 +652,26 @@ the top. Anything else is E106. The limits are the same as for TOML (256 KiB per
 }
 ```
 
-`bingsu config check` accepts this as `config.json` (0 errors, 0 warnings), and the file list names it like any other:
+`bingsu config check` accepts this as `config.json`, and the file list names it like any other. The note (N504) is not
+an error: at narrow widths the band draws its own template in place of the line the file writes (`bingsu help N504`).
 
 ```console
 $ bingsu config check
+settings folder: ~/.config/bingsu
 selection: config.toml or config.json in the settings folder
 files, in the order they apply:
   1. (built-in) (trusted)
   2. ~/.config/bingsu/config.json (trusted)
-diagnostics: 0 error(s), 0 warning(s), 0 note(s)
+diagnostics: 0 error(s), 0 warning(s), 1 note(s)
+N504: at widths 0-59 the band `narrow` draws its own template in place of layout.line2
+  where: ~/.config/bingsu/config.json:8:34
+  why: a band's template replaces the layout lines the band would take from `[layout]`
+  fix: to draw your segments at those widths too, write `layout.when.narrow.style.template` yourself
+  code: N504 (bingsu help N504)
+
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
 result: valid
 ```
 
@@ -644,10 +679,18 @@ With a `config.toml` beside it, neither is read:
 
 ```console
 $ bingsu config check
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
 diagnostics: 1 error(s), 0 warning(s), 0 note(s)
 E308: `~/.config/bingsu/config.json` and `~/.config/bingsu/config.toml` are both here
+  where: ~/.config/bingsu/config.json:1:1
   why: one place holds one settings file, and bingsu does not pick one of two
   fix: keep one of the two files
+  code: E308 (bingsu help E308)
+
+widths (columns -> layout):
+  (not available while an error remains)
 result: invalid; the prompt keeps the last good settings
 ```
 
@@ -659,7 +702,7 @@ program.
 
 ```console
 $ bingsu --version
-bingsu 0.1.0-rc.1 (18b26c1e1d6ba89f7f95bc769c5eb8d3afa2c52d8a88a53074fb7eb44f9fa583, aarch64-apple-darwin, rustc 1.98.1 48a229cea)
+bingsu 0.1.0-rc.1 (9c9a576bb41400e37390cce6970723f6703ffaacbae05025db024696f90fb890, aarch64-apple-darwin, rustc 1.98.1 48a229cea)
 bingsu-prompt: same build
 bingsu-collect: same build
 ```
