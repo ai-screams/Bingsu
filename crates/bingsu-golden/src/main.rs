@@ -1,4 +1,4 @@
-//! Determinism probe (spec section 7 layer 7, F-06). Prints one line per
+//! Determinism probe. Prints one line per
 //! case: `case<TAB>value`. CI runs it natively on Linux, macOS and Windows
 //! and under wasmtime as wasm32-wasip1, and compares each output with
 //! tests/golden/render/render.tsv byte for byte. The cases cover every

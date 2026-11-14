@@ -1,4 +1,4 @@
-"""F-01 / X-06: at prompt time HOME, USER, XDG_* and BINGSU_LOG point into a
+"""X-06: at prompt time HOME, USER, XDG_* and BINGSU_LOG point into a
 repository; the hook must still pass only the roots pinned by init, and the
 binary (with every process and thread it starts) must touch nothing under
 the repository."""
@@ -240,7 +240,7 @@ OPENS = {"openat", "openat2", "open"}
 
 def resolve_dirfds(lines):
     """Each line with the paths it names, a name relative to a descriptor
-    resolved against the path that descriptor was opened with (Task R1: the
+    resolved against the path that descriptor was opened with (the
     runtime root walk opens "/" and then one name at a time with
     `openat(fd, name, O_NOFOLLOW)`). Descriptors are tracked per process
     from the `= N` of each open; a relative name under a descriptor this
@@ -486,7 +486,7 @@ def descriptor_child(call, path):
 
 
 def helper_mkdir_step(call, path, roots):
-    # R1's shared creator and runtime publication/collector staging use only
+    # The shared creator and runtime publication/collector staging use only
     # mkdirat(held-parent, one-name, 0700). Config roots are never created.
     writable = roots[:1] + roots[2:]
     below = any(path == r or path.startswith(r + "/") for r in writable)
@@ -1651,14 +1651,13 @@ HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
 # Command stages (M6 C4): one config unit run through the relay, on a screen
 # without dir or git. The miss runs it (no cache: every round); the hit finds
 # the warm-up's result inside its cache time; not_run keeps the unit off the
-# screen. All three take the session lock and reclaim (C4 ruling Q4; the
-# security review's R-1 names both rounds with nothing to run). Paths the
+# screen. All three take the session lock and reclaim (both rounds have nothing to run). Paths the
 # helper reaches in these rounds, and why:
-#   /proc/self/cgroup: the atomic path's input, the delegated cgroup subpath
-#     (C3 ruling R3); the helper path rules admit it under /proc/self/.
+#   /proc/self/cgroup: the atomic path's input, the delegated cgroup subpath;
+#     the helper path rules admit it under /proc/self/.
 #   /sys/fs/cgroup/<own>, its cgroup.procs, the session parent bingsu-cmd-*
-#     and its unit cgroups: the helper's reclaim under the session lock (C3
-#     ruling R1, CMD-CGROUP-PROCS); uname is the 5.14 check before them.
+#     and its unit cgroups: the helper's reclaim under the session lock
+#     (CMD-CGROUP-PROCS); uname is the 5.14 check before them.
 #   /proc/self/fd, /dev/null (three opens) and chdir("/"): the supervisor
 #     spawn's fd census and its posix_spawn child before exec, as the
 #     collector spawn (miss only).
@@ -2130,7 +2129,7 @@ class HelperStageFixture:
                             else path_names("/usr/bin"),
                             "target_links": target_links("/usr/bin/true") if stage == "command_miss" else 0,
                             # The repository scan walks the shell's folder by its names
-                            # (U-24): a canonical folder, so no link is followed.
+                            # : a canonical folder, so no link is followed.
                             "shell_names": path_names(self.pwd)}
             assert os.path.realpath(self.pwd) == str(self.pwd), ("a canonical shell folder", self.pwd)
             if builtin:
@@ -2486,7 +2485,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {helper_stage_evidence / stage}")
 
 
-# The helper's E_n cap (user decision U2), pinned independently from the product source.
+# The helper's E_n cap, pinned independently from the product source.
 HELPER_E_N_CAP = 1024
 
 
@@ -3613,7 +3612,7 @@ def test_helper_fds_after_env(tmp_path):
         exe = str(fixture.inst.exe)
         check_front_receives_shell_pipes(after, initial, pipes, exe)
         inode = helper_fd_table(after, exe, initial)[4][0]
-        # U-9i: the helper reads the whole frame in one read and closes fd 4,
+        # the helper reads the whole frame in one read and closes fd 4,
         # before its own first open (the loader's and stack guard's come before
         # main; on the cold init path there is no fd 4).
         helper = exec_pid(after, exe, "__refresh-v1")
@@ -3938,7 +3937,7 @@ def test_target_links_count_same_folder_hops(tmp_path):
         target_links(str(tmp_path / f"h{TARGET_LINKS_MAX}"))
 
 
-# GATE-FS-FRONT command response shapes (C4b, U-9h as revised by C4b ruling Q1):
+# GATE-FS-FRONT command response shapes (C4b):
 # the prompt prefetches `command` with the collection responses before the
 # filter and reads it after the filter only when the snapshot draws a command
 # segment. A store without the file costs one ENOENT open; a file the snapshot

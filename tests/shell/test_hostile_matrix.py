@@ -45,7 +45,7 @@ def cases():
 
 def record(shell, data):
     # The same value in the left field and in the upper line, which the hook
-    # joins to the left field before escaping (record change plan 12, R-04).
+    # joins to the left field before escaping.
     left = b"L<" + data + b">L "
     upper = b"U<" + data + b">U"
     if shell == "zsh":

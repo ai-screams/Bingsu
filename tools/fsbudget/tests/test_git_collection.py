@@ -82,7 +82,7 @@ def test_trace_rejects_outside_root_even_on_eperm(line, message):
         assert_repository_trace(ACQUIRE + CONTENT[:-1] + [line, CONTENT[-1]], CAPS, {})
 
 
-# 이것을 실패시키는 것: U2 names-only 권한을 stat/open/더 넓은 Landlock root로 바꾸는 것.
+# 이것을 실패시키는 것: names-only 권한을 stat/open/더 넓은 Landlock root로 바꾸는 것.
 @pytest.mark.parametrize("call,message", [
     ('newfstatat(8</home>, "other", {st_mode=S_IFREG|0600}, AT_SYMLINK_NOFOLLOW)', "outside|metadata"),
     ('openat(8</home>, ".", O_RDONLY|O_DIRECTORY)', "already-held"),

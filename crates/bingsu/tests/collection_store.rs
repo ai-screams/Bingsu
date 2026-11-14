@@ -1099,7 +1099,7 @@ fn store_capacity_is_reserved_before_mkdir() {
             Ok(store) => held.push(store),
             Err(StoreError::Busy) => {
                 assert!(!f.path_for(&b).exists());
-                // U-21: ⌊(16,600,000 − 2 × 1,048,576 catalog copies) ÷ (4 × 262,144
+                // ⌊(16,600,000 − 2 × 1,048,576 catalog copies) ÷ (4 × 262,144
                 // + 2 × 505,370 command response maximum)⌋ = 7, as at 10 MB before
                 // the command response. One byte under 16,512,364 leaves 6.
                 assert_eq!(
@@ -3025,7 +3025,7 @@ mod command_store {
         assert_eq!(read(&f), r);
     }
 
-    // 앞 형식(BNGCMD01)의 응답은 읽지 못하는 응답으로 보고 지운 뒤 새 형식으로 덮어쓴다(U-32: 이전 판의 항목은
+    // 앞 형식(BNGCMD01)의 응답은 읽지 못하는 응답으로 보고 지운 뒤 새 형식으로 덮어쓴다(이전 판의 항목은
     // 남기지 않는다). 이것을 실패시키는 것: read_command가 decode 실패를 오류로 돌려 발행을 막는 것, 옛 응답을
     // 지우지 않고 그 위에 섞는 것.
     #[test]

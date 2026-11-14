@@ -36,8 +36,8 @@ HERE = Path(__file__).resolve().parent
 LEDGER = "collector-acceptance.tsv"
 FIELDS = ("case", "environment", "arch", "cell", "status", "outcome", "evidence_file", "command", "reason")
 ARCHES = ("x86_64", "aarch64")
-# U4: Linux collection needs 5.9+ and the required kernel features; below it
-# the product collects nothing and the prompt stays normal. U5: the current
+# Linux collection needs 5.9+ and the required kernel features; below it
+# the product collects nothing and the prompt stays normal. The macOS case is the current
 # macOS runtime; the minimum macOS VM is decision 24, never a substitute here.
 LINUX_FLOOR = (5, 9)
 ALL_ENVIRONMENTS = ("macos-current", "linux-glibc", "linux-musl")

@@ -74,7 +74,7 @@ impl StageDeadlines {
     };
 
     /// The product stages of one request. With languages asked for, the
-    /// language stage's time comes out of C (user decision U-19), so the
+    /// language stage's time comes out of C, so the
     /// stages still add up to the request budget; without, nothing changes
     /// (fails without it: product_stages_give_c_time_to_languages_only).
     pub const fn product(languages: bool) -> Self {

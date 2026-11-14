@@ -103,7 +103,7 @@ def prepare_case(row):
         write(repo / "new/a", "a")
         write(repo / "new/b", "b")
     elif name in {"untracked-under-cap", "untracked-at-cap", "untracked-over-cap", "untracked-large"}:
-        # U7's per-directory cap is 256 files. Below it counts remain exact;
+        # The per-directory cap is 256 files. Below it counts remain exact;
         # reaching it leaves EOF unproven, even when Git counts exactly 256.
         # The manifest's untracked-cap-boundary policy requires 256+ partial.
         count = {"untracked-under-cap": 255, "untracked-at-cap": 256,

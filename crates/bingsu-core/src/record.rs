@@ -28,7 +28,7 @@ impl RecordVersion {
 }
 
 /// The eleven display fields, in record order. `upper` is the line above the
-/// input line (record change plan 12, R-01); an empty `upper` means a one-line
+/// input line; an empty `upper` means a one-line
 /// prompt. The last four describe vi command mode and stand after `upper`, so
 /// the other fields keep their places: each `*_vicmd` is that line drawn whole,
 /// and `vi_lines` (`l`, `r`, `u`) names the lines that use it. A line it does
@@ -490,7 +490,6 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 윗줄을 일곱째 자리가 아닌 곳에 두거나, 윗줄의 줄바꿈을 받는 것
-    // (변경안 12판 R-01·R-03).
     #[test]
     fn upper_line_is_the_seventh_field_without_newlines() {
         let (r, out) = enc(&Fields {

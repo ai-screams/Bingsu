@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Judge the cause of PTY session stalls from session_stall.py results
-(Task R0 Step 5). Runs on Python 3.9 or later.
+Runs on Python 3.9 or later.
 
 One judgement per body (case), host and load. A cell is one side (this
 host, or the other host at the same load), product and driver; its value is

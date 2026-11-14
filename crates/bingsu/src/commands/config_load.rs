@@ -1,5 +1,5 @@
-//! The CLI side of reading config (spec section 2 "합치는 순서", `extends`
-//! path and safety rows; Task R3). Core walks the `extends` graph and
+//! The CLI side of reading config (the order of merging, the `extends`
+//! path and safety rows). Core walks the `extends` graph and
 //! returns the S3a source graph; this module finds the roots,
 //! resolves and opens each `extends` entry, checks every file and decides
 //! its trust:
@@ -190,8 +190,7 @@ pub struct Loader {
     pub untrusted: Vec<(FileKey, PathBuf, Untrusted)>,
     pub remedies: Vec<(FileKey, String)>,
     /// The `config use` file's new identity, when another file now stands
-    /// at the recorded path and it passed the whole safety check (ruling
-    /// P-R3c, spec change S-10). The caller writes it back with
+    /// at the recorded path and it passed the whole safety check. The caller writes it back with
     /// `trust_record::write`.
     pub renew: Option<Record>,
     /// False when the source set could not be listed to the end.
@@ -636,7 +635,7 @@ impl Loader {
     /// config.local.toml or config.local.json. A place holding both of its
     /// names reads neither (E308). All candidates are probed one at a time and
     /// deduplicated by FileKey; core owns the semantic file/byte budgets.
-    /// S3b/N2 supplies the compiled-in default TOML; R3 does not define it.
+    /// The caller supplies the compiled-in default TOML; this module does not define it.
     /// Probe fds close before the next candidate. After reading, adopt
     /// retains only execution evidence, bounded by SESSION_FDS_MAX.
     pub fn roots(&mut self, builtin: &[u8]) -> Vec<Root> {
@@ -1096,7 +1095,7 @@ mod tests {
         }
 
         /// The root at 0775 with group members the system could not
-        /// confirm: init keeps it as a shape-only root (R3 I-1).
+        /// confirm: init keeps it as a shape-only root.
         /// Group members unknown for the root folder only.
         fn root_unknown(&self) -> UnknownAt {
             let md = std::fs::metadata(&self.root).unwrap();
@@ -1555,7 +1554,7 @@ mod tests {
     }
 
     // 큰 conf.d는 메타데이터 계획만 만들고 fd를 보유하지 않는다. Part S가 고유 파일 예산을 정한다.
-    // 후보가 R 상한(256)을 넘는 conf.d는 의미 예산 판정 전에 Incomplete다(U2): 300개는 오늘까지 확인한 실패
+    // 후보가 R 상한(256)을 넘는 conf.d는 의미 예산 판정 전에 Incomplete다300개는 오늘까지 확인한 실패
     // (EXTENDS_TOO_MANY, 무효 표식)였고 이제 표식을 바꾸지 않는다.
     // 이것을 실패시키는 것: 모든 뿌리를 열어 fd를 쥐는 것, 열지 못한 이유를 일반 문구로 바꾸는 것, 뿌리 후보를
     // R에 세지 않는 것(300개가 끝까지 계획됨).
@@ -1607,7 +1606,7 @@ mod tests {
         );
     }
 
-    // 모양 전용 뿌리(사용자 결정 2026-10-17, R3 I-1): 그 아래 파일은 모두 ShapeOnly다. 색은 적용되고, 명령 세그먼트는
+    // 모양 전용 뿌리: 그 아래 파일은 모두 ShapeOnly다. 색은 적용되고, 명령 세그먼트는
     // 다른 모양 전용 원본과 같은 진단(W405 계열)으로 막히며 실행 단위가 없다. S3b 보고 경로로 확인한다.
     // 이것을 실패시키는 것: trusted_place·linked_from_root에서 모양 전용 상한을 빼는 것(뿌리 아래 파일이 Executable 또는
     // Unsafe가 됨), 발행 전 재확인에서 모양 전용 뿌리를 보통 뿌리처럼 다시 검사하는 것.
@@ -1722,7 +1721,7 @@ mod tests {
     }
 
     // config use 기록: 기록한 파일이 config.toml 자리를 대신하고 실행 키를 준다. 같은 정규 경로에 새 파일이 오면
-    // (편집기의 새 파일 저장) 전체 안전 검사를 다시 통과할 때 승계하고 새 정체를 돌려준다(P-R3c, S-10).
+    // (편집기의 새 파일 저장) 전체 안전 검사를 다시 통과할 때 승계하고 새 정체를 돌려준다.
     // 검사에 실패하면 승계하지 않는다.
     // 이것을 실패시키는 것: 기록 밖 파일에 실행 신뢰를 주는 것, 새 정체를 돌려주지 않는 것(다음 회차에도 다시 검사),
     // 안전하지 않은 새 파일을 승계하는 것.
@@ -1825,7 +1824,7 @@ mod tests {
         assert_eq!(l.verified(&r.files, r.succeeded), Verified::Incomplete);
     }
 
-    // 판정 P-R3b(S-9): 뿌리 안의 symlink는 링크가 있는 자리로 신뢰한다. 대상은 같은 안전 검사를 거친다.
+    // 뿌리 안의 symlink는 링크가 있는 자리로 신뢰한다. 대상은 같은 안전 검사를 거친다.
     // 적힌 경로의 `..`로 뿌리를 벗어난 파일은 뿌리 안이 아니다.
     // 이것을 실패시키는 것: 정규 경로로만 판단하는 것(stow 사용자의 명령이 꺼짐), 대상의 안전 검사를 건너뛰는 것,
     // `..`가 든 적힌 경로를 뿌리 안으로 보는 것.

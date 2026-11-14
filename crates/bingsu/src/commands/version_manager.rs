@@ -1,4 +1,4 @@
-//! The helper's side of the version manager resolvers (plan D2, U-12 R2).
+//! The helper's side of the version manager resolvers.
 //! It gathers the facts the pure rules (`bingsu_core::collection::manager`)
 //! decide on: which manager's shim the language's command is, the manager's
 //! folders from the shell environment, rustup's settings file and one
@@ -70,7 +70,7 @@ pub(crate) enum Shim {
     /// A manager with a resolver.
     Manager(Manager),
     /// A manager bingsu does not resolve (asdf, mise, volta): the value is
-    /// hidden with a diagnostic (U-12 R2).
+    /// hidden with a diagnostic.
     Unsupported,
     /// Not a manager's shim: the version command runs (D3).
     None,
@@ -119,7 +119,7 @@ fn home_of(vars: &Environ<'_>, name: &[u8], fallback: &str) -> Option<PathBuf> {
 ///   `$GOENV_ROOT`, else `~/.goenv`, shims in `shims/` (each one's
 ///   `libexec/*-rehash`: `SHIM_PATH="${NODENV_ROOT}/shims"`, and the same
 ///   for goenv). Their shims are `#!/usr/bin/env bash` scripts (the same
-///   files' prototype), which a probe never runs anyway (D3a ruling R2).
+///   files' prototype), which a probe never runs anyway.
 ///
 /// Every candidate is listed: a folder that does not exist matches nothing.
 fn unsupported(vars: &Environ<'_>) -> Vec<PathBuf> {
@@ -473,7 +473,7 @@ fn resolve(
     };
     let manager = match shim {
         Shim::Manager(manager) => manager,
-        // The caller hides the value and reports the shim (U-12 R2).
+        // The caller hides the value and reports the shim.
         Shim::Unsupported => return None,
         Shim::None => return done(Decision::Run(None)),
     };
@@ -560,7 +560,7 @@ pub(crate) enum Choice {
     },
     /// Show nothing; the reason goes to the log.
     Hidden(&'static str),
-    /// A manager without a resolver (U-12 R2): hidden, with a diagnostic.
+    /// A manager without a resolver: hidden, with a diagnostic.
     Unsupported,
 }
 
@@ -773,7 +773,7 @@ mod tests {
     // 모른다. mise는 MISE_DATA_DIR이 없으면 XDG_DATA_HOME/mise, asdf는 ASDF_DIR도, mise는 MISE_SHIMS_DIR과 시스템
     // shim 폴더도 본다(리뷰 M9). 이것을 실패시키는 것: folder()의 절대 경로 검사나 `..` 검사를 지우는 것, 변수보다
     // HOME 기본값을 먼저 쓰는 것, XDG_DATA_HOME·ASDF_DIR·MISE_SHIMS_DIR 칸을 지우는 것, nodenv·goenv 칸을 지우는
-    // 것(D3a 판정 R2).
+    // 것.
     #[test]
     fn homes_follow_the_environment() {
         let body = environ(&[
@@ -1157,7 +1157,7 @@ mod tests {
         );
     }
 
-    // 보안 리뷰 M-1: 관리자 폴더 자리에 FIFO나 장치가 있어도 필터 전 helper가 멈추지 않는다(open_home이 바로
+    // 관리자 폴더 자리에 FIFO나 장치가 있어도 필터 전 helper가 멈추지 않는다(open_home이 바로
     // 실패). O_DIRECTORY가 FIFO·장치를 열기 전에 거부한다(ENOTDIR). 이것을 실패시키는 것: O_DIRECTORY를 빼는 것
     // (FIFO open이 쓰는 쪽을 기다려 시간 안에 끝나지 않음). 장치 칸(/dev/null)은 O_DIRECTORY가 없어도 신뢰 규칙
     // (남이 쓸 수 있음)이 따로 막으므로 이 변이를 죽이지 않는다.

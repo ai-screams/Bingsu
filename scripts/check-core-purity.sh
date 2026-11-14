@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Core purity gate (spec section 1, F-05).
+# Core purity gate.
 # Fails on: a bingsu-core Cargo.toml that does not forbid clippy::disallowed_*
 # (so no allow/expect can switch the rules off) or whose lint copy drifts from
 # [workspace.lints], conditional compilation, #[path], include, macro_rules, a

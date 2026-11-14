@@ -1,5 +1,5 @@
-//! Producer layer for rendered prompts (spec section 3 "시험은 두 층이다",
-//! F-19): every hostile class from tests/hostile/classes.tsv through layout
+//! Producer layer for rendered prompts (the spec's two test layers):
+//! every hostile class from tests/hostile/classes.tsv through layout
 //! and shell output, once per input path (segment text, `{git.branch}`
 //! field, folder name, theme text) so that each path is checked on its own.
 //! Every field is read back with the shell's field grammar

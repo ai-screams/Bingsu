@@ -401,7 +401,7 @@ def certify(obs: dict, proofs: dict, error: int, diagnostic: Diagnostic, method:
 
 def verdict(memory: PromptMemory, hypothesis_bytes: int) -> str:
     """D5 rule: upper at or under the hypothesis meets it, lower over it exceeds
-    it, anything between is undecided (U6). No certified upper is BLOCKED."""
+    it, anything between is undecided. No certified upper is BLOCKED."""
     if memory["rss_upper_bytes"] is None:
         return "BLOCKED"
     if memory["rss_upper_bytes"] <= hypothesis_bytes:

@@ -34,7 +34,7 @@ CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 # These run only the normal product prompt, not the helper fixture. The gate
 # records them only (size_gate.py --record-only): a base that reads no command
 # response makes the ratio the whole added cost, and the worst increment is
-# bounded by +0.5 ms (U-23), not by the ratio.
+# bounded by +0.5 ms, not by the ratio.
 # - prompt-env64k: about 60 KiB of shell environment, so the prompt writes a near-full frame.
 # - prompt-env64k-commands: the same environment and 32 cached command segments
 #   that each allow another variable (32 environment digests, none shared),
@@ -43,7 +43,7 @@ CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 # - prompt-commands-max: 32 cached command segments, each value 4 KB of mixed text, all drawn (2,400 columns).
 # - prompt-commands-max-empty: the max config with no command response: the
 #   prompts pass no session, so no unit runs and nothing is published. Its
-#   difference from max is the cost of drawing command values (U-23).
+#   difference from max is the cost of drawing command values.
 # - prompt-commands-redraw: the max config, redrawn (`--redraw`: no helper).
 # - prompt-commands-max-empty-redraw: the empty max config, redrawn. Neither
 #   redraw starts a helper, so its difference from the redraw case is the
@@ -51,7 +51,7 @@ CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
 # - prompt-text-max: the max layout and width with 32 text segments of the
 #   same values instead of commands; its difference from max is what the
 #   command feature itself adds (reading, decoding, deciding), apart from
-#   drawing 32 wide segments (U-23).
+#   drawing 32 wide segments.
 # - prompt-env-segments: 32 env segments (C5) over the near-full frame of
 #   prompt-env64k, each variable about 1 KB of mixed text, all drawn (2,400
 #   columns). No command, no session, no response. A base without env
@@ -374,7 +374,7 @@ def observe_stages(preparation, directory, repo):
                     sent = True
             output.extend(child.communicate()[0])
         text = output.decode(errors="replace")
-        # A round that asks for languages gives C two of its milliseconds (U-19).
+        # A round that asks for languages gives C two of its milliseconds.
         stages = [{"stage": {5: "A", 3: "PathFacts", 28: "B", 8: "C", 6: "C", 4: "D", 2: "Languages"}[int(ms)],
                    "budget_ns": int(ms) * 1_000_000, "elapsed_ns": int(ns), "result": result}
                   for ms, ns, result in re.findall(r"(?m)^F3_STAGE (\d+) (\d+) (.*)$", text)]

@@ -1,4 +1,4 @@
-//! The refresh helper's side of a command round (U-1 C+, U-15 Q1): whether
+//! The refresh helper's side of a command round: whether
 //! this round has config units to run, the session lock, the grant built in
 //! memory from the compiled config the helper holds (never by decoding the
 //! published snapshot again), the supervisor spawned before the helper's
@@ -109,7 +109,7 @@ pub(crate) enum Skip {
     Neutral,
     Failed,
     /// Nothing runs, but cache hits were re-matched under a changed `match`
-    /// (U-9c): the helper publishes them once this round's marker stands.
+    /// : the helper publishes them once this round's marker stands.
     Reapplied,
 }
 impl Skip {
@@ -182,12 +182,12 @@ pub(crate) struct Publish {
     clock: bingsu_core::snapshot::Clock,
     environments: Vec<(String, [u8; 32])>,
     attempts: Vec<(String, u64)>,
-    /// Each runnable unit's `match`, applied to its result (U-9c).
+    /// Each runnable unit's `match`, applied to its result.
     patterns: Vec<(String, Option<String>)>,
     /// Cache hits re-matched under a changed `match`, published with the
     /// round's results without running.
     reapplied: Vec<response::Entry>,
-    /// The round's match time (U-29), shared by re-matching and results.
+    /// The round's match time, shared by re-matching and results.
     budget: super::command_match::Budget,
 }
 
@@ -295,7 +295,7 @@ impl Scripts {
     }
 }
 
-/// This round's language answers, by the asked language's id (U-3 L2): what
+/// This round's language answers, by the asked language's id: what
 /// the collector found for each version selection file. Empty when the
 /// collection did not run or did not finish.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -457,7 +457,7 @@ fn neutral(runtime: &File, me: u32) -> Result<bool, StoreError> {
 }
 
 /// Under the session lock no supervisor of the session is alive: whatever
-/// its cgroup parent holds is left over (C3 ruling R1, U-15 Q1). The
+/// its cgroup parent holds is left over. The
 /// parent, for the round's supervisor, and the reclaim's log lines.
 #[cfg(target_os = "linux")]
 fn session_reclaim(
@@ -520,7 +520,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         state: i.context.state.clone(),
         cwd: cwd.to_vec(),
     });
-    // The cache (U-16 K1): a unit whose entry is bound to this round, to its
+    // The cache: a unit whose entry is bound to this round, to its
     // policy and to this shell's original environment, and still stands,
     // runs nothing. Read without the lock; a damaged one is no cache.
     let current = match (&binding, runnable.is_empty() && i.builtins.is_empty()) {
@@ -546,7 +546,7 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
             let entry = current.as_ref().and_then(|c| c.entry(Origin::Config, id));
             let hit = entry.is_some_and(|e| e.hit(&policy, &env, i.now.now, cache_ns));
             // A hit matched under another `match` is re-matched, not run
-            // again (U-9c).
+            // again.
             if let (true, Some(e)) = (hit, entry) {
                 reapplied.extend(budget.reapplied(e, *pattern));
             }
@@ -800,7 +800,7 @@ pub(crate) struct Search {
 /// The repositories the shell is in, by identity, for the PATH and
 /// executable rules: the root this round's collection reported, else the
 /// shell's own folder (C2 ruling J9), and every folder at or above the
-/// shell's that holds `.git` (U-24), so a round without a collected root
+/// shell's that holds `.git`, so a round without a collected root
 /// still keeps a repository's folders out. The config units and the builtin
 /// languages share this one list and its one walk. A folder that cannot be
 /// read refuses the round, both its units and its languages.
@@ -1039,7 +1039,7 @@ impl Round {
     /// deadline may still be starting an interpreter on one: its copies
     /// stay for the next round of the session to sweep. Then, still under
     /// the lock and only when it was reaped, its unit cgroups are reclaimed
-    /// (Linux, C3 ruling R1).
+    /// (Linux).
     fn end(self) -> Vec<&'static str> {
         let deadline = self.grant.helper_deadline;
         let Self {
@@ -1862,7 +1862,7 @@ mod tests {
         std::fs::remove_dir_all(&t).unwrap();
     }
 
-    // M4·M-2: 상한을 넘는 단위만 빠지고 나머지는 돈다. 이것을 실패시키는 것: units()의 relay 입력 상한 검사를
+    // 상한을 넘는 단위만 빠지고 나머지는 돈다. 이것을 실패시키는 것: units()의 relay 입력 상한 검사를
     // 지우는 것(20 KB 환경 단위가 허가에 남음), 허가 전체 encode 검사를 지우는 것(여덟 단위 × 15 KB가 한 프레임을
     // 넘어 회차 전체가 실패함).
     #[test]
@@ -1965,7 +1965,7 @@ mod tests {
         assert!(!got.repo_fallback);
     }
 
-    // U-24: 수집 루트가 없는 회차에도 셸 폴더 위의 `.git` 조상이 저장소다. 셸이 저장소 하위 폴더에 있으면 저장소
+    // 수집 루트가 없는 회차에도 셸 폴더 위의 `.git` 조상이 저장소다. 셸이 저장소 하위 폴더에 있으면 저장소
     // 뿌리 아래 PATH 폴더의 실행 파일을 찾지 않는다. 대조: `.git`이 없으면 같은 폴더의 실행 파일을 찾는다(J9 대체는
     // 셸 폴더만 뺀다). 셸 폴더까지 걷지 못하면 회차를 거부한다. 이것을 실패시키는 것: units()에서 찾은
     // 조상을 저장소 목록에 넣지 않는 것. 조상 검사의 거부를 "저장소 없음"으로 바꾸는 변이는 이 칸이 잡지 못한다:

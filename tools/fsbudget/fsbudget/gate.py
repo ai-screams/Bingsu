@@ -109,8 +109,8 @@ def check_collect(attribution, expected, *, deadline=None, evidence=None):
     attempt, is the formula without publication. It applies only when the
     supervisor renamed no response: a collector that sent a verified update
     and then hit its own stage deadline leaves a Deadline partial, which the
-    supervisor stores after reaping exit 75 (spec message row: the results so
-    far; S-17). That attempt is held to the publication formula, as exit 0 is.
+    supervisor stores after reaping exit 75 (the results so
+    far). That attempt is held to the publication formula, as exit 0 is.
     A rename counts as publication only if every supervisor call before it
     succeeded; the one tolerated failure is the absence check of the stage
     and legacy request names (ENOENT) before the stage is created.

@@ -28,7 +28,7 @@ def main():
         "good": rec([b"\x1b[31m\x01L\x02", b"R", b"tL", b"tR", b">", b"<", b"U", b"lV", b"rV", b"uV", b"lru"]),
         "good_utf8": one("한글 *[\\%!".encode()),
         "eleven_empty": rec([b""] * 11),
-        # Change plan 12 (R-07): the upper line alone, a status-shaped upper
+        # Change plan 12: the upper line alone, a status-shaped upper
         # line (pins the field the runners classify as the status), a newline
         # in it, and the two old B1 shapes (count 7, then count 8 before the vi
         # command mode fields).

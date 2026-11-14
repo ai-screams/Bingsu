@@ -1,6 +1,6 @@
 """Runtime root and fixed-path words arrive at the binary as single words
 (spec section 9 M1 row, change (1)); init twice redefines the call with the
-new runtime root (F-23 golden)."""
+new runtime root."""
 import importlib.util
 import os
 import pathlib
@@ -256,7 +256,7 @@ def test_init_twice_redefines_runtime_root(tmp_path, shells):
         (argv,) = inst.calls()
         root_b = os.path.realpath(b_env["XDG_RUNTIME_DIR"] + "/bingsu").encode()
         assert any(x.startswith(b"--runtime-root=") and x.endswith(b":" + root_b) for x in argv), (shell, argv)
-        # Every other pinned value follows the second init too (N-129), not only the runtime root.
+        # Every other pinned value follows the second init too, not only the runtime root.
         want = {
             b"--git-global-home=": os.fsencode(b_env["HOME"]),
             b"--git-global-xdg=": os.fsencode(b_env["XDG_CONFIG_HOME"]),

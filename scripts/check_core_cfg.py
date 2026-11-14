@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conditional-compilation check for bingsu-core (spec section 1, F-05),
+"""Conditional-compilation check for bingsu-core,
 and for the prompt adapter crates/bingsu/src/prompt.rs (the token rules
 below, so its code is the code that is linted and reviewed). The `bingsu`
 binary crate may have no build script either: it could link code that runs

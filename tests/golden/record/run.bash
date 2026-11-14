@@ -33,7 +33,7 @@ _trans() {
   printf 'T\t%s\t%s\t%s\t%s\n' "$old" "$new" "$due" "$key"
 }
 for _v in "$2"/*.bin; do _report "$_v"; done
-# _bingsu_status_ok called on its own must also ignore nocasematch (R5).
+# _bingsu_status_ok called on its own must also ignore nocasematch.
 if _bingsu_status_ok OK:NONE; then printf 'U\tstatus_ok_upper\taccept\n'; else printf 'U\tstatus_ok_upper\treject\n'; fi
 while IFS='|' read -r _old _new _rest; do
   [[ $_old == \#* ]] && continue

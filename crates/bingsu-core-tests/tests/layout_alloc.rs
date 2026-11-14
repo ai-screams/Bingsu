@@ -177,7 +177,7 @@ fn largest(
 //   combining marks): over PATH_BYTES_MAX, so the path is never read;
 // - `{@fill:line}` at 65535 columns: the fill's bytes count, the line is
 //   over LINE_BYTES_MAX, and the right side goes.
-// 이것을 실패시키는 것: 항목 버퍼를 노드 수 × 조각 상한으로 잡는 것(변이 R7), 조각 수나 바이트가 확실히 넘는 방식을
+// 이것을 실패시키는 것: 항목 버퍼를 노드 수 × 조각 상한으로 잡는 것(변이), 조각 수나 바이트가 확실히 넘는 방식을
 // 돌리는 것(`abbrev`·`unique`·`depth 1000`·`none`), PATH_BYTES_MAX를 넘는 경로를 읽는 것(표시 글자 약 12 MB),
 // fill 바이트를 세지 않는 것(약 192 KB 줄).
 #[test]

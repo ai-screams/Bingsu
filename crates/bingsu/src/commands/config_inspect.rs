@@ -682,11 +682,11 @@ pub(super) fn lookups(
 }
 
 /// Why the executor refuses a setuid, setgid or file-capability program
-/// (U-33), for W411 and `--explain`.
+/// , for W411 and `--explain`.
 const SET_ID_REASON: &str = "setuid, setgid or file capabilities (bingsu runs no such program)";
 
 /// W411 for each unit whose script the executor refuses by its first line,
-/// or whose program is set-id (U-33) (D3a/E2 ruling Q2: one code, the reason
+/// or whose program is set-id (D3a/E2 ruling Q2: one code, the reason
 /// as its argument). The decision is the executor's (`exec_path::explain`,
 /// core `head`), so `config check` warns about exactly what will not run.
 fn env_shebang_notes(

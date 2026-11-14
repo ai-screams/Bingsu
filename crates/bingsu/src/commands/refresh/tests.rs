@@ -1382,7 +1382,7 @@ fn set_posix_acl(_: &Path) {
 // 표식 갱신 조건(GATE-MARKER-UPDATE.1): 마감 초과·일부 훑음·conf.d 목록 실패에서는 Incomplete이고
 // snapshot·last-good·marker·sequence가 한 바이트도 바뀌지 않는다. ACL 오류(판정 불가)는 P-R4대로 그 파일만
 // 빠지고 그 단위는 바로 다음 앞단에서 승인되지 않는다(Linux POSIX ACL; macOS의 ACL 조회 오류는 주입할 수 없다, M1 L243).
-// 이것을 실패시키는 것: Verified::Incomplete를 Invalid 표식으로 바꾸는 것(N-057 모양), 마감 확인을 빼는 것,
+// 이것을 실패시키는 것: Verified::Incomplete를 Invalid 표식으로 바꾸는 것마감 확인을 빼는 것,
 // 훑지 못한 원본이나 conf.d 목록 오류를 확인한 부재로 낮추는 것, 판정 불가 ACL 파일을 실행 가능으로 두는 것.
 #[test]
 fn marker_unchanged_after_deadline_partial_scan_acl_error_or_conf_d_failure() {
@@ -2225,7 +2225,7 @@ fn scan_time_chmod_or_replace_keeps_marker() {
 }
 
 mod axes {
-    //! Helper I/O axes over whole refresh rounds (spec 1435, user decision U2).
+    //! Helper I/O axes over whole refresh rounds .
     use super::*;
     use crate::commands::io_meter::{
         self, AXIS_CAPS, AxisCaps, AxisExceeded, HelperAxis, TestCaps,
@@ -2574,7 +2574,7 @@ mod axes {
         f.put(&format!("extends = [{}]\n{body}", list.join(", ")));
     }
 
-    // 실제 U2 값에서: 신뢰 파일의 extends로 R을 넘기면 Invalid가 아니라 Incomplete이고, conf.d 항목이 마지막
+    // 실제 상한 값에서: 신뢰 파일의 extends로 R을 넘기면 Invalid가 아니라 Incomplete이고, conf.d 항목이 마지막
     // 재검증에서야 넘는 경우에도 sequence를 옮기기 전에 끝나며, 버린 원본까지 센 B가 2 MiB를 넘으면 끝난다. 모두
     // snapshot·last-good·marker·sequence가 그대로다. 각 경우 cap에 딱 맞는 설정은 발행된다.
     // 이것을 실패시키는 것: 상한 초과를 확인한 실패(Invalid)로 내는 것, sequence staging 전 재검증 비용 확인을
@@ -2661,7 +2661,7 @@ mod axes {
         );
     }
 
-    // 오늘 발행되는 설정 모양은 U2 값에서도 발행된다: 내장 설정만, 뿌리 순서(config.toml·conf.d·local), conf.d
+    // 오늘 발행되는 설정 모양은 상한 값에서도 발행된다: 내장 설정만, 뿌리 순서(config.toml·conf.d·local), conf.d
     // 하드 링크 40개, 링크 20개 사슬의 config.toml, 링크로 고정한 설정 뿌리, 4,097개 참조를 가진 버려지는 shape-only 테마, conf.d의
     // 설정이 아닌 항목 200개, 깊이 8의 큰 shape-only 사슬, 해석 실패 256 KiB 넷 뒤 256 KiB 하나.
     // 이것을 실패시키는 것: 의미 상한 숫자를 I/O 상한에 대입하는 것(F 32는 하드 링크 40개, B 1 MiB는 1.25 MiB

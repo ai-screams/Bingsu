@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Purity canary checker (spec section 1, F-05).
+"""Purity canary checker.
 
 Every path configured in CLIPPY_TOML must have exactly one `// CANARY: <path>`
 line in the canary, and clippy must report a disallowed_* diagnostic whose

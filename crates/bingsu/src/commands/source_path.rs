@@ -462,7 +462,7 @@ impl Resolved {
     /// system could not confirm. `Ok` means the only refusals in the whole
     /// chain are `Undecided`; a hidden `Ancestor`, `Last` or `StickyNext`
     /// (masked because `refusal` keeps the first one) still fails. Used for
-    /// a shape-only config root (user decision 2026-10-17, R3 I-1).
+    /// a shape-only config root.
     pub fn revalidate_assuming_decided(
         &self,
         me: u32,

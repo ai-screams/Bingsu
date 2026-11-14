@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs clippy on bingsu-core and counts its diagnostics (spec section 1, F-05).
+"""Runs clippy on bingsu-core and counts its diagnostics.
 
 Runs `cargo clippy --message-format=json` on bingsu-core and fails if clippy
 exits non-zero or if any compiler message has level warning or error. The

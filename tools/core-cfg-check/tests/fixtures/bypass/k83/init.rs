@@ -13,8 +13,8 @@
 //! libc names used here to equal its `libc` column, on Linux the seccomp
 //! filter allows only its `syscall` column, and the strace test checks the
 //! calls the prompt makes.
-// Prompt path: the clippy.toml rules (environment reads among them, spec 4
-// rule 7, F-01) are forbidden here. Unlike the crate-wide deny, forbid cannot
+// Prompt path: the clippy.toml rules (environment reads among them)
+// are forbidden here. Unlike the crate-wide deny, forbid cannot
 // be switched off with #[expect] or #[allow]. scripts/check_cli_prompt_forbid.py
 // checks this line.
 #![forbid(

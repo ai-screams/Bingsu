@@ -48,7 +48,7 @@ def test_relative_gate_fails_above_threshold_and_records_absolute():
     assert gate.relative_gate(paired((10e6, 10e6), (11e6, 11e6)), "prompt_ns", (1.10, 1.10))["status"] == "PASS"
 
 
-# U3 T1 (p50 1.03, p95 1.10). 103/100 and 110/100 equal the float literals exactly.
+# The approved limits (p50 1.03, p95 1.10). 103/100 and 110/100 equal the float literals exactly.
 # 이것을 실패시키는 것: 두 한계를 바꿔 쓰거나 하나로 합치는 것, 경계에서 >= 로 판정하는 것.
 @pytest.mark.parametrize("base,cand,status", [
     ((100e6, 100e6), (103e6, 103e6), "PASS"), ((100e6, 100e6), (103000001, 103e6), "FAIL"),
@@ -296,7 +296,7 @@ def test_pr_job_runs_on_pull_request_trigger():
     assert "github.event_name == 'pull_request'" in job
     assert "--rounds 200" in job and "bench/size_gate.py" in job
     assert "persist-credentials: false" in job
-    # Approved values (U3 ratios, the first release's size caps); FAIL fails the job, BLOCKED only warns.
+    # Approved values (the ratios, the first release's size caps); FAIL fails the job, BLOCKED only warns.
     assert "GATE_ENFORCE: 'true'" in job and "GATE_RATIO_P50: '1.03'" in job
     assert "GATE_RATIO_P95: '1.10'" in job and "GATE_SIZE_CAP_BYTES: '2500000'" in job
     assert "GATE_INSTALLED_CAP_BYTES: '7000000'" in job

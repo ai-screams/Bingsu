@@ -7,7 +7,7 @@
 //! listings and every revalidation before publication. Charges are counted
 //! work, not accepted work: unlike core's semantic budget (32 files, 1 MiB,
 //! `config::source`), nothing is given back when a shape-only subgraph is
-//! dropped, so the caps (user decision U2, 2026-10-30) are not those numbers.
+//! dropped, so the caps are not those numbers.
 //!
 //! | Axis | Unit, charged where | Cap |
 //! | -- | -- | -- |
@@ -87,7 +87,7 @@ impl AxisCaps {
     }
 }
 
-/// User decision U2 (2026-10-30), option (나).
+/// The caps of the helper's I/O axes.
 pub(crate) const AXIS_CAPS: AxisCaps = AxisCaps {
     f: 256,
     p: 8_192,

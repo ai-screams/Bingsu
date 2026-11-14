@@ -9,8 +9,8 @@
 //!
 //! The policy (`membership`) is a pure function of what the system said, so
 //! it is tested with made-up groups; `SystemGroups` asks the system through
-//! `sys`. The executable path check of `init`, the runtime root walk (Task
-//! R1) and the config file check (Task R3) all use it. Nothing here is
+//! `sys`. The executable path check of `init`, the runtime root walk and the config file check
+//! all use it. Nothing here is
 //! cached across walks: a verdict that decides whether configured commands
 //! may run is never read from a cache.
 use crate::commands::sys;
@@ -281,8 +281,7 @@ impl GroupOracle for SystemGroups {
     }
 }
 
-/// Passes every question on and keeps the folders it cleared (ruling P-R1,
-/// spec change S-8): `init` asks the system for the runtime root's
+/// Passes every question on and keeps the folders it cleared: `init` asks the system for the runtime root's
 /// group-writable ancestors and pins the cleared ones next to the root, so
 /// the prompt front end, which cannot ask, compares against them
 /// (`bingsu_core::fs_trust::PinnedGroupWrite`).

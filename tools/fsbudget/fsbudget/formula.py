@@ -286,7 +286,7 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     "folder_root": {"openat": 1, "fstat": 1},
     "folder_name": {"openat": 1, "fstat": 2},
     # exec_path::lookup_open's target: lstat, open, statx and fd stat, the
-    # file-capability query (U-33; a readable target, so on its descriptor)
+    # file-capability query (a readable target, so on its descriptor)
     # and the 256-byte header pread.
     "target_file": {"fstat": 3, "openat": 1, "caps": 1, "read": 1},
 }
@@ -321,7 +321,7 @@ POSIX_SPAWN_PRIMITIVES: dict[str, dict[str, int]] = {
 
 # The front's command environment frame before its helper spawn, every libc:
 # pipe2(O_CLOEXEC|O_NONBLOCK), one write of the whole frame, close of the
-# write end after it and of the read end after the spawn (U-9h). These are the
+# write end after it and of the read end after the spawn. These are the
 # counts of a normal prompt, which every gate fixture is; an oversize
 # environment skips the write (test_oversize_env_block_means_no_env checks that
 # path on its own). The helper's fd 4 read and close are pipe calls, outside
@@ -433,7 +433,7 @@ class HelperPlan:
     # finds the link, its readlinkat and the name's lstat again.
     target_links: int = 0
     # Names of the shell's folder below "/": the command round's repository
-    # scan walks them (U-24).
+    # scan walks them.
     shell_names: int = 0
     # Builtin stages: the PATH folders the round's one lookup walks (the
     # names of all of them are `path_names`), the version managers' shim
@@ -1013,7 +1013,7 @@ def _command_prefix(e: dict, p: HelperPlan, stage: str) -> None:
     _add(e, "command_spawn")
     _add(e, "dup", 3)
     # Round::grant -> units: the shell folder's identity (statx), the
-    # repository scan (U-24: a no-follow walk of the shell's folder, then one
+    # repository scan (a no-follow walk of the shell's folder, then one
     # lstat of `.git` in "/" and in each folder of it), the PATH folder's
     # walk, the target folder's walk and the target.
     e["fstat"] = e.get("fstat", 0) + 1
@@ -1569,7 +1569,7 @@ def collector_repository_expected(ax: CollectorAxes) -> dict[str, int]:
     if ax.backend not in {"openat2", "stepwise"} or ax.phase not in {"acquisition", "content", "read-layer", "probe", "ancestor-names"}:
         raise ValueError("unreviewed repository primitive table")
     if ax.phase == "ancestor-names":
-        # U2: use held ancestor descriptors only. Each directory has its own
+        # Use held ancestor descriptors only. Each directory has its own
         # chunk rounding and EOF, never per-entry stat/open or a new read root.
         if (len(ax.dir_bytes) != ax.directories or ax.directories > 32
                 or ax.raw_entries > 256 * ax.directories

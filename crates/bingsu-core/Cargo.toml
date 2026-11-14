@@ -28,8 +28,8 @@ disallowed_macros = "forbid"
 fn_to_numeric_cast_any = "forbid"
 
 [dependencies]
-# Pure Rust math so native and wasm32 give the same bits (spec section 1,
-# F-06). default-features = false drops the `arch` feature, which swaps in
+# Pure Rust math so native and wasm32 give the same bits .
+# default-features = false drops the `arch` feature, which swaps in
 # hardware sqrt and fma; those are exact anyway, but one code path is
 # simpler to reason about.
 libm = { version = "=0.2.16", default-features = false }

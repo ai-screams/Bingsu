@@ -1,4 +1,4 @@
-"""Record upper line (record change plan 12, R-04): each hook joins the upper line
+"""Record upper line: each hook joins the upper line
 and the left field with one constant newline, only when the upper line is
 not empty, and its escaping covers both."""
 import os

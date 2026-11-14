@@ -1,4 +1,4 @@
-//! D2: the version manager resolvers' pure rules (rustup and pyenv, U-12 R2).
+//! D2: the version manager resolvers' pure rules (rustup and pyenv).
 use bingsu_core::collection::manager::{
     Decision, Facts, Hidden, Install, Manager, Plan, Selection, Settings, concrete, early,
     installed, plan, rustup_settings,

@@ -90,7 +90,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     };
     let runtime_path = request.runtime.path.clone();
     let collected_repo: std::sync::Arc<std::sync::Mutex<Option<u16>>> = Default::default();
-    // This round's language answers, by the asked language's id (U-3 L2).
+    // This round's language answers, by the asked language's id.
     let collected_languages: std::sync::Arc<std::sync::Mutex<command_grant::Languages>> =
         Default::default();
     let mut command_round = None;
@@ -406,7 +406,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         }
     }
     // A round that runs nothing but re-matched cached entries under a
-    // changed `match` (U-9c) publishes them once its marker stands.
+    // changed `match` publishes them once its marker stands.
     if let Some(publish) = reapply.take()
         && grant_permit(round_marker, &result).is_some()
     {
@@ -646,8 +646,8 @@ pub(crate) fn read_env_why(fd: i32) -> Result<Vec<u8>, NoEnv> {
     })
 }
 
-/// The permit of this round's grant, or `None` when no grant goes out
-/// (U-1 C+): only a round that installed its marker (Published,
+/// The permit of this round's grant, or `None` when no grant goes out:
+/// only a round that installed its marker (Published,
 /// Revalidated, Invalid) sends one, under that marker's clock and trust
 /// deadline. Busy and Incomplete (a failed filter, a source that changed
 /// before the final revalidation, a lost lock) send none.

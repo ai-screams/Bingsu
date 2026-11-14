@@ -48,7 +48,7 @@ pub enum Miss {
     /// A link, folder or file on the way someone else can change, or one
     /// the rules could not decide, or a name that cannot be looked up.
     Refused,
-    /// A setuid or setgid file, or one with file capabilities (U-33):
+    /// A setuid or setgid file, or one with file capabilities:
     /// refused like `Refused`, with its own reason for `config check`.
     SetId,
 }
@@ -237,7 +237,7 @@ pub fn repo_id(root: Option<&Path>) -> Result<Option<rule::Id>, Miss> {
 /// The folders that hold a `.git` entry (a folder, a worktree's `.git`
 /// file, or anything else by that name), by identity: every one counts as a
 /// repository root for `sanitize` and `lookup`, nested ones included
-/// (U-24). Two sets of folders are checked:
+/// . Two sets of folders are checked:
 /// - each prefix of `cwd` as the shell gave it (`/home/u/repo` for
 ///   `/home/u/repo/docs`), so a shell in a repository's link to a folder
 ///   elsewhere is still in that repository;
@@ -513,7 +513,7 @@ pub enum ScriptRefusal {
     /// A NUL in the line.
     Nul,
     /// The interpreter is setuid, setgid or carries file capabilities
-    /// (U-33).
+    /// .
     SetIdInterpreter,
 }
 
@@ -545,7 +545,7 @@ pub enum Explained {
     Refused {
         file: Option<PathBuf>,
         script: Option<ScriptRefusal>,
-        /// Refused for setuid, setgid or file capabilities (U-33).
+        /// Refused for setuid, setgid or file capabilities.
         set_id: bool,
     },
 }
@@ -675,7 +675,7 @@ fn interpreter(
 ) -> Result<Interpreter, Miss> {
     let word = Path::new(OsStr::from_bytes(line.interpreter));
     // A missing interpreter refuses the script; a set-id one keeps its
-    // reason (U-33).
+    // reason.
     // 이것을 실패시키는 것: 인터프리터의 SetId를 Refused로 바꾸는 것(W411·explain 이유가 빠짐).
     let (found, checked) = resolve_checked(word, repo, me, groups).map_err(|m| match m {
         Miss::SetId => Miss::SetId,
@@ -737,7 +737,7 @@ fn resolve_checked(
     let mut recording = Recording::new(groups);
     match rule::candidate(&facts, me, next, &mut recording) {
         Candidate::Run => {
-            // U-33: a program that would run with other rights than the
+            // a program that would run with other rights than the
             // user's is not run, on any system: setuid or setgid bits, or
             // (Linux) file capabilities, also when they cannot be read.
             // 이것을 실패시키는 것: 이 조건을 지우는 것, 두 비트 가운데 하나만 보는 것
@@ -760,7 +760,7 @@ fn resolve_checked(
             if sys::fd_is_local(std::os::fd::AsRawFd::as_raw_fd(&file)) != Some(true) {
                 return Err(Miss::Refused);
             }
-            // Every target that would run is pinned (U-33): the relay opens
+            // Every target that would run is pinned: the relay opens
             // it again by name and compares its device, inode, group, mode
             // and status change time with these, so a setcap, chmod or
             // replacement after this check (each moves the ctime or the
@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     /// The pin of what sits at `path` now: every target that would run
-    /// carries one (U-33).
+    /// carries one.
     fn pin_of(path: &Path) -> Option<ExecPin> {
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::metadata(path).unwrap();
@@ -1106,7 +1106,7 @@ mod tests {
         (m.dev(), m.ino())
     }
 
-    // U-24: 셸 폴더와 그 위에서 `.git`(폴더, worktree의 파일)을 가진 조상을 모두 저장소로 본다. 이것을 실패시키는
+    // 셸 폴더와 그 위에서 `.git`(폴더, worktree의 파일)을 가진 조상을 모두 저장소로 본다. 이것을 실패시키는
     // 것: `.git` 부재 판정을 뒤집는 것(저장소 없는 경로가 모든 조상을 냄), 판정을 지워 아무것도 내지 않는 것, 가장
     // 가까운 하나에서 멈추는 것(바깥 저장소가 빠짐).
     #[test]
@@ -1164,7 +1164,7 @@ mod tests {
         assert_eq!(repo_ancestors(&looped), Ok(vec![id_of(&looped)]));
     }
 
-    // `.git`을 확인하지 못하는 폴더(검색 권한 없는 셸 폴더)는 저장소로 센다(U-24 L3). 이것을 실패시키는 것: 확인
+    // `.git`을 확인하지 못하는 폴더(검색 권한 없는 셸 폴더)는 저장소로 센다. 이것을 실패시키는 것: 확인
     // 오류를 "없음"으로 보는 것(열린 쪽 실패).
     #[test]
     fn repo_ancestors_count_a_folder_they_cannot_check() {
@@ -1187,7 +1187,7 @@ mod tests {
         }
     }
 
-    // 셸이 준 논리 경로의 접두사도 본다(U-24 L1): 저장소 안의 `docs -> 바깥 폴더`로 들어간 셸은 그 저장소 안이다.
+    // 셸이 준 논리 경로의 접두사도 본다: 저장소 안의 `docs -> 바깥 폴더`로 들어간 셸은 그 저장소 안이다.
     // 이것을 실패시키는 것: 논리 경로의 접두사 검사를 지우는 것(실제 폴더의 조상만 남아 저장소가 빠짐).
     #[test]
     fn repo_ancestors_count_the_shells_own_path() {
@@ -1226,7 +1226,7 @@ mod tests {
         assert_eq!(repo_ancestors(&t.join("alias")), Ok(vec![id_of(&repo)]));
     }
 
-    // 링크 안의 `..`는 앞 폴더로 돌아간다(U-24 M1). 셸 경로에도 실제 폴더의 조상에도 없는 폴더(링크가 놓인
+    // 링크 안의 `..`는 앞 폴더로 돌아간다. 셸 경로에도 실제 폴더의 조상에도 없는 폴더(링크가 놓인
     // 저장소 b)는 저장소가 아니고, `../a/../a…`로 길게 쓴 링크도 폴더를 쌓지 않는다. 이것을 실패시키는 것: `..`를
     // 부모를 새로 여는 이름으로 걷는 것(b가 들어감), 절대 링크의 "/"에서 걸은 폴더를 버리지 않는 것.
     #[test]
@@ -1256,7 +1256,7 @@ mod tests {
         );
     }
 
-    // 걸을 수 없는 경로와 링크 고리는 "저장소 없음"이 아니라 거부다. 깊이에는 상한이 없다(U-24 판정). 이것을
+    // 걸을 수 없는 경로와 링크 고리는 "저장소 없음"이 아니라 거부다. 깊이에는 상한이 없다. 이것을
     // 실패시키는 것: 이름 조회 실패를 건너뛰는 것, 링크 수 상한을 지우거나 옮기는 것, 깊이 상한을 두는 것(깊이 40의
     // 셸 폴더가 거부됨), 들어갈 수 없는 폴더를 "저장소 없음"으로 보는 것.
     #[test]
@@ -1448,7 +1448,7 @@ mod tests {
         std::fs::remove_dir_all(&t).unwrap();
     }
 
-    // U-33: setuid·setgid 파일은 SetId로 거부되고 조회가 거기서 끝난다(뒤 폴더의 같은 이름으로 넘어가지 않음).
+    // setuid·setgid 파일은 SetId로 거부되고 조회가 거기서 끝난다(뒤 폴더의 같은 이름으로 넘어가지 않음).
     // explain도 그 이유를 표시한다. 양성 대조: 0755 사본은 실행된다. 이것을 실패시키는 것: Candidate::Run의
     // set-id 조건을 지우는 것, 두 비트 가운데 하나만 보는 것, SetId에서 다음 폴더로 넘어가는 것, explain이 SetId를
     // 표시하지 않는 것.
@@ -1487,7 +1487,7 @@ mod tests {
         std::fs::remove_dir_all(&t).unwrap();
     }
 
-    // U-33: set-id 인터프리터를 쓰는 script는 SetId로 거부되고, explain은 script의 정규 경로와 인터프리터 이유를
+    // set-id 인터프리터를 쓰는 script는 SetId로 거부되고, explain은 script의 정규 경로와 인터프리터 이유를
     // 보인다. 없는 인터프리터는 그대로 Refused다. set-id 파일을 링크로 찾으면 정규 경로로 보인다. 이것을 실패시키는
     // 것: 인터프리터의 SetId를 Refused로 바꾸는 것, 없는 인터프리터를 SetId로 두는 것, 인터프리터 경우를 파일 자체로
     // 보는 것, explain이 정규 경로 대신 찾은 이름을 쓰는 것.
@@ -1533,7 +1533,7 @@ mod tests {
         std::fs::remove_dir_all(&t).unwrap();
     }
 
-    // U-33(Linux, root): file capability가 있는 프로그램은 SetId로 거부된다. CI가 sudo로 --ignored로 돌린다
+    // Linux, root: file capability가 있는 프로그램은 SetId로 거부된다. CI가 sudo로 --ignored로 돌린다
     // (security.capability를 쓰려면 CAP_SETFCAP이 필요). 양성 대조: 속성을 지운 같은 파일은 실행된다.
     // 이것을 실패시키는 것: Candidate::Run의 capability 검사를 지우는 것.
     #[cfg(target_os = "linux")]

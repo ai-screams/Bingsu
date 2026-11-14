@@ -10,7 +10,7 @@ pub const CONFIG_ROOT_WRITTEN_PREFIX: &[u8] = b"--config-root-written=";
 /// A whole word, no value: the config root words that come with it name a
 /// root whose safety init could not decide (`Refusal::Undecided`). Every
 /// file under it is shape-only; the helper may lower trust further, never
-/// raise it (user decision 2026-10-17 on R3 I-1).
+/// raise it.
 pub const CONFIG_ROOT_SHAPE_ONLY: &[u8] = b"--config-root-shape-only";
 pub const STATE_ROOT_PREFIX: &[u8] = b"--state-root=";
 pub const LOG_ROOT_PREFIX: &[u8] = b"--log-root=";
