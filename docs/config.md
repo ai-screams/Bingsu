@@ -524,16 +524,17 @@ bingsu doctor
   unknown hook version    hook compatibility not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
   unknown hook order      hook order not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
   unknown envelope        the last envelope not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
+  unknown breaker         the collection breaker not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
   skipped seccomp         this platform has no seccomp
   ok      settings        the settings check out (0 warning(s))
   skipped terminal width  standard output is not a terminal; `--terminal` asks the controlling terminal anyway
   skipped background      standard output is not a terminal; `--terminal` asks the controlling terminal anyway
-result: 2 ok, 2 warning(s), 0 failed, 4 unknown, 4 skipped
+result: 2 ok, 2 warning(s), 0 failed, 5 unknown, 4 skipped
 ```
 
 This run is a development build outside a shell that ran `bingsu init`, with the output going to a pipe. In your own
 shell, run `bingsu_doctor` (a zsh function that `bingsu init zsh` defines) instead of `bingsu doctor`: it hands the check
-the facts only the shell knows, so the four `unknown` rows get an answer. The rows `terminal width` and `background` are
+the facts only the shell knows, so the five `unknown` rows get an answer. The rows `terminal width` and `background` are
 `skipped` here only because the output is a pipe (see [Terminal rows](#terminal-rows)).
 
 | Check | What it looks at |
@@ -546,6 +547,7 @@ the facts only the shell knows, so the four `unknown` rows get an answer. The ro
 | `hook version` | Whether the hook of your shell asks for a record version this bingsu reads (E608 when it does not: open a new shell or run `bingsu init` again in it) |
 | `hook order` | That the hook functions stand in the order bingsu needs: the capture hook first and the install hook last in `precmd_functions`, each once (W609) |
 | `envelope` | That the last words the hook gave the prompt call have the fields the prompt reads, in order (W610). It also carries the brightness hint (`COLORFGBG`) the prompt got, which the `background` row compares |
+| `breaker` | Whether this shell session has stopped collecting git and folder facts in the folder you are in (W612): the same mount missed its deadline three times in a row, so for up to five minutes the prompt draws without those facts instead of waiting on it. The folder is the shell's `PWD`; it is never opened, since a stuck mount is just when the breaker is on. No breaker record, a wait that is over, or a record from another boot is not a warning |
 | `seccomp` | Whether the kernel supports seccomp (Linux; the example above is from macOS, where it is skipped). It does not check whether the prompt's own filter was installed |
 | `settings` | A summary of `config check`; a settings folder that fails the safety check is a `fail` |
 | `terminal width` | How many cells the terminal moves the cursor for probe characters, against `width.ambiguous` and `width.emoji` ([below](#terminal-rows)) |
