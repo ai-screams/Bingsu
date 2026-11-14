@@ -1,4 +1,4 @@
-# bingsu hooks for zsh (spec section 5). init redefines every function on
+# bingsu hooks for zsh. init redefines every function on
 # each run; hook registration happens once. @…@ markers are literal
 # shell words embedded by init.
 # typeset keeps attributes set earlier in this shell (an integer would evaluate
@@ -66,7 +66,7 @@ zmodload zsh/datetime 2>/dev/null || :
 # Reset, never inherited: an environment value for _bingsu_t0 would make
 # the first duration negative or huge. _bingsu_warned_last is reset on
 # first registration only (below): a re-init keeps the late-hook warning
-# quiet once it has been shown (spec section 5, same order stays silent).
+# quiet once it has been shown (the same order stays silent).
 typeset -g _bingsu_s=0 _bingsu_t0= _bingsu_t1= _bingsu_ps1= _bingsu_rps1= _bingsu_dead= _bingsu_key_prev= _bingsu_nested= _bingsu_keymap=main \
   _bingsu_drawn_cols=
 typeset -g _bingsu_warned_last
@@ -78,7 +78,7 @@ typeset -g +x _bingsu_session _bingsu_seq _bingsu_rec _bingsu_s _bingsu_p _bings
 # Capture hook, first in precmd_functions. Nothing may run before these
 # assignments, or $? and $pipestatus are lost (emulate itself sets $? to
 # 0). The end time is read here too, so hooks running between this one and
-# the install hook do not count as command time (spec section 5).
+# the install hook do not count as command time.
 _bingsu_save() {
   _bingsu_s=$? _bingsu_p=("${pipestatus[@]}")
   emulate -L zsh
@@ -92,7 +92,7 @@ _bingsu_preexec() {
   _bingsu_t0=${EPOCHREALTIME-} _bingsu_dead=
 }
 
-# Status notices (spec section 5): one fixed line when the key changes to a
+# Status notices: one fixed line when the key changes to a
 # non-empty value. A failed frame is the key no-record, which no status can
 # equal (a status has a colon). The status is read as the last field, and
 # selects a line only by exact comparison with init's constants. init resets
@@ -130,7 +130,7 @@ _bingsu_notify() {
 # Sets PROMPT and RPROMPT from record fields, given by number (0: no upper
 # line). The numbers keep callers free of array syntax: this must run before
 # any `emulate` in its caller, because prompt options are read here, right
-# before installing (spec section 3 option table). Data never reaches
+# before installing. Data never reaches
 # PROMPT unescaped: reference when PROMPT_SUBST is on, plain assignment
 # otherwise. Without a record, or with NO_PROMPT_PERCENT (the record is
 # %-escaped, which that option would show as it is), a constant.
@@ -173,7 +173,7 @@ _bingsu_render() {
     (( ms < 0 )) || ctx+=(--duration-ms "$ms")
   fi
   _bingsu_t0= _bingsu_t1= _bingsu_nested= _bingsu_keymap=main
-  # A size change draws this prompt again from the same words (spec section 3).
+  # A size change draws this prompt again from the same words.
   _bingsu_ctx=("${ctx[@]}") _bingsu_drawn_cols=${COLUMNS:-0}
   _bingsu_call --width "$_bingsu_drawn_cols" "${ctx[@]}"
   # The record is checked whatever the options are, so the status notices
@@ -220,7 +220,7 @@ _bingsu_has_transient() {
 }
 
 # Transient prompt: the line just finished keeps only the short form, without
-# the upper line (spec section 5). A record without one has nothing to swap in.
+# the upper line. A record without one has nothing to swap in.
 # No bingsu call here: the precmd_functions after any of these put the full
 # prompt back (after Ctrl-C too; only a `precmd` function is skipped then).
 _bingsu_transient() {
@@ -361,7 +361,7 @@ _bingsu_zle_wrap() {
 }
 
 # User command, not part of any prompt: hands `bingsu doctor` what only this
-# shell knows (spec section 6, doctor). One record on the standard input of the
+# shell knows, for `bingsu doctor`. One record on the standard input of the
 # pinned bingsu and nowhere else: nothing is exported, so no child process of
 # the shell can see it. Fields end with 0x1f, list items are joined by 0x1d and
 # the record ends with 0x1e; doctor refuses a record that does not have that

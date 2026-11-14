@@ -1,5 +1,5 @@
-# bingsu record reader (spec section 3) and status receive semantics
-# (spec section 5). Embedded by `bingsu init zsh`; @KNOWN_CODES@ is
+# bingsu record reader and status receive semantics.
+# Embedded by `bingsu init zsh`; @KNOWN_CODES@ is
 # replaced with the known non-ok status strings as quoted words.
 # typeset keeps attributes set earlier in this shell: an integer key would
 # evaluate a status string as arithmetic, so the names start over.

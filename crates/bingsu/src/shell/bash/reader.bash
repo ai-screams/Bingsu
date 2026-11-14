@@ -1,5 +1,5 @@
-# bingsu record reader (spec section 3) and status receive semantics
-# (spec section 5). Embedded by `bingsu init bash`; @KNOWN_CODES@ is
+# bingsu record reader and status receive semantics.
+# Embedded by `bingsu init bash`; @KNOWN_CODES@ is
 # replaced with the known non-ok status strings as quoted words.
 _bingsu_f=()
 _bingsu_disp= _bingsu_note= _bingsu_key=
