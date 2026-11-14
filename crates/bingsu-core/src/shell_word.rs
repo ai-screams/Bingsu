@@ -1,5 +1,5 @@
 //! One shell word, single-quoted, for embedding literals in init output
-//! (spec section 4 "runtime root" 3, section 5 "connection").
+//! .
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -37,13 +37,13 @@ impl Manager {
 /// it (the helper maps the detection result here).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Selection<'a> {
-    /// No selection file in the repository (ruling Q2 for D2: the folders
+    /// No selection file in the repository (the folders
     /// above the repository root are not read).
     Absent,
     /// The nearest file exists but has no usable value (over its cap, not
     /// grammar-checked, malformed).
     Unusable,
-    /// `rust-toolchain.toml` names a `path` toolchain (ruling Q4 for D2).
+    /// `rust-toolchain.toml` names a `path` toolchain.
     Path,
     /// A grammar-checked name.
     Value(&'a [u8]),
@@ -88,7 +88,7 @@ pub enum Settings {
     /// Missing, unreadable or in a form these rules do not parse.
     Unknown,
     Known {
-        /// `default_host_triple`, when the file names one (ruling Q5).
+        /// `default_host_triple`, when the file names one.
         host: Option<Vec<u8>>,
         /// A directory override (`rustup override set`) covers the shell's
         /// folder: it outranks every selection file.
@@ -109,7 +109,7 @@ pub struct Facts<'a> {
     pub settings: &'a Settings,
     /// rustup only: the target triple bingsu was built for, used when the
     /// settings name no `default_host_triple` (rustup leaves the key out
-    /// when the host is its own; ruling Q8 for D2). A wrong guess only
+    /// when the host is its own). A wrong guess only
     /// misses the install check, which then runs the command.
     pub build_host: &'a [u8],
 }
@@ -268,7 +268,7 @@ fn parse_settings(bytes: &[u8], cwd: &[u8]) -> Option<Settings> {
         if in_overrides {
             let folder = quoted(key)?;
             // A toolchain name rustup would use must pass the version
-            // grammar (D2 ruling: no path-shaped name from this file).
+            // grammar (no path-shaped name from this file).
             // Fails without it: settings_forms (a path override value).
             if !version_ok(quoted(value)?) {
                 return None;

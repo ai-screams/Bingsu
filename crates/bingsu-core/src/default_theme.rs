@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 /// Line 1: blocks left and right; line 2: the input line. A segment with
 /// no value is hidden, so ids the front end cannot fill yet cost nothing.
 /// The icon set the built-in default draws with until settings can choose
-/// one (decision P20, 2026-10-14): `unicode` needs no Nerd Font or
+/// one : `unicode needs no Nerd Font or
 /// Powerline font, so a fresh install shows no boxes. Settings (Part S) and
 /// the setup wizard bring back the spec's choice (`nerd`, ADR-0008 powerline
 /// separators) with a "can you see these?" check.
@@ -38,8 +38,7 @@ pub const LINES: [LineLayout<'static>; 2] = [
     },
 ];
 
-/// The `narrow` band (spec section 2 "폭 구간별 레이아웃", width under 60,
-/// the spec's example): the right side is dropped and `duration` moves
+/// The `narrow` band (width under 60): the right side is dropped and `duration` moves
 /// beside `char`, drawn lean (`NARROW_TEMPLATE`).
 pub const NARROW: Band = Band {
     min_cols: None,

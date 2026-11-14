@@ -1,4 +1,4 @@
-//! Diagnostics (spec section 6 "진단 구조"): one structure for `config
+//! Diagnostics: one structure for `config
 //! check`, `explain` and `doctor`, with a stable code, a place, a severity
 //! and an optional fix. Codes are versioned in `diag_codes`: a code is never
 //! removed, only marked deprecated. A place is not tied to a bingsu config

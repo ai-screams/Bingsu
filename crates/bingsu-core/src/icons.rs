@@ -1,6 +1,5 @@
 //! Icons by name (ADR-0009: themes name icons, never code points) and the
-//! glyph width table for private use code points (spec section 3 "폭
-//! 프로필", open question "아이콘 세트별 글리프와 폭 표"). The width is the
+//! glyph width table for private use code points. The width is the
 //! cells a terminal advances, which for a Nerd Font glyph is 1 whatever the
 //! font draws (UNVERIFIED per terminal; `doctor` measures with CPR in M7).
 //! Glyph choices are provisional until the M7 preset review.
@@ -34,7 +33,7 @@ impl IconSet {
     }
 }
 
-/// Separators, heads and tails are exactly one cell (spec section 3).
+/// Separators, heads and tails are exactly one cell.
 /// A `OneCell` glyph is never empty in any set and its ASCII form is one
 /// byte. A `Glyph` may be empty in a set that does not draw it (the
 /// non-nerd sets of `git.branch` and `readonly`).
@@ -304,7 +303,7 @@ mod tests {
         );
         let tri = lookup("sep.triangle.r").unwrap();
         assert_eq!(resolve(tri, IconSet::Nerd, a2).fell_back_to, None);
-        // The unicode separators are East Asian Width N (decision 2026-10-15):
+        // The unicode separators are East Asian Width N:
         // one cell under either profile, no fallback. An ambiguous unicode
         // glyph still falls back.
         assert_eq!(resolve(tri, IconSet::Unicode, a2).text, "\u{25B8}");

@@ -1,5 +1,4 @@
-//! Grammar of the root arguments init pins into the hook (spec section 4
-//! "runtime root" 3 and 7). Walking and checking the path is M3a.
+//! Grammar of the root arguments init pins into the hook. Walking and checking the path is M3a.
 
 /// `--helper-exe=<path>`: the refresh helper the prompt starts
 /// (`front::helper_exe`).
@@ -14,8 +13,7 @@ pub const CONFIG_ROOT_WRITTEN_PREFIX: &[u8] = b"--config-root-written=";
 pub const CONFIG_ROOT_SHAPE_ONLY: &[u8] = b"--config-root-shape-only";
 pub const STATE_ROOT_PREFIX: &[u8] = b"--state-root=";
 pub const LOG_ROOT_PREFIX: &[u8] = b"--log-root=";
-/// Home folder from `getpwuid`, pinned by init like the roots (spec section
-/// 4 "runtime root" 7: `~` is never `$HOME` at prompt time). Display only.
+/// Home folder from `getpwuid`, pinned by init like the roots (`~` is never `$HOME` at prompt time). Display only.
 pub const HOME_PREFIX: &[u8] = b"--home=";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

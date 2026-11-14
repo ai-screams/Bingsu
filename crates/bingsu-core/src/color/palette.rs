@@ -78,7 +78,7 @@ pub const TOKENS: &[TokenDef] = &[
     tk("venv", "accent.yellow", "accent.yellow", S(3), S(3)),
 ];
 
-/// Reserved token prefixes (spec section 2): names under them are not
+/// Reserved token prefixes: names under them are not
 /// prompt tokens yet.
 pub const RESERVED_PREFIXES: &[&str] = &["term.ansi.", "syntax.", "diff."];
 
@@ -500,7 +500,7 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: light 7·15번이 ADR-0007의 L(0.86·0.905)·palette study의 C에서 벗어나는 것.
-    // ADR-0007의 hex(#ced0de·#dddfed)는 같은 공식으로 나오지 않는다(사용자 결정 2026-10-08: 공식이 원본, ADR-0007 hex를 고침).
+    // ADR-0007의 hex(#ced0de·#dddfed)는 같은 공식으로 나오지 않는다(공식이 원본, ADR-0007 hex를 고침).
     #[test]
     fn light_ansi_7_15_follow_adr_0007_lightness() {
         assert_eq!(
@@ -534,7 +534,7 @@ mod tests {
             .unwrap();
         assert!((7_300..=7_500).contains(&min), "{min}");
         // muted (overlay, L 0.56) is 3.56:1 on the background: below the text
-        // rule, so no built-in segment uses it for text (user decision 2026-10-08).
+        // rule, so no built-in segment uses it for text.
         let muted = token_index("muted").unwrap();
         let text_warn: Vec<usize> = p
             .warnings

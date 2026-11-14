@@ -1,5 +1,4 @@
-//! The three style levels (ADR-0022, spec section 2 "스타일 세 단계의
-//! 우선순위", M2 rule): the preset is the base, option keys sit on top, and
+//! The three style levels (ADR-0022): the preset is the base, option keys sit on top, and
 //! a template replaces both (`config check` reports the ignored levels from
 //! M3). Presets and options only produce template text: the renderer knows
 //! templates alone.

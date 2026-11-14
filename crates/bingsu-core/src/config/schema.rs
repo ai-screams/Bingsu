@@ -1,4 +1,4 @@
-//! JSON Schema of the config and of a theme (spec section 2 "JSON Schema"),
+//! JSON Schema of the config and of a theme,
 //! made from the key table, so the editor, `config check` and the docs
 //! agree. Every key carries `x-bingsu-level`, its default, an example
 //! (`examples`) and a description in English (`description`) and Korean
@@ -15,8 +15,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 /// Version of the logical value and fact schema: `field::FieldValue`,
-/// `field::ValueState`, `shorten::PathFacts` as of M2 (spec section 4 "필드
-/// 타입과 값 상태"). It goes up when one of them changes in a way a reader
+/// `field::ValueState`, `shorten::PathFacts` as of M2. It goes up when one of them changes in a way a reader
 /// of an older version would misread; `FACT_SCHEMA` below is the shape it
 /// stands for. The tests `fact_schema_matches_the_types` (here) and
 /// `path_facts_fields_are_the_fact_schema` (`shorten.rs`) stop compiling
@@ -650,7 +649,7 @@ mod tests {
         assert!(c.contains("\"x-bingsu-level\": \"basic\""));
     }
 
-    // 스펙 2절: 키마다 층·기본값·예시·두 언어 설명. 메타 키도 같은 틀.
+    // 키마다 층·기본값·예시·두 언어 설명. 메타 키도 같은 틀.
     // 이것을 실패시키는 것: 예시나 층을 빠뜨린 키, 뒤 마일스톤 키의 표시를 빼먹는 것.
     #[test]
     fn every_key_has_an_example_and_a_level() {

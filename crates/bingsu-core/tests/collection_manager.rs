@@ -26,7 +26,7 @@ fn check(folder: &[u8], value: &[u8], host: Option<&[u8]>) -> Plan {
 // 우선순위 출처마다 빠른 경로를 끄는 칸. 이것을 실패시키는 것: 환경이 오지 않은 경우를 끄지 않는 것, override 변수
 // (RUSTUP_TOOLCHAIN·PYENV_VERSION)를 무시하는 것, rustup 설정을 모르는데 진행하는 것, 폴더 override를 무시하는 것,
 // 선택 파일이 없거나 값이 없는데 진행하는 것, path 툴체인을 숨기지 않는 것, pyenv의
-// `system`을 버전으로 보는 것, settings에 host가 없을 때 빌드 triple로 설치 확인을 하지 않는 것(D2 판정 Q8),
+// `system`을 버전으로 보는 것, settings에 host가 없을 때 빌드 triple로 설치 확인을 하지 않는 것,
 // path를 환경 없음·settings 모름보다 늦게 보는 것(리뷰 M3).
 #[test]
 fn decision_table() {
@@ -156,8 +156,8 @@ fn decision_table() {
     }
 }
 
-// 설치 확인 뒤: 설치되어 있고 이름이 그대로 버전일 때만 빠른 경로다(ruling Q6: 이름이 정확히 같은 폴더만). 신뢰
-// 위반은 숨김이고 실행하지 않는다(리뷰 H1). 이것을 실패시키는 것: 설치 확인 결과를 무시하는 것(없는 버전을 보임),
+// 설치 확인 뒤: 설치되어 있고 이름이 그대로 버전일 때만 빠른 경로다(이름이 정확히 같은 폴더만). 신뢰
+// 위반은 숨김이고 실행하지 않는다. 이것을 실패시키는 것: 설치 확인 결과를 무시하는 것(없는 버전을 보임),
 // concrete 검사를 지우는 것(`stable`을 보임), 신뢰 위반을 미설치처럼 실행으로 보내는 것.
 #[test]
 fn install_check_decides_the_fast_path() {
@@ -206,8 +206,8 @@ fn concrete_names() {
 // escape가 든 override 키를 받는 것, override가 shell 폴더의 부모를 덮는 것을 놓치는 것, 이름 앞부분만 같은 폴더
 // (`/w/re`)를 부모로 보는 것, default_host_triple을 읽지 않는 것, 루트(`/`)와 끝 `/`가 붙은 override를 놓치는 것,
 // 빈 키나 따옴표 없는 override 값을 받는 것, 이 파일이 주는 이름(override 값, host, default_toolchain)에 버전 문법을
-// 적용하지 않는 것(경로 꼴 이름), `false` 값을 받지 않는 것(재리뷰 L6), inline table·한 줄 배열·따옴표 없는 문자열 같은 값 모양을 받는 것, rustup 1.29의
-// `default_host_tuple`을 읽지 않는 것, 두 host 키를 함께 받는 것(rustup 1.29.2는 이 파일을 거부함, 리뷰 M5).
+// 적용하지 않는 것(경로 꼴 이름), `false` 값을 받지 않는 것, inline table·한 줄 배열·따옴표 없는 문자열 같은 값 모양을 받는 것, rustup 1.29의
+// `default_host_tuple`을 읽지 않는 것, 두 host 키를 함께 받는 것(rustup 1.29.2는 이 파일을 거부함).
 #[test]
 fn settings_forms() {
     let cwd = b"/w/repo/sub";

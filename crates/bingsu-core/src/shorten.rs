@@ -1,4 +1,4 @@
-//! Shorteners (spec section 3 "긴 이름 줄이기"). Requests and results are
+//! Shorteners. Requests and results are
 //! plain data; built-in methods are pure functions here; core validates
 //! every result, so "a line never overflows" does not depend on whoever
 //! made the result (a plugin method in sub-project 3).
@@ -12,7 +12,7 @@ use unicode_segmentation::UnicodeSegmentation;
 /// Most path steps kept (PATH_MAX 4096 allows about 2048).
 pub const MAX_STEPS: usize = 4096;
 
-/// Most raw entries of a folder `unique` looks at (spec section 4).
+/// Most raw entries of a folder `unique` looks at.
 pub const MAX_SIBLINGS: usize = 256;
 
 // Raw sibling bytes `unique` may scan (decision "E1 `unique` cost caps",
@@ -32,7 +32,7 @@ pub enum Anchor {
     Home,
 }
 
-/// Path facts from the `dir` segment (spec section 4 `PathFacts`). Fields
+/// Path facts from the `dir` segment. Fields
 /// are private: `PathFacts::new` sanitizes every name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathFacts {
@@ -57,7 +57,7 @@ impl PathFacts {
     /// Siblings are read only for kept steps and only to find, per step, the
     /// prefix that tells it apart (the sanitized sibling strings are dropped
     /// at once). A step whose raw sibling list has more than MAX_SIBLINGS
-    /// entries (spec section 4), a sibling name over SIBLING_NAME_MAX raw
+    /// entries, a sibling name over SIBLING_NAME_MAX raw
     /// bytes, more than SIBLING_STEP_MAX raw bytes for the step or
     /// SIBLING_PATH_MAX for the path gets the first grapheme (`abbrev 1`).
     /// The one entry whose raw bytes equal the step is dropped; any other
@@ -463,7 +463,7 @@ mod tests {
         .text()
     }
 
-    // 이것을 실패시키는 것: 스펙 3절 표의 예(`~/Works/AiScream/themes/src/render`)와 다른 결과.
+    // 이것을 실패시키는 것: 표의 예(`~/Works/AiScream/themes/src/render`)와 다른 결과.
     #[test]
     fn spec_table_examples() {
         assert_eq!(run(Method::None), "~/Works/AiScream/themes/src/render");

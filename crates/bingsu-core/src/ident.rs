@@ -1,4 +1,4 @@
-//! Segment ids (spec section 2 "세그먼트 이름 공간, id 문법"). One grammar for
+//! Segment ids. One grammar for
 //! the config table name `[segment."<id>"]`, layout arrays and templates:
 //!
 //! ```text
@@ -248,7 +248,7 @@ mod tests {
         }
     }
 
-    // 공개 필드 이름은 M3에서 확정된다(스펙 4절 "세그먼트 선언"): 템플릿과 설정이 이 이름을 쓴다.
+    // 공개 필드 이름은 M3에서 확정된다: 템플릿과 설정이 이 이름을 쓴다.
     // 이것을 실패시키는 것: 내장 세그먼트·필드 이름을 하나라도 바꾸거나 더하거나 지우는 것
     // (바꾸려면 이 표와 스키마 버전을 같은 PR에서 고친다).
     #[test]

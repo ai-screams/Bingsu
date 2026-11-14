@@ -1,4 +1,4 @@
-//! Width profile (spec section 3 "폭 프로필"). Widths are counted per
+//! Width profile. Widths are counted per
 //! extended grapheme cluster in terminal cells; alignment is guaranteed only
 //! when the terminal draws the same way as the profile.
 use crate::sanitize::{in_ranges, range_index};
@@ -225,7 +225,7 @@ pub fn fit_suffix(s: &str, max: u32, p: WidthProfile) -> (usize, u32) {
 
 /// The ellipsis for truncation under `p`: `…` (U+2026, East Asian
 /// Ambiguous) when it fits in `room` cells, else ASCII `.`, else nothing
-/// (spec section 3 "한 줄 조립과 넘칠 때").
+/// .
 pub fn ellipsis(p: WidthProfile, room: u32) -> &'static str {
     if u32::from(p.ambiguous) <= room {
         "\u{2026}"

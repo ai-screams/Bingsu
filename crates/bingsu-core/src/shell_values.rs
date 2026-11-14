@@ -10,8 +10,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// Shown from this many milliseconds (spec section 4 "필수 세그먼트":
-/// default 2 s). Becomes `[segment.duration] min` with the config.
+/// Shown from this many milliseconds (default 2 s). Becomes `[segment.duration] min` with the config.
 pub const DURATION_MIN_MS: u64 = 2000;
 
 /// Values and facts per `field::BUILTIN` entry, same index.
@@ -132,7 +131,7 @@ pub fn path_facts(pwd: &[u8], home: Option<&[u8]>) -> PathFacts {
 
 /// The non-empty parts between `/`, at most the last `MAX_STEPS`.
 /// `PathFacts::new` keeps only those anyway; cutting here means a 64 KiB
-/// `$PWD` of 32,767 steps is not split and collected whole (decision P14).
+/// `$PWD` of 32,767 steps is not split and collected whole.
 fn last_steps(rest: &[u8]) -> Vec<&[u8]> {
     let mut steps: Vec<&[u8]> = rest
         .rsplit(|&b| b == b'/')
@@ -159,8 +158,7 @@ pub fn collect_with_duration_min(e: &Envelope, duration_min_ms: u64) -> Collecte
     };
     let code = e.status.unwrap_or(0);
     let pipe = e.pipestatus.as_deref().unwrap_or(&[]);
-    // One verdict for `char` and `status` (spec section 4 "필수 세그먼트":
-    // status shows a failure of any pipe stage, so char must too).
+    // One verdict for `char` and `status` (status shows a failure of any pipe stage, so char must too).
     let failed = code != 0 || pipe.iter().any(|&s| s != 0);
     let vicmd = e.keymap.as_deref() == Some(b"vicmd");
     put(

@@ -1,4 +1,4 @@
-//! SGR output (spec section 3 "색 출력"). The depth is chosen outside core
+//! SGR output. The depth is chosen outside core
 //! (`COLORTERM` is environment, read by the CLI side) and passed in.
 use super::palette::{AnsiSlot, ResolvedPalette};
 use alloc::vec::Vec;

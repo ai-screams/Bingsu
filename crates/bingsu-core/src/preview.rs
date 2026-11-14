@@ -1,5 +1,5 @@
 //! One preview line per built-in preset for `bingsu list presets --preview`
-//! (plan D2). It draws the default theme's upper line with the preset
+//! . It draws the default theme's upper line with the preset
 //! through the same renderer as the prompt. Nothing is collected: the folder
 //! is the caller's, every other value is a fixed sample.
 use crate::color::palette::Mode;

@@ -1,5 +1,4 @@
-//! Config sources and the `extends` graph (spec section 2 "합치는 순서",
-//! "`extends` 규칙", "키별 출처 검증"). Core orders the graph; the caller
+//! Config sources and the `extends` graph. Core orders the graph; the caller
 //! (the CLI) opens files. The exchange is one call per edge: core parses a
 //! file and asks the caller's `Resolver` for each `extends` entry, left to
 //! right; the caller resolves the path against the declaring file's folder,
@@ -27,7 +26,7 @@
 //!    is given back.
 //!
 //! A problem in a trusted file rejects the whole load (the caller keeps the
-//! last good snapshot, spec section 6). Every file met is in the report's
+//! last good snapshot). Every file met is in the report's
 //! catalog, whether applied, dropped or failed, so a diagnostic's place can
 //! always be shown.
 use crate::config::tree::{self, Span, SyntaxErrorKind, Table, Value};

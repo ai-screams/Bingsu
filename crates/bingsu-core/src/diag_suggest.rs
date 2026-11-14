@@ -1,5 +1,4 @@
-//! "Did you mean" for unknown keys and segment names (spec section 6 "진단
-//! 구조"): a near spelling among the known names, or the bingsu name of
+//! "Did you mean" for unknown keys and segment names: a near spelling among the known names, or the bingsu name of
 //! another tool's segment. Only a suggestion: unknown names stay errors and
 //! are never accepted as aliases.
 

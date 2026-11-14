@@ -1,5 +1,4 @@
-//! Checking the merged config against the key table (spec section 2,
-//! section 6 "오류 회복": an unknown key is a strict error). Every problem
+//! Checking the merged config against the key table (an unknown key is a strict error). Every problem
 //! is reported, with the file and range of the value that won the merge.
 use crate::config::keys::{self, KeyDef, Ty};
 use crate::config::merge::{MNode, MTable, MValue, Merged};
@@ -442,7 +441,7 @@ fn line_gaps(root: &MTable, out: &mut Vec<Diagnostic>) {
 /// Every `custom/…` id a layout names should be declared as
 /// `[segment."custom/…"]`. An undeclared one is a warning and is not drawn:
 /// a theme that removes a segment the user's layout names must not reject
-/// the user's config (rule 5, decision 2026-10-15).
+/// the user's config.
 fn declared(root: &MTable, out: &mut Vec<Diagnostic>) {
     let has = |id: &str| {
         matches!(
@@ -508,7 +507,7 @@ pub fn check(m: &Merged) -> Vec<Diagnostic> {
     out
 }
 
-/// A theme file (spec section 2 "테마 스키마"): every check of a config,
+/// A theme file: every check of a config,
 /// and only the keys a theme may set, never an execution key or `extends`.
 pub fn check_theme(id: crate::diag::SourceId, t: &Table) -> Vec<Diagnostic> {
     fn lift(t: &Table, id: crate::diag::SourceId) -> MTable {
@@ -626,8 +625,8 @@ pub(crate) mod tests {
         assert_eq!(name("A-B"), [codes::BAD_VALUE]);
     }
 
-    // 스펙 2절 예시 파일 그대로. `layout.transient`는 M4·M5 키라 알림 N503 하나만 낸다.
-    // 이것을 실패시키는 것: 스펙 예시 파일(키 이름은 이 표)을 오류로 보는 것, 뒤 마일스톤 키를 오류로 보는 것.
+    // 설정 예시 파일 그대로. `layout.transient`는 M4·M5 키라 알림 N503 하나만 낸다.
+    // 이것을 실패시키는 것: 예시 파일(키 이름은 이 표)을 오류로 보는 것, 뒤 마일스톤 키를 오류로 보는 것.
     #[test]
     fn the_spec_example_checks() {
         let src = r#"

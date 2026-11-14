@@ -58,7 +58,7 @@ fn producer_column_matches() {
         assert!(!seen.contains(&class), "class {class:?} repeats");
         seen.push(class);
         let p = payload(c[1]);
-        // Every display field, the upper line (record change plan 12) included.
+        // Every display field, the upper line included.
         for field in 0..11 {
             let mut parts: [&[u8]; 11] = [b""; 11];
             parts[field] = &p;

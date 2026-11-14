@@ -200,8 +200,7 @@ pub fn request(
 pub const DIR_SEGMENT: u16 = 1;
 
 /// The builtin languages whose segments `drawn` (the layout's built-in
-/// segment bits at this width) shows, each asked about on its own (D3a
-/// rulings Q-A and Q6), in the language table's order.
+/// segment bits at this width) shows, each asked about on its own, in the language table's order.
 pub fn builtin_languages(drawn: u32) -> Vec<language::LanguageQuery> {
     language::BUILTIN
         .iter()

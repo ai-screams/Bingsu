@@ -1,5 +1,5 @@
 //! What `config check --explain` shows for each command and language
-//! segment (plan E2; M7 `explain <segment>` uses the same model): whether it
+//! segment (`explain <segment>` uses the same model): whether it
 //! runs and why not, its command, working folder, time limits and the names
 //! of the environment it gets, each with where it came from. The model holds
 //! no environment value: it is built from the compiled config alone, which
@@ -18,7 +18,7 @@ pub enum From {
     Default,
     /// The key at this place in a settings file.
     Source(Origin),
-    /// The names every command gets (spec section 4 keep list).
+    /// The names every command gets.
     KeepList,
 }
 
