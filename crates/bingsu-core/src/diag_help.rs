@@ -360,6 +360,12 @@ pub const HELP: &[Help] = &[
         "Use zsh 5.8 or newer, then run `bingsu init` again in it.",
     ),
     h(
+        c::COLLECTION_BREAKER_ON,
+        "Collection of git and folder facts is switched off for the folder you are in, in this shell session.\nThe prompt still draws; the segments that need those facts show no value until it is on again.",
+        "The same mount missed its deadline three times in a row (a stopped or very slow mount can do that). The session then stops collecting there for up to five minutes, so a prompt never waits on it. The switch is kept per session and per folder, and the next collection after the wait is a trial.",
+        "Wait about five minutes, or open a new shell. Fix or unmount the stuck mount if it stays. Run the shell function bingsu_doctor, which calls `bingsu doctor`, to see whether it is still on.",
+    ),
+    h(
         c::TERMINAL_WIDTH_DIFFERS,
         "The terminal moved the cursor by another number of cells than the settings assume for some probe characters (ambiguous-width characters, emoji, a joined emoji, a flag, a combining mark or an icon).\nThe check names which ones and how many cells each took.",
         "The prompt counts the width of every piece in cells to place the right side and to wrap lines. A count that differs from the terminal's by one cell shifts the right edge, or breaks a line at the wrong place.\nThe check asks the terminal where its cursor is after each probe character, so it measures what is drawn, not what a table says.",

@@ -92,6 +92,7 @@ pub const RECORD_VERSION_UNSUPPORTED: DiagCode = e(608);
 pub const HOOK_ORDER_CHANGED: DiagCode = w(609);
 pub const ENVELOPE_UNEXPECTED: DiagCode = w(610);
 pub const ZSH_TOO_OLD: DiagCode = w(611);
+pub const COLLECTION_BREAKER_ON: DiagCode = w(612);
 pub const TERMINAL_WIDTH_DIFFERS: DiagCode = w(613);
 pub const TERMINAL_BACKGROUND_DIFFERS: DiagCode = w(614);
 
@@ -435,6 +436,12 @@ pub const CODES: &[CodeInfo] = &[
         "the shell is older than the oldest version bingsu is tested with",
         "versions below the tested one are not covered by the shell tests, so a hook may misbehave",
         "use zsh 5.8 or newer",
+    ),
+    stable(
+        COLLECTION_BREAKER_ON,
+        "collection is switched off for this folder in this shell session",
+        "the same mount missed its deadline three times in a row, so this session stops collecting there for a while; the prompt still draws",
+        "wait about five minutes or open a new shell; the shell function bingsu_doctor shows whether it is still on",
     ),
     stable(
         TERMINAL_WIDTH_DIFFERS,

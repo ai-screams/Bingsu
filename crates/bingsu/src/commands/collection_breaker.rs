@@ -245,6 +245,61 @@ impl Ticket {
     }
 }
 
+/// What the breaker of one session says about one folder, as `doctor` reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Peek {
+    /// The session has no record (or no folder yet): nothing was ever switched off.
+    NoRecord,
+    Allowed,
+    /// The wait is over; the next collection tries again.
+    Probe,
+    Blocked,
+    /// The record is from another boot or clock: it says nothing about now.
+    Disabled,
+}
+
+/// Reads the breaker of exactly `session` and says what it holds for `cwd`
+/// at `now`. Nothing is made, locked, leased or changed: the folders are
+/// opened without following links and checked as the helper checks them, the
+/// record is read with the same checked reads, and only `admit` is asked. No
+/// other session is named, listed or opened: the path is built from `session`
+/// alone, which must be a session id's shape. A folder or file that is not
+/// there is `NoRecord`; anything unsafe or unreadable is an error.
+pub(crate) fn peek(
+    runtime: &File,
+    session: &[u8],
+    cwd: &[u8],
+    now: Clock,
+) -> Result<Peek, StoreError> {
+    if !session_valid(session) {
+        return Err(StoreError::Unsafe);
+    }
+    let key = Key::cwd(cwd).map_err(|_| StoreError::Unsafe)?;
+    let session = std::str::from_utf8(session).map_err(|_| StoreError::Unsafe)?;
+    let me = sys::current_uid();
+    snapshot_store::check_directory(runtime, me)?;
+    let mut dir = runtime.try_clone()?;
+    for name in path(session) {
+        let child = match sys::open_dir_at_nofollow(dir.as_fd(), OsStr::new(&name)) {
+            Ok(child) => child,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Peek::NoRecord),
+            Err(e) => return Err(e.into()),
+        };
+        snapshot_store::check_directory(&child, me)?;
+        snapshot_store::same_name(&child, dir.as_fd(), &name)?;
+        dir = child;
+    }
+    let Some(breaker) = load(&dir, me)? else {
+        return Ok(Peek::NoRecord);
+    };
+    Ok(match breaker.admit(&key, now) {
+        Admission::Allowed => Peek::Allowed,
+        Admission::Probe => Peek::Probe,
+        Admission::Blocked => Peek::Blocked,
+        Admission::Disabled => Peek::Disabled,
+    })
+}
+
 /// Immutable same-fd, checked-length reads, in 1 KiB units with no EOF probe.
 pub(crate) fn read(dir: &File, name: &str, me: u32) -> Result<Option<Vec<u8>>, StoreError> {
     #[cfg(test)]
