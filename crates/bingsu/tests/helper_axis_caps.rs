@@ -1,4 +1,4 @@
-//! The helper's I/O caps (user decision U2) through `bingsu reload`, which
+//! The helper's I/O caps through `bingsu reload`, which
 //! publishes with the refresh engine: a config exactly at a cap publishes,
 //! one unit past it ends "not finished" (3) with the context files unchanged.
 //! Here: R, E_n and B, whose exact boundaries do not depend on the platform.
@@ -225,7 +225,7 @@ fn after(e: &Env, past: impl FnOnce(&Env)) -> (Option<i32>, bool, String) {
     (code, context(e) == before, out)
 }
 
-// 실제 U2 값에서 R·E_n·B 각각: cap에 딱 맞는 설정은 발행되고(0), 하나 넘으면 3(끝나지 않음)이며
+// 실제 상한 값에서 R·E_n·B 각각: cap에 딱 맞는 설정은 발행되고(0), 하나 넘으면 3(끝나지 않음)이며
 // snapshot·last-good·marker·sequence가 그대로다.
 // 이것을 실패시키는 것: 거부된 extends 항목이나 없는 뿌리 후보를 R에서 빼는 것, conf.d의 설정이 아닌 항목을
 // 세지 않거나 재검증 목록을 세지 않는 것, 버린 원본의 바이트를 B에서 빼는 것, cap 비교의 하나 차이, 상한

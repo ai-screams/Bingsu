@@ -72,7 +72,7 @@ impl DataFile {
         }
     }
 }
-/// Constructed only after R1's pinned root walk and each 0700 child check.
+/// Constructed only after the pinned root walk and each 0700 child check.
 /// A CRC never selects a directory. No PATH_MAX-sized joined path is built.
 pub struct CheckedContextFd {
     pub(super) dir: File,

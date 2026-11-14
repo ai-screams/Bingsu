@@ -111,7 +111,7 @@ def test_platform_stack_guard_is_exact_and_only_in_prefix(libc, seeks, stages):
     (call("chdir", '"/"'), "cwd"),
     (call("chdir", '"/r"'), "unknown-fs"),
     (call("umask", "077", "022"), "umask"),
-    # U-33: a target's file-capability query, on its descriptor only; another
+    # a target's file-capability query, on its descriptor only; another
     # attribute or an unnamed fd stays outside the vocabulary.
     (call("fgetxattr", '6</usr/bin/true>, "security.capability", NULL, 0', "-1 ENODATA (No data available)"), "caps"),
     (call("fgetxattr", '6, "security.capability", NULL, 0', "-1 ENODATA (No data available)"), "unknown-fs"),

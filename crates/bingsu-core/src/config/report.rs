@@ -104,7 +104,7 @@ fn sorted(mut d: Vec<Diagnostic>) -> Vec<Diagnostic> {
 
 /// Reads the config from `roots` (built-in first). `version` is this
 /// bingsu's version. `auto` is retained for caller compatibility; the
-/// snapshot holds both display palettes (S-11).
+/// snapshot holds both display palettes.
 /// Numbers alone for `version` are a release.
 pub fn report<R: Into<Root>, V: Into<Version>>(
     roots: Vec<R>,

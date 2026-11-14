@@ -1,5 +1,4 @@
-//! Command supervisor `bingsu __command-v1` (spec section 4, process row
-//! "command supervisor"; U-1 C+, U-15 Q1). The refresh helper spawns it
+//! Command supervisor `bingsu __command-v1`. The refresh helper spawns it
 //! before its own filter with an empty environment and exactly descriptors
 //! 0 to 2 (`/dev/null`), 3 the grant channel's read end, 4 the result
 //! channel's write end (pipes, Unix stream socket pairs on macOS:
@@ -39,10 +38,10 @@ pub(crate) const ENTRY: &str = "__command-v1";
 pub(crate) const GRANT_FD: i32 = 3;
 pub(crate) const RESULT_FD: i32 = 4;
 pub(crate) const LOCK_FD: i32 = 5;
-/// The session's cgroup parent, open only on the atomic path (C3 ruling R2).
+/// The session's cgroup parent, open only on the atomic path.
 #[cfg(target_os = "linux")]
 pub(crate) const CGROUP_FD: i32 = 6;
-/// U-9d: the round ends 100 ms before the helper's deadline, and a unit
+/// the round ends 100 ms before the helper's deadline, and a unit
 /// with less than 10 ms left is not spawned.
 pub(crate) const BUDGET: Budget = Budget {
     reserve: 100_000_000,

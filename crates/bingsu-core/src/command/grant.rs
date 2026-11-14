@@ -48,7 +48,7 @@ pub fn approve(
     if !deadline::has_budget(now.now, budget.min_run, limit) {
         return Err(Refusal::Budget);
     }
-    // A config can ask for more; no unit runs longer than the U-9d cap.
+    // A config can ask for more; no unit runs longer than the cap.
     let timeout = timeout.min(super::plan::TIMEOUT_MAX);
     Ok(deadline::run_deadline(now.now, timeout, limit))
 }
@@ -56,8 +56,7 @@ pub fn approve(
 /// Names every config unit may pass, plus every `LC_*`: in `keep.rs`,
 /// which the prompt reads too and is pinned with its files.
 pub use super::keep::{KEEP, KEEP_PREFIX};
-/// Never passed, not even through `env_allow` (U-13 V2, closed list S-24,
-/// S-25): loader injection, then language and shell startup settings.
+/// Never passed, not even through `env_allow`: loader injection, then language and shell startup settings.
 pub const FORBIDDEN: [&[u8]; 20] = [
     b"GLIBC_TUNABLES",
     b"GCONV_PATH",
@@ -394,7 +393,7 @@ mod tests {
 
     // 이것을 실패시키는 것: env_allow 금지 검사(`env_allow.iter().any(forbidden)`)를 지우는 것,
     // FORBIDDEN 비교나 FORBIDDEN_PREFIX 비교를 지우는 것, FORBIDDEN에서 항목 하나를 빼는 것.
-    // 기대 목록은 판정(U-13 V2, S-24, S-25)에서 따로 옮겨 적었다.
+    // 기대 목록은 판정에서 따로 옮겨 적었다.
     #[test]
     fn target_environment_forbidden_names_never_pass() {
         for name in [

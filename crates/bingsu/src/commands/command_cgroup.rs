@@ -1,5 +1,4 @@
-//! Reclaiming a shell session's command cgroups (spec section 4, stop order
-//! step 4; U-15 Q1, U-9d, U-9j). Only the refresh helper that holds the
+//! Reclaiming a shell session's command cgroups. Only the refresh helper that holds the
 //! session lock reclaims: while it holds the lock no supervisor of the
 //! session is alive (the supervisor holds a copy), so everything under the
 //! session's parent folder is left over from one that is gone.
@@ -429,8 +428,8 @@ pub(crate) mod fs {
         magic
     }
 
-    /// The atomic path's capability (spec section 4 stop order step 4, the
-    /// X-04 method; U-14 F0, C3 rulings): Linux 5.14 or later; the process's
+    /// The atomic path's capability (the
+    /// X-04 method): Linux 5.14 or later; the process's
     /// `0::` cgroup on the cgroup v2 mount at `/sys/fs/cgroup`, which must
     /// hold this process (a cgroup namespace whose mount was not redone
     /// names another folder); and the session parent `bingsu-cmd-<digest>`
@@ -492,7 +491,7 @@ pub(crate) mod fs {
 
     /// The folder `proc_self_cgroup` names on `mount` when its
     /// `cgroup.procs` lists `pid`: a cgroup namespace whose mount was not
-    /// redone names another folder (U-14 F0).
+    /// redone names another folder.
     fn open_member_at(mount: &[u8], proc_self_cgroup: &[u8], pid: u32) -> Option<File> {
         let own = open_own_at(mount, proc_self_cgroup)?;
         sys::collection_ops(2).ok()?;

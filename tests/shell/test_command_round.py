@@ -222,7 +222,7 @@ def test_supervisor_lookup_sees_only_its_session(tmp_path, _native_boot_required
         s.wait_quiet()
 
 
-# U-15: 셸 세션마다 동시 감독은 하나다. 이것을 실패시키는 것: command_grant::prepare의 세션 잠금
+# 셸 세션마다 동시 감독은 하나다. 이것을 실패시키는 것: command_grant::prepare의 세션 잠금
 # (close_only_lock)을 지우는 것(1초 걸리는 명령 동안 연속 프롬프트가 같은 세션의 감독을 여럿 띄운다).
 def test_one_supervisor_per_session(tmp_path, _native_boot_required):
     sessions = []
@@ -254,7 +254,7 @@ def test_one_supervisor_per_session(tmp_path, _native_boot_required):
     assert len(most) == 2 and set(most.values()) == {1}, (most, [s.log() for s in sessions])
 
 
-# 생존 신호(U-1): 출력 없는 대상도 도우미가 죽으면 끝난다. 이것을 실패시키는 것: 감독이 허가 파이프 EOF에서
+# 생존 신호: 출력 없는 대상도 도우미가 죽으면 끝난다. 이것을 실패시키는 것: 감독이 허가 파이프 EOF에서
 # 자식을 끝내지 않는 것(read_grant_pipe의 stop 삭제): 대상이 자기 마감(1 s)까지 남는다.
 def test_target_ends_soon_after_helper_death(tmp_path, _native_boot_required):
     session = CommandSession(tmp_path)
@@ -326,7 +326,7 @@ def script(path, body):
 
 
 # J9: 같은 회차 수집이 알린 저장소 루트가 PATH 정제의 저장소다. 셸이 저장소 하위 폴더에 있어도 루트 아래
-# bin은 빠진다. U-24부터는 셸 폴더 위의 `.git` 조상도 저장소라, 수집이 이 회차에 끝나지 않아도 결과가 같다.
+# bin은 빠진다. 셸 폴더 위의 `.git` 조상도 저장소라, 수집이 이 회차에 끝나지 않아도 결과가 같다.
 # 이것을 실패시키는 것: 저장소 규칙에서 수집 루트와 조상 검사를 둘 다 지우는 것(셸 폴더로 대체되어 루트 바로 아래
 # bin이 남음).
 def test_collected_repo_root_excludes_its_bin(tmp_path, _native_boot_required):
@@ -360,7 +360,7 @@ def test_collected_repo_root_excludes_its_bin(tmp_path, _native_boot_required):
     assert not canary.exists(), ("a PATH folder under the collected repository root ran", session.log())
 
 
-# U-24: 수집 세그먼트를 그리지 않는 설정은 어느 회차에도 수집 루트가 없다. 그래도 셸 폴더 위에서 `.git`을 가진
+# 수집 세그먼트를 그리지 않는 설정은 어느 회차에도 수집 루트가 없다. 그래도 셸 폴더 위에서 `.git`을 가진
 # 조상(바깥 저장소와 그 안의 저장소 모두)은 저장소라, 그 아래 PATH 폴더의 명령은 돌지 않는다. 양성 대조: 저장소
 # 밖 폴더의 같은 명령은 돈다. 이것을 실패시키는 것: 명령 회차에서 조상 검사를 지우는 것, 가장 가까운 저장소에서
 # 멈추는 것(바깥 저장소의 bin이 돈다).
@@ -389,7 +389,7 @@ def test_repository_bins_stay_out_without_a_collection(tmp_path, _native_boot_re
     assert not ran_outer.exists() and not ran_inner.exists(), ("a repository's PATH folder ran", session.log())
 
 
-# U-24 L1: 셸이 저장소 안의 링크(`docs -> 바깥 폴더`)로 들어가면 실제 폴더에는 `.git` 조상이 없지만, 셸이 준 경로의
+# 셸이 저장소 안의 링크(`docs -> 바깥 폴더`)로 들어가면 실제 폴더에는 `.git` 조상이 없지만, 셸이 준 경로의
 # 접두사인 저장소는 여전히 저장소다. 절대 경로로 PATH에 넣은 저장소 bin(direnv의 PATH_add 같은)은 돌지 않는다.
 # 이것을 실패시키는 것: 명령 회차의 조상 검사에서 셸 경로 접두사 검사를 지우는 것(실제 폴더만 보아 저장소 bin이 돈다).
 def test_a_repository_link_to_elsewhere_keeps_its_bin_out(tmp_path, _native_boot_required):
@@ -557,7 +557,7 @@ def alive_pid(pidfile):
     return int(text) if text.isdigit() else None
 
 
-# C3 판정 R6(macOS 최선 노력 종료): relay는 자기 프로세스 그룹을 이끌고, 대상이 끝나면 reap 전에 그 그룹을 끝낸다.
+# macOS 최선 노력 종료: relay는 자기 프로세스 그룹을 이끌고, 대상이 끝나면 reap 전에 그 그룹을 끝낸다.
 # 그래서 대상이 남긴 같은 그룹의 손자는 회차가 끝나면 없다. 이것을 실패시키는 것: OwnedChild::reap_group의 killpg를
 # 지우는 것(손자 sleep 30이 남음), relay 생성의 POSIX_SPAWN_SETPGROUP을 지우는 것.
 @macos_only
@@ -573,7 +573,7 @@ def test_macos_group_grandchild_ends_with_the_round(tmp_path, _native_boot_requi
     assert until(lambda: gone(pid), timeout=1.0), "a grandchild in the relay's group outlived the round"
 
 
-# C3 판정 R6: helper가 죽어 감독이 회차를 멈춰도 대상의 종료를 reap하기 전에 그룹을 끝낸다. 이것을 실패시키는 것:
+# helper가 죽어 감독이 회차를 멈춰도 대상의 종료를 reap하기 전에 그룹을 끝낸다. 이것을 실패시키는 것:
 # OwnedChild::reap_group의 killpg를 지우는 것, relay 생성의 POSIX_SPAWN_SETPGROUP을 지우는 것(손자가 감독의 그룹 밖).
 @macos_only
 def test_macos_group_grandchild_ends_when_the_helper_dies(tmp_path, _native_boot_required):
@@ -983,7 +983,7 @@ def test_match_picks_the_published_value(tmp_path, _native_boot_required):
     assert b"1.23.1" in record and b"darwin" not in record, record
 
 
-# `match`만 바꾸면 명령을 다시 실행하지 않고, 저장한 원문 첫 줄에 새 패턴을 맞춰 발행한다(U-9c). 바꾼 뒤 옛
+# `match`만 바꾸면 명령을 다시 실행하지 않고, 저장한 원문 첫 줄에 새 패턴을 맞춰 발행한다. 바꾼 뒤 옛
 # 패턴의 값을 숨기는 것은 앞단 단위 시험(display a_patterned_unit_shows_only_entries_matched_with_its_pattern)이 맡는다.
 # 이것을 실패시키는 것: prepare에서 다시 맞추기를 지우는 것(새 값이 캐시 기간 동안
 # 나오지 않음), 패턴 변경을 캐시 빗나감으로 보는 것(다시 실행), 아무것도 실행하지 않는 회차에서 다시 맞춘 항목을

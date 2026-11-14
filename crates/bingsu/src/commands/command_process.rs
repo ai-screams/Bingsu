@@ -581,7 +581,7 @@ mod tests {
         assert!(environ.is_empty());
     }
 
-    // GATE-CMD-FDS(원자 경로, C3 판정 R2): 세션 cgroup 부모가 있으면 정확히 {0..6}. 이것을 실패시키는 것:
+    // GATE-CMD-FDS(원자 경로): 세션 cgroup 부모가 있으면 정확히 {0..6}. 이것을 실패시키는 것:
     // spawn_supervisor의 `dups.extend(cgroup…)`를 지우는 것({0..5}가 됨).
     #[test]
     fn test_supervisor_gets_seven_fds_on_the_atomic_path() {

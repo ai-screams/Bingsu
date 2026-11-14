@@ -3,7 +3,7 @@
 computing base of the prompt path: every decision is bingsu_core::front
 (pure, `no_std`, checked by check_core_no_std.py and the core gates); the
 adapter turns argv into bytes, calls the core, writes and exits. This gate
-keeps it that small (spec section 4 front end, F-01):
+keeps it that small:
 
 1. the adapter's first inner attribute forbids the clippy.toml rules
    (environment reads, std::process::exit, write_all), so no #[allow] can

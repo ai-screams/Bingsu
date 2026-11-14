@@ -151,8 +151,7 @@ M6_GATES = {
         "A reclaim never touches the units of a live supervisor",
         "Once the helper is killed every target ends within 1 s, also while its results are held back",
     ),
-    # M6 F1: the descriptors and environment a command round hands down (plan
-    # "decisive gates"; B1, B3, C2, C3 R2).
+    # M6 F1: the descriptors and environment a command round hands down.
     "GATE-CMD-FDS": (
         "The supervisor starts with exactly {0,1,2,3,4,5} (and 6, the session's cgroup parent, on the atomic path) "
         "and an empty environment, whatever the helper held without close-on-exec",
@@ -480,8 +479,8 @@ def shell_time_job(text):
     return text[start:end]
 
 
-# Proves the job and its recorded verdict exist; the timing result itself is U-8's.
-# 이것을 실패시키는 것: job을 지우거나 PR에서 돌지 않게 하는 것, U-4 값을 바꾸는 것, 200쌍·R2를 바꾸는 것,
+# Proves the job and its recorded verdict exist; the timing result itself is recorded only.
+# 이것을 실패시키는 것: job을 지우거나 PR에서 돌지 않게 하는 것, 비율 상한(p50 1.25, p95 1.50)을 바꾸는 것, 200쌍·`ci-r2` 승인값을 바꾸는 것,
 # 칸을 빼거나 macOS를 더하는 것, 기록 전용을 강제로 바꾸는 것, 판정·보존 단계를 지우는 것.
 def test_shell_time_job_records_a_verdict():
     assert_shell_time_job(workflows()["ci.yml"])

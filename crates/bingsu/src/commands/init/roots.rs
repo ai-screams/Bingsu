@@ -16,7 +16,7 @@ pub struct RuntimeRootPin {
     pub dev: u64,
     pub ino: u64,
     pub path: PathBuf,
-    /// Ancestors whose group write was cleared by this walk (P-R1/S-8).
+    /// Ancestors whose group write was cleared by this walk.
     /// N4 carries these pins to the front end, which never asks the system.
     pub group_ok: Vec<GroupPin>,
 }
@@ -39,8 +39,7 @@ pub struct ConfigRootPin {
     pub path: PathBuf,
     pub written: PathBuf,
     pub evidence: crate::commands::source_path::Resolved,
-    /// Trust ceiling for every file under the root (user decision
-    /// 2026-10-17, R3 I-1). `true`: the only refusals in the root's chain
+    /// Trust ceiling for every file under the root. `true`: the only refusals in the root's chain
     /// are `Undecided` (group members, ACL or ownership enforcement could
     /// not be confirmed), so the root is kept for colors and layout but
     /// nothing under it is `Executable`, the `config use` record included.
@@ -521,7 +520,7 @@ mod tests {
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
     }
 
-    // 사용자 결정(2026-10-17, R3 I-1): 그룹 구성원을 확정하지 못한 뿌리(Undecided)는 모양 전용으로 남기고,
+    // 사용자 결정: 그룹 구성원을 확정하지 못한 뿌리(Undecided)는 모양 전용으로 남기고,
     // 남이 쓸 수 있는 것으로 확정된 뿌리(Last)와 조상(Ancestor)은 지금처럼 버린다.
     // 이것을 실패시키는 것: Undecided 뿌리를 버리는 것(모양 전용 분기 삭제), Last·Ancestor 거부를 모양 전용으로
     // 받아 주는 것(`Some(_)` 분기를 모양 전용으로 바꾸기).
@@ -953,7 +952,7 @@ mod tests {
                 bingsu_core::fs_trust::Group::OnlyRootAndUser
             }
         }
-        // init clears it and pins it for the front end (P-R1, S-8).
+        // init clears it and pins it for the front end.
         let pin = pin_for(&gw.join("bingsu"), me, &mut Cleared).unwrap();
         let gw_md = std::fs::metadata(&gw).unwrap();
         assert_eq!(

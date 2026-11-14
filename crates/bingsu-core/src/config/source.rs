@@ -17,7 +17,7 @@
 //!
 //! 1. Trusted walk: only files trusted for execution keys are followed.
 //!    Trusted files get their place, depth and budget from trusted paths
-//!    alone (spec change S-7). A file that is not trusted is a leaf here.
+//!    alone. A file that is not trusted is a leaf here.
 //! 2. Each such leaf, in apply order, is followed on its own. What it
 //!    reaches first is shape-only and goes just before it. Registered
 //!    shape-only leaves are still walked; execution origins keep their
@@ -48,7 +48,7 @@ pub struct FileKey {
     pub ino: u64,
 }
 
-/// Whether a file may give execution keys (the CLI decides, Task R3).
+/// Whether a file may give execution keys (the CLI decides).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trust {
     /// Under the config root or approved with `config use`, and it passed
@@ -458,7 +458,7 @@ impl Walk<'_> {
         self.nodes.iter().position(|n| n.found.opened.key == key)
     }
 
-    /// Executable paths retain S-7's placement rule. Without one, an
+    /// Executable paths retain the rule that a trusted file is placed by its trusted path alone. Without one, an
     /// explicit unsafe origin must preserve the execution-blocking keys
     /// that a shape-only alias would discard.
     fn replaces_origin(&self, i: usize, trust: Trust) -> bool {
@@ -1225,7 +1225,7 @@ pub(crate) mod tests {
         );
     }
 
-    // 스펙 개정 S-7: 신뢰 파일의 적용 자리는 신뢰 경로만으로 정한다.
+    // 신뢰 파일의 적용 자리는 신뢰 경로만으로 정한다.
     // 이것을 실패시키는 것: 모양 전용 파일이 신뢰 파일을 먼저 가리켜 그 자리를 앞당기는 것(뒤가 이기는 순서가 바뀜).
     #[test]
     fn trusted_files_keep_their_trusted_place() {

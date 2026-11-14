@@ -276,7 +276,7 @@ def test_builtin_probe_never_runs_from_the_repository(tmp_path, _native_boot_req
 
 
 # 수집이 안쪽 저장소의 뿌리를 알려도, 그 위의 바깥 저장소 bin에 있는 node는 실행하지 않는다. 내장 언어도 설정 단위와
-# 같은 저장소 목록(수집 뿌리와 셸 폴더 위의 `.git` 조상)을 쓰기 때문이다(U-24). 수집이 없는 회차는 언어를 그리면
+# 같은 저장소 목록(수집 뿌리와 셸 폴더 위의 `.git` 조상)을 쓰기 때문이다. 수집이 없는 회차는 언어를 그리면
 # 생기지 않고(test_language_only_layout_is_collected), 뿌리를 확정하지 못한 회차는 정하지 않는다
 # (test_unsettled_repository_decides_no_language). 이것을 실패시키는 것: 명령 회차의 저장소 목록에서 조상 검사를
 # 빼는 것(수집 뿌리만 남아 바깥 저장소의 node가 실행됨).
@@ -581,7 +581,7 @@ def test_git_shows_beside_a_user_language(tmp_path, _native_boot_required):
     session.await_text("main", timeout=8)
 
 
-# U-32: 명령 응답에서 내장 언어와 설정 단위는 칸을 따로 쓴다. 설정 단위 32개를 모두 그리고 node를 함께 그려도, 32개의
+# 명령 응답에서 내장 언어와 설정 단위는 칸을 따로 쓴다. 설정 단위 32개를 모두 그리고 node를 함께 그려도, 32개의
 # 값과 node 버전이 한 응답에 함께 남는다. 이것을 실패시키는 것: 응답 상한을 출처 구분 없이 32로 되돌리는 것(서로
 # 밀어내 하나가 빠짐), merge가 넘친 출처 밖의 항목을 지우는 것.
 def test_builtin_and_32_units_share_the_response(tmp_path, _native_boot_required):

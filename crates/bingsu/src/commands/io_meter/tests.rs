@@ -14,7 +14,7 @@ fn caps(n: u64) -> AxisCaps {
     }
 }
 
-// 이것을 실패시키는 것: U2(사용자 결정 2026-10-30) 값 하나라도 바꾸는 것, 의미 상한(32 files, 1 MiB)을
+// 이것을 실패시키는 것: 상한 값 하나라도 바꾸는 것, 의미 상한(32 files, 1 MiB)을
 // F·B에 대입하는 것.
 #[test]
 fn axis_caps_are_the_user_decision_values() {

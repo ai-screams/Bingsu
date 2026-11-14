@@ -689,7 +689,7 @@ def valid_trace():
         '11 openat(AT_FDCWD, "/proc/sys/kernel/random/boot_id", O_RDONLY) = 3</proc/sys/kernel/random/boot_id>',
         '11 socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0) = 3<UNIX-STREAM:[1]>',
         '11 connect(3<UNIX-STREAM:[1]>, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (No such file or directory)',
-        # R1 state/log creation and final held-chain metadata recheck.
+        # State/log creation and final held-chain metadata recheck.
         '11 mkdirat(3</pinned>, "state", 0700) = 0',
         '11 openat(3</pinned>, "state", O_RDONLY|O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC) = 6</pinned/state>',
         '11 mkdirat(6</pinned/state>, "log", 0700) = 0',
@@ -2037,7 +2037,7 @@ CAPABILITY_RESULT = "-1 ENODATA (No data available)"
 
 
 def with_capability_queries(lines):
-    """The captures predate exec_path's file-capability check (U-33): a
+    """The captures predate exec_path's file-capability check: a
     target the lookup would run is asked for `security.capability` on its
     descriptor after the walk's folders close, just before the fd stat and
     header read (the only pread right after an fd stat of the same file).
@@ -2565,9 +2565,9 @@ def deadline_published_capture():
     """Synthetic exit-75 variant that keeps the supervisor publication.
 
     The collector sent a verified update, hit its own stage deadline and exited
-    75; the supervisor reaped it and stored the Deadline partial (spec message
-    row: results so far; S-17: a timeout after verified A). CI run 40730902708
-    attempt 8 traced this order. A checker fixture, not a live capture.
+    75; the supervisor reaped it and stored the Deadline partial (results so
+    far, as for a timeout after verified A). CI run 40730902708 attempt 8
+    traced this order. A checker fixture, not a live capture.
     """
     lines, collector, plan = helper_stage_case("collect")
     pid = next(line.split()[0] for line in lines if budget.is_root(line, collector))
@@ -3300,7 +3300,7 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
 
 
 def env_pipe_replay(pid):
-    """The current bootstrap's environment pipe (U-9h), for captures and
+    """The current bootstrap's environment pipe, for captures and
     synthetic traces from before it: pipe2, the frame write and the write
     end's close before the helper spawn; the read end's close after it."""
     return ([f'{pid} pipe2([200<pipe:[909090]>, 201<pipe:[909090]>], O_NONBLOCK|O_CLOEXEC) = 0',

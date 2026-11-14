@@ -57,7 +57,7 @@ fn append(
     message: &str,
 ) -> Result<(), StoreError> {
     let root = root.ok_or(StoreError::Unsafe)?;
-    // The same held-descriptor creator as R1 init; a pinned spelling is
+    // The same held-descriptor creator as init; a pinned spelling is
     // never re-canonicalized, including when several parents are missing.
     let chain =
         runtime_root::ensure_root(root, me, groups, bingsu_core::fs_trust::Last::PrivateFolder)?;
@@ -164,7 +164,7 @@ mod tests {
         drop(inherited);
         fs::remove_dir_all(base).unwrap();
     }
-    // 이것을 실패시키는 것: 로그의 여러 없는 부모를 R1 생성기로 만들지 않는 것.
+    // 이것을 실패시키는 것: 로그의 여러 없는 부모를 init의 생성기로 만들지 않는 것.
     #[test]
     fn fresh_log_root_creates_its_missing_state_chain() {
         let base = std::env::temp_dir().join(format!("bingsu-n3-fresh-log-{}", std::process::id()));

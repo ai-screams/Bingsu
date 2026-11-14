@@ -139,7 +139,7 @@ fn open_chain_with(path: &Path, mut meter: Meter<'_>) -> Result<Chain, RootError
     Ok(chain)
 }
 
-/// Create a private root at an already-canonical spelling. Shared by R1
+/// Create a private root at an already-canonical spelling. Shared by
 /// init and refresh/log writers: existing ancestors are judged before any
 /// mutation; missing names are made 0700 through held no-follow descriptors.
 /// The whole final chain is judged and revalidated; failures roll back only

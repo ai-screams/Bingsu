@@ -72,7 +72,7 @@ impl Status {
     pub const DEGRADED_TRUST_MISMATCH: Self = Self::new(StatusClass::Degraded, "trust-mismatch");
     pub const DEGRADED_TRUST_CLOCK: Self = Self::new(StatusClass::Degraded, "trust-clock");
     /// Linux: the prompt's seccomp filter could not be installed, so the
-    /// core did not run (spec revision S-5, decision P18).
+    /// core did not run.
     pub const DEGRADED_SANDBOX: Self = Self::new(StatusClass::Degraded, "sandbox");
     pub const ERROR_CONFIG_LAST_GOOD: Self = Self::new(StatusClass::Error, "config-last-good");
     pub const ERROR_CONFIG_DEFAULT: Self = Self::new(StatusClass::Error, "config-default");

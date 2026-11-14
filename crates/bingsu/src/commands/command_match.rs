@@ -1,4 +1,4 @@
-//! A command segment's `match` in the CLI (U-9c, C4c ruling Q1): the regex
+//! A command segment's `match` in the CLI: the regex
 //! lives here, never in core and never on the prompt path. One check decides
 //! for every report the CLI makes (publication, `config check`): a pattern
 //! that does not compile or passes the size limit is an E203 error and turns
@@ -72,7 +72,7 @@ pub(crate) fn bind(mut e: Entry, pattern: Option<&str>) -> Entry {
 }
 
 /// The entry `current` would be under `pattern` without running anything
-/// again (U-9c): a success matched under another pattern, re-matched on its
+/// again: a success matched under another pattern, re-matched on its
 /// stored raw line. Its completion moves one nanosecond, so the publication
 /// replaces the older entry (only a newer completion does), and its cache
 /// still ends where the run's did.
@@ -86,7 +86,7 @@ pub(crate) fn reapplied(current: &Entry, pattern: Option<&str>) -> Option<Entry>
     Some(e)
 }
 
-/// Time one round may spend matching (U-29). A search cannot stop halfway,
+/// Time one round may spend matching. A search cannot stop halfway,
 /// so the budget is checked between units: a round spends at most this plus
 /// one unit's search.
 pub(crate) const ROUND_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
@@ -284,7 +284,7 @@ mod tests {
         assert!(reapplied(&bind(entry("x", Status::Failed), None), Some("(x)")).is_none());
     }
 
-    // U-29 회차 예산: 매칭에 쓴 시간이 예산(250 ms)에 닿으면 남은 성공 항목은 그 회차에 Failed로 발행되고(값 없음),
+    // 회차 예산: 매칭에 쓴 시간이 예산(250 ms)에 닿으면 남은 성공 항목은 그 회차에 Failed로 발행되고(값 없음),
     // 패턴이 없는 항목과 이미 실패한 항목은 그대로다. 다시 맞추기는 예산이 다하면 미룬다. 확인은 단위 사이에서만
     // 한다. 이것을 실패시키는 것: 예산 확인을 지우는 것, 경계를 넘김(>)으로 바꾸는 것, 매칭 시간을 쌓지 않는 것,
     // 패턴 없는 항목까지 실패로 만드는 것, 다시 맞추기에 예산을 걸지 않는 것.

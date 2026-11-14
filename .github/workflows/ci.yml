@@ -995,7 +995,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build -p bingsu-core --target wasm32-unknown-unknown
       - run: cargo clippy -p bingsu-core --target wasm32-unknown-unknown -- -D warnings -F clippy::disallowed_methods -F clippy::disallowed_types -F clippy::disallowed_macros
-      # Determinism golden (spec section 7 layer 7, F-06): the native half is
+      # Determinism golden: the native half is
       # the bingsu-golden test in the Test job (Linux, macOS, Windows); this is
       # the wasm32 half. cmp fails on a missing golden file as well.
       - name: Install wasmtime (pinned release, checksum verified)
@@ -1253,7 +1253,7 @@ jobs:
 
   # Spec section 11 gate: full prompt time (base tip against the merge result,
   # alternated, 200 pairs per case) and stripped binary size, judged with the
-  # decision U3 limits. The job fails the pull request on FAIL only (a ratio
+  # the approved limits. The job fails the pull request on FAIL only (a ratio
   # or the size cap exceeded). BLOCKED, meaning
   # missing or invalid evidence, ends green and shows as a warning and in the summary.
   prompt-gate:
@@ -1263,7 +1263,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      # Decision U3: GATE_RATIO_P50 and GATE_RATIO_P95 are the largest
+      # GATE_RATIO_P50 and GATE_RATIO_P95 are the largest
       # accepted candidate/base ratios of p50 and p95. Size caps of the first
       # release, in decimal stripped bytes with no per-binary cap:
       # GATE_SIZE_CAP_BYTES caps front + collector (combined, what a prompt
@@ -1277,7 +1277,7 @@ jobs:
       GATE_CASES: no-git,git-clean,git-dirty,prompt-env64k,prompt-env64k-commands,prompt-commands-hit,prompt-commands-max,prompt-commands-max-empty,prompt-commands-redraw,prompt-commands-max-empty-redraw,prompt-text-max,prompt-env-segments
       # M6 C4b-3: the command time fixtures are measured and recorded, not
       # judged. A base without command values makes their ratio the whole added
-      # cost; the worst increment is bounded by +0.5 ms (U-23), not by the ratio.
+      # cost; the worst increment is bounded by +0.5 ms, not by the ratio.
       GATE_RECORD_ONLY: prompt-env64k,prompt-env64k-commands,prompt-commands-hit,prompt-commands-max,prompt-commands-max-empty,prompt-commands-redraw,prompt-commands-max-empty-redraw,prompt-text-max,prompt-env-segments
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1311,7 +1311,7 @@ jobs:
           BINGSU_CANDIDATE_REVISION: merge-result
         run: |
           # A BLOCKED measurement (exit 2) is recorded by the verdict step.
-          # --admission ci-r2: decision U3 rule R2, honoured only on a GitHub Actions runner.
+          # --admission ci-r2: rule R2, honoured only on a GitHub Actions runner.
           python3 bench/git-product.py --base "$RUNNER_TEMP/base/target/release/bingsu" --candidate target/release/bingsu \
             --rounds 200 --cases "$GATE_CASES" --admission ci-r2 --out "$RUNNER_TEMP/measurements/prompt-pairs.json" || test "$?" -eq 2
       - name: Record the verdict
@@ -1356,7 +1356,7 @@ jobs:
         cell: [runner, min-u22]
     env:
       CELL: ${{ matrix.cell }}
-      # U-4: the largest accepted candidate/base ratios of p50 and p95.
+      # the largest accepted candidate/base ratios of p50 and p95.
       # GATE_ENFORCE=true makes a FAIL or BLOCKED verdict fail the job.
       GATE_RATIO_P50: '1.25'
       GATE_RATIO_P95: '1.50'
@@ -1398,7 +1398,7 @@ jobs:
       - name: Alternate 200 pairs per row in the controlled protocol
         run: |
           # A BLOCKED measurement (exit 2) is recorded by the verdict step.
-          # --admission ci-r2: decision U3 rule R2, honoured only on a GitHub Actions runner.
+          # --admission ci-r2: rule R2, honoured only on a GitHub Actions runner.
           run=(--rounds 200 --admission ci-r2)
           if [ "$CELL" = runner ]; then
             python3 bench/shell_gate.py --base "$RUNNER_TEMP/bins/base" --candidate "$RUNNER_TEMP/bins/candidate" "${run[@]}" \

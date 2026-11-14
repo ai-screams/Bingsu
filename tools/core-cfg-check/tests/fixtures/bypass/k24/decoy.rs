@@ -1,5 +1,5 @@
-//! Linux seccomp for `bingsu prompt` (spec section 4 front end, revision
-//! S-5, N4 option 3): `prompt::dispatch` calls `enter` inside its panic guard
+//! Linux seccomp for `bingsu prompt` :
+//! `prompt::dispatch` calls `enter` inside its panic guard
 //! after fixed helper spawn and core-directed fd preparation, before snapshot
 //! content decoding and rendering. From then
 //! on the kernel lets through only RULES, which are the `syscall` column of
@@ -20,7 +20,7 @@
 //! can answer the kernel question for us. No in-process filter can guard
 //! against them. A wrong architecture and, on x86_64, an x32 ABI call are
 //! killed (no code makes them on purpose; the hand-written classic BPF of
-//! the M1 collector, B2, revision S-6).
+//! the M1 collector).
 //!
 //! Not covered by the kernel: the vDSO (clock_gettime, gettimeofday, time
 //! and getcpu run in user space without a system call) and CPU

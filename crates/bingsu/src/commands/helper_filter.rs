@@ -113,7 +113,7 @@ fn supervisor_program(
     code.push(allow);
     code.push(deny);
     // kill(-pgid, SIGKILL) for the relays' own groups only (best-effort
-    // path, C3 ruling R5). Only the low 32 bits are compared: the kernel
+    // path). Only the low 32 bits are compared: the kernel
     // reads both arguments as int. The supervisor sends it only while the
     // relay, the group's leader, is unreaped, so the number names no other
     // group then.

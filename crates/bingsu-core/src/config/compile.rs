@@ -122,7 +122,7 @@ pub struct ExecUnit {
     /// `None`: it runs.
     pub not_run: Option<NotRun>,
     /// A command segment's `match`: the helper applies it to the first line
-    /// before publishing (U-9c), the prompt compares its digest
+    /// before publishing, the prompt compares its digest
     /// (`command::wire::pattern_digest`). Not in the policy digest, so a
     /// change of `match` alone runs nothing again.
     pub pattern: Option<String>,
@@ -132,7 +132,7 @@ pub struct ExecUnit {
 /// snapshot carries each one).
 pub const MAX_CUSTOM_TEXT: usize = 256;
 /// Command and language segments one config may draw: those a trusted
-/// layout draws at some width and that may run (plan U-9d: 32 units, the
+/// layout draws at some width and that may run (32 units, the
 /// command response's `CONFIG_ENTRIES_MAX`, which holds only units that run). A
 /// declared segment no layout draws is not counted.
 pub const MAX_EXEC_UNITS: usize = 32;
@@ -852,7 +852,7 @@ fn palette(r: &MTable, mode: Mode) -> Result<ResolvedPalette, Vec<Diagnostic>> {
 
 /// Compiles `m` (already checked without errors) with `trusted`, the merge
 /// of the executable sources alone. Both display palettes are retained;
-/// `auto` remains in the interface for existing callers (S-11). Returns the config
+/// `auto` remains in the interface for existing callers. Returns the config
 /// and its warnings and notes; errors carry the place of the key that
 /// caused them.
 pub fn compile(
@@ -2199,7 +2199,7 @@ mod tests {
             );
             assert!(r.snapshot.is_none(), "{name}");
         }
-        // Credentials may come back (they are warned about later, U-13 V2).
+        // Credentials may come back (they are warned about later).
         let r = read(
             &command_seg("command = [\"k\"]\nenv_allow = [\"SSH_AUTH_SOCK\", \"LDX\"]\n"),
             &[],
@@ -2232,7 +2232,7 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 실행 정책 필드(cwd·env_allow·timeout·cache·shell)와 키별 출처를 snapshot에서 버리는 것.
-    // 그리는(실행될 수 있는) 명령·언어 segment는 설정 하나에 32개까지다(계획 U-9d, 명령 응답의 항목 상한). 그리지
+    // 그리는(실행될 수 있는) 명령·언어 segment는 설정 하나에 32개까지다(명령 응답의 항목 상한). 그리지
     // 않는 선언은 세지 않고, 좁은 폭 구간 하나에서만 그리거나 필드 참조로만 그리는 단위도 센다. 이것을 실패시키는
     // 것: 상한 검사를 지우는 것, 상한을 33 이상으로 두는 것, 그리지 않는 선언까지 세는 것, 좁은 폭에서만 그리는
     // 단위를 빼는 것, language 단위를 세지 않는 것.

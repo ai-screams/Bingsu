@@ -155,12 +155,12 @@ CI_REFERENCE_STABILITY = 0.05
 
 
 def ci_r2_host(power):
-    """A GitHub Actions runner without a power device: the only host U3 rule R2 may judge."""
+    """A GitHub Actions runner without a power device: the only host rule R2 may judge."""
     return power == 'mains-assumed' and os.environ.get('GITHUB_ACTIONS') == 'true'
 
 
 def admission_basis(power, condition):
-    """'ci-r2' when a gate block is judged by U3 rule R2, else 'default'.
+    """'ci-r2' when a gate block is judged by rule R2, else 'default'.
 
     R2 needs both the explicit request (condition admission 'ci-r2') and a
     hosted runner; an ambient environment alone never selects it.

@@ -1,4 +1,4 @@
-//! The vi command mode fields of a whole B1 record (spec section 3, U-2 V1):
+//! The vi command mode fields of a whole B1 record:
 //! from `front::render_selected`, so band selection, the notice and the
 //! encoder all take part, split the way the shell readers split.
 use bingsu_core::{

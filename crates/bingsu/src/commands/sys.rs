@@ -2,7 +2,7 @@
 //! `unsafe` is on `mod sys;` in commands/mod.rs; the prompt makes its own
 //! in crate::prompt and crate::sandbox and cannot name this module). Every
 //! block carries a SAFETY comment (workspace lint).
-// The clippy.toml rules (environment reads among them, spec 4 rule 7, F-01)
+// The clippy.toml rules (environment reads among them)
 // are forbidden here. Unlike the crate-wide deny, forbid cannot
 // be switched off with #[expect] or #[allow].
 #![forbid(
@@ -561,7 +561,7 @@ pub fn acl_facts_fd(fd: std::os::fd::BorrowedFd<'_>) -> AclFacts {
 }
 
 /// Linux: whether an open file is known to carry no file capabilities
-/// (`security.capability`, U-33). An attribute of any length, or an answer
+/// (`security.capability`). An attribute of any length, or an answer
 /// that cannot be read, is `false`, so the caller refuses. A path-only
 /// descriptor asks through `/proc/self/fd/N`, as `acl_facts_fd` does.
 #[cfg(target_os = "linux")]
@@ -753,7 +753,7 @@ mod linux_boundary_tests {
         }
     }
 
-    // U-33: file capability가 없다고 아는 것은 ENODATA·EOPNOTSUPP뿐이다. 이것을 실패시키는 것: 다른 errno(EIO,
+    // file capability가 없다고 아는 것은 ENODATA·EOPNOTSUPP뿐이다. 이것을 실패시키는 것: 다른 errno(EIO,
     // EACCES, 오래된 errno)를 없음으로 보는 것, 길이 0인 속성을 없음으로 보는 것, 길이가 있는데 errno만 보는 것.
     #[test]
     fn capability_errors_do_not_grant_trust() {

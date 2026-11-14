@@ -15,18 +15,18 @@ CMD-OUTPUT-4K	Endless output: the result keeps 4 KB, the rest is read and droppe
 CMD-OUTPUT-EXIT	Output past 4 KB keeps the target's own exit status (no SIGPIPE)	Unix	crates/bingsu/src/commands/command_supervisor.rs::test_long_output_keeps_exit_status	C2
 CMD-STDOUT-HOLDER	A descendant holding stdout delays neither the prompt nor the round	Unix	tests/shell/test_command_round.py::test_stdout_holder_does_not_block_prompt	C2
 CMD-FILTER	After the last spawn the supervisor's own filter refuses execve	Linux	crates/bingsu/src/commands/command_supervisor.rs::test_supervisor_filter_denies_exec_after_spawn	C2
-CMD-NNP	The relay sets no_new_privs; a setuid target gains nothing (U-17)	Linux	crates/bingsu/src/relay.rs::test_relay_target_has_no_new_privs	C2
+CMD-NNP	The relay sets no_new_privs; a setuid target gains nothing	Linux	crates/bingsu/src/relay.rs::test_relay_target_has_no_new_privs	C2
 CMD-STATUS	The relay reports a refusal on its status pipe and the pipe ends at exec; the target's fd 2 is /dev/null	Linux	crates/bingsu/src/relay.rs::test_relay_writes_refusal_to_status	C2
 CMD-NEUTRAL	Neutral units run only in an empty, own, 0500 neutral folder	Unix	tests/shell/test_command_round.py::test_neutral_folder_must_be_empty_and_0500	C2
 CMD-REPO-ROOT	The collected repository root, else the shell's folder, bounds the sanitized PATH (J9)	Unix	tests/shell/test_command_round.py::test_collected_repo_root_excludes_its_bin	C2
 CMD-MACOS-ONE-PROCESS	macOS runs config units through the relay: each unit is one process, already the target (PR 10b)	macOS	tests/shell/test_command_round.py::test_macos_unit_is_one_process_the_relay_execs_into	C2
-CMD-MACOS-SET-ID	macOS refuses a setuid or setgid target (U-17)	macOS	crates/bingsu/src/relay.rs::test_set_id_targets_are_refused	C2
+CMD-MACOS-SET-ID	macOS refuses a setuid or setgid target	macOS	crates/bingsu/src/relay.rs::test_set_id_targets_are_refused	C2
 CMD-MACOS-EXEC-ONLY	macOS refuses an execute-only target, whose #! line it cannot read (C2 ruling Q4)	macOS	crates/bingsu/src/relay.rs::test_macos_execute_only_target_refused	C2
-CMD-MACOS-NAME-CHECK	macOS rechecks the whole path with no symlink on it, then the clock, then execve (U-18, C2 ruling Q3)	macOS	crates/bingsu/src/relay.rs::test_macos_link_on_the_way_is_refused	C2
+CMD-MACOS-NAME-CHECK	macOS rechecks the whole path with no symlink on it, then the clock, then execve	macOS	crates/bingsu/src/relay.rs::test_macos_link_on_the_way_is_refused	C2
 CMD-MACOS-SCRIPT-COPY	macOS runs a script from the helper's private copy and removes it once the supervisor has ended (C2 ruling Q1)	macOS	tests/shell/test_command_round.py::test_macos_script_runs_from_a_copy_that_is_then_removed	C2
 CMD-MACOS-SWEEP	A copy left under a live supervisor stays until the next round of the same session sweeps it; other sessions' copies stay (C2 ruling Q1)	macOS	tests/shell/test_command_round.py::test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep	C2
 CMD-XONLY-SCRIPT	Linux: an execute-only #! script is not loaded by the kernel through the close-on-exec folder (RELAY_EXEC, nothing runs)	Linux	crates/bingsu/src/relay.rs::test_execute_only_script_is_not_loaded	C2
-CMD-MACOS-GROUP-KILL	macOS best-effort end (C3 ruling R6): the relay leads its own process group, killed before its exit is reaped; a grandchild in that group does not outlive the round or the helper	macOS	tests/shell/test_command_round.py::test_macos_group_grandchild_ends_with_the_round	C2
+CMD-MACOS-GROUP-KILL	macOS best-effort end: the relay leads its own process group, killed before its exit is reaped; a grandchild in that group does not outlive the round or the helper	macOS	tests/shell/test_command_round.py::test_macos_group_grandchild_ends_with_the_round	C2
 CMD-MACOS-SCRIPT-UNCHANGED	macOS copies a script only when its descriptor still has the checked stat after the copy (owner, group, mode, ctime)	macOS	crates/bingsu/src/commands/exec_path.rs::test_macos_copy_refuses_a_script_changed_after_its_check	C2
 CMD-MACOS-SCRIPT-EXEC	macOS copies a script only when the kernel lets the user execute it (faccessat X_OK, AT_EACCESS; noexec mount) and the path still names the checked file	macOS	crates/bingsu/src/commands/exec_path.rs::test_macos_script_needs_its_own_execute_bit	C2
 CMD-MACOS-COPY-RECHECK	The macOS relay rechecks the script copy by path with the interpreter, right before the clock and execve	macOS	crates/bingsu/src/relay.rs::test_macos_copy_swapped_before_the_exec_is_refused	C2

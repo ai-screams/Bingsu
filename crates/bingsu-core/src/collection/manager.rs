@@ -1,5 +1,4 @@
-//! Version manager resolvers (plan D2, spec section 4 "language versions",
-//! row "read before running"; user decision U-12 R2: rustup and pyenv).
+//! Version manager resolvers for rustup and pyenv.
 //!
 //! When the language's command on the sanitized `PATH` is the shim of a
 //! manager bingsu understands, the version can be read from the repository's
@@ -12,7 +11,7 @@
 use super::language::{lines, trim, version_ok};
 use alloc::vec::Vec;
 
-/// The managers with a resolver (U-12 R2).
+/// The managers with a resolver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Manager {
     Rustup,

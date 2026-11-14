@@ -1,17 +1,16 @@
-//! The cgroup layer's pure parts (spec section 4, stop order step 4; U-14
-//! F0, U-15 Q1): whether a kernel release has `cgroup.kill`, the process's
+//! The cgroup layer's pure parts: whether a kernel release has `cgroup.kill`, the process's
 //! own cgroup v2 path from `/proc/self/cgroup`, and the names of the session
 //! parent folder and of each unit's cgroup. Nothing here touches a file.
 use crate::collection::cwd_hash::sha256;
 use alloc::{format, string::String};
 
 /// One reclaim visits at most this many folders: the entries right under
-/// the session parent and every folder of their subtrees (U-9d).
+/// the session parent and every folder of their subtrees.
 pub const RECLAIM_VISITS: usize = 64;
-/// Deepest subtree level a reclaim enters below a unit folder (U-9d); a
+/// Deepest subtree level a reclaim enters below a unit folder; a
 /// folder deeper than this is never visited, so its unit folder stays.
 pub const RECLAIM_DEPTH: usize = 4;
-/// Work time of one reclaim (U-9d).
+/// Work time of one reclaim.
 pub const RECLAIM_NS: u64 = 20_000_000;
 /// Reads of `cgroup.events` after a kill before an entry counts as still
 /// populated (the plan's `r`).
@@ -23,7 +22,7 @@ pub const PROC_CGROUP_MAX: usize = 4096;
 pub const PROCS_MAX: usize = 65_536;
 
 /// `cgroup.kill` exists from Linux 5.14; below that the atomic path is off
-/// and the best-effort path runs (U-14 F0). `release` is `uname -r`: the
+/// and the best-effort path runs. `release` is `uname -r`: the
 /// leading `major.minor` numbers decide, the rest is ignored. Anything that
 /// does not start with two numbers is not atomic.
 pub fn kernel_has_kill(release: &[u8]) -> bool {
@@ -116,7 +115,7 @@ pub fn is_unit_name(name: &[u8]) -> bool {
 }
 
 /// The next unit's sequence value: the boot clock now, but always past the
-/// previous one. One supervisor per session runs at a time (U-15 Q1) and the
+/// previous one. One supervisor per session runs at a time and the
 /// boot clock never goes back, so no name repeats within a boot; a reboot
 /// removes every cgroup. No record file is kept.
 pub fn next_seq(previous: Option<u64>, now: u64) -> u64 {

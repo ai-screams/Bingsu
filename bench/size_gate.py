@@ -2,7 +2,7 @@
 """Pull request gate verdicts for full prompt time and stripped binary size.
 
 Pure judgement over D1 `Paired` rows and `git-product.py --prepare` size maps. The
-p50 and p95 ratio limits and the two size caps are inputs (U3: 1.03, 1.10; the
+p50 and p95 ratio limits and the two size caps are inputs (1.03, 1.10; the
 first release: 2,500,000 bytes for front + collector, 7,000,000 bytes for the
 three shipped files together); a missing one leaves its verdict BLOCKED, never
 FAIL. The CLI exits 0 unless --enforce is given, and then exits 1 only on FAIL;
@@ -29,7 +29,7 @@ SIZE_KEYS = ("front", "collector", "combined")
 PENDING = "not set"
 # Cases the gate records without judging (--record-only): the command time
 # fixtures (M6 C4b-3). A base that reads no command response makes their ratio
-# the whole added cost, and their worst increment is bounded by +0.5 ms (U-23).
+# the whole added cost, and their worst increment is bounded by +0.5 ms.
 RECORD_ONLY = ("record only: a base without command values makes the ratio the whole added cost; "
                "the worst increment is bounded by +0.5 ms (U-23), not by this ratio")
 

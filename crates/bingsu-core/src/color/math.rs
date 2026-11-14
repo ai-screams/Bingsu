@@ -1,4 +1,4 @@
-//! OKLCH, OKLab and sRGB (spec section 1 crate table, F-06). Every
+//! OKLCH, OKLab and sRGB. Every
 //! transcendental goes through the pure Rust `libm` (the std float methods
 //! are disallowed in clippy.toml), and results are quantized at three fixed
 //! points: 8-bit sRGB, OKLab in millionths, contrast in thousandths. Nothing

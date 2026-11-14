@@ -574,7 +574,7 @@ fn e3_gc_inventory_counts_actual_control_bytes_and_tolerates_corrupt_records() {
 #[test]
 fn breaker_growth_is_charged_before_each_write_and_budget_is_unchanged() {
     // Mutation: omitting the pre-write catalog charge lets a second large
-    // record grow past the shared 16,100,000-byte bound (U-21).
+    // record grow past the shared 16,100,000-byte bound.
     // Mutation: rounding down undercharges every non-page-aligned record.
     for (len, expected) in [
         (0, 0),
@@ -589,7 +589,7 @@ fn breaker_growth_is_charged_before_each_write_and_budget_is_unchanged() {
     let mut stores = Vec::new();
     // Response stores fill the budget but leave room for large breaker
     // records: 6 (the budget admits 7, after which 67,668 bytes are left,
-    // less than one 64 KiB-cwd record; U-21).
+    // less than one 64 KiB-cwd record).
     for i in 0..6 {
         stores.push(response_store(&f.runtime, format!("/store-{i}").as_bytes(), 1).unwrap());
     }
@@ -685,7 +685,7 @@ fn gc_preserves_large_live_breaker_under_response_pressure() {
     let mut stores = Vec::new();
     // Response stores fill the budget but leave room for large breaker
     // records: 6 (the budget admits 7, after which 67,668 bytes are left,
-    // less than one 64 KiB-cwd record; U-21).
+    // less than one 64 KiB-cwd record).
     for i in 0..6 {
         stores.push(response_store(&f.runtime, format!("/store-{i}").as_bytes(), 1).unwrap());
     }

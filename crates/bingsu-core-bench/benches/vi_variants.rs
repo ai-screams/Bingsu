@@ -1,4 +1,4 @@
-//! Instruction counts of the vi command mode lines (spec section 3, U-2 V1):
+//! Instruction counts of the vi command mode lines:
 //! the second layout and field writing a prompt pays on top of `render_prompt`.
 //! Each bench group is its own bench target, so the code generation of one
 //! binary does not depend on the benches of another.

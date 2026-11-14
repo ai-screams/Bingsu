@@ -16,7 +16,7 @@ approximation, `filtered`, `partial`, and `~`, including `!0~`. Unsupported
 split-index, unknown global excludes, include uncertainty, case collisions,
 and no-follow embedded `.git` links have separate asserted expectations.
 
-U7 counts untracked files individually. The 2- and 255-file fixtures require
+The collector counts untracked files individually. The 2- and 255-file fixtures require
 exact Git counts. The 256-file fixture alone uses the explicit manifest policy
 `untracked-cap-boundary`: an index-free subtree reaching the cap reports cap+
 even when Git's count equals the cap, because EOF remains unproven (#131;
@@ -28,7 +28,7 @@ also require independently known staged and modified counts. Empty directories
 count zero; valid embedded repositories count one.
 
 All corpus cases compare the real collector result with the policy oracle.
-The five nonempty untracked-directory cases also run as individual U7 boundary
+The five nonempty untracked-directory cases also run as individual boundary
 tests, and CI requires each to pass on Linux and macOS.
 
 Each independent canary has read, spawn, and write negative controls. Each

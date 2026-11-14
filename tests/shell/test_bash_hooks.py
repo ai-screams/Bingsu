@@ -361,7 +361,7 @@ def test_late_hook_check_ignores_nocasematch(tmp_path):
     assert out.count(LATE) == 1
 
 
-# F-23. 이것을 실패시키는 것: 등록 블록의 멤버십 조건(`_bingsu_reg`)을 지우는 것(HOOKS=4).
+# 이것을 실패시키는 것: 등록 블록의 멤버십 조건(`_bingsu_reg`)을 지우는 것(HOOKS=4).
 def test_init_twice_registers_hooks_once(tmp_path):
     s, _, _ = start(tmp_path, record=minimal_record())
     s.run(f"source {tmp_path / 'init.bash'}")

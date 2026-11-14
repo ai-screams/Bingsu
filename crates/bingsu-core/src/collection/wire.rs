@@ -416,7 +416,7 @@ pub enum EndReason {
     WorkerExit,
 }
 /// Worker-local stage/request timeout, classified as Deadline only after Ready
-/// and request delivery at a validated frame boundary. Under S-17, like a
+/// and request delivery at a validated frame boundary. Like a
 /// supervisor deadline, it counts as a breaker failure before verified stage A
 /// completion: three failures block the key for BLOCK_NS (300 s). Verified A
 /// completion resets the count even when followed by this exit status.
@@ -904,7 +904,7 @@ impl Transcript {
         // section's queries and count (`room` kept `stored` within it).
         add_budget(self.stored, STREAM_MAX - self.room()?, STREAM_MAX)?;
         // Language results alone are still this round's answer: the helper
-        // hands them to the builtin probes (D3a ruling Q-B, U-3 L2). The store
+        // hands them to the builtin probes. The store
         // publishes no record without an update (`CollectionStore::publish`),
         // so they never make the newest record the prompt reads.
         // Fails without it: language_results_alone_reach_the_round.

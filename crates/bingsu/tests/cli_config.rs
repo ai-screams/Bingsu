@@ -850,7 +850,7 @@ fn explain_shows_limits_cwd_shell_and_the_sanitized_lookup() {
     );
 }
 
-// U-33: setuid·setgid 프로그램은 실행하지 않고, `config check`(W411)와 `--explain`이 그 이유를 적는다. 대조: 0755
+// setuid·setgid 프로그램은 실행하지 않고, `config check`(W411)와 `--explain`이 그 이유를 적는다. 대조: 0755
 // 사본은 실행 파일로 보이고, 남이 쓸 수 있는 0757 사본은 이유 없이 거부된다(W411 없음). 이것을 실패시키는 것:
 // explain이 SetId를 다른 거부처럼 다루는 것(이유가 빠짐), 이유를 다른 거부에도 붙이는 것, W411에 set-id를 더하지
 // 않는 것, 상태 줄을 "will not run"으로 두지 않는 것.
@@ -903,7 +903,7 @@ fn check_and_explain_name_set_id_programs() {
     }
 }
 
-// U-33: set-id 인터프리터를 쓰는 script는 W411과 `--explain`이 인터프리터 이유를 적는다(script 자체가 set-id인 이유와
+// set-id 인터프리터를 쓰는 script는 W411과 `--explain`이 인터프리터 이유를 적는다(script 자체가 set-id인 이유와
 // 다름). 이것을 실패시키는 것: 인터프리터의 SetId를 이유 없는 거부로 바꾸는 것, 인터프리터 경우를 파일 자체로 보는 것.
 #[test]
 fn check_and_explain_name_a_set_id_interpreter() {

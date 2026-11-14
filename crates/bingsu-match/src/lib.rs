@@ -1,4 +1,4 @@
-//! A command segment's `match` (spec section 3, U-9c): a regular expression
+//! A command segment's `match`: a regular expression
 //! the refresh helper applies to the sanitized first line of a command's
 //! output before it publishes the value. One check (`Matcher::new`, also used
 //! by config check and when a snapshot is made) and one apply
@@ -6,7 +6,7 @@
 //! pattern digest in the command response with its snapshot's.
 #![forbid(unsafe_code)]
 
-/// Bytes the compiled program of one pattern may take (U-29). Without the
+/// Bytes the compiled program of one pattern may take. Without the
 /// perf engines the search is a Pike VM whose time grows with the states a
 /// line keeps alive: at 256 KiB a pattern of thousands of alternatives took
 /// over a second on a 4 KB line. At 64 KiB, with `MAX_PATTERN_BYTES`, the
@@ -16,7 +16,7 @@
 /// `(?P<value>[0-9]+\.[0-9]+\.[0-9]+)`, `(?P<value>\w+)`) fit; a long Unicode
 /// class repeat such as `\w{10}` does not.
 pub const SIZE_LIMIT: usize = 64 * 1024;
-/// Bytes of pattern text (U-29): thousands of alternatives fit 64 KiB of
+/// Bytes of pattern text: thousands of alternatives fit 64 KiB of
 /// program yet keep thousands of states alive; 256 bytes leaves room for
 /// any version or path pattern.
 pub const MAX_PATTERN_BYTES: usize = 256;
@@ -132,7 +132,7 @@ mod tests {
         assert_eq!(value(r"(?P<value>\w+)", "caf\u{e9}!"), "caf\u{e9}");
     }
 
-    // 크기 상한(U-29): 프로그램 64 KiB, 패턴 글 256 B. 버전·경로 패턴은 받고, 경계 바로 위(`[\s\S]{158}`, 257 B)와
+    // 크기 상한: 프로그램 64 KiB, 패턴 글 256 B. 버전·경로 패턴은 받고, 경계 바로 위(`[\s\S]{158}`, 257 B)와
     // `\w{10}`, 중첩 반복은 거부한다. 이것을 실패시키는 것: size_limit 지정을 빼는 것(기본 10 MiB), 상한을 80 KiB
     // 이상으로 올리는 것(`{158}`을 받음), 48 KiB 이하로 내리는 것(`{157}`을 거부), 패턴 길이 검사를 지우거나 257 B
     // 이상으로 늘리는 것, 255 B 이하로 줄이는 것.

@@ -668,7 +668,7 @@ fn byte_bound_stops_further_languages() {
     );
 }
 
-// 사용자 결정 U-19: 언어 요청이 있는 회차에만 C가 2 ms를 언어 단계에 준다(8 → 6). 없는 회차는 그대로다.
+// 언어 요청이 있는 회차에만 C가 2 ms를 언어 단계에 준다(8 → 6). 없는 회차는 그대로다.
 // 이것을 실패시키는 것: product()가 언어 요청에도 PRODUCT를 돌려주는 것, 요청이 없어도 C를 줄이는 것.
 #[test]
 fn product_stages_give_c_time_to_languages_only() {
@@ -684,7 +684,7 @@ fn product_stages_give_c_time_to_languages_only() {
     assert_eq!(total(with) + with.lang_ms, total(plain));
 }
 
-// U-19 호출 자리: 제품 입구(collect_with_access)가 언어 요청 회차에 C 6 ms와 언어 2 ms를 쓴다. 요청이 없으면 C 8 ms.
+// 호출 자리: 제품 입구(collect_with_access)가 언어 요청 회차에 C 6 ms와 언어 2 ms를 쓴다. 요청이 없으면 C 8 ms.
 // 이것을 실패시키는 것: collect_with_access가 product(...) 대신 StageDeadlines::PRODUCT를 쓰는 것.
 #[test]
 fn product_entry_gives_c_time_to_languages() {
@@ -814,7 +814,7 @@ fn directories_stay_for_git_after_a_deep_request() {
     );
 }
 
-// 보안 리뷰 H2·S-L2·S-L3와 재리뷰 M1: 호출 상한(1,024, 사용자 결정 U-20)은 meter가 호출을 세는 자리
+// 호출 상한(1,024)은 meter가 호출을 세는 자리
 // (Meter::charge)에서, 세는 모든 종류(stat·open·read·identity·mount·component·retry 등)에 건다. 20단 아래에서 표시
 // 파일 둘짜리 언어 16개는 탐침이 672개(1,024 미만)지만, 폴더를 열고 확인하는 호출까지 세면 상한을 넘는다. 언어
 // 단계의 실제 호출 수(모든 종류의 합)는 1,024를 넘지 않는다. 이것을 실패시키는 것: Meter::charge의 상한 검사를

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PTY session-stall probe (Task R0). Runs the bodies of the PTY tests that
+"""PTY session-stall probe. Runs the bodies of the PTY tests that
 stalled, many rounds, and records every stall. Two things can be swapped to
 tell causes apart:
 

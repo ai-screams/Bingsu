@@ -110,7 +110,7 @@ def test_terminal_queries_in_record_get_no_answer(tmp_path):
     assert b"1;1R" not in out and b"?62;c" not in out and b"rgb:0000" not in out, out
 
 
-# F-23: init twice redefines functions but registers hooks once.
+# init twice redefines functions but registers hooks once.
 # 이것을 실패시키는 것: 등록 블록의 `(( ! ${precmd_functions[(Ie)_bingsu_install]:-0} ))` 조건을 지우는 것.
 def test_init_twice_registers_hooks_once(tmp_path):
     s, inst, _ = start(tmp_path, record=minimal_record())

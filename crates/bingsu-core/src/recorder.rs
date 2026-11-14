@@ -1,4 +1,4 @@
-//! Decision log (spec section 3 "템플릿 문법" 결정 기록, F-24): the chosen
+//! Decision log: the chosen
 //! band, the overflow steps applied, hidden segments with a reason code and
 //! shortened segments with the method used. Off by default at zero cost:
 //! layout is generic over `R: Recorder` and every call site is

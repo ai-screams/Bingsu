@@ -198,7 +198,7 @@ fn envelope_golden_vectors() {
     );
     check("runtime_root_dup", with(&["--runtime-root=1:2:/s"]), &bad);
     check("config_root_relative", with(&["--config-root=rel"]), &bad);
-    // A shape-only root (R3 I-1) leaves the B1 record byte for byte unchanged.
+    // A shape-only root leaves the B1 record byte for byte unchanged.
     // 이것을 실패시키는 것: 프롬프트가 모양 전용 표식을 모르는 인자로 거부하는 것, 중복을 받아 주는 것.
     check(
         "config_root_shape_only",
