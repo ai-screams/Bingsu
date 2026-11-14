@@ -130,6 +130,20 @@ impl TrustedEnv {
         )
     }
 
+    /// What `doctor` compares the terminal with: the `COLORFGBG` hint the
+    /// prompt draws by, and whether the shell runs inside tmux (it answers
+    /// the width questions for its own pane).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the user's own command reads the hints their shell's prompt reads"
+    )]
+    pub fn terminal_hints() -> (Option<OsString>, bool) {
+        (
+            std::env::var_os("COLORFGBG"),
+            std::env::var_os("TMUX").is_some_and(|v| !v.is_empty()),
+        )
+    }
+
     /// The roots variable the init script exported (see `pinned`).
     #[expect(
         clippy::disallowed_methods,

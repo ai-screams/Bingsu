@@ -123,7 +123,7 @@
           "enum": ["published", "published-files-changed", "published-files-invalid", "files-only", "file"]
         },
         "width": { "type": "integer", "minimum": 1 },
-        "width_source": { "enum": ["flag", "default"] },
+        "width_source": { "enum": ["flag", "columns", "terminal", "default"] },
         "band": { "type": ["string", "null"] },
         "lines": {
           "type": "array",
@@ -284,7 +284,53 @@
               "title": { "type": "string" },
               "status": { "enum": ["ok", "warn", "fail", "unknown", "skipped"] },
               "text": { "type": "string" },
-              "fix": { "type": ["string", "null"], "maxLength": 4, "pattern": "^[EWN][0-9]{3}$" }
+              "fix": { "type": ["string", "null"], "maxLength": 4, "pattern": "^[EWN][0-9]{3}$" },
+              "details": {
+                "description": "What a terminal measurement saw; only on the terminal-width and terminal-background items, and only when the terminal answered. Cell counts and fixed words, never text the terminal sent.",
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["probes", "recommended", "inside_tmux"],
+                    "properties": {
+                      "probes": {
+                        "description": "The cells the cursor moved for each probe character, in the order they were written.",
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": ["name", "cells"],
+                          "properties": {
+                            "name": { "type": "string" },
+                            "cells": { "type": "integer", "minimum": 0 }
+                          }
+                        }
+                      },
+                      "recommended": {
+                        "description": "The width settings this terminal fits; null where the probes do not agree on 1 or 2.",
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["ambiguous", "emoji"],
+                        "properties": {
+                          "ambiguous": { "enum": [1, 2, null] },
+                          "emoji": { "enum": [1, 2, null] }
+                        }
+                      },
+                      "inside_tmux": { "type": "boolean" }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["terminal", "prompt", "colors_mode"],
+                    "properties": {
+                      "terminal": { "enum": ["dark", "light"] },
+                      "prompt": { "enum": ["dark", "light"] },
+                      "colors_mode": { "const": "auto" }
+                    }
+                  }
+                ]
+              }
             }
           }
         },

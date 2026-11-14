@@ -35,6 +35,7 @@ use bingsu_core::{
 };
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
+use std::os::fd::AsFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::process::ExitCode;
@@ -44,6 +45,64 @@ const USAGE: &str =
 /// The widest file `--config` reads (the cap of one config file).
 const FILE_MAX: u64 = 256 * 1024;
 const DEFAULT_WIDTH: u16 = 80;
+
+/// Where the width came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidthSource {
+    Flag,
+    Columns,
+    Terminal,
+    Default,
+}
+
+impl WidthSource {
+    /// The JSON `width_source` word.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Columns => "columns",
+            Self::Terminal => "terminal",
+            Self::Default => "default",
+        }
+    }
+
+    /// What the text report adds after `width: N cells`.
+    fn note(self) -> &'static str {
+        match self {
+            Self::Flag => "",
+            Self::Columns => " (from COLUMNS)",
+            Self::Terminal => " (from the terminal)",
+            Self::Default => " (assumed; give --width N)",
+        }
+    }
+}
+
+/// The width to decide at: `--width`, else `COLUMNS` when it is a whole
+/// number from 1 to 65535 (the values `--width` takes), else the columns of
+/// the terminal standard output is (`terminal`, asked only then), else 80.
+/// Shells keep `COLUMNS` to themselves unless it is exported, so the
+/// terminal is the usual answer when explain runs in one.
+fn width_of(
+    flag: Option<u16>,
+    columns: Option<&OsStr>,
+    terminal: impl FnOnce() -> Option<u16>,
+) -> (u16, WidthSource) {
+    if let Some(n) = flag {
+        return (n, WidthSource::Flag);
+    }
+    // 이것을 실패시키는 것: COLUMNS=0을 받는 것(폭 0으로 판정), 숫자가 아닌 값에서 다음 출처로 가지 않는 것.
+    let columns = columns
+        .and_then(OsStr::to_str)
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|n| *n > 0);
+    if let Some(n) = columns {
+        return (n, WidthSource::Columns);
+    }
+    match terminal() {
+        Some(n) => (n, WidthSource::Terminal),
+        None => (DEFAULT_WIDTH, WidthSource::Default),
+    }
+}
 
 /// What the arguments asked for.
 #[derive(Debug, PartialEq, Eq)]
@@ -362,7 +421,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
         },
         None => None,
     };
-    let width = a.width.unwrap_or(DEFAULT_WIDTH);
+    let (width, width_source) = width_of(a.width, TrustedEnv::terminal().0.as_deref(), || {
+        super::tty::columns_of(std::io::stdout().as_fd())
+    });
     let pwd = std::env::current_dir()
         .ok()
         .map(|p| p.as_os_str().as_bytes().to_vec());
@@ -397,7 +458,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
             errors: &errors,
             log: &log,
             width,
-            width_flag: a.width.is_some(),
+            width_source,
             basis,
             source: source.as_deref(),
             only,
@@ -414,11 +475,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
         if let Some(b) = basis.line() {
             out.push_str(b);
         }
-        let note = if a.width.is_some() {
-            ""
-        } else {
-            " (assumed; give --width N)"
-        };
+        let note = width_source.note();
         let body = text(compiled, &log, width, only);
         // `width: N cells` carries where N came from.
         out.push_str(&body.replacen(" cells\n", &format!(" cells{note}\n"), 1));
@@ -456,7 +513,7 @@ struct Doc<'a> {
     errors: &'a [bingsu_core::diag::Diagnostic],
     log: &'a DecisionLog,
     width: u16,
-    width_flag: bool,
+    width_source: WidthSource,
     basis: Basis,
     source: Option<&'a str>,
     only: Option<usize>,
@@ -480,8 +537,7 @@ fn explain_json(d: &Doc<'_>) -> String {
     w.end_object();
     w.key("basis").string(d.basis.word());
     w.key("width").number(u64::from(d.width));
-    w.key("width_source")
-        .string(if d.width_flag { "flag" } else { "default" });
+    w.key("width_source").string(d.width_source.word());
     let ids = segment_ids(d.compiled);
     let methods: Vec<&[Method]> = d
         .compiled
@@ -522,6 +578,34 @@ mod tests {
 
     fn a(w: &[&str]) -> Vec<OsString> {
         w.iter().map(OsString::from).collect()
+    }
+
+    // 이것을 실패시키는 것: COLUMNS가 `--width`를, 터미널이 COLUMNS를 이기는 것, COLUMNS나 터미널을 읽지 않는 것,
+    // 앞 출처가 있는데도 터미널에 묻는 것, 0·숫자 아님·65535 초과·빈 값의 COLUMNS를 폭으로 받는 것.
+    #[test]
+    fn width_comes_from_the_flag_then_columns_then_the_terminal_then_80() {
+        let c = |v: &str| Some(OsString::from(v));
+        let not_asked = || -> Option<u16> { panic!("the terminal was asked") };
+        assert_eq!(
+            width_of(Some(40), c("100").as_deref(), not_asked),
+            (40, WidthSource::Flag)
+        );
+        assert_eq!(
+            width_of(None, c("100").as_deref(), not_asked),
+            (100, WidthSource::Columns)
+        );
+        for bad in [None, c(""), c("0"), c("abc"), c("70000"), c("-5"), c(" 90")] {
+            assert_eq!(
+                width_of(None, bad.as_deref(), || Some(120)),
+                (120, WidthSource::Terminal),
+                "{bad:?}"
+            );
+            assert_eq!(
+                width_of(None, bad.as_deref(), || None),
+                (80, WidthSource::Default),
+                "{bad:?}"
+            );
+        }
     }
 
     // 이것을 실패시키는 것: 폭 0·중복 옵션·모르는 옵션·값 없는 옵션·세그먼트 둘을 받는 것.

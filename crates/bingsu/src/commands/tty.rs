@@ -45,7 +45,7 @@ use super::sys;
 use bingsu_core::color::osc11::REPLY_MAX;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -83,10 +83,6 @@ pub enum ReplyEnd {
     /// `ESC [`, parameter bytes (0x30-0x3f), intermediate bytes (0x20-0x2f)
     /// and the final byte given, for example `Csi(b'R')` for a cursor
     /// position report. At most `CSI_REPLY_MAX` (32) bytes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "bingsu doctor's terminal measurement asks it")
-    )]
     Csi(u8),
 }
 
@@ -136,16 +132,8 @@ pub trait Terminal {
     /// cut the write short (later queries are cancelled), and
     /// `ErrorKind::TimedOut` when the terminal took nothing more for
     /// `WRITE_TIMEOUT` (what was queued is dropped, later queries are silent).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "bingsu doctor's terminal measurement writes")
-    )]
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()>;
     /// Columns from `TIOCGWINSZ`; `None` when unknown or 0.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "bingsu doctor's terminal measurement reads it")
-    )]
     fn columns(&self) -> Option<u16>;
 }
 
@@ -924,13 +912,22 @@ impl Terminal for RawGuard<'_> {
     }
 
     fn columns(&self) -> Option<u16> {
-        // SAFETY: an all-zero `winsize` is a valid value for the call to fill.
-        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-        // SAFETY: the descriptor is open and `size` is writable memory of the
-        // type TIOCGWINSZ fills.
-        let rc = unsafe { libc::ioctl(self.tty.file.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
-        (rc == 0 && size.ws_col > 0).then_some(size.ws_col)
+        columns_of(self.tty.file.as_fd())
     }
+}
+
+/// Columns of the terminal behind `fd` from `TIOCGWINSZ`; `None` when `fd`
+/// is not a terminal (a pipe or a file: the call fails) or the terminal
+/// reports 0. Asks nothing and changes no mode, so any descriptor will do,
+/// standard output included (`bingsu explain`).
+pub fn columns_of(fd: BorrowedFd<'_>) -> Option<u16> {
+    // SAFETY: an all-zero `winsize` is a valid value for the call to fill.
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: the descriptor is borrowed open for the call and `size` is
+    // writable memory of the type TIOCGWINSZ fills.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+    // 이것을 실패시키는 것: 0칸을 받는 것(columns_come_from_the_window_size의 0칸 터미널).
+    (rc == 0 && size.ws_col > 0).then_some(size.ws_col)
 }
 
 impl Tty {
