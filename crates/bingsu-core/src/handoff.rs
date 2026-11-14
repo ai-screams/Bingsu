@@ -9,7 +9,8 @@ use crate::{
     snapshot_codec::Error,
 };
 use alloc::vec::Vec;
-/// The relay's entry word: `bingsu __exec-v2` runs the trusted relay.
+/// The relay's entry word: on Linux and macOS, `bingsu __exec-v2` runs the
+/// trusted relay.
 pub const ENTRY: &str = "__exec-v2";
 pub const PERMIT_ARG: &str = "--permit-fd=3";
 pub const PERMIT_FD: u8 = 3;

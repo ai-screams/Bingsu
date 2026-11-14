@@ -1,5 +1,5 @@
-//! Who may change a file or folder: the pure rules for config files and the
-//! runtime root, over facts the
+//! Who may change a file or folder: the pure rules for config files, the
+//! runtime root and executable targets, over facts the
 //! caller observed through an open descriptor (`fstat`, the ACL, the file
 //! system). The same functions serve `init` (the executable path and the
 //! roots it pins), the refresh helper and the prompt front end, so the
@@ -36,8 +36,9 @@ pub enum AclFacts {
     Unknown,
     /// Linux: an extended POSIX access ACL exists. The mode's group bits
     /// are then its mask, the upper bound of every named user and group
-    /// entry (X-28): with no group write nobody named can write, and with
-    /// group write a named entry may, whatever the owning group's members.
+    /// entry, as the kernel checks them: with no group write nobody named
+    /// can write, and with group write a named entry may, whatever the
+    /// owning group's members.
     PosixExtended,
 }
 
@@ -207,7 +208,7 @@ pub enum Last {
     Mine,
 }
 
-/// Spec section 4 "runtime root" 2, over the chain the walk opened: `/`,
+/// The runtime root rule, over the chain the walk opened: `/`,
 /// each folder below it, and the last entry. Every ancestor follows
 /// `entry_verdict`, with one exception: a root-owned sticky folder (`/tmp`)
 /// that others can write passes when the next name is owned by `me`. The

@@ -16,7 +16,9 @@
 //!   An entry matched under an older `match` shows nothing until the
 //!   helper applies the new one;
 //! - for a config unit, the marker makes the snapshot's units eligible for
-//!   display. A builtin probe has no such condition.
+//!   display (a security condition: a config unit's value shows only while
+//!   the trust marker that lets those units run holds). A builtin probe has
+//!   no such condition.
 //!
 //! A builtin language's version (`builtin_value`) needs
 //! the same binding, clock, completion and success, and this shell's

@@ -174,8 +174,9 @@ pub fn env_segment_value(vars: &Environ<'_>, name: &str) -> Option<String> {
 /// by `TERM` can show the value made under another terminal's `TERM`.
 pub const DIGEST_SKIP: [&[u8]; 1] = [b"TERM"];
 
-/// The original environment digest of a config unit, the cache's key: the
-/// keep list but `DIGEST_SKIP` (`LC_*` by prefix) and
+/// The original environment digest of a config unit, one of what an entry
+/// must still match, with its policy and cache time: the keep list but
+/// `DIGEST_SKIP` (`LC_*` by prefix) and
 /// the unit's `env_allow`, as the shell gave them, before any sanitizing.
 /// The prompt computes the same from its own environment, so a response is
 /// shown only to a shell whose values it ran with. Names in byte order, each

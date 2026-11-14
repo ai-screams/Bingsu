@@ -219,7 +219,8 @@ fn env_pipe_ends() -> Option<[i32; 2]> {
     {
         // A blocking write could wait on the helper: without the flag, no socket.
         // No test: F_SETFL fails only on an invalid fd, which a test cannot
-        // produce here; the check stays without one.
+        // produce here. This untested fail-closed branch is a deliberate
+        // exception.
         // SAFETY: the write end made above; changes only its status flags.
         if unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
             // SAFETY: both ends made above, closed exactly once.

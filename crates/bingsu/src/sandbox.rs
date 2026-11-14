@@ -1,4 +1,4 @@
-//! Linux seccomp for `bingsu prompt` :
+//! Linux seccomp for `bingsu prompt`:
 //! `prompt::dispatch` calls `enter` inside its panic guard
 //! after fixed helper spawn and core-directed fd preparation, before snapshot
 //! content decoding and rendering. From then
@@ -11,16 +11,17 @@
 //! a kill. Whether the prompt carries on after a refused call is up to the
 //! caller: the verified LD_PRELOAD allocators (jemalloc, mimalloc) do, an
 //! allocator whose `brk` is refused faults. The rule for adding a row:
-//! reading from held descriptors adds held-fd read/close and CLOCK_BOOTTIME
-//! only; every pathname and fd-fact operation must complete before this filter.
+//! after the filter the prompt only reads and closes descriptors it already
+//! holds and reads CLOCK_BOOTTIME; every pathname and fd-fact operation must
+//! complete before this filter.
 //!
 //! The dynamic loader and any LD_PRELOAD library are platform TCB, like the
 //! kernel: they run before this filter (a constructor can even start a
 //! thread the filter never sees, as it applies to the calling thread) and
 //! can answer the kernel question for us. No in-process filter can guard
 //! against them. A wrong architecture and, on x86_64, an x32 ABI call are
-//! killed (no code makes them on purpose; the hand-written classic BPF of
-//! the M1 collector).
+//! killed (no code makes them on purpose; the M1 collector's hand-written
+//! classic BPF kills them the same way).
 //!
 //! Not covered by the kernel: the vDSO (clock_gettime, gettimeofday, time
 //! and getcpu run in user space without a system call) and CPU

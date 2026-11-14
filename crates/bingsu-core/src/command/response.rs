@@ -447,8 +447,8 @@ pub fn merge(current: Option<&Response>, binding: &Binding, mine: &[Entry]) -> R
     }
 }
 
-/// What a unit shows: the first line of its stdout, sanitized by the
-/// section 3 rules (a CR before the line end is a control character it
+/// What a unit shows: the first line of its stdout, sanitized like every
+/// outside value (a CR before the line end is a control character it
 /// drops), at most `VALUE_MAX` bytes.
 pub fn first_line(stdout: &[u8]) -> String {
     let line = stdout.split(|&b| b == b'\n').next().unwrap_or_default();

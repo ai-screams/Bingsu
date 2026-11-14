@@ -92,7 +92,9 @@ fn take_status() -> Result<Option<OwnedFd>, Option<OwnedFd>> {
     let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
     // No test: opening /dev/null or the dup2 below cannot be made to fail
     // from a test without also failing the relay's other opens; either way
-    // the relay refuses (fail closed).
+    // the relay refuses (fail closed). An untested fail-closed branch is a
+    // deliberate exception here, like the macOS `F_SETFL` branch of
+    // `prompt_spawn`.
     if null < 0 {
         return Err(status);
     }
@@ -215,9 +217,10 @@ impl Target {
     /// role from the executed name (uutils' multicall coreutils reads
     /// AT_EXECFN) refuses a `/dev/fd/N`. Right before, the name must still
     /// be the checked file: same device, inode and ctime, and not a symlink.
-    /// Linux runs the name in the folder the walk held; macOS runs the
-    /// canonical path, which only root, the user or a cleared group can
-    /// change (an OS limit on macOS).
+    /// Linux runs the name in the folder the walk held. macOS has neither
+    /// `execveat` nor `fexecve`, so it runs the canonical path, which only
+    /// root, the user or a cleared group can change; the window between the
+    /// check and the exec there is an accepted OS limit.
     fn exec(self) -> u8 {
         // The name check first: on NFS or FUSE it can take long, and the
         // clock read must be the last step before execveat.
