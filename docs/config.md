@@ -261,6 +261,71 @@ enabled = false
 `bingsu config check --explain` shows each file as "trusted" or "colors and layout only", and for each command
 segment, whether it runs and which file each key came from.
 
+### Asking for a bingsu version: `requires`
+
+A config can say which bingsu it needs with a top-level `requires`, for example `requires = ">=0.2"`. The only form
+accepted is `>=MAJOR.MINOR` or `>=MAJOR.MINOR.PATCH`. When the running bingsu is older, `bingsu config check` reports E306
+with the version asked for, and what happens next depends on the file's trust. A trusted file makes the whole read fail:
+the prompt keeps drawing with the last good settings. A file that is trusted for colors and layout only is dropped on
+its own, with a warning (W406), and the other files are applied. `bingsu config check --explain` shows which each file
+is.
+
+For example, `~/.config/bingsu/config.toml` extends `~/themes/theme.toml`, which is outside the config folder and has
+`requires = ">=9.0"`. The check reports the error and the warning, the result is still `valid`, the exit code is 0, and
+the theme is not in the list of files that apply (the rest of the settings are published):
+
+```console
+$ bingsu config check
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.toml (trusted)
+diagnostics: 1 error(s), 1 warning(s), 0 note(s)
+E306: this config requires bingsu >=9.0
+  where: ~/themes/theme.toml:1:12
+    via ~/.config/bingsu/config.toml
+  why: the file asks for a newer bingsu
+  fix: upgrade bingsu
+  code: E306 (bingsu help E306)
+
+W406: this shape-only file is not used: E306
+  where: ~/themes/theme.toml:1:1
+    via ~/.config/bingsu/config.toml
+  why: a shape-only file that does not check is dropped alone
+  fix: fix the file, or remove it from `extends`
+  code: W406 (bingsu help W406)
+
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
+result: valid; some files are left out (see above)
+```
+
+The running version is compared as SemVer says: a pre-release is lower than the release with the same numbers. So
+`0.1.0-rc.1` does not satisfy `requires = ">=0.1.0"` (or `">=0.1"`), while `0.1.1-rc.1` does satisfy `">=0.1.0"`, and
+`0.1.0` itself satisfies both.
+
+On `0.1.0-rc.1`, `requires = ">=0.1.0"` (and `">=0.1"` the same way) is refused, while `">=0.0.9"` is accepted:
+
+```console
+$ bingsu config check
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+diagnostics: 1 error(s), 0 warning(s), 0 note(s)
+E306: this config requires bingsu >=0.1.0
+  where: ~/.config/bingsu/config.toml:1:12
+  why: the file asks for a newer bingsu
+  fix: upgrade bingsu
+  code: E306 (bingsu help E306)
+
+widths (columns -> layout):
+  (not available while an error remains)
+result: invalid; the prompt keeps the last good settings
+```
+
+With `requires = ">=0.0.9"` the same command ends with `result: valid`.
 ## How commands run
 
 The refresh helper starts with each prompt (not with a redraw, such as after a terminal resize) and runs commands,
@@ -327,6 +392,11 @@ the config it reads.
 
 ## Commands that help with a config
 
+The outputs below were copied from real runs, with the home folder written as `~` (and the path of a development build
+shortened). A line in parentheses in the `config edit` examples says what the editor did. One kind of line is left out of
+the `config check`, `config edit` and `doctor` examples: in a shell that has not run `bingsu init`, each command also
+prints on standard error a notice that it found its folders from the environment now, not from what `init` pinned.
+
 ### First settings: `bingsu setup`
 
 `bingsu setup` makes a first settings file from two questions: whether you can see Nerd Font symbols, and the color
@@ -352,6 +422,72 @@ eval "$(bingsu init zsh)"
 
 Without a terminal it asks nothing and needs `--yes --icons nerd|unicode --mode auto|dark|light`. On a terminal,
 `--icons` and `--mode` answer their question in advance and `--yes` skips the final confirmation.
+
+### Editing: `bingsu config edit`
+
+`bingsu config edit` opens your settings file in your editor, then runs `config check` on what you saved and, when it is
+valid, applies it the way `reload` does. A file that is not valid is not applied: the prompt keeps drawing with the
+last good settings, and the command exits 1 and says so.
+
+It opens the file `config use` picked, or else the one file of the settings place: `config.toml` or `config.json`, whichever
+is there. With both there it opens neither, points at E308 and exits 1. It does not make a file: when there is none it
+points to `bingsu setup` and exits 1.
+
+The editor is `$VISUAL`, or `$EDITOR` when `$VISUAL` is unset or empty; with neither set the command stops with an
+example and does not try a default. The value is not given to a shell. It is split at spaces. Single quotes keep
+everything inside them. Inside double quotes everything is kept except `$` and a backquote, which are refused. Outside
+quotes `$`, a backquote, `;`, `&`, `|`, `<`, `>`, `(` and `)` are refused unless a backslash comes right before them (the
+backslash is dropped and the character stays plain text); to run something that needs them, point the variable at a
+script. `~` and `*` are not expanded. A first word with a `/` must be an absolute path; otherwise it is
+looked up in the absolute entries of `PATH`, in order, and only a regular file with an execute bit is run. The file's
+path is added as the last argument. If the editor ends with a nonzero status or by a signal, nothing is applied.
+
+```console
+$ bingsu config edit
+(the editor opens ~/.config/bingsu/config.toml; you save `icons = "unicode"`)
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.toml (trusted)
+diagnostics: 0 error(s), 0 warning(s), 0 note(s)
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
+result: valid
+bingsu: edited; new settings published (generation 1)
+```
+
+After a save that is not valid, the check says so, nothing is published and the exit code is 1:
+
+```console
+$ bingsu config edit
+(the editor opens the file; you save `colr = 1`)
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.toml (trusted)
+diagnostics: 1 error(s), 0 warning(s), 0 note(s)
+E201: unknown key `colr`
+  where: ~/.config/bingsu/config.toml:1:1
+  why: unknown keys are errors, so a typo is never silently ignored
+  fix: check the key name
+  code: E201 (bingsu help E201)
+
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
+result: invalid; the prompt keeps the last good settings
+bingsu: the saved settings are not valid, so they were not applied; the prompt keeps the previous settings
+bingsu: the settings are not valid, so nothing changed and the prompt keeps the last good settings. Run: bingsu config check
+```
+
+The file you saved stays as it is, so run `bingsu config edit` again to fix it. If another refresh is running at the
+moment you save, the new settings are not published; the command says "another refresh is running, so nothing changed. Try again in a moment", and `bingsu reload` publishes the saved file.
+
+Two limits. While the editor is open, another shell's prompt can read a half-written file; if that file is invalid, the
+commands of that shell stop until you save a valid one. And a key in a settings file can never choose the editor.
 
 ### Names: `bingsu list`
 
@@ -429,22 +565,34 @@ diagnostics. Values of environment variables do not appear in either output.
 
 ### Problems with the installation: `bingsu doctor` and `bingsu help`
 
-`bingsu doctor` checks the installation and the shell setup, one row per check. It only reads: it runs no other
-executable, writes nothing and starts no process. Each row has a status (`ok`, `warn`, `fail`, `unknown`, `skipped`), one
+`bingsu doctor` checks the installation and the shell setup, one row per check. It runs no other executable, writes no
+file and starts no process. The only thing it does besides reading is to ask the terminal two questions (see
+[Terminal rows](#terminal-rows)). Each row has a status (`ok`, `warn`, `fail`, `unknown`, `skipped`), one
 line, and, when there is something to do, a diagnostic code that `bingsu help CODE` explains.
 
 ```console
-$ bingsu doctor
+$ bingsu doctor | cat
 bingsu doctor
-  ok      executable      ~/.local/bin/bingsu: only you and root can change it or the folders above it
-  ok      bingsu on PATH  ~/.local/bin/bingsu: the bingsu on PATH is this executable
+  ok      executable      ~/src/Bingsu/target/debug/bingsu: only you and root can change it or the folders above it
+  skipped bingsu on PATH  no bingsu is found on PATH here; the hook uses the path pinned by init
   warn    pinned folders  init has not run in this shell; commands read the current environment (W603; bingsu help W603)
-  ok      one build       bingsu-prompt is not installed here; the hook calls `bingsu prompt`; bingsu-collect is from this build
-  unknown shell           shell version not confirmed: no shell passed it to this command
+  warn    one build       bingsu-prompt beside bingsu is not from this build or fails the safety check (W605; bingsu help W605)
+  unknown shell           shell version not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
+  unknown hook version    hook compatibility not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
+  unknown hook order      hook order not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
+  unknown envelope        the last envelope not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
+  unknown breaker         the collection breaker not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
   skipped seccomp         this platform has no seccomp
   ok      settings        the settings check out (0 warning(s))
-result: 4 ok, 1 warning(s), 0 failed, 1 unknown, 1 skipped
+  skipped terminal width  standard output is not a terminal; `--terminal` asks the controlling terminal anyway
+  skipped background      standard output is not a terminal; `--terminal` asks the controlling terminal anyway
+result: 2 ok, 2 warning(s), 0 failed, 5 unknown, 4 skipped
 ```
+
+This run is a development build outside a shell that ran `bingsu init`, with the output going to a pipe. In your own
+shell, run `bingsu_doctor` (a zsh function that `bingsu init zsh` defines) instead of `bingsu doctor`: it hands the check
+the facts only the shell knows, so the five `unknown` rows get an answer. The rows `terminal width` and `background` are
+`skipped` here only because the output is a pipe (see [Terminal rows](#terminal-rows)).
 
 | Check | What it looks at |
 | -- | -- |
@@ -452,13 +600,48 @@ result: 4 ok, 1 warning(s), 0 failed, 1 unknown, 1 skipped
 | `bingsu on PATH` | Whether the `bingsu` your shell finds on `PATH` is the one running now |
 | `pinned folders` | The folders `bingsu init` pinned in this shell. The runtime folder is checked for being replaced (a different folder at the same path) or removed. The settings, state and log folders get the safety check the helper uses (owner, permissions, links); a state or log folder that does not exist yet is accepted |
 | `one build` | That `bingsu`, `bingsu-prompt` and `bingsu-collect` come from the same build (read from the files, not by running them) |
-| `shell` | The shell version. Today this is always `unknown`: no shell passes its version to `doctor` yet, and bingsu never guesses a version from a path or a folder name |
+| `shell` | The shell and its version, as the shell reports them through `bingsu_doctor`. Without it the row is `unknown`: bingsu never guesses a version from a path or a folder name. A zsh older than 5.8 is a warning (W611) |
+| `hook version` | Whether the hook of your shell asks for a record version this bingsu reads (E608 when it does not: open a new shell or run `bingsu init` again in it) |
+| `hook order` | That the hook functions stand in the order bingsu needs: the capture hook first and the install hook last in `precmd_functions`, each once (W609) |
+| `envelope` | That the last words the hook gave the prompt call have the fields the prompt reads, in order (W610). It also carries the brightness hint (`COLORFGBG`) the prompt got, which the `background` row compares |
+| `breaker` | Whether this shell session has stopped collecting git and folder facts in the folder you are in (W612): the same mount missed its deadline three times in a row, so for up to five minutes the prompt draws without those facts instead of waiting on it. The folder is the shell's `PWD`; it is never opened, since a stuck mount is just when the breaker is on. No breaker record, a wait that is over, or a record from another boot is not a warning |
 | `seccomp` | Whether the kernel supports seccomp (Linux; the example above is from macOS, where it is skipped). It does not check whether the prompt's own filter was installed |
 | `settings` | A summary of `config check`; a settings folder that fails the safety check is a `fail` |
+| `terminal width` | How many cells the terminal moves the cursor for probe characters, against `width.ambiguous` and `width.emoji` ([below](#terminal-rows)) |
+| `background` | Whether the terminal's background is light or dark, against what the prompt draws for ([below](#terminal-rows)) |
 
 The exit code is 1 when any check fails; warnings, `unknown` and `skipped` give 0. `--format json` prints the same
-rows as a JSON document. The shell evidence a hook can give (hook order, the envelope a hook sent, the circuit
-breaker) is not part of this table yet.
+rows as a JSON document. `--evidence-stdin` is what the shell function uses to pass its record; run the function, not that
+flag.
+
+#### Terminal rows
+
+The last two rows ask the terminal. They write a few characters to the screen, read the answers back and clear the line,
+so they run only when standard output is a terminal, or when you pass `--terminal`, which asks the controlling terminal
+(`/dev/tty`) even when the output goes to a pipe. Without a terminal, or when `bingsu` is not the job in the foreground,
+both rows are `skipped`. A terminal that does not answer within about 0.2 seconds gives `unknown`, never a warning.
+Ctrl-C (the key, read as a character) stops the run with exit code 130 after the terminal is back in its normal state; a signal such as SIGTERM restores the terminal and ends the run by that signal (exit status 128 plus the signal, for example 143). No table is printed in either case.
+
+| Row | What it measures | A warning means |
+| -- | -- | -- |
+| `terminal width` | Writes twelve probe characters one after the other (ASCII, a Hangul syllable, three East Asian ambiguous characters, an emoji, an emoji made by U+FE0F, a joined emoji, a flag, a letter with a combining mark, two Nerd Font glyphs) and asks the cursor position after each. It runs when the terminal is at least 40 columns wide | The terminal draws something in another number of cells than `width.ambiguous` and `width.emoji` say (W613). The row names the characters and the values the terminal fits |
+| `background` | Asks for the background color (OSC 11) and compares light or dark with what the prompt picks. It runs only when `colors.mode` is `auto`; with `dark` or `light` set, the prompt does not guess and the row is `skipped` | The prompt would draw for the other brightness (W614). Set `colors.mode` to `dark` or `light` |
+
+What each status means on these rows:
+
+| Status | Meaning |
+| -- | -- |
+| `ok` | The terminal drew every probe in the number of cells the settings say (`terminal width`), or its background is the brightness the prompt draws for (`background`) |
+| `warn` | W613 for width, W614 for background; `bingsu help W613` and `bingsu help W614` say what to set |
+| `unknown` | The terminal did not answer in time, answered with something that is not a cursor position, or the cursor left the line while measuring; or the control characters moved the cursor by an unexpected number of cells, so the measurement is not trusted; or the settings could not be read |
+| `skipped` | Nothing was asked. For both rows: standard output is not a terminal (and `--terminal` is not given), or there is no controlling terminal. For `terminal width` alone: the terminal is under 40 columns wide. For `background` alone: `colors.mode` is not `auto`. A narrow terminal does not stop the background question |
+
+The usage is `bingsu doctor [--format json|text] [--terminal]`; the two options may come in either order, once each.
+
+With `--format json` a row that finished its measurement carries a `details` object: the measured cells per probe and the
+values that fit (`probes`, `recommended`, `inside_tmux`) for `terminal width`, or the two brightnesses (`terminal`,
+`prompt`, `colors_mode`) for `background`. A skipped row, or a measurement that got no usable answer, has no `details`.
+Inside `tmux` the answers come from `tmux`, which may differ from the outer terminal; the width row says so.
 
 `bingsu help CODE` explains a diagnostic code that `config check`, `explain` or `doctor` printed, in three parts: what
 happened, why, and how to fix it. It does not read your settings. A code it does not know ends with exit code 2.
@@ -477,6 +660,101 @@ How to fix
   Check the spelling against `bingsu config schema`. When a close key exists, the message suggests it.
   A key inside a user segment is written as `segment.<id>.command`, `segment.<id>.text` and so on.
 ```
+
+## JSON config files
+
+A file whose name ends in `.json` is read as JSON and then treated like the TOML one: the same keys, merging, `extends`,
+trust and places in diagnostics. The places are `config.json` or `config.toml`, `conf.d/*.json` and `conf.d/*.toml`
+(read together by name), and `config.local.json` or `config.local.toml`. If both forms of one place exist
+(`config.toml` and `config.json`), bingsu reads neither and reports E308 (`bingsu help E308`); the last good settings stay
+in use. `conf.d/a.toml` and `conf.d/a.json` are different names, so both are read. A file picked with `config use`
+stands in for the whole place, so the two names beside it do not conflict.
+
+The JSON must follow RFC 8259 strictly: no comments, no trailing commas, no `null`, no duplicate keys, an object at
+the top. Anything else is E106. The limits are the same as for TOML (256 KiB per file, 32 levels). A top-level
+`"$schema"` string is accepted for editors and ignored; `bingsu config schema` prints a schema that declares it.
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/ai-screams/Bingsu/main/crates/bingsu-core/schema/config-v1.json",
+  "colors": { "mode": "dark" },
+  "style": { "preset": "lean" },
+  "segment": {
+    "custom/label": { "kind": "text", "text": "work" }
+  },
+  "layout": { "line2": { "left": ["custom/label", "char"] } }
+}
+```
+
+`bingsu config check` accepts this as `config.json`, and the file list names it like any other. The note (N504) is not
+an error: at narrow widths the band draws its own template in place of the line the file writes (`bingsu help N504`).
+
+```console
+$ bingsu config check
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.json (trusted)
+diagnostics: 0 error(s), 0 warning(s), 1 note(s)
+N504: at widths 0-59 the band `narrow` draws its own template in place of layout.line2
+  where: ~/.config/bingsu/config.json:8:34
+  why: a band's template replaces the layout lines the band would take from `[layout]`
+  fix: to draw your segments at those widths too, write `layout.when.narrow.style.template` yourself
+  code: N504 (bingsu help N504)
+
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
+result: valid
+```
+
+With a `config.toml` beside it, neither is read:
+
+```console
+$ bingsu config check
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+diagnostics: 1 error(s), 0 warning(s), 0 note(s)
+E308: `~/.config/bingsu/config.json` and `~/.config/bingsu/config.toml` are both here
+  where: ~/.config/bingsu/config.json:1:1
+  why: one place holds one settings file, and bingsu does not pick one of two
+  fix: keep one of the two files
+  code: E308 (bingsu help E308)
+
+widths (columns -> layout):
+  (not available while an error remains)
+result: invalid; the prompt keeps the last good settings
+```
+
+## Version: `bingsu --version`
+
+`bingsu --version` says which build this is and whether the two programs beside it come from the same build. It starts
+neither of them: it reads the build mark inside each file, the same mark `bingsu init` reads before it pins the
+program.
+
+```console
+$ bingsu --version
+bingsu 0.1.0-rc.1 (9c9a576bb41400e37390cce6970723f6703ffaacbae05025db024696f90fb890, aarch64-apple-darwin, rustc 1.98.1 48a229cea)
+bingsu-prompt: same build
+bingsu-collect: same build
+```
+
+The first line is the version, the build identity (64 hex digits), the target and the compiler. Each of the next two
+lines is one of:
+
+| Status | Meaning |
+| -- | -- |
+| `same build` | The file has exactly one build mark and one role mark, the build is this one and the role matches the name |
+| `differs (build ...)` | The marks are whole but belong to another build; the line shows that build's identity |
+| `missing` | There is no file of that name beside `bingsu` |
+| `symlink, not read` | The name is a link, which `init` does not accept either |
+| `not a bingsu-prompt build` (or `bingsu-collect`) | The marks are absent, belong to another role, appear twice, are cut off, or disagree |
+| `unreadable (reason)` | It is not a regular file, is over 64 MiB, or cannot be opened |
+
+The exit code is 0 whatever the two lines say. `same build` looks at the marks only; it does not say that `init` will
+pin the file, because `init` also checks the owner, the permission bits and that the folder is local.
 
 ## Current limits
 

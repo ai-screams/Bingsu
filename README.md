@@ -93,7 +93,7 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width; your text, command and environment variable segments, and node, python, rust and go versions where a layout draws them |
 | User commands and segments (M6) | Done on Linux and macOS: text, command and `env` segments are drawn, commands run in the background with a cleaned environment, time limits, caching and `match`, and the built-in language segments show versions. User-defined language segments run their version command where their project files are found. See [docs/config.md](docs/config.md), which also says how a team shares a config, and [docs/writing-command-segments.md](docs/writing-command-segments.md) for writing a command segment others will use. Not complete: on macOS the helper's check of the folders on `PATH` is slower than on Linux, because it asks the system about each account's group membership; this delays the first value of a command segment (the prompt does not wait for it); on macOS, prompt time has only a record-only run on one Mac: no case was slower than M4 beyond that run's noise, and the cost of command segments could not be called; the Linux CI prompt gate gives the verdict |
 | Theme selection and customization | Partly: seven style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
-| First-use commands and presets (M7) | In progress. Done: the seven built-in presets (`lean`, `triangle`, `pill`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file; `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation; `bingsu help CODE` explains a diagnostic. Still to come in M7: `bingsu config edit`, JSON config files and the first release. See [Setting up and customizing](#setting-up-and-customizing) |
+| First-use commands and presets (M7) | In progress. Done: the seven built-in presets (`lean`, `triangle`, `pill`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file; `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation, the shell's hooks and the terminal; `bingsu config edit` opens your settings file and applies it when it is valid; JSON and YAML config files are read; `bingsu --version` shows the build and whether its sibling programs are from the same build; `bingsu help CODE` explains a diagnostic. Still to come in M7: the first release. See [Setting up and customizing](#setting-up-and-customizing) |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
 
@@ -282,6 +282,7 @@ accent_l = 0.76
   ```
 
 - `bingsu config schema` prints the JSON Schema; editors that read it complete every key above.
+- A config can also be a JSON file (`config.json`, `config.local.json`, `conf.d/*.json`) that reads like the TOML one; a place that has both forms is an error (E308). See [docs/config.md](docs/config.md#json-config-files).
 - `extends` layers config files, for example a team file under your own. [docs/config.md](docs/config.md) says what a
   shared file may and may not do.
 
@@ -292,7 +293,9 @@ accent_l = 0.76
 | `bingsu config check` | Reads your files and reports mistakes, with a diagnostic code for each |
 | `bingsu help CODE` | Explains a diagnostic code (`bingsu help E201`): what happened, why, how to fix it |
 | `bingsu explain` | Says which segments are hidden or shortened at a width, and why (`--width N`, `--format json`) |
-| `bingsu doctor` | Checks the installation: the executable and the folders above it, the pinned folders, the three binaries |
+| `bingsu doctor` | Checks the installation: the executable and the folders above it, the pinned folders, the three binaries; on a terminal it also measures how wide the terminal draws some characters and what its background is (`--terminal` asks the terminal even when output goes to a pipe) |
+| `bingsu config edit` | Opens your settings file in your editor, then checks it and applies it if it is valid |
+| `bingsu --version` | Prints the version, the full build identity, and whether `bingsu-prompt` and `bingsu-collect` beside it are the same build |
 | `bingsu reload` | Applies the settings now |
 
 ```console
