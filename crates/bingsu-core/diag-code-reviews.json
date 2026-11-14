@@ -73,8 +73,8 @@
   },
   {
     "before": "78fd46fa9a4189c0ae1815e34056b4ea48c0f7c9e57f8217a3f541492d68709e",
-    "after": "b10c2c76bfea5a700db646df3de30c3d61b7b44f34763cdbec9b49d86a749752",
+    "after": "8033a8926a3c8d4474e70f6f247a9bfb058d5d2ee8351613c510be1b75d78d36",
     "kind": "wording",
-    "reason": "N504's fix text now also names the way out that layout.when.<band>.enabled = false gives (a trusted file only), beside writing the band's own template. The condition, the arguments {band}, {widths} and {lines}, the severity and the message are unchanged; a band turned off is not chosen at any width, so N504 is not said for it, as for any band no width chooses. No other code changes."
+    "reason": "Two fix and why texts change their words; no code changes its meaning. N504's fix now also names the way out that layout.when.<band>.enabled = false gives (a trusted file only), beside writing the band's own template; its condition, arguments {band}, {widths} and {lines}, severity and message are unchanged, and a band turned off is not chosen at any width, so N504 is not said for it. W401's why no longer says that execution keys are not allowed, which read as wrong for layout.when.<band>.enabled, a key that turns a band off rather than runs anything; it keeps the words users see (trusted for colors and layout only) and names what such a file cannot set: keys that run commands, read the environment or turn a layout band off come only from trusted files. W401's condition (a key the key table marks as execution in a shape-only file), the {key} argument, severity, message and fix are unchanged; the registry test that pins the why follows it."
   }
 ]

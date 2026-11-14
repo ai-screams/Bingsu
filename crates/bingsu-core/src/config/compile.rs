@@ -2582,15 +2582,16 @@ mod tests {
             band_notes(&both)[0].2,
             Some("layout.line1 and layout.line2")
         );
-        // A theme's band template over the user's lines is the same surprise.
-        let theme = read(
+        // A band template another file writes (here a trusted one, "t") over the user's lines is
+        // the same surprise.
+        let other_file = read(
             "extends = [\"t\"]\n[layout.line1]\nleft = [\"dir\"]\n",
             &[(
                 "t",
                 "[layout.when.mid]\nmin_cols = 60\nmax_cols = 79\n[layout.when.mid.style]\ntemplate = \"{dir}{@nl}{char}\"\n",
             )],
         );
-        let bands: Vec<_> = band_notes(&theme).iter().map(|n| (n.0, n.1)).collect();
+        let bands: Vec<_> = band_notes(&other_file).iter().map(|n| (n.0, n.1)).collect();
         assert_eq!(
             bands,
             [(Some("narrow"), Some("0-59")), (Some("mid"), Some("60-79"))]

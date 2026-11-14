@@ -248,7 +248,7 @@ pub const HELP: &[Help] = &[
     h(
         c::EXEC_KEY_IGNORED,
         "A key that only a trusted file may set (one that runs something, reaches the environment, or turns a layout band off) is set in a shape-only file, so it is dropped.",
-        "A shape-only file is read for colors and layout only; it may change how the prompt looks but never what runs.\nThemes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.\nA file in your config folder whose own folder fails the safety check is a different case (W405).",
+        "A shape-only file is read for colors and layout only; it may change how the prompt looks, but it never sets what runs, reads the environment or turns a layout band off.\nThemes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.\nA file in your config folder whose own folder fails the safety check is a different case (W405).",
         "Put the key in your own config file in the config folder (`bingsu config path` shows where it is).\nRun `bingsu config check` for the details.",
     ),
     h(

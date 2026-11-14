@@ -444,7 +444,7 @@ What happened
   A key that only a trusted file may set (one that runs something, reaches the environment, or turns a layout band off) is set in a shape-only file, so it is dropped.
 
 Why
-  A shape-only file is read for colors and layout only; it may change how the prompt looks but never what runs.
+  A shape-only file is read for colors and layout only; it may change how the prompt looks, but it never sets what runs, reads the environment or turns a layout band off.
   Themes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.
   A file in your config folder whose own folder fails the safety check is a different case (W405).
 

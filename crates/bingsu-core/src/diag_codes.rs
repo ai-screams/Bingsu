@@ -326,7 +326,7 @@ pub const CODES: &[CodeInfo] = &[
     stable(
         EXEC_KEY_IGNORED,
         "`{key}` is ignored here",
-        "this file is trusted for colors and layout only; execution keys are not allowed",
+        "this file is trusted for colors and layout only; keys that run commands, read the environment or turn a layout band off come only from trusted files",
         "put the key in a trusted config file; run `bingsu config check` for folder safety details",
     ),
     stable(
@@ -494,7 +494,7 @@ mod tests {
         let c = CODES.iter().find(|c| c.code == EXEC_KEY_IGNORED).unwrap();
         assert_eq!(
             c.why,
-            "this file is trusted for colors and layout only; execution keys are not allowed"
+            "this file is trusted for colors and layout only; keys that run commands, read the environment or turn a layout band off come only from trusted files"
         );
         assert!(c.fix.contains("bingsu config check"));
     }
