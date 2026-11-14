@@ -118,18 +118,37 @@ jobs:
         run: |
           cargo +"$FUZZ_TOOLCHAIN" fetch --locked --manifest-path fuzz/collector/Cargo.toml
           cargo +"$FUZZ_TOOLCHAIN" run --locked --manifest-path fuzz/collector/Cargo.toml --bin write-seeds -- "$RUNNER_TEMP/seeds"
+      - name: Build the fuzz target under AddressSanitizer with debug assertions
+        shell: bash --noprofile --norc -euo pipefail {0}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo +"$FUZZ_TOOLCHAIN" fuzz build --fuzz-dir fuzz/collector --features libfuzzer -O -a --sanitizer address "$TARGET"
+      # The run's output stays in a file on the runner. libFuzzer prints a
+      # failing input of up to 256 bytes as hex, text and Base64, and a crash
+      # message can quote input bytes; this log and any artifact are public,
+      # so they would publish an unfixed crash before a private report
+      # (SECURITY.md). The job still fails, and the next step names the
+      # inputs by hash and size only. Nothing keeps the bytes after the job,
+      # and a run with the same -seed found other inputs, so a crash is found
+      # again by fuzzing privately.
       - name: Fuzz under AddressSanitizer with debug assertions
+        id: fuzz
         shell: bash --noprofile --norc -euo pipefail {0}
         env:
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p "$RUNNER_TEMP/corpus/$TARGET" "$RUNNER_TEMP/artifacts/$TARGET"
-          cargo +"$FUZZ_TOOLCHAIN" fuzz run --fuzz-dir fuzz/collector --features libfuzzer -O -a --sanitizer address "$TARGET" "$RUNNER_TEMP/corpus/$TARGET" "$RUNNER_TEMP/seeds/$TARGET" -- -max_total_time=900 -rss_limit_mb=2048 -timeout=10 -max_len=65536 -artifact_prefix="$RUNNER_TEMP/artifacts/$TARGET/"
-      - name: Preserve crash inputs
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: collector-fuzz-${{ matrix.target }}
-          path: ${{ runner.temp }}/artifacts/
-          if-no-files-found: warn
-          retention-days: 2
+          cargo +"$FUZZ_TOOLCHAIN" fuzz run --fuzz-dir fuzz/collector --features libfuzzer -O -a --sanitizer address "$TARGET" "$RUNNER_TEMP/corpus/$TARGET" "$RUNNER_TEMP/seeds/$TARGET" -- -max_total_time=900 -rss_limit_mb=2048 -timeout=10 -max_len=65536 -artifact_prefix="$RUNNER_TEMP/artifacts/$TARGET/" > "$RUNNER_TEMP/fuzz-$TARGET.log" 2>&1
+          grep -F 'Done ' "$RUNNER_TEMP/fuzz-$TARGET.log"
+      - name: Name the failing inputs by hash and size only
+        if: failure() && steps.fuzz.outcome == 'failure'
+        shell: bash --noprofile --norc -euo pipefail {0}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          echo "The inputs and the fuzz output stay on this runner. Report a crash privately (SECURITY.md)."
+          find "$RUNNER_TEMP/artifacts/$TARGET" -type f -printf '%f %s bytes\n'
+          find "$RUNNER_TEMP/artifacts/$TARGET" -type f -exec sha256sum {} +
+          echo "To find it again, fuzz privately from an empty corpus folder: a new run, even with the same seed, finds inputs of its own. Write the seeds first: cargo +$FUZZ_TOOLCHAIN run --locked --manifest-path fuzz/collector/Cargo.toml --bin write-seeds -- seeds"
+          echo "cargo +$FUZZ_TOOLCHAIN fuzz run --fuzz-dir fuzz/collector --features libfuzzer -O -a --sanitizer address $TARGET corpus/$TARGET seeds/$TARGET -- -max_total_time=900 -rss_limit_mb=2048 -timeout=10 -max_len=65536 -artifact_prefix=artifacts/$TARGET/"
+          echo "Replay an input you hold: cargo +$FUZZ_TOOLCHAIN fuzz run --fuzz-dir fuzz/collector --features libfuzzer -O -a --sanitizer address $TARGET FILE"
