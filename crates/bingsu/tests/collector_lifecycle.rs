@@ -188,6 +188,7 @@ int main(int argc, char **argv) {
     }
     if(!strcmp(mode,"request-closed")) { close(3); frame(1,ready,24); for(;;) pause(); }
     frame(1,ready,24);
+    if(!strcmp(mode,"late-large")) usleep(300000);
     uint32_t body=0;
     for(;;) {
         exact(3,h,80); uint32_t n; memcpy(&n,h+12,4);
@@ -196,7 +197,7 @@ int main(int argc, char **argv) {
         if(h[10]==3) body+=n-4;
         if(h[10]==4) break;
     }
-    if(!strcmp(mode,"large") && body<=65536) return 38;
+    if((!strcmp(mode,"large") || !strcmp(mode,"late-large")) && body<=65536) return 38;
     if(!strncmp(mode,"git-",4)) {
         unsigned char progress[10]={1,1,9};
         if(!strcmp(mode,"git-deadline-before-a") || !strcmp(mode,"git-deadline-after-a")) {
@@ -477,7 +478,7 @@ fn run_peer_timed(
     let job = CollectorJob::fixture_timed(
         exe.as_os_str(),
         OsStr::new(mode),
-        request(mode == "large"),
+        request(mode == "large" || mode == "late-large"),
         held_lock,
         &watchdog,
         &SEGMENTS,
@@ -522,6 +523,29 @@ fn request_waits_for_ready_and_pipes_are_backpressured() {
     assert_eq!(report.reason, EndReason::Complete);
     assert!(report.reaped && !report.kill_requested, "{report:?}");
     assert_eq!((report.frames, report.bytes, values.len()), (3, 276, 1));
+}
+
+// collector가 Ready 뒤 300 ms 동안 요청을 읽지 않아도 감독은 요청 파이프를 기다리되 돌지 않는다(기다림은 1 ms에
+// 한 번 정도). 이것을 실패시키는 것: poll이 쓰기 가능이라 했는데 쓰기가 아무것도 못 한 뒤에 쉬지 않는 것(파이프가
+// 512바이트에 머문 Mac에서는 poll이 곧바로 돌아와 마감까지 돎: 기다림 약 31만 번), 쓰기가 다시 바이트를 받은 뒤에도
+// 쉼을 되돌리지 않는 것(바이트를 받은 뒤 첫 쉼이 50 µs가 아니고 1 ms: stalls_not_restarted가 0이 아님). 시간으로
+// 재지 않는 것은 CI 러너에서 정상 실행도 Ready부터 445 ms가 걸려 변이(약 500 ms)와 갈리지 않았기 때문이다. 파이프가
+// 정상으로 커지는 Mac과 Linux에서는 POLLOUT이 정확해 쉼이 시작되지 않으므로(stalls 0) 두 변이가 이 시험으로
+// 잡히지 않는다.
+#[test]
+fn a_collector_that_reads_late_is_waited_for_without_spinning() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
+    let (report, values, _) = run_peer_timed("late-large", true, GENEROUS);
+    assert_eq!(report.reason, EndReason::Complete, "{report:?}");
+    assert_eq!(values.len(), 1);
+    assert!(report.waits < 1_000, "{} waits", report.waits);
+    // Once the collector reads, a write takes bytes and the next stall
+    // starts over at its shortest sleep.
+    assert_eq!(
+        report.stalls_not_restarted, 0,
+        "{} of {} stall sleeps did not start over",
+        report.stalls_not_restarted, report.stalls
+    );
 }
 
 // 이것을 실패시키는 것: helper가 envelope home·compiled unique를 요청에 넣지 않거나 환경 항목으로 복원하는 것.

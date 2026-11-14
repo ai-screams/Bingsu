@@ -1,15 +1,16 @@
 //! Command supervisor `bingsu __command-v1` (spec section 4, process row
 //! "command supervisor"; U-1 C+, U-15 Q1). The refresh helper spawns it
 //! before its own filter with an empty environment and exactly descriptors
-//! 0 to 2 (`/dev/null`), 3 the grant pipe's read end, 4 the result pipe's
-//! write end and 5 a close-only copy of the session lock. It waits for the
-//! one grant; end of file before one runs nothing. For each unit it repeats
-//! the approval right before that unit's relay spawn, then supervises every
-//! relay in one `poll` loop with the grant pipe (done or end of file: the
-//! helper is gone, so every child is ended), the result pipe's partial
-//! writes, each child's stdout (4 KB, never parsed) and status, and the next
-//! deadline. Every decision is `bingsu_core::command`; this file makes the
-//! system calls.
+//! 0 to 2 (`/dev/null`), 3 the grant channel's read end, 4 the result
+//! channel's write end (pipes, Unix stream socket pairs on macOS:
+//! `command_process::channel`) and 5 a close-only copy of the session lock.
+//! It waits for the one grant; end of file before one runs nothing. For each
+//! unit it repeats the approval right before that unit's relay spawn, then
+//! supervises every relay in one `poll` loop with the grant channel (done or
+//! end of file: the helper is gone, so every child is ended), the result
+//! channel's partial writes, each child's stdout (4 KB, never parsed) and
+//! status, and the next deadline. Every decision is `bingsu_core::command`;
+//! this file makes the system calls.
 #![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -1102,9 +1103,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// A pipe; the read end is non-blocking.
+    /// A grant or result channel as the helper makes it (a socket pair on
+    /// macOS); the read end is non-blocking.
     fn pipe() -> (OwnedFd, OwnedFd) {
-        let (r, w) = crate::commands::collector_process::pipe().unwrap();
+        let (r, w) = crate::commands::command_process::channel().unwrap();
         crate::commands::collector_process::nonblocking(&r).unwrap();
         (r.into(), w.into())
     }
@@ -1510,6 +1512,16 @@ pub(crate) mod tests {
     }
 
     // 결과 파이프가 가득 차도(도우미가 읽지 않음) 감독은 허가 파이프 EOF를 보고 모든 대상을 끝낸다.
+    /// CPU time of this thread.
+    fn thread_cpu() -> std::time::Duration {
+        // SAFETY: an all-zero timespec is a valid value for the call to fill.
+        let mut t: libc::timespec = unsafe { std::mem::zeroed() };
+        // SAFETY: `t` is writable; the clock id is a constant.
+        let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        assert_eq!(rc, 0);
+        std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    }
+
     // 이것을 실패시키는 것: 결과 쓰기를 차단 모드로 하는 것(EAGAIN 대신 write에 막혀 EOF를 못 봄),
     // poll 집합에서 허가 파이프를 빼는 것(Linux만. macOS는 REAP_TICK 때문에 이 변이를 잡지 못한다).
     #[test]
@@ -1561,6 +1573,50 @@ pub(crate) mod tests {
             // SAFETY: signal 0 only asks whether the pid still exists.
             assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "{pid} still runs");
         }
+    }
+
+    // 결과 통로가 가득 찬 채(도우미가 읽지 않음) 회차가 도는 동안 감독은 쓸 자리를 기다리되 CPU를 쓰지 않는다.
+    // 이것을 실패시키는 것: macOS에서 통로를 파이프로 되돌리는 것(파이프가 512바이트에 머문 Mac에서 poll이 가득
+    // 찬 파이프를 쓰기 가능이라 해 step이 곧바로 되돌아 돎). 파이프가 정상으로 커지는 Mac과 Linux에서는 그
+    // 변이가 이 시험으로는 잡히지 않고, 통로 종류 시험(command_process)이 잡는다.
+    #[test]
+    fn test_waiting_results_use_no_cpu() {
+        let _inherited_fds = super::super::sys::test_inherited_fd_lock();
+        let (grant_read, grant_write) = pipe();
+        let (_result_read, result_write) = pipe();
+        let w = result_write.as_raw_fd();
+        nonblocking(w).unwrap();
+        let fill = [0u8; 4096];
+        // SAFETY: `fill` is readable; the end is non-blocking, so this stops at EAGAIN.
+        while unsafe { libc::write(w, fill.as_ptr().cast(), fill.len()) } > 0 {}
+        // SAFETY: as above, one byte at a time for the last room.
+        while unsafe { libc::write(w, fill.as_ptr().cast(), 1) } > 0 {}
+        // Quiet units: their results wait, and their output costs nothing.
+        let mut units: Vec<Unit> = (0..7)
+            .map(|i| unit(&format!("ok{i}"), 1_000 * MS))
+            .collect();
+        units.push(unit("sleep", 1_000 * MS));
+        let g = grant(units, 1_000 * MS);
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(grant_write);
+        });
+        let (cpu, wall) = (thread_cpu(), std::time::Instant::now());
+        let s = Supervisor::new(
+            g,
+            Vec::new(),
+            stub(),
+            grant_read.as_raw_fd(),
+            result_write.as_raw_fd(),
+        )
+        .run(false);
+        let (cpu, wall) = (thread_cpu() - cpu, wall.elapsed());
+        let eagain = s.eagain;
+        drop(s);
+        killer.join().unwrap();
+        assert!(eagain >= 1, "the full channel must have refused a write");
+        assert!(wall >= std::time::Duration::from_millis(250), "{wall:?}");
+        assert!(cpu * 5 < wall, "cpu {cpu:?} over {wall:?}");
     }
 
     // 이것을 실패시키는 것: relay_input의 16 KB 상한을 지우거나 그 거부를 생성으로 바꾸는 것.
