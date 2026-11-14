@@ -349,6 +349,17 @@ pub const KEYS: &[KeyDef] = &[
         "구간 하나.",
     ),
     key(
+        "layout.when.*.enabled",
+        Ty::Bool,
+        Advanced,
+        "Use this band; false turns it off, so its widths draw the default layout.",
+        "이 구간을 씀. false면 끄고 그 폭에서 기본 레이아웃을 그림.",
+    )
+    // Trusted files only: turning a band off changes which layout is reached
+    // at which width, and a new key starts sensitive.
+    .exec()
+    .example("false"),
+    key(
         "layout.when.*.line1",
         Ty::Table,
         Advanced,

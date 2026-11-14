@@ -149,15 +149,27 @@ widths under 60, and it has its own template: there the prompt shows the host, t
 and the duration and the prompt character below, whatever `[layout.line1]` and `[layout.line2]` say. Your lines are
 used from 60 columns on, and `bingsu config check` notes the widths where they are not (N504).
 
-The built-in template stays unless the band gets another one. To draw your own segments under 60 columns too, write
-a template for the band:
+To draw your own lines under 60 columns too, turn the band off. Its widths then draw the default layout, which is your
+`[layout]` lines at every width:
+
+```toml
+[layout.when.narrow]
+enabled = false
+```
+
+`enabled = false` turns off any band, the built-in one or one a file of yours adds. Only a file you trust sets it: in
+a theme or another shape-only file it is dropped with a warning (W401), so a shared theme cannot turn a band off. A
+band that is off still counts toward the limit of bands a config may have.
+
+Or keep the band and give it a template of your own:
 
 ```toml
 [layout.when.narrow.style]
 template = "{dir} {git}{@nl}{char}"
 ```
 
-`bingsu explain --width 40` shows what is drawn at a narrow width.
+`bingsu explain --width 40` shows what is drawn at a narrow width, and `bingsu config check` lists the bands and the
+widths each one covers.
 
 ## YAML files
 

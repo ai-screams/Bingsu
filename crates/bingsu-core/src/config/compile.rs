@@ -368,6 +368,23 @@ struct Layout {
     template: Option<MNode>,
 }
 
+/// The bands of `when` (the `layout.when` table) that are on: a band with
+/// `enabled = false` is left out of the band choice, the width table and the
+/// compiled variants, so its widths draw the default layout. `layouts` and
+/// `bands_of` both walk bands through this, which keeps a band's index the
+/// same in both. The band count limit and the layout budget still count
+/// every band written, off or not.
+fn live_bands(when: &[MEntry]) -> impl Iterator<Item = &MEntry> {
+    // 이것을 실패시키는 것: `enabled = false`인 구간을 남기는 것(내장 narrow를 끌 수 없음), `enabled` 없는
+    // 구간이나 `true`인 구간을 빼는 것.
+    when.iter().filter(|b| match &b.node.value {
+        MValue::Table(bt) => bt
+            .get("enabled")
+            .is_none_or(|n| n.value != MValue::Scalar(Value::Bool(false))),
+        _ => true,
+    })
+}
+
 fn layouts(r: &MTable) -> Vec<Layout> {
     let empty = Line {
         enabled: true,
@@ -385,7 +402,7 @@ fn layouts(r: &MTable) -> Vec<Layout> {
         table: None,
         template: base_template.clone(),
     }];
-    for b in entries(&layout, &["when"]) {
+    for b in live_bands(entries(&layout, &["when"])) {
         if let MValue::Table(bt) = &b.node.value {
             let template = get(bt, &["style", "template"])
                 .cloned()
@@ -714,7 +731,7 @@ pub fn bands_of(m: &Merged) -> Result<Bands, Vec<Diagnostic>> {
     let mut bands = Vec::new();
     let mut names = Vec::new();
     let mut nodes: Vec<Vec<MNode>> = Vec::new();
-    for b in entries(r, &["layout", "when"]) {
+    for b in live_bands(entries(r, &["layout", "when"])) {
         let MValue::Table(bt) = &b.node.value else {
             continue;
         };
@@ -2622,6 +2639,77 @@ mod tests {
         assert!(codes_of(&never).contains(&codes::BAND_NEVER_CHOSEN));
         let names: Vec<_> = band_notes(&never).iter().map(|n| n.0).collect();
         assert_eq!(names, [Some("narrow")]);
+    }
+
+    // `layout.when.<band>.enabled = false` turns a band off: its widths draw the default layout,
+    // here the user's lines at 59 as at 60. Without the key, or with `true`, nothing changes.
+    // 이것을 실패시키는 것: 꺼진 구간을 구간 고르기·폭 표(bands_of)에 남기는 것, 그 variant를 컴파일(layouts)에
+    // 남기는 것, 59/60 경계에서 다른 variant를 고르는 것, 꺼진 구간에 N504·W407을 내는 것, `true`를 끔으로 읽는 것.
+    #[test]
+    fn a_band_turned_off_draws_the_default_layout_at_its_widths() {
+        let user = "[layout.line1]\nleft = [\"dir\"]\nright = [\"time\"]\n";
+        let on = read(user, &[]);
+        let off = read(
+            &alloc::format!("{user}[layout.when.narrow]\nenabled = false\n"),
+            &[],
+        );
+        let runs = |r: &crate::config::report::ConfigReport| -> Vec<(u16, u16, Option<String>)> {
+            r.widths
+                .iter()
+                .map(|w| (w.from, w.to, w.band.clone()))
+                .collect()
+        };
+        assert_eq!(
+            runs(&on),
+            [(0, 59, Some(String::from("narrow"))), (60, u16::MAX, None)]
+        );
+        assert_eq!(runs(&off), [(0, u16::MAX, None)]);
+        assert!(codes_of(&on).contains(&codes::BAND_TEMPLATE_REPLACES_LINES));
+        assert_eq!(codes_of(&off), []);
+        let (c_on, c_off) = (on.snapshot.unwrap(), off.snapshot.unwrap());
+        assert_eq!((c_on.bands.len(), c_on.variants.len()), (1, 2));
+        assert_eq!((c_off.bands.len(), c_off.variants.len()), (0, 1));
+        for (w, band) in [(59, Some(0)), (60, None)] {
+            assert_eq!(
+                crate::bands::select(&c_on.band_order, &c_on.bands, w),
+                band,
+                "{w}"
+            );
+            assert_eq!(
+                crate::bands::select(&c_off.band_order, &c_off.bands, w),
+                None,
+                "{w}"
+            );
+        }
+        assert_eq!(c_off.variants[0], c_on.variants[0]);
+        let explicit = read(
+            &alloc::format!("{user}[layout.when.narrow]\nenabled = true\n"),
+            &[],
+        );
+        assert_eq!(explicit.snapshot.unwrap().variants, c_on.variants);
+    }
+
+    // Only a trusted file turns a band off: from a theme the key is dropped with W401 and the band
+    // stays.
+    // 이것을 실패시키는 것: `layout.when.*.enabled`를 모양 전용 키로 두는 것(남의 테마가 구간을 끔).
+    #[test]
+    fn only_a_trusted_file_turns_a_band_off() {
+        let r = read(
+            "extends = [\"shape-t\"]\n",
+            &[("shape-t", "[layout.when.narrow]\nenabled = false\n")],
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| {
+                d.code == codes::EXEC_KEY_IGNORED
+                    && d.args
+                        .iter()
+                        .any(|a| a.name == "key" && a.value == "layout.when.narrow.enabled")
+            }),
+            "{:?}",
+            r.diagnostics
+        );
+        let widths: Vec<_> = r.widths.iter().map(|w| w.band.as_deref()).collect();
+        assert_eq!(widths, [Some("narrow"), None]);
     }
 
     // 이것을 실패시키는 것: 꺼진 내장 세그먼트를 그리거나 수집 mask에 남기는 것, 그려지는 세그먼트를 mask에서 빠뜨리는 것.

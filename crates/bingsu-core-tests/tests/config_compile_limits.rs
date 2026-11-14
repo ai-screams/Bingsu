@@ -50,6 +50,18 @@ fn nested(n: usize) -> String {
         .collect()
 }
 
+/// `nested(n)` with every band turned off.
+fn nested_off(n: usize) -> String {
+    (0..n)
+        .map(|i| {
+            format!(
+                "[layout.when.b{i}]\nmax_cols={}\nenabled = false\n",
+                i + 100
+            )
+        })
+        .collect()
+}
+
 fn isolated(r: &ConfigReport) {
     assert!(r.snapshot.is_some(), "{:?}", r.diagnostics);
     assert_eq!(r.files[2].status, Status::Dropped);
@@ -139,6 +151,30 @@ fn band_limit_keeps_thousands_and_respects_source_trust() {
         order_bands(&over),
         Err(bingsu_core::bands::BandError::TooMany)
     );
+}
+
+// Turning bands off does not get round the limits: the band count and the expanded layout budget
+// count every band written, off or not.
+// 이것을 실패시키는 것: 구간 수 상한이나 레이아웃 예산이 켜진 구간만 세는 것(끈 구간으로 상한을 피함).
+#[test]
+fn bands_turned_off_still_count_toward_the_limits() {
+    let over = read(&nested_off(MAX_BANDS), "", Trust::Executable);
+    assert!(over.snapshot.is_none());
+    assert!(over.diagnostics.iter().any(|d| {
+        d.args
+            .iter()
+            .any(|a| a.name == "expected" && a.value == format!("at most {MAX_BANDS} bands"))
+    }));
+    let wide = read(&(wide_line() + &nested_off(700)), "", Trust::Executable);
+    assert!(wide.snapshot.is_none());
+    assert!(wide.diagnostics.iter().any(|d| {
+        d.args
+            .iter()
+            .any(|a| a.value.contains("expanded layout work units"))
+    }));
+    // Within the limits the bands are off: only the built-in one is left.
+    let fine = read(&nested_off(MAX_BANDS - 1), "", Trust::Executable);
+    assert_eq!(fine.snapshot.unwrap().bands.len(), 1);
 }
 
 // 이것을 실패시키는 것: 명시적 순서가 섞인 경로에서 매 구간마다 전체 간선을 다시 순회하는 것.

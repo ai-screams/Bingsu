@@ -441,7 +441,7 @@ How to fix
 W401 (warning)
 
 What happened
-  A key that runs something or reaches the environment is set in a shape-only file, so it is dropped.
+  A key that only a trusted file may set (one that runs something, reaches the environment, or turns a layout band off) is set in a shape-only file, so it is dropped.
 
 Why
   A shape-only file is read for colors and layout only; it may change how the prompt looks but never what runs.
@@ -794,7 +794,10 @@ Why
   A band chosen for a width range takes its lines from `[layout]` unless it has its own template; a template replaces the lines. The built-in theme has such a band, `narrow`, for widths under 60.
 
 How to fix
-  To draw your segments at those widths too, give the band a template of your own, for example:
+  To draw your own lines at those widths too, turn the band off in your own config file (a theme cannot turn a band off):
+  [layout.when.narrow]
+  enabled = false
+  Or give the band a template of your own, for example:
   [layout.when.narrow.style]
   template = "{dir} {git}{@nl}{char}"
   Then run `bingsu config check` to see the widths again.

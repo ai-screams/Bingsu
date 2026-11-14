@@ -480,7 +480,7 @@ pub const CODES: &[CodeInfo] = &[
         BAND_TEMPLATE_REPLACES_LINES,
         "at widths {widths} the band `{band}` draws its own template in place of {lines}",
         "a band's template replaces the layout lines the band would take from `[layout]`",
-        "to draw your segments at those widths too, write `layout.when.{band}.style.template` yourself",
+        "to draw your lines at those widths too, set `layout.when.{band}.enabled = false` in a trusted file, or write `layout.when.{band}.style.template` yourself",
     ),
 ];
 
