@@ -134,7 +134,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     let reason = super::git_global::attach(&mut request, &e);
                     report(&mut groups, reason.log_level(), reason.message());
                 }
-                // D1 (ruling Q1): the user-defined languages' detect_files;
+                // D1: the user-defined languages' detect_files;
                 // the built-in four are asked for by their segments (D3). After
                 // the global excludes, so queries that do not fit what the
                 // request leaves are the ones dropped, never the excludes.
@@ -176,7 +176,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     &store,
                 );
                 // The repository root this collection reports for the shell's
-                // folder, for the command round's PATH rules (C2 ruling J9).
+                // folder, for the command round's PATH rules.
                 let slot = collected_repo.clone();
                 let languages = collected_languages.clone();
                 Ok::<_, super::snapshot_store::StoreError>(Ok(Some(job.start(Box::new(
@@ -188,7 +188,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                             .and_then(|f| f.repo_component);
                         // Before the record: a round with only language
                         // answers publishes none, and its answers still go
-                        // to the builtin probes (D3a ruling Q-B).
+                        // to the builtin probes.
                         *languages.lock().unwrap_or_else(|e| e.into_inner()) =
                             command_grant::Languages::from_result(&result);
                         store.publish(&result)?;
@@ -688,7 +688,7 @@ pub(super) fn detach() -> Result<(), ()> {
     }
 }
 
-/// The builtin languages whose segments this width draws (D3 ruling Q6),
+/// The builtin languages whose segments this width draws,
 /// the same ones the collection request asks about; none on a redraw.
 fn drawn_builtins(
     config: &bingsu_core::config::compile::CompiledConfig,
@@ -750,7 +750,7 @@ pub(crate) fn selected_request(
     let (Some((config, id)), Some(cwd)) = (display, e.pwd.as_deref()) else {
         return Ok(None);
     };
-    // The builtin language segments this width draws (D3a ruling Q6); a
+    // The builtin language segments this width draws; a
     // redraw collects nothing.
     let languages = if e.redraw {
         Vec::new()
@@ -956,7 +956,7 @@ mod grant_tests {
     // 잠금 경합은 Busy다. 둘 다 permit이 없어 허가를 보내지 않는다. 표식을 설치한 회차는 그 표식의 permit을
     // 보낸다. 이것을 실패시키는 것: grant_permit의 결과 판정에 Incomplete나 Busy를 더하는 것, 표식 대신 다른
     // 시계로 permit을 만드는 것. 계획 표의 변이("허가 전송을 broker 안으로 옮김")는 제품 바이너리에 회차 사이
-    // hook이 없어 죽일 수 없다(K4 판정). 그 자리는 이 함수와 helper::run의 호출 위치(refresh_broker 반환 뒤)로
+    // hook이 없어 죽일 수 없다. 그 자리는 이 함수와 helper::run의 호출 위치(refresh_broker 반환 뒤)로
     // 고정한다.
     #[test]
     fn grant_only_after_the_marker_is_installed() {

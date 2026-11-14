@@ -453,7 +453,7 @@ fn sink_rejects_invalid_setup_without_writing() {
     }
 }
 
-// 보안 리뷰 S-M(D1): 단계 마감을 넘긴 언어 결과는 쓰지 않고, 스트림을 멈추지 않는다. 구별되는 오류를 돌려주고,
+// 단계 마감을 넘긴 언어 결과는 쓰지 않고, 스트림을 멈추지 않는다. 구별되는 오류를 돌려주고,
 // 마감을 다시 건 뒤의 Complete는 그대로 나가며 받는 쪽 transcript도 그 언어를 보지 않는다. 이것을 실패시키는 것:
 // WireSink::language의 마감 선검사를 지우는 것(send가 TimedOut으로 latch를 걸어 Complete가 실패함).
 #[test]

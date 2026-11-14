@@ -1,4 +1,4 @@
-//! Instruction counts of the built-in default theme (M3a Task V1): building
+//! Instruction counts of the built-in default theme: building
 //! it (presets to templates, compile, palette) and one render with it. The
 //! front end does both on every prompt until the compiled snapshot lands,
 //! so the build count is the cost the snapshot is meant to remove.

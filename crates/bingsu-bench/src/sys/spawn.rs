@@ -1,6 +1,5 @@
 //! posix_spawn with /dev/null stdin/stderr, optional stdout pipe, new
-//! session, and every other fd closed in the child (spec section 4:
-//! children never hold the shell's fds).
+//! session, and every other fd closed in the child (children never hold the shell's fds).
 use std::ffi::CStr;
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 use std::ffi::c_char;

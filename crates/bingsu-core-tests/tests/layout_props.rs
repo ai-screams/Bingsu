@@ -1,4 +1,4 @@
-//! Layer 1 property (spec section 7): over random names, widths 0–200,
+//! Layer 1 property: over random names, widths 0–200,
 //! both profiles and every icon set, no line exceeds the target width,
 //! measured on the joined text as a terminal reads it.
 use bingsu_core::field::{BUILTIN, Field, FieldValue, Value, segment};

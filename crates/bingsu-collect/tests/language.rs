@@ -304,7 +304,7 @@ fn test_version_length() {
     }
 }
 
-// C2 판정 Q2(D1): 저장소 루트가 32단 위면 루트의 표시 파일까지 본다. 33단 위의 루트는 탐색이 찾지 못해 저장소
+// 저장소 루트가 32단 위면 루트의 표시 파일까지 본다. 33단 위의 루트는 탐색이 찾지 못해 저장소
 // 밖이므로 shell 폴더만 본다. 이것을 실패시키는 것: levels의 상한을 `..=`에서 `..`로 바꾸는 것(32단 위 루트를
 // 빠뜨림), DETECT_LEVELS를 31로 낮추는 것(그러면 discovery 상한과 같다는 단언이 컴파일에서 막는다).
 #[test]
@@ -377,7 +377,7 @@ fn symlinked_files_are_not_used() {
     );
 }
 
-// D2 리뷰 M8·재리뷰 M1: 셸 폴더에 더 가까운 버전 파일을 안전하게 읽을 수 없으면(링크, FIFO, 읽기 거부) 위쪽
+// 셸 폴더에 더 가까운 버전 파일을 안전하게 읽을 수 없으면(링크, FIFO, 읽기 거부) 위쪽
 // 파일의 값을 쓰지 않는다. pyenv와 rustup은 가까운 파일을 읽기 때문이다. 폴더는 두 관리자 모두 건너뛰므로 없는
 // 것으로 보고 위로 간다(루트의 3.11.9). 이것을 실패시키는 것: Entry::Other를 건너뛰고 위로 가는 것, 폴더를 Other로
 // 보는 것(폴더 칸이 Refused), read_version이 open 거부를 그 언어의 오류로 올리는 것.
@@ -431,7 +431,7 @@ fn a_nearer_unreadable_version_file_stops_the_search() {
     }
 }
 
-// D2 재리뷰 M1: 같은 레벨에서 rust-toolchain이 폴더이면 rustup은 그것을 건너뛰고 rust-toolchain.toml을 읽는다.
+// 같은 레벨에서 rust-toolchain이 폴더이면 rustup은 그것을 건너뛰고 rust-toolchain.toml을 읽는다.
 // path 키가 든 toml이면 Path다. 이것을 실패시키는 것: 폴더를 Other로 보는 것(Refused file 0이 됨).
 #[test]
 fn a_folder_lets_the_next_file_of_its_level_answer() {
@@ -463,7 +463,7 @@ fn a_folder_lets_the_next_file_of_its_level_answer() {
     }
 }
 
-// D2 재리뷰 L6: stat 뒤 open 전에 버전 파일이 바뀌는 경우. 사라졌으면 다음 파일(같은 레벨의 rust-toolchain.toml,
+// stat 뒤 open 전에 버전 파일이 바뀌는 경우. 사라졌으면 다음 파일(같은 레벨의 rust-toolchain.toml,
 // 그것이 없으면 위쪽 3.11.9), FIFO나 링크로 바뀌었으면 그 레벨의 Refused. 이것을 실패시키는 것: open의 Missing을
 // 다시 보지 않고 사라짐으로 보는 것(링크 칸이 위쪽 3.11.9가 됨), Missing을 늘 Refused로 보는 것, Special을
 // 건너뛰는 것, 사라진 파일 뒤에 같은 레벨의 나머지 파일을 보지 않는 것.
@@ -603,7 +603,7 @@ fn git_rounds_without_languages_are_unchanged() {
     );
 }
 
-// 크기 상한(C2 판정 Q4, D1): 4,096바이트를 넘는 버전 파일은 값이 없다(Refused, 요약값 0). 이것을 실패시키는
+// 크기 상한: 4,096바이트를 넘는 버전 파일은 값이 없다(Refused, 요약값 0). 이것을 실패시키는
 // 것: Limit을 그 파일의 부재로 보는 것(답이 None이 됨).
 #[test]
 fn version_file_over_its_cap_has_no_value() {
@@ -714,7 +714,7 @@ fn product_entry_gives_c_time_to_languages() {
     );
 }
 
-// 보안 리뷰 H1: 파일 하나를 안전하게 읽을 수 없으면 그 언어만 답이 없다. hard link인 `.python-version`(링크 수 2)은
+// 파일 하나를 안전하게 읽을 수 없으면 그 언어만 답이 없다. hard link인 `.python-version`(링크 수 2)은
 // 읽지 않고, 뒤의 go는 답이 오며, 회차는 완료된다(round_with가 Complete를 단언한다). 이것을 실패시키는 것:
 // detect_all이 읽기 오류에서 멈추는 것(go가 오지 않음), 읽기 오류를 회차 오류로 올리는 것(round가 실패).
 #[test]
@@ -737,7 +737,7 @@ fn hard_linked_version_file_leaves_only_that_language() {
     );
 }
 
-// 보안 리뷰 H1: 언어 단계 시간이 0이어도 회차는 완료되고, 남은 언어는 보내지 않는다(하나씩 건너뛰지 않고 멈춘다).
+// 언어 단계 시간이 0이어도 회차는 완료되고, 남은 언어는 보내지 않는다(하나씩 건너뛰지 않고 멈춘다).
 // 이것을 실패시키는 것: detect_all에서 Deadline을 멈춤 대신 그 언어만 건너뛰는 쪽으로 보내는 것
 // (language_unreadable이 생김), Deadline을 회차 오류로 올리는 것(round가 실패).
 #[test]
@@ -766,7 +766,7 @@ fn lang_ms_zero_keeps_the_round_complete() {
     );
 }
 
-// 보안 리뷰 H1: 언어 단계 안의 panic도 회차를 실패시키지 않는다(Sink 오류만 실패시킨다). 이것을 실패시키는 것:
+// 언어 단계 안의 panic도 회차를 실패시키지 않는다(Sink 오류만 실패시킨다). 이것을 실패시키는 것:
 // languages()가 Sink가 아닌 오류를 그대로 돌려주는 것(round가 실패).
 #[test]
 fn a_panic_in_the_language_stage_keeps_the_round_complete() {
@@ -782,7 +782,7 @@ fn a_panic_in_the_language_stage_keeps_the_round_complete() {
     assert!(results.is_empty(), "{results:?}");
 }
 
-// 보안 리뷰 H2: 한 언어는 폴더 stack 하나로 찾으므로, 20단 아래에서 16×16 요청을 해도 언어 단계가 쓰는
+// 한 언어는 폴더 stack 하나로 찾으므로, 20단 아래에서 16×16 요청을 해도 언어 단계가 쓰는
 // Directories는 언어마다 폴더 깊이(20)를 넘지 않고, git B가 쓸 몫(4,096)이 남는다. 이것을 실패시키는 것:
 // is_file이 탐침마다 새 stack(worktree_metadata)을 쓰는 것(탐침마다 20씩 씀).
 #[test]
@@ -840,7 +840,7 @@ fn probe_bound_counts_folder_calls() {
     assert!(calls(&events) <= 1_024, "{}", calls(&events));
 }
 
-// 재리뷰 M1: 언어 단계의 호출 상한은 그 단계에서 끝난다. 상한을 다 쓴 뒤에도 git 단계는 HEAD와 config를 읽고
+// 언어 단계의 호출 상한은 그 단계에서 끝난다. 상한을 다 쓴 뒤에도 git 단계는 HEAD와 config를 읽고
 // 저장소를 연다(repository_init). 이것을 실패시키는 것: languages()가 calls_limit을 되돌리지 않는 것(git 단계의
 // 첫 호출이 거부되어 회차가 실패함).
 #[test]
@@ -908,7 +908,7 @@ fn bytes_of_failed_reads_count() {
     assert_eq!(results.len(), 4, "{results:?}");
 }
 
-// 보안 리뷰 H1의 반대편: 회차를 실패시키는 것은 Sink 오류뿐이고, 언어 결과를 보내지 못하면 회차가 실패한다.
+// 회차를 실패시키는 것은 Sink 오류뿐이고, 언어 결과를 보내지 못하면 회차가 실패한다.
 // 이것을 실패시키는 것: languages()가 Sink 오류도 삼키는 것(회차가 완료됨).
 #[test]
 fn a_sink_error_in_the_language_stage_fails_the_round() {
@@ -943,7 +943,7 @@ fn a_sink_error_in_the_language_stage_fails_the_round() {
     );
 }
 
-// 보안 리뷰 S-L4: 형식 상한과 같은 cap으로 읽다가 meter의 바이트·할당·호출 상한이 낸 Limit은 파일이 크다는 뜻이
+// 형식 상한과 같은 cap으로 읽다가 meter의 바이트·할당·호출 상한이 낸 Limit은 파일이 크다는 뜻이
 // 아니다. 그 언어를 Refused로 답하지 않고 남은 언어를 멈춘다. 이것을 실패시키는 것: read_version이 cap이 형식
 // 상한과 같은 모든 Limit을 Refused로 보는 것(파일 크기·읽은 바이트 검사를 지우는 것).
 #[test]
@@ -979,7 +979,7 @@ fn meter_limits_stop_instead_of_refusing() {
     );
 }
 
-// 보안 리뷰 S-M: sink가 늦었다고 답한 언어 결과는 멈춤으로 처리하고, 회차는 완료된다(Sink 오류가 아니다). 남은
+// sink가 늦었다고 답한 언어 결과는 멈춤으로 처리하고, 회차는 완료된다(Sink 오류가 아니다). 남은
 // 언어는 보내지 않는다. 이것을 실패시키는 것: detect_all이 늦은 결과를 오류로 올리는 것(회차 실패), languages()
 // 호출부가 늦은 결과를 Sink 오류로 바꾸는 것.
 #[test]

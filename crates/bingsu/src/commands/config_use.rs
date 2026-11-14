@@ -1,5 +1,5 @@
 //! `bingsu config use PATH`: record which file stands in `config.toml`'s
-//! place (spec section 4 "config edit loop"). Only the choice is saved; the
+//! place. Only the choice is saved; the
 //! file is never copied, and `conf.d/*.toml` and `config.local.toml` keep
 //! applying. The save is the R record procedure (state `selection.lock`,
 //! temporary file, fsync, rename, folder fsync); the new choice is then

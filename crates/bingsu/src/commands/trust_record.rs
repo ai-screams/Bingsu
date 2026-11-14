@@ -1,15 +1,14 @@
-//! The `config use` trust record (spec section 4 "config edit loop": the
-//! canonical path and identity of the config the user chose, kept under the
+//! The `config use` trust record (the canonical path and identity of the config the user chose, kept under the
 //! state root `init` pinned). The record makes a file outside the config
 //! root a source of execution keys, so it is read like the runtime state
-//! files (spec section 3 state file row): the state root passes rule 2, the
+//! files: the state root passes rule 2, the
 //! record is a regular file owned by the user, mode 0600, one link, at most
 //! `RECORD_MAX` bytes, opened without following a symlink, in a known
 //! format version. A record that fails any of these is not used.
 //!
 //! Format (version 1, bytes): `bingsu-config-use 1\n<st_dev> <st_ino>\n`
 //! then the canonical path to the end (no newline added; a path may hold
-//! one). Writing (`write`, called by `config use`, Task N5) goes through a
+//! one). Writing (`write`, called by `config use`) goes through a
 //! temporary file in the same folder, `fsync`, rename, folder `fsync`: the
 //! record lives outside the runtime root, so it keeps the durable steps.
 use crate::commands::runtime_root::{Chain, RootError, open_chain};
@@ -448,7 +447,7 @@ mod tests {
         }
     }
 
-    // 스펙 4절 표식 경로 시험과 같은 목록: symlink, 권한 0644, 링크 수 2, 큰 파일, 옛 형식, 남이 쓸 수 있는 상태 뿌리.
+    // 표식 경로 시험과 같은 목록: symlink, 권한 0644, 링크 수 2, 큰 파일, 옛 형식, 남이 쓸 수 있는 상태 뿌리.
     // 이것을 실패시키는 것: O_NOFOLLOW·일반 파일·0600·링크 수·크기·형식·상태 뿌리 규칙 중 하나라도 빼는 것.
     #[test]
     fn the_record_is_read_like_a_state_file() {

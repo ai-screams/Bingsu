@@ -15,7 +15,7 @@
 pub enum WriteOutcome {
     Done,
     /// EPIPE or another error: the shell will see a truncated record and
-    /// fall back to its minimal prompt. We stay silent (spec section 6).
+    /// fall back to its minimal prompt. We stay silent.
     /// EAGAIN is not retried and ends as `Failed`: on a non-blocking fd the
     /// record may be cut short and the shell falls back to its minimal prompt.
     Failed,
@@ -86,7 +86,7 @@ pub fn test_limit_fds(limit: libc::rlim_t) {
 }
 
 /// Hand-written write(2) loop. `write_all` retries EINTR on its own, which
-/// a timer could not interrupt (spec section 4 "output rules"). M3a adds
+/// a timer could not interrupt. M3a adds
 /// the deadline-flag check on EINTR; M1 has no timer yet.
 pub fn write_fd(fd: i32, mut buf: &[u8]) -> WriteOutcome {
     while !buf.is_empty() {
@@ -175,7 +175,7 @@ pub struct Passwd {
     pub gid: u32,
 }
 
-/// getpwuid_r, so `~` never comes from $HOME (spec section 2 extends rules).
+/// getpwuid_r, so `~` never comes from $HOME.
 pub fn passwd_entry(uid: u32) -> Option<Passwd> {
     let mut buf = vec![0u8; 4096];
     loop {
@@ -648,7 +648,7 @@ pub fn fd_ownership(_: std::os::fd::BorrowedFd<'_>) -> Option<bool> {
     Some(true)
 }
 
-/// 16 random bytes for the session value (spec section 3 "session").
+/// 16 random bytes for the session value.
 pub fn random_bytes16() -> Option<[u8; 16]> {
     let mut b = [0u8; 16];
     // musl has no getentropy in the libc crate; getrandom never returns a

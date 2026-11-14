@@ -1,4 +1,4 @@
-//! Warm and cold `init` (spec section 5 "init output", plan N5 Step 2). A
+//! Warm and cold `init`. A
 //! snapshot of the same boot and settings context needs no work: `init`
 //! compiles nothing, and a marker that grew old is the first prompt's helper
 //! to renew. Without one, `init` asks the same fixed helper the prompt uses

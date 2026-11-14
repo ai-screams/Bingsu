@@ -1,4 +1,4 @@
-//! macOS memory watchdog costs (spec section 4, X-25):
+//! macOS memory watchdog costs (X-25):
 //! 1. cost of one proc_pid_rusage call,
 //! 2. parent CPU per sampling interval (1, 2, 4 ms),
 //! 3. footprint vs resident while a child maps and touches a file

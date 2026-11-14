@@ -1,5 +1,5 @@
 //! Collector-process stub for the M1 cost matrix. Reproduces only the
-//! startup order of spec section 4 ("execution ban" row): limits, then
+//! startup order of the real collector: limits, then
 //! no_new_privs + seccomp (Linux), then the ready byte. Collects nothing.
 //! The filter content is partial (see `sys::sandbox`), so its install cost
 //! is a lower bound for the spec's filter.

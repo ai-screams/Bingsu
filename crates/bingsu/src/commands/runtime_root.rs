@@ -1,4 +1,4 @@
-//! The runtime root walk (spec section 4 "runtime root" 2 and 4). The pinned
+//! The runtime root walk. The pinned
 //! path is canonical, so it holds no symlink: it is opened from "/" one name
 //! at a time with `openat(O_NOFOLLOW)` on search-only descriptors (a
 //! symlink swapped in later fails the walk instead of redirecting it), each
@@ -9,7 +9,7 @@
 //! `init` pins with the same walk (`init::roots`), and the refresh helper
 //! and the write child (Part N) open the root with `open_runtime_root`. The
 //! prompt front end makes the same observations through its read plan
-//! (Task N4) and applies the same core rule, so the three cannot disagree.
+//!  and applies the same core rule, so the three cannot disagree.
 use crate::commands::io_meter::{self, HelperAxis, IoMeter, Meter};
 use crate::commands::sys;
 use bingsu_core::fs_trust::{Facts, GroupOracle, Last, Refusal, walk_verdict};
@@ -388,7 +388,7 @@ mod tests {
         }
     }
 
-    // 스펙 4절 "런타임 뿌리" 4·5: 고정값이 맞으면 열리고, 지웠다 다시 만들면 Moved, 0755면 규칙 위반,
+    // 고정값이 맞으면 열리고, 지웠다 다시 만들면 Moved, 0755면 규칙 위반,
     // 상위 이름이 symlink로 바뀌면 걷기가 실패한다(따라가지 않음), 상대·`..` 경로는 거부.
     // 이것을 실패시키는 것: (dev, ino) 비교를 빼는 것, 마지막 폴더 규칙을 빼는 것, O_NOFOLLOW를 빼는 것,
     // 정규 경로 검사를 빼는 것.

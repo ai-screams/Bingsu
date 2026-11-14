@@ -77,8 +77,7 @@ pub(crate) struct Inputs<'a> {
     pub exe: &'a OsStr,
     pub me: u32,
     pub helper_deadline: u64,
-    /// The builtin languages whose segments this round draws (D3 ruling
-    /// Q6); empty on a redraw.
+    /// The builtin languages whose segments this round draws; empty on a redraw.
     pub builtins: &'a [&'static Language],
     /// Where `prepare` leaves the re-matched entries of a round that runs
     /// nothing (`Skip::Reapplied`), for the helper to publish once the
@@ -98,10 +97,10 @@ pub(crate) enum Skip {
     /// Another supervisor of this session holds the lock.
     Busy,
     /// No trusted relay on this platform: a unix other than Linux and
-    /// macOS (C2 ruling Q2).
+    /// macOS.
     NoRelay,
     /// This macOS refuses `AT_SYMLINK_NOFOLLOW_ANY`, without which the
-    /// relay's name check refuses every target (C2 ruling Q3).
+    /// relay's name check refuses every target.
     #[cfg(target_os = "macos")]
     NoNofollowAny,
     /// Every unit runs in the neutral folder, which is not empty, the
@@ -193,7 +192,7 @@ pub(crate) struct Publish {
 
 /// Script copies of one round. Linux runs a script through a sealed memfd
 /// the relay makes, so this holds nothing there. macOS runs the helper's
-/// private copy (C2 ruling Q1): made after the marker from the descriptor
+/// private copy: made after the marker from the descriptor
 /// the checks ran on, named after the session, removed once the
 /// supervisor has ended, or by a later round of the same session. The
 /// `scripts` folder is opened (and swept) at the round's first script.
@@ -381,7 +380,7 @@ impl Languages {
     }
 
     /// Whether a user-defined language's marker files were found this
-    /// round (D3c-2 ruling Q3): `None` when the collection did not answer
+    /// round: `None` when the collection did not answer
     /// it or its folder facts do not settle the repository the round
     /// searches with (`ready`), so the language is not decided either way.
     pub(crate) fn detected(&self, id: &[u8], repo: Option<u16>) -> Option<bool> {
@@ -566,12 +565,12 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         .unwrap_or_default();
     let builtins = i.builtins.to_vec();
     // A drawn builtin language spawns the supervisor even with no config
-    // unit (D3a ruling Q-C (a)): whether it runs is known only once the
+    // unit: whether it runs is known only once the
     // collection answered, after the marker.
     // Fails without it: test_builtin_probe_runs_once_and_is_cached.
     if runnable.is_empty() && builtins.is_empty() {
         // A config with command units reclaims what an earlier supervisor of
-        // the session left even when no unit runs this round (C4 ruling Q4);
+        // the session left even when no unit runs this round;
         // one without any touches nothing. A busy lock is a live supervisor.
         #[cfg(target_os = "linux")]
         if let (false, Some(session)) = (i.config.exec_units.is_empty(), i.session)
@@ -603,11 +602,11 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
     }
     // Another unix has no trusted relay and runs nothing. No CI target is
     // such a unix, so no test runs this branch; `cfg!` keeps it compiled on
-    // Linux and macOS too (C2 ruling Q2).
+    // Linux and macOS too.
     if cfg!(not(any(target_os = "linux", target_os = "macos"))) {
         return Err(Skip::NoRelay);
     }
-    // The behavior probe of C2 ruling Q3. Every macOS CI runner has the
+    // The behavior probe. Every macOS CI runner has the
     // flag, so no test removes this call and fails; `nofollow_any` itself
     // is tested (nofollow_any_probe_decides).
     #[cfg(target_os = "macos")]
@@ -799,7 +798,7 @@ pub(crate) struct Search {
 
 /// The repositories the shell is in, by identity, for the PATH and
 /// executable rules: the root this round's collection reported, else the
-/// shell's own folder (C2 ruling J9), and every folder at or above the
+/// shell's own folder, and every folder at or above the
 /// shell's that holds `.git`, so a round without a collected root
 /// still keeps a repository's folders out. The config units and the builtin
 /// languages share this one list and its one walk. A folder that cannot be
@@ -1016,8 +1015,7 @@ pub(crate) struct Report {
     pub published: Option<response::Response>,
     /// Results came back but could not be published (store busy or unsafe).
     pub publish_failed: bool,
-    /// Why builtin languages were hidden this round (D3 ruling Q4: the
-    /// reason goes to the log, never to the prompt).
+    /// Why builtin languages were hidden this round (the reason goes to the log, never to the prompt).
     pub hidden: Vec<&'static str>,
     /// The round walked `PATH` (debug log; D3a re-review M3).
     pub searched: bool,
@@ -1077,7 +1075,7 @@ impl Round {
     /// Sends the grant under `permit`, reads every result until the helper's
     /// deadline less the reserve, then writes done and closes the pipe.
     /// `repo`: the repository component this round's collection reported
-    /// for the shell's folder, if it ran (C2 ruling J9).
+    /// for the shell's folder, if it ran.
     pub(crate) fn grant(
         mut self,
         permit: Permit,
@@ -1091,7 +1089,7 @@ impl Round {
         let builtins = !self.builtins.is_empty() && languages.ready(repo);
         // A user-defined language runs only where this round found its
         // marker files; where the files are gone, its shown value is
-        // replaced by a hidden one (D3c-2 rulings Q2, Q3).
+        // replaced by a hidden one.
         let (skip, hide) = gate_languages(&self.language_units, languages, repo);
         self.runnable.retain(|(id, _)| !skip.contains(id));
         if let Ok(now) = now_ns() {
@@ -1466,8 +1464,8 @@ impl Publish {
     }
 
     /// Publishes `entries` into the command response of this context and
-    /// cwd: the store of the collection response, under its lock (C4 ruling
-    /// P1). A store another round holds is no publication: the next round
+    /// cwd: the store of the collection response, under its lock. A store another round holds is no publication: the
+    /// next round
     /// runs those units again.
     fn publish_entries(
         &self,
@@ -1528,7 +1526,7 @@ fn gate_languages(
 }
 
 /// A language unit's entry: the version word of the first line it printed
-/// (D3c-2 ruling Q1, `profile::any_version`); a line with none is a failed
+/// (`profile::any_version`); a line with none is a failed
 /// entry with no value.
 fn language_entry(mut e: response::Entry) -> response::Entry {
     if e.status == response::Status::Ok {
@@ -1633,7 +1631,7 @@ mod tests {
         )
     }
     // 폴더 사실이 저장소를 확정했을 때만 내장 언어를 정한다. in_repo를 모르거나(탐색 깊이 제한) 저장소 안인데 뿌리
-    // 위치를 모르면(별칭 경로) 미확정이다(D3a 재리뷰 H1). 이것을 실패시키는 것: 미확정을 저장소 밖으로 보는 것,
+    // 위치를 모르면(별칭 경로) 미확정이다. 이것을 실패시키는 것: 미확정을 저장소 밖으로 보는 것,
     // 뿌리 위치 없는 저장소 안을 받는 것.
     #[test]
     fn roots_stay_unknown_unless_settled() {
@@ -1652,10 +1650,10 @@ mod tests {
         assert_eq!(of(None, Some(1)), Root::Unknown);
     }
 
-    // 수집 답과 같은 저장소의 폴더 사실이 있을 때만 내장 언어를 정하고(D3a 리뷰 H1), 할 일이 없는 회차는 PATH를
-    // 걷지 않는다(보안 리뷰 S-M3). 이것을 실패시키는 것: 폴더 사실 없이 내장 언어를 정하는 것(셸 폴더가 저장소를
+    // 수집 답과 같은 저장소의 폴더 사실이 있을 때만 내장 언어를 정하고, 할 일이 없는 회차는 PATH를
+    // 걷지 않는다. 이것을 실패시키는 것: 폴더 사실 없이 내장 언어를 정하는 것(셸 폴더가 저장소를
     // 대신함), 다른 저장소의 사실을 받는 것, 답 없는 회차를 정하는 것, 할 일이 없어도 탐색하는 것.
-    // D3c-2 Q3: 사용자 정의 language는 이 회차가 그 표시 파일을 찾았을 때만 돈다. 찾지 못한 것은 건너뛰고 숨김
+    // 사용자 정의 language는 이 회차가 그 표시 파일을 찾았을 때만 돈다. 찾지 못한 것은 건너뛰고 숨김
     // 항목 대상이며, 답이 없거나 뿌리가 미확정이면 건너뛰기만 한다(숨기지도 않음). 이것을 실패시키는 것: 찾지 못한
     // 단위를 실행 목록에 남기는 것, 답 없는 단위를 숨김으로 보내는 것, 뿌리 미확정에서 정하는 것.
     // 사용자 정의 language 항목은 출력 첫 줄의 버전 단어만 값으로 남기고, 버전 단어가 없으면 값 없는 실패
@@ -1690,7 +1688,7 @@ mod tests {
     }
 
     // 감지 파일이 있는 곳에서만 사용자 language를 돌리고, 정하지 못한 회차(폴더 사실이 저장소를 확정하지 않음,
-    // 수집 답 없음)는 숨기지 않아 그리던 값이 남는다(D3c-2 판정 Q2·Q3). 이것을 실패시키는 것: 미확정을 숨김으로
+    // 수집 답 없음)는 숨기지 않아 그리던 값이 남는다. 이것을 실패시키는 것: 미확정을 숨김으로
     // 보는 것, 답 없는 회차를 감지 결과로 정하는 것.
     #[test]
     fn a_language_runs_only_where_its_files_were_found() {
@@ -1798,7 +1796,7 @@ mod tests {
         SystemGroups::new(&sys::passwd_entry(sys::current_uid()).unwrap().name)
     }
 
-    // C2 판정 Q3: "/"는 0, 링크를 지나는 "/var/empty"는 ELOOP일 때만 relay를 쓴다(EINVAL은 그 플래그가 없는
+    // "/"는 0, 링크를 지나는 "/var/empty"는 ELOOP일 때만 relay를 쓴다(EINVAL은 그 플래그가 없는
     // macOS, 받기만 하고 지키지 않는 플래그는 링크 쪽에서 걸림). 이 Mac의 탐침 결과도 기록한다. 이것을 실패시키는
     // 것: nofollow_any의 두 조건 가운데 하나를 지우는 것.
     #[cfg(target_os = "macos")]
@@ -1824,7 +1822,7 @@ mod tests {
         (t, root)
     }
 
-    // C2 판정 Q1: macOS 스크립트는 세션 이름이 붙은 사본으로, 핀 없이 넘긴다. 네이티브 파일은 그대로다. 빠진 단위의
+    // macOS 스크립트는 세션 이름이 붙은 사본으로, 핀 없이 넘긴다. 네이티브 파일은 그대로다. 빠진 단위의
     // 사본과 회차의 사본은 지운다. 이것을 실패시키는 것: executable()의 사본 분기를 지우는 것(원본 경로가 넘어감),
     // forget_last나 remove_all의 unlink를 지우는 것.
     #[cfg(target_os = "macos")]

@@ -1,6 +1,5 @@
 //! clone3(CLONE_INTO_CGROUP | CLONE_PIDFD): the child starts inside the
-//! cgroup, so no fork can escape before a move (spec section 4 deadline
-//! order 4). Measured in M1 for M6 command processes.
+//! cgroup, so no fork can escape before a move. Measured in M1 for M6 command processes.
 use std::ffi::{CStr, c_char};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};

@@ -1,5 +1,4 @@
-//! When the atomic cgroup.kill path may be used (spec section 4 deadline
-//! order 4; platform table: CLONE_INTO_CGROUP 5.7, cgroup.kill 5.14), and
+//! When the atomic cgroup.kill path may be used (platform table: CLONE_INTO_CGROUP 5.7, cgroup.kill 5.14), and
 //! the X-04 probe line built from what the probe observed. Pure: the probe
 //! binary does the I/O, this module only decides and formats.
 use crate::report::escape;
@@ -9,7 +8,7 @@ pub fn atomic_kill_available(kernel: (u32, u32), has_cgroup_kill: bool, delegate
 }
 
 /// Delegation as X-04 means it: this user really moved a process into a
-/// child cgroup and read it back there (spec section 9, "쓰기 권한").
+/// child cgroup and read it back there.
 pub fn delegated(move_ok: bool, readback_ok: bool) -> bool {
     move_ok && readback_ok
 }

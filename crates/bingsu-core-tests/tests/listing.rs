@@ -1,5 +1,5 @@
 //! `bingsu list` rows come from the same tables as the published schemas
-//! and the renderer (plan D2).
+//! and the renderer.
 use bingsu_core::color::palette::TOKENS;
 use bingsu_core::config::schema::{Which, schema};
 use bingsu_core::field::BUILTIN;

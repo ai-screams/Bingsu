@@ -1,5 +1,4 @@
-//! Fixed executable path policy (spec section 5 "connection", decision 2;
-//! spec section 2 safety row and decision 6 review for group write).
+//! Fixed executable path policy.
 use crate::commands::collector::Sibling;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -9,8 +8,7 @@ use std::path::{Path, PathBuf};
 pub use bingsu_core::fs_trust::{AclFacts, Verdict};
 use bingsu_core::fs_trust::{Facts, GroupOracle, entry_verdict};
 
-/// The executable must live on a local file system (spec section 4,
-/// macOS executable row: not `MNT_LOCAL` is refused; init only warns).
+/// The executable must live on a local file system (not `MNT_LOCAL` is refused; init only warns).
 pub fn local_verdict(local: Option<bool>) -> Verdict {
     match local {
         Some(true) => Verdict::Safe,
@@ -55,7 +53,7 @@ pub fn invocation_path(argv0: &OsStr, path_env: Option<&OsStr>, cwd: &Path) -> O
     None
 }
 
-/// The rule for one path entry (Task A7 table; the rule itself is
+/// The rule for one path entry (the rule itself is
 /// `bingsu_core::fs_trust::entry_verdict`, shared with the runtime root walk
 /// and the config file check).
 pub fn classify(e: &EntryFacts, uid: u32, groups: &mut dyn GroupOracle) -> Verdict {
@@ -122,7 +120,7 @@ pub fn sibling(
 /// name at a time: "/", each folder entered, each symlink on the way (any
 /// hop of a chain, in any component) and the final file. Each symlink and
 /// each target sits in a folder that is itself on the list, so this covers
-/// "the symlink, its target and every ancestor folder" (spec section 4)
+/// "the symlink, its target and every ancestor folder"
 /// for every hop. `None` if a name cannot be inspected, a link cannot be
 /// read, the path is relative, or the chain exceeds `MAX_SYMLINK_HOPS`.
 /// The second value is the resolved final file.
@@ -266,7 +264,7 @@ mod tests {
         }
     }
 
-    // One row per rule in the Task A7 table. 이것을 실패시키는 것: 표의 어느 한 행이라도 다르게 판정하는 것.
+    // One row per rule in the table. 이것을 실패시키는 것: 표의 어느 한 행이라도 다르게 판정하는 것.
     #[test]
     fn rule_table() {
         use AclFacts as A;

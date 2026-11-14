@@ -1,5 +1,4 @@
-//! Write-only child spawn and fd cleanup order (spec section 4 side-effect
-//! rules). The default mode times both orders in one process, taking turns
+//! Write-only child spawn and fd cleanup order. The default mode times both orders in one process, taking turns
 //! within each round in alternating direction; `--demo ORDER` shows the
 //! effect on a shell's $(...); `--probe-child PATH` spawns PATH through the
 //! same path with a leaked fd in place and prints what the child saw.

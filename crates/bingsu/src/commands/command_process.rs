@@ -1,5 +1,4 @@
-//! One relay spawn for the command supervisor (spec section 4 "user command
-//! execution model", row input and output). The relay's permit and exec frame
+//! One relay spawn for the command supervisor. The relay's permit and exec frame
 //! are written into an empty channel (a pipe; on macOS a socket pair) before
 //! the spawn, so a relay that never reads cannot hold the supervisor. The relay always gets descriptors 0, 1
 //! and 2 from the spawn actions, whatever the supervisor holds there: 0 is

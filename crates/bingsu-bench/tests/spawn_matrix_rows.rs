@@ -1,4 +1,4 @@
-//! The matrix prints every row of the Task B3 table, measured or `na`.
+//! The matrix prints every row of the table, measured or `na`.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 

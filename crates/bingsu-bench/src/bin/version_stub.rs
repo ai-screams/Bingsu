@@ -1,4 +1,4 @@
-//! A stand-in language command for the builtin probe tests (plan D3a): a
+//! A stand-in language command for the builtin probe tests: a
 //! real executable (probes never run a `#!` script) that prints a version
 //! line by the name it was copied under, or the contents of `<self>.out`
 //! when that file exists, and appends one line to `<self>.runs` per run.

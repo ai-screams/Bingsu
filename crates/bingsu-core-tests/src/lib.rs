@@ -1,7 +1,7 @@
 //! Tests only (tests/). The crate exists so that proptest stays
 //! out of bingsu-core's dependency graph (crates/bingsu-core/deny.toml).
 //! It also holds the readers of the shell field grammar that several test
-//! files share (spec section 3 "셸 경계의 요구 행동").
+//! files share.
 use bingsu_core::sanitize::is_removed;
 use bingsu_core::shell_word::Shell;
 

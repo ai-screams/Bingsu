@@ -1,12 +1,11 @@
 //! Sanitized `PATH` and executable lookup for user commands and builtin
-//! probes (spec section 4, rows environment, executable lookup and native
-//! executable). The rules are `bingsu_core::command::path` and
+//! probes. The rules are `bingsu_core::command::path` and
 //! `bingsu_core::fs_trust`; this file walks the file system one name at a
 //! time through held descriptors and hands them the facts.
 //!
 //! The helper resolves; the relay, which cannot ask the group database,
 //! runs only the canonical path it is given, refuses any symlink on it and
-//! accepts group write only for the pin found here (B2 ruling, design A).
+//! accepts group write only for the pin found here.
 //! Ancestor folders get no pin: the walk below found that only root, the
 //! user or a cleared group can change them, so between this check and the
 //! relay's exec nobody else can swap a name on the way.
@@ -499,7 +498,7 @@ pub fn resolve_open(
 }
 
 /// Why a script found on the way does not run, for `config check`'s W411
-/// (D3a/E2 ruling Q2: one code, the reason as its argument). The decision
+/// (one code, the reason as its argument). The decision
 /// is `rule::head`'s and `interpreter`'s; this only names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScriptRefusal {
@@ -662,7 +661,7 @@ pub fn explain(
     Explained::Absent
 }
 
-/// A script's interpreter (spec section 4 script row): an absolute path
+/// A script's interpreter: an absolute path
 /// resolved by the same rules, a native executable (no nested `#!`, read
 /// from its checked descriptor), and not `/usr/bin/env` under another name
 /// (merged-/usr `/bin/env`). A missing interpreter refuses the script; the
@@ -751,9 +750,8 @@ fn resolve_checked(
                 return Err(Miss::SetId);
             }
             // macOS runs the target by path, not by descriptor: an executable
-            // on a network file system (no MNT_LOCAL) is refused (spec section
-            // 4, macOS executable row). Only the file itself, as that row
-            // says, and only one that would run: a file the lookup skips
+            // on a network file system (no MNT_LOCAL) is refused. Only the file itself, and only one that would run: a
+            // file the lookup skips
             // stays a skip. The test that fails this needs a network mount
             // (`test_macos_network_fs_refused`).
             #[cfg(target_os = "macos")]
@@ -796,7 +794,7 @@ fn resolve_checked(
 #[cfg(target_os = "macos")]
 pub const SCRIPT_MAX: u64 = 65_536;
 
-/// macOS script copies (spec section 4 script row): macOS cannot run a
+/// macOS script copies: macOS cannot run a
 /// checked descriptor, so a script's body is copied into the private folder
 /// `scripts` of the runtime root and the interpreter is given the copy's
 /// path. Only the user can change anything in that folder.
@@ -809,7 +807,7 @@ pub struct ScriptCopies {
     path: PathBuf,
 }
 
-/// Copies removed by one sweep, at most (C2 ruling Q1).
+/// Copies removed by one sweep, at most.
 #[cfg(target_os = "macos")]
 pub const SWEEP_MAX: usize = 64;
 
@@ -2148,7 +2146,7 @@ mod tests {
         }
     }
 
-    // C2 판정 Q1: sweep은 자기 태그의 사본만, 한 번에 SWEEP_MAX개까지 지운다. 이것을 실패시키는 것: 접두사
+    // sweep은 자기 태그의 사본만, 한 번에 SWEEP_MAX개까지 지운다. 이것을 실패시키는 것: 접두사
     // 비교를 지우는 것(다른 세션의 사본이 지워짐), 상한 검사를 지우는 것(70개가 한 번에 지워짐).
     #[cfg(target_os = "macos")]
     #[test]
