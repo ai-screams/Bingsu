@@ -20,7 +20,7 @@ pub struct TrustedEnv {
 impl TrustedEnv {
     #[expect(
         clippy::disallowed_methods,
-        reason = "init pins roots at a trusted moment (spec 4, runtime root 1 and 7)"
+        reason = "init pins roots at a trusted moment"
     )]
     pub fn capture() -> Self {
         Self {
