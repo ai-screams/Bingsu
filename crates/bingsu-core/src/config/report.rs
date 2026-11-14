@@ -1,4 +1,4 @@
-//! One read of the config, end to end (spec section 2 "합치는 순서"): load
+//! One read of the config, end to end: load
 //! → merge → check → compile, with every diagnostic, the width table and
 //! the snapshot in one report. `config check` (N5) shows it, the refresh
 //! helper (N2) publishes its snapshot; neither can drop a warning on the
@@ -54,8 +54,7 @@ fn below(files: &[Found], id: SourceId) -> Vec<SourceId> {
 }
 
 impl ConfigReport {
-    /// Adds diagnostics a caller decided after compiling (the CLI's `match`
-    /// check, C4c ruling Q1), in the report's order.
+    /// Adds diagnostics a caller decided after compiling (the CLI's `match` check), in the report's order.
     pub fn add_diagnostics(&mut self, more: Vec<Diagnostic>) {
         if more.is_empty() {
             return;

@@ -119,7 +119,7 @@ fn found(index: u8, value: &[u8]) -> LanguageResult {
     }
 }
 
-// 스펙 935행의 문법과 보안 리뷰 M1(D1, C2 판정 Q3의 "첫 글자 `-` 금지"를 대체): 첫 글자는 [0-9A-Za-z]다.
+// 첫 글자는 [0-9A-Za-z]다.
 // 이것을 실패시키는 것: 허용 글자에 `/`를 더하는 것, `..` 금지를 지우는 것, 첫 글자 검사를 `-`만 막는 쪽으로
 // 되돌리는 것(`.`, `.hidden`, `+nightly`, `_x`가 통과), 길이 상한(32)이나 하한(1)을 지우는 것, 제어 문자를 허용
 // 글자에 넣는 것.
@@ -154,8 +154,8 @@ fn version_grammar_table() {
 }
 
 // 형식별 추출. 이것을 실패시키는 것: Line이 주석·빈 줄을 건너뛰지 않는 것, rust-toolchain.toml이 [toolchain] 밖의
-// channel을 읽거나 escape를 받는 것, `path` 키를 보지 않는 것(channel과 함께여도 Path, D2 판정 Q4), `path.x`를
-// 받는 것, go.mod가 toolchain보다 go 지시어를 먼저 쓰는 것(C2 판정 Q5, D1).
+// channel을 읽거나 escape를 받는 것, `path` 키를 보지 않는 것(channel과 함께여도 Path), `path.x`를
+// 받는 것, go.mod가 toolchain보다 go 지시어를 먼저 쓰는 것.
 #[test]
 fn formats_extract_one_candidate() {
     let cases: [(Format, &[u8], Candidate<'_>); 14] = [
@@ -363,7 +363,7 @@ fn decoder_returns_the_queries() {
     assert_eq!(got.languages, r.languages);
 }
 
-// C2 판정 Q1(D1): 사용자 정의 language 단위의 detect_files만 질의가 된다. not_run 단위와 경로 성분이 아닌 이름은
+// 사용자 정의 language 단위의 detect_files만 질의가 된다. not_run 단위와 경로 성분이 아닌 이름은
 // 뺀다. 이것을 실패시키는 것: not_run 거름을 지우는 것, user_queries의 validate 거름을 지우는 것.
 #[test]
 fn user_queries_leave_out_bad_names() {
@@ -428,7 +428,7 @@ fn reseal(bytes: &mut [u8]) {
     bytes[16..20].copy_from_slice(&crc);
 }
 
-// 보안 리뷰 M2: 저장 응답의 언어 결과는 index 오름차순이고 겹치지 않는다. [1,0]과 [0,0]은 encode도 decode도
+// 저장 응답의 언어 결과는 index 오름차순이고 겹치지 않는다. [1,0]과 [0,0]은 encode도 decode도
 // 거부한다. 이것을 실패시키는 것: languages_len의 순서 검사를 `>`로 바꾸는 것([0,0]이 통과), 검사를 지우는 것.
 #[test]
 fn stored_languages_are_ascending_and_unique() {
@@ -467,7 +467,7 @@ fn stored_languages_are_ascending_and_unique() {
     }
 }
 
-// 보안 리뷰 M2와 Codex L6: 받는 쪽 검사의 나머지 칸. Found의 레벨 33, 표시 파일 index 9, Refused의 파일 index 9,
+// 받는 쪽 검사의 나머지 칸. Found의 레벨 33, 표시 파일 index 9, Refused의 파일 index 9,
 // 표시 파일이 없다는 바이트(0) 뒤의 0이 아닌 index나 level은 거부한다. 이것을 실패시키는 것: check의 file_ok에서
 // 레벨 검사를 지우는 것, 표시 파일 index 검사를 지우는 것, Refused를 검사 없이 받는 것, read의 `m == 0`이나
 // `level == 0` 조건을 지우는 것, Path의 파일 index를 보지 않는 것(D2).
@@ -547,8 +547,8 @@ fn receiver_checks_every_index_and_level() {
 // 값 안의 가짜 표·키는 읽지 않는다. channel을 정할 수 있는데 지원하지 않는 구문은 값 없음(Malformed)이다.
 // 이것을 실패시키는 것: 표 머리 뒤 주석을 거부하는 것, 여러 줄 문자열 상태를 지우는 것(가짜 channel을 읽음),
 // 여러 줄 기본 문자열 안의 `\` 건너뛰기를 지우는 것, 괄호 깊이를 지우는 것(배열 안의 `[`를 표 머리로 읽음),
-// 따옴표 키·최상위 toolchain·점 키·따옴표 표 이름·머리 뒤 잔여·열린 문자열 거부를 지우는 것. 재리뷰 M2·M3·L5:
-// channel을 찾은 뒤에도 파일 끝까지 검증하는 것을 지우는 것(뒤의 따옴표 키·열린 문자열·두 번째 channel을 놓침),
+// 따옴표 키·최상위 toolchain·점 키·따옴표 표 이름·머리 뒤 잔여·열린 문자열 거부를 지우는 것. channel을 찾은 뒤에도 파일 끝까지 검증하는 것을 지우는 것(뒤의 따옴표 키·열린 문자열·두 번째
+// channel을 놓침),
 // 괄호를 종류 없이 세는 것(`[}`가 닫힘), 32단 중첩 상한을 지우는 것, `channel.` 거부를 지우는 것, channel 값
 // 뒤 잔여 검사(comment_or_end)를 지우는 것. 확인 리뷰 M: `toolchain` 표를 다시 여는 것(두 번째 `[toolchain]`,
 // `[[toolchain]]`, `[toolchain.<x>]`)을 받는 것(각 조건을 지우면 뒤 channel이나 재정의를 놓침).
@@ -771,8 +771,8 @@ x = 1
     }
 }
 
-// D3a 판정 Q-B: 갱신 없이 언어 결과만 있는 회차도 결과(Completed)를 낸다. helper가 이번 회차의 내장 조사에 넘기기
-// 때문이다. 기록은 저장소가 갱신 있을 때만 만든다(보안 리뷰 L4의 계약, collection_store 시험이 고정). 둘 다 없으면
+// 갱신 없이 언어 결과만 있는 회차도 결과(Completed)를 낸다. helper가 이번 회차의 내장 조사에 넘기기
+// 때문이다. 기록은 저장소가 갱신 있을 때만 만든다(collection_store 시험이 고정한 계약). 둘 다 없으면
 // 결과도 없다. 이것을 실패시키는 것: finish가 언어 결과만 있는 회차를 None으로 보내는 것, 빈 회차에 결과를 내는 것.
 #[test]
 fn language_results_alone_reach_the_round() {
@@ -792,7 +792,7 @@ fn language_results_alone_reach_the_round() {
     assert_eq!((c.updates.len(), c.languages.len()), (1, 1));
 }
 
-// D2 판정 Q9·Q11: 내장 파일 순서는 관리자가 읽는 순서다. rustup은 한 폴더에 둘이 있으면 `rust-toolchain`을 읽는다
+// 내장 파일 순서는 관리자가 읽는 순서다. rustup은 한 폴더에 둘이 있으면 `rust-toolchain`을 읽는다
 // (rustup 1.29.2 실측). `.tool-versions`는 읽지 않는다. 형식 태그 1(옛 `.tool-versions`)은 거부한다. 이것을 실패시키는
 // 것: rust 파일 순서를 toml 먼저로 되돌리는 것, format_from이 태그 1을 받는 것.
 #[test]
@@ -828,7 +828,7 @@ fn formats_follow_the_managers_order() {
     );
 }
 
-// D2 판정 Q4: path 툴체인은 값도 거부도 아닌 자기 답(Path)이고, 받는 쪽과 저장 응답을 지난다. 이것을 실패시키는
+// path 툴체인은 값도 거부도 아닌 자기 답(Path)이고, 받는 쪽과 저장 응답을 지난다. 이것을 실패시키는
 // 것: version()이 Candidate::Path를 Refused로 보내는 것, Path의 wire 태그를 읽지 않는 것.
 #[test]
 fn path_toolchain_is_its_own_answer() {
@@ -859,7 +859,7 @@ fn path_toolchain_is_its_own_answer() {
     );
 }
 
-// 그려진 내장 언어 segment만 각각 묻고(D3 판정 Q6), worker mask가 0이어도 언어가 있으면 요청을 만든다. 이것을
+// 그려진 내장 언어 segment만 각각 묻고, worker mask가 0이어도 언어가 있으면 요청을 만든다. 이것을
 // 실패시키는 것: builtin_languages에서 그려진 비트 검사를 지우는 것(그리지 않은 언어까지 물음), mask가 0이면
 // 언어가 있어도 요청을 만들지 않는 것.
 #[test]

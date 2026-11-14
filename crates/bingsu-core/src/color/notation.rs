@@ -1,5 +1,4 @@
-//! Color notations accepted for overrides (spec section 2 "색 token과 색
-//! 표기"): `oklch(L C H)`, `#rrggbb`, a 256-color number and `term.ansi.N`.
+//! Color notations accepted for overrides: `oklch(L C H)`, `#rrggbb`, a 256-color number and `term.ansi.N`.
 //! Parsed once when the config is compiled, never per prompt.
 use super::math::{Oklch, Srgb8};
 

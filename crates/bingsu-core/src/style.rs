@@ -1,5 +1,4 @@
-//! The three style levels (ADR-0022, spec section 2 "스타일 세 단계의
-//! 우선순위", M2 rule): the preset is the base, option keys sit on top, and
+//! The three style levels: the preset is the base, option keys sit on top, and
 //! a template replaces both (`config check` reports the ignored levels from
 //! M3). Presets and options only produce template text: the renderer knows
 //! templates alone.
@@ -19,7 +18,7 @@ pub enum Cap {
     Bracket,
 }
 
-/// How neighboring blocks meet (ADR-0022 "블록 연결").
+/// How neighboring blocks meet ("블록 연결").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Joining {
     /// A separator glyph between blocks.
@@ -30,7 +29,7 @@ pub enum Joining {
     Spaced,
 }
 
-/// Option keys (ADR-0022 option combination). `None` = not set at this
+/// Option keys (option combination). `None` = not set at this
 /// level. Key names are fixed in M3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct StyleOptions {
@@ -68,7 +67,7 @@ pub struct Preset {
     pub options: StyleOptions,
 }
 
-/// The seven first-release presets (ADR-0022, the style playground's seven):
+/// The seven first-release presets (the style playground's seven):
 /// each is a combination of the option keys, no renderer code of its own.
 pub const PRESETS: &[Preset] = &[
     Preset {

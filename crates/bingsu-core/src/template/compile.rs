@@ -1,4 +1,4 @@
-//! Template tree to render nodes (spec section 3 "템플릿 중간 표현"). The
+//! Template tree to render nodes. The
 //! helper list is closed: an unknown helper is an error, so a later helper
 //! never changes an existing theme. Source spans go to a side table
 //! (`CompiledLine::origin`), not into the nodes.
@@ -319,7 +319,7 @@ pub struct CompileError {
     pub span: Span,
 }
 
-/// Most lines a template may have (spec section 2: `line1` and `line2`).
+/// Most lines a template may have.
 pub const MAX_LINES: usize = 2;
 
 struct Ctx<'a> {

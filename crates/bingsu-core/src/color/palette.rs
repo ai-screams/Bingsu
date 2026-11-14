@@ -1,6 +1,5 @@
-//! Color tokens, flavor A and the render-free palette resolution (spec
-//! section 2 "색 token과 색 표기", ADR-0004, ADR-0005, ADR-0006, ADR-0007,
-//! ADR-0016). `resolve_palette` is the one function the prompt and the
+//! Color tokens, flavor A and the render-free palette resolution. `resolve_palette` is the one function the prompt and
+//! the
 //! generators (sub-project 5) share.
 use super::math::{
     Oklch, OklchQ, Srgb8, clamp_chroma, contrast_milli_lum, luminance, nearest_256, oklch_q,
@@ -25,7 +24,7 @@ pub enum AnsiSlot {
 
 /// A prompt token: name, palette color it points to in each mode, and its
 /// ANSI slot in each mode. Text drawn in a token uses the read tier in light
-/// mode (ADR-0006); block backgrounds use the display tier.
+/// mode; block backgrounds use the display tier.
 #[derive(Debug)]
 pub struct TokenDef {
     pub name: &'static str,
@@ -78,7 +77,7 @@ pub const TOKENS: &[TokenDef] = &[
     tk("venv", "accent.yellow", "accent.yellow", S(3), S(3)),
 ];
 
-/// Reserved token prefixes (spec section 2): names under them are not
+/// Reserved token prefixes: names under them are not
 /// prompt tokens yet.
 pub const RESERVED_PREFIXES: &[&str] = &["term.ansi.", "syntax.", "diff."];
 
@@ -86,7 +85,7 @@ pub fn token_index(name: &str) -> Option<usize> {
     TOKENS.binary_search_by(|t| t.name.cmp(name)).ok()
 }
 
-/// Knobs of ADR-0016 step 2. `None` keeps the flavor value.
+/// Knobs of resolution step 2. `None` keeps the flavor value.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Knobs {
     pub hue: Option<f64>,
@@ -98,10 +97,10 @@ pub struct Knobs {
 pub struct PaletteInput<'a> {
     pub mode: Mode,
     pub knobs: Knobs,
-    /// ADR-0016 step 3: a palette color name (`accent.blue`) or a token
+    /// Resolution step 3: a palette color name (`accent.blue`) or a token
     /// name (`git.dirty`) and its new value.
     pub overrides: &'a [(&'a str, ColorSpec)],
-    /// ADR-0016 step 4: token name to palette color name.
+    /// Resolution step 4: token name to palette color name.
     pub roles: &'a [(&'a str, &'a str)],
 }
 
@@ -222,8 +221,7 @@ fn flavor_a(name: &str, mode: Mode, k: Knobs, read: bool) -> Option<Oklch> {
                 (Mode::Dark, _) => (k.accent_l.unwrap_or(0.76), k.accent_c.unwrap_or(0.12)),
                 // Teal's display tier is C 0.1092, the most sRGB holds at L
                 // 0.62 H 185 (shown #009b8f either way), so the default
-                // palette reports no clipping; the exception to ADR-0004
-                // item 3 is recorded there (2026-10-13).
+                // palette reports no clipping.
                 (Mode::Light, false) => (
                     k.accent_l.unwrap_or(0.62),
                     k.accent_c
@@ -266,7 +264,7 @@ fn flavor_a(name: &str, mode: Mode, k: Knobs, read: bool) -> Option<Oklch> {
     }
 }
 
-/// ANSI 16 slots of flavor A (palette study; light 0, 7, 8, 15 per ADR-0007).
+/// ANSI 16 slots of flavor A (palette study; light 0, 7, 8, 15).
 pub fn ansi_color(slot: u8, mode: Mode, k: Knobs) -> Srgb8 {
     const DARK: [&str; 16] = [
         "neutral.surface1",
@@ -322,7 +320,7 @@ fn spec_to_shown(s: ColorSpec, mode: Mode, k: Knobs) -> Shown {
 }
 
 /// Settings to the resolved token table, without rendering anything.
-/// Order: flavor and knobs, overrides, role reassignment (ADR-0016).
+/// Order: flavor and knobs, overrides, role reassignment.
 pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, PaletteError> {
     let check = |name: &str| {
         if RESERVED_PREFIXES.iter().any(|p| name.starts_with(p)) {
@@ -365,7 +363,7 @@ pub fn resolve_palette(input: &PaletteInput<'_>) -> Result<ResolvedPalette, Pale
     }
     for (i, t) in TOKENS.iter().enumerate() {
         let ansi = t.ansi[input.mode as usize];
-        // ADR-0016: a role reassignment (step 4) beats a color override of
+        // A role reassignment (step 4) beats a color override of
         // the token itself (step 3); palette-name overrides apply to the
         // color the role picks.
         let role = input.roles.iter().rev().find(|(n, _)| *n == t.name);
@@ -499,8 +497,8 @@ mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: light 7·15번이 ADR-0007의 L(0.86·0.905)·palette study의 C에서 벗어나는 것.
-    // ADR-0007의 hex(#ced0de·#dddfed)는 같은 공식으로 나오지 않는다(사용자 결정 2026-10-08: 공식이 원본, ADR-0007 hex를 고침).
+    // 이것을 실패시키는 것: light 7·15번이 L(0.86·0.905)·palette study의 C에서 벗어나는 것.
+    // 이전 기록의 hex(#ced0de·#dddfed)는 같은 공식으로 나오지 않아 공식을 원본으로 삼고 그 hex를 고쳤다.
     #[test]
     fn light_ansi_7_15_follow_adr_0007_lightness() {
         assert_eq!(
@@ -521,7 +519,7 @@ mod tests {
         );
     }
 
-    // 이것을 실패시키는 것: dark 강조색 최저 대비가 ADR-0004의 7.4:1 근처에서 벗어나는 것(값 회귀).
+    // 이것을 실패시키는 것: dark 강조색 최저 대비가 7.4:1 근처에서 벗어나는 것(값 회귀).
     #[test]
     fn dark_flavor_contrast_floor() {
         let p = resolve_palette(&input(Mode::Dark)).unwrap();
@@ -534,7 +532,7 @@ mod tests {
             .unwrap();
         assert!((7_300..=7_500).contains(&min), "{min}");
         // muted (overlay, L 0.56) is 3.56:1 on the background: below the text
-        // rule, so no built-in segment uses it for text (user decision 2026-10-08).
+        // rule, so no built-in segment uses it for text.
         let muted = token_index("muted").unwrap();
         let text_warn: Vec<usize> = p
             .warnings
@@ -600,7 +598,7 @@ mod tests {
         );
     }
 
-    // 이것을 실패시키는 것: light에서 글자 token이 읽기용 단계를 쓰지 않는 것(ADR-0006).
+    // 이것을 실패시키는 것: light에서 글자 token이 읽기용 단계를 쓰지 않는 것.
     #[test]
     fn light_text_uses_read_tier() {
         let p = resolve_palette(&input(Mode::Light)).unwrap();
@@ -610,8 +608,8 @@ mod tests {
     }
 
     // Expected values were computed apart from this code (a Python script that
-    // applies the palette study's flavor A formulas and the ANSI map, with
-    // ADR-0007's light 0, 7, 8 and 15), not copied from this code's output.
+    // applies the palette study's flavor A formulas and the ANSI map, with the fixed light 0, 7, 8 and 15), not copied
+    // from this code's output.
     fn hex(v: u32) -> Srgb8 {
         Srgb8 {
             r: (v >> 16) as u8,
@@ -716,7 +714,7 @@ mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: 역할 재배정이 같은 token 의 덮어쓰기에 지는 것(ADR-0016 4단계가 3단계보다 뒤).
+    // 이것을 실패시키는 것: 역할 재배정이 같은 token 의 덮어쓰기에 지는 것(4단계가 3단계보다 뒤).
     // 역할이 고른 팔레트 색에 걸린 이름 덮어쓰기는 그대로 적용된다.
     #[test]
     fn role_beats_token_override() {

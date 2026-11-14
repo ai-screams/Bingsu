@@ -7,7 +7,7 @@
 //! (monomorphization). `explain` (M7) prints `DecisionLog`.
 use alloc::vec::Vec;
 
-/// Overflow steps of spec section 3 "한 줄 조립과 넘칠 때", 1–7.
+/// Overflow steps 1–7 of the line assembly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Step {
     ShortenNames = 1,

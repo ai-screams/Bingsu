@@ -1,5 +1,4 @@
-//! Width bands (spec section 2 "폭 구간별 레이아웃", M2 rule, user decision
-//! 2026-10-03). Order: a band properly contained in another comes first
+//! Width bands. Order: a band properly contained in another comes first
 //! (this covers "both max-only: smaller first" and "both min-only: larger
 //! first"); bands that overlap without containment, or have the same
 //! range, must both carry `order`, which then decides (lower first). Names
