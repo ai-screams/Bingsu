@@ -31,7 +31,7 @@ PENDING = "not set"
 # fixtures (M6 C4b-3). A base that reads no command response makes their ratio
 # the whole added cost, and their worst increment is bounded by +0.5 ms.
 RECORD_ONLY = ("record only: a base without command values makes the ratio the whole added cost; "
-               "the worst increment is bounded by +0.5 ms (U-23), not by this ratio")
+               "the worst increment is bounded by +0.5 ms, not by this ratio")
 
 
 class GateResult(TypedDict, total=False):
@@ -203,8 +203,8 @@ def main(argv=None):
     p.add_argument("--measurement", type=Path, required=True, help="git-product.py --base/--candidate output")
     p.add_argument("--base-preparation", type=Path, required=True)
     p.add_argument("--candidate-preparation", type=Path, required=True)
-    p.add_argument("--ratio-p50", type=float, help="max candidate/base ratio of p50 (U3: 1.03)")
-    p.add_argument("--ratio-p95", type=float, help="max candidate/base ratio of p95 (U3: 1.10)")
+    p.add_argument("--ratio-p50", type=float, help="max candidate/base ratio of p50 (approved limit 1.03)")
+    p.add_argument("--ratio-p95", type=float, help="max candidate/base ratio of p95 (approved limit 1.10)")
     p.add_argument("--cap-bytes", type=int, help="cap on stripped front + collector bytes (2500000)")
     p.add_argument("--installed-cap-bytes", type=int,
                    help="cap on the stripped bytes of the three shipped files together (7000000)")
