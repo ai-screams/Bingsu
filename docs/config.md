@@ -270,6 +270,38 @@ the prompt keeps drawing with the last good settings. A file that is trusted for
 its own, with a warning (W406), and the other files are applied. `bingsu config check --explain` shows which each file
 is.
 
+For example, `~/.config/bingsu/config.toml` extends `~/themes/theme.toml`, which is outside the config folder and has
+`requires = ">=9.0"`. The check reports the error and the warning, the result is still `valid`, the exit code is 0, and
+the theme is not in the list of files that apply (the rest of the settings are published):
+
+```console
+$ bingsu config check
+settings folder: ~/.config/bingsu
+selection: config.toml or config.json in the settings folder
+files, in the order they apply:
+  1. (built-in) (trusted)
+  2. ~/.config/bingsu/config.toml (trusted)
+diagnostics: 1 error(s), 1 warning(s), 0 note(s)
+E306: this config requires bingsu >=9.0
+  where: ~/themes/theme.toml:1:12
+    via ~/.config/bingsu/config.toml
+  why: the file asks for a newer bingsu
+  fix: upgrade bingsu
+  code: E306 (bingsu help E306)
+
+W406: this shape-only file is not used: E306
+  where: ~/themes/theme.toml:1:1
+    via ~/.config/bingsu/config.toml
+  why: a shape-only file that does not check is dropped alone
+  fix: fix the file, or remove it from `extends`
+  code: W406 (bingsu help W406)
+
+widths (columns -> layout):
+  0-59       narrow
+  60+        (default layout)
+result: valid; some files are left out (see above)
+```
+
 The running version is compared as SemVer says: a pre-release is lower than the release with the same numbers. So
 `0.1.0-rc.1` does not satisfy `requires = ">=0.1.0"` (or `">=0.1"`), while `0.1.1-rc.1` does satisfy `">=0.1.0"`, and
 `0.1.0` itself satisfies both.
