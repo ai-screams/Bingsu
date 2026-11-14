@@ -52,5 +52,7 @@ pub mod snapshot_codec;
 pub mod status;
 pub mod style;
 pub mod template;
+pub mod terminal_reply;
+pub mod terminal_width;
 mod ucd;
 pub mod width;

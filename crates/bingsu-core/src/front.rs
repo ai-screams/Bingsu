@@ -44,8 +44,8 @@ fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
     // Display-only envelope observation; absent/garbled falls back to dark.
     // Built-in constants (test default_theme_builds); were it ever to fail,
     // the adapter's panic fallback gives the same `error:internal` record.
-    let theme =
-        DefaultTheme::new(parsed.colorfgbg.unwrap_or(Mode::Dark)).expect("built-in default theme");
+    let theme = DefaultTheme::new(envelope::display_mode(parsed.colorfgbg))
+        .expect("built-in default theme");
     let c = shell_values::collect(parsed);
     let inputs = Inputs {
         catalog: BUILTIN,

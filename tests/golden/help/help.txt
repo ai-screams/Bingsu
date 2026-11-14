@@ -698,6 +698,39 @@ How to fix
 
 ----
 
+W613 (warning)
+
+What happened
+  The terminal moved the cursor by another number of cells than the settings assume for some probe characters (ambiguous-width characters, emoji, a joined emoji, a flag, a combining mark or an icon).
+  The check names which ones and how many cells each took.
+
+Why
+  The prompt counts the width of every piece in cells to place the right side and to wrap lines. A count that differs from the terminal's by one cell shifts the right edge, or breaks a line at the wrong place.
+  The check asks the terminal where its cursor is after each probe character, so it measures what is drawn, not what a table says.
+
+How to fix
+  Set `width.ambiguous` and `width.emoji` to the values the check reports for this terminal.
+  Or change the terminal's own setting for ambiguous-width characters, then run the check again.
+  A result of unknown means the terminal did not answer in time; that is not a mismatch.
+
+----
+
+W614 (warning)
+
+What happened
+  The terminal's background is light where the prompt draws for dark, or the other way round.
+  The prompt decides this from a hint in the environment; the terminal itself was asked for its background color.
+
+Why
+  With `colors.mode` set to auto, the prompt cannot ask the terminal on every line, so it uses a hint that some terminals do not set and a shell inside tmux or ssh may not pass on.
+  Text drawn for the wrong brightness can fall below the contrast the themes are checked for.
+
+How to fix
+  Set `colors.mode` to dark or light to match the terminal.
+  The check runs only when `colors.mode` is auto.
+
+----
+
 N501 (note)
 
 What happened

@@ -150,6 +150,8 @@ mod cases {
         /// an entry, or hand it without one.
         no_build_id: bool,
         build_without_entry: bool,
+        /// The shell passed no `--colorfgbg` (the display mode then falls back).
+        no_colorfgbg: bool,
     }
     impl Harness {
         fn new() -> Self {
@@ -176,6 +178,7 @@ mod cases {
                 entry: None,
                 no_build_id: false,
                 build_without_entry: false,
+                no_colorfgbg: false,
             }
         }
         fn bytes(&self) -> Option<&[u8]> {
@@ -292,14 +295,16 @@ mod cases {
             fixture: Option<&crate::collection::selection::Catalog<'_>>,
         ) -> Response {
             let mut args = args.to_vec();
-            args.extend([
-                b"--colorfgbg".as_slice(),
-                if mode == Mode::Light {
-                    b"0;15"
-                } else {
-                    b"15;0"
-                },
-            ]);
+            if !self.no_colorfgbg {
+                args.extend([
+                    b"--colorfgbg".as_slice(),
+                    if mode == Mode::Light {
+                        b"0;15"
+                    } else {
+                        b"15;0"
+                    },
+                ]);
+            }
             let mut plan = prepare(&args).with_environment(self.environment.clone());
             if let Some(entry) = self.entry {
                 plan = plan.with_entry(entry);
@@ -822,6 +827,35 @@ mod cases {
         assert_eq!(records[2].0, records[2].1);
         assert_eq!(records[0].0, records[1].0);
         assert_eq!(records[0].1, records[2].0);
+    }
+
+    // `envelope::display_mode` is what `bingsu doctor` asks "which mode would the prompt draw for". The staged
+    // front end keeps its own `unwrap_or(Mode::Dark)` (a hash-pinned file), so this ties the two: with
+    // `colors.mode = "auto"` the record is the one an explicit mode gives, for the mode `display_mode` names,
+    // for both observations and for none.
+    // 이것을 실패시키는 것: staged 쪽의 대체 모드(관찰이 없을 때 Dark)나 COLORFGBG 사용을 `display_mode`와 다르게 바꾸는 것.
+    #[test]
+    fn display_mode_is_the_mode_auto_draws_for() {
+        use crate::envelope::display_mode;
+        let word = |m: Mode| if m == Mode::Light { "light" } else { "dark" };
+        let draw = |configured: &str, observed: Option<Mode>| {
+            let s = snapshot(&format!("[colors]\nmode='{configured}'\n"));
+            let mut h = Harness::new();
+            h.current = Some(s.encode(1, 0).unwrap());
+            h.marker = Some(marker(&s).encode().to_vec());
+            h.no_colorfgbg = observed.is_none();
+            h.run(&args(), observed.unwrap_or(Mode::Dark)).record
+        };
+        for observed in [None, Some(Mode::Dark), Some(Mode::Light)] {
+            let picked = display_mode(observed);
+            assert_eq!(
+                draw("auto", observed),
+                draw(word(picked), observed),
+                "observation {observed:?}"
+            );
+            // And the two modes do look different, so the comparison says something.
+            assert_ne!(draw("dark", observed), draw("light", observed));
+        }
     }
 
     // 이것을 실패시키는 것: snapshot의 not_run/승인 정책 대신 임의 unit 허용, compiled render 옵션·팔레트 무시.

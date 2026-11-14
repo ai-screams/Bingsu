@@ -137,9 +137,18 @@ fn display_or_unknown(v: &[u8]) -> Option<Vec<u8>> {
     (!v.is_empty() && v.len() <= PATH_BYTES_MAX).then(|| v.to_vec())
 }
 
+/// The display mode the prompt draws for: the `COLORFGBG` observation, else
+/// dark. `colors.mode = "auto"` takes its palette from this; an explicit mode
+/// ignores it. `bingsu doctor` asks the same function what the prompt would
+/// pick, so the two cannot drift (the staged front end keeps its own copy of
+/// this one line because it is a hash-pinned file; a test ties the two).
+pub fn display_mode(colorfgbg: Option<crate::color::palette::Mode>) -> crate::color::palette::Mode {
+    colorfgbg.unwrap_or(crate::color::palette::Mode::Dark)
+}
+
 // Accept only two ANSI indices, without retaining or rendering hostile bytes.
 // A valid word is at most five bytes ("15;15"); parsing cost is bounded too.
-fn colorfgbg_mode(v: &[u8]) -> Option<crate::color::palette::Mode> {
+pub fn colorfgbg_mode(v: &[u8]) -> Option<crate::color::palette::Mode> {
     use crate::color::palette::Mode;
     if v.len() > 5 {
         return None;
