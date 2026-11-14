@@ -89,9 +89,17 @@ def processes():
     return found
 
 
-def supervisors():
-    """Live command supervisors: pid and parent pid."""
-    return [(pid, ppid) for pid, ppid, _, argv in processes() if argv[1:2] == ["__command-v1"]]
+def supervisors(session):
+    """`session`'s live command supervisors: pid and parent pid. A
+    supervisor's parent is the helper that spawned it, and that helper's argv
+    carries the session's pinned runtime root, so supervisors of other test
+    runs on the same machine are never signalled. A supervisor whose helper
+    has died is not listed: ask `gone(pid)` about one already found."""
+    root = next(w for w in session.words if w.startswith("--runtime-root="))
+    found = processes()
+    helpers = {pid for pid, _, _, argv in found if argv[1:2] == ["__refresh-v1"] and root in argv}
+    return [(pid, ppid) for pid, ppid, _, argv in found
+            if argv[1:2] == ["__command-v1"] and ppid in helpers]
 
 
 def children(pid):
@@ -185,6 +193,27 @@ def lock_of(pid):
         return None
 
 
+# 감독 찾기는 시험이 띄운 세션의 것만 고른다: 같은 기계에서 도는 다른 시험(다른 팀원의 실행 포함)의 감독에
+# SIGKILL·SIGSTOP을 보내지 않게. 이것을 실패시키는 것: supervisors가 helper의 런타임 뿌리를 보지 않는 것(두 세션의
+# 감독이 서로의 목록에 섞임).
+def test_supervisor_lookup_sees_only_its_session(tmp_path, _native_boot_required):
+    sessions = []
+    for name, value in (("a", SESSION), ("b", OTHER)):
+        s = CommandSession(tmp_path / name)
+        s.session = value
+        s.put(config(["/bin/sleep", "1"], "timeout='1s'\n"))
+        sessions.append(ready(s))
+    a, b = sessions
+    a.prompt()
+    b.prompt()
+    both = until(lambda: (supervisors(a), supervisors(b)) if supervisors(a) and supervisors(b) else None)
+    assert both, "each session runs a supervisor"
+    mine, theirs = both
+    assert not {pid for pid, _ in mine} & {pid for pid, _ in theirs}, both
+    for s in sessions:
+        s.wait_quiet()
+
+
 # U-15: 셸 세션마다 동시 감독은 하나다. 이것을 실패시키는 것: command_grant::prepare의 세션 잠금
 # (close_only_lock)을 지우는 것(1초 걸리는 명령 동안 연속 프롬프트가 같은 세션의 감독을 여럿 띄운다).
 def test_one_supervisor_per_session(tmp_path, _native_boot_required):
@@ -200,7 +229,7 @@ def test_one_supervisor_per_session(tmp_path, _native_boot_required):
             s.prompt()
         time.sleep(0.05)
         per = {}
-        for pid, _ in supervisors():
+        for pid, _ in (sup for s in sessions for sup in supervisors(s)):
             lock = lock_of(pid)
             if lock is not None:
                 per[lock] = per.get(lock, 0) + 1
@@ -219,7 +248,7 @@ def test_target_ends_soon_after_helper_death(tmp_path, _native_boot_required):
     session.put(config(["/bin/sleep", "5"], "timeout='1s'\n"))
     ready(session)
     session.prompt()
-    found = until(lambda: [(s, p, c) for s, p in supervisors() for c in children(s)])
+    found = until(lambda: [(s, p, c) for s, p in supervisors(session) for c in children(s)])
     assert found, "no running target"
     supervisor, helper, target = found[0]
     os.kill(helper, signal.SIGKILL)
@@ -227,7 +256,7 @@ def test_target_ends_soon_after_helper_death(tmp_path, _native_boot_required):
     ended = until(lambda: gone(target), timeout=2.0)
     took = time.monotonic() - killed
     assert ended and took < 0.5, took
-    until(lambda: not any(s == supervisor for s, _ in supervisors()), timeout=2.0)
+    until(lambda: gone(supervisor), timeout=2.0)
     session.wait_quiet()
 
 
@@ -239,7 +268,7 @@ def test_lock_held_while_supervisor_alive(tmp_path, _native_boot_required):
     session.put(config(["/bin/sleep", "1"], "timeout='1s'\n"))
     ready(session)
     session.prompt()
-    found = until(lambda: [(s, p) for s, p in supervisors() if lock_of(s) is not None])
+    found = until(lambda: [(s, p) for s, p in supervisors(session) if lock_of(s) is not None])
     assert found, "no supervisor"
     supervisor, helper = found[0]
     os.kill(supervisor, signal.SIGSTOP)
@@ -249,14 +278,14 @@ def test_lock_held_while_supervisor_alive(tmp_path, _native_boot_required):
         session.wait_quiet()
         session.prompt()
         session.wait_quiet()
-        others = [s for s, _ in supervisors() if s != supervisor]
+        others = [s for s, _ in supervisors(session) if s != supervisor]
         assert others == [], "a second supervisor while the first holds the lock"
     finally:
         os.kill(supervisor, signal.SIGCONT)
     # It sees the helper gone (end of file), ends its child and exits.
-    assert until(lambda: not any(s == supervisor for s, _ in supervisors()), timeout=3.0)
+    assert until(lambda: gone(supervisor), timeout=3.0)
     session.prompt()
-    assert until(lambda: supervisors()), "the next prompt starts a supervisor again"
+    assert until(lambda: supervisors(session)), "the next prompt starts a supervisor again"
     session.wait_quiet()
 
 
@@ -489,14 +518,14 @@ def test_macos_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_r
 
     def running():
         table = processes()
-        for pid, _ in supervisors():
+        for pid, _ in supervisors(session):
             kids = [(p, argv) for p, ppid, state, argv in table if ppid == pid and state != "Z"]
             if len(kids) == 3 and all(argv == ["/bin/sleep", "1"] for _, argv in kids):
                 return [p for p, _ in kids]
         return None
 
     kids = until(running, timeout=2.0)
-    assert kids, [(s, children(s)) for s, _ in supervisors()]
+    assert kids, [(s, children(s)) for s, _ in supervisors(session)]
     for k in kids:
         assert children(k) == [], "a target has a child of its own"
     session.wait_quiet()
@@ -538,7 +567,7 @@ def test_macos_group_grandchild_ends_when_the_helper_dies(tmp_path, _native_boot
     session.prompt()
     pid = until(lambda: alive_pid(pidfile))
     assert pid, "the unit never ran"
-    found = until(lambda: supervisors())
+    found = until(lambda: supervisors(session))
     assert found, "no supervisor"
     os.kill(found[0][1], signal.SIGKILL)
     assert until(lambda: gone(pid), timeout=0.5), "a grandchild outlived the helper's death"
@@ -582,7 +611,7 @@ def test_macos_copy_outlives_a_stopped_supervisor_until_the_sweep(tmp_path, _nat
     folder = scripts_folder(session)
     other = folder / f"{session_tag(OTHER)}-{'0' * 32}"
     session.prompt()
-    found = until(lambda: [(s, p) for s, p in supervisors()
+    found = until(lambda: [(s, p) for s, p in supervisors(session)
                            if any(f.name.startswith(session_tag(SESSION)) for f in folder.iterdir())])
     assert found, "no supervisor with a copy"
     supervisor, helper = found[0]
@@ -638,7 +667,7 @@ def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_re
     sleep = os.path.realpath("/bin/sleep")
 
     def running():
-        for pid, _ in supervisors():
+        for pid, _ in supervisors(session):
             kids = children(pid)
             try:
                 exes = sorted(os.readlink(f"/proc/{k}/exe") for k in kids)
@@ -649,7 +678,7 @@ def test_each_unit_is_one_process_the_relay_execs_into(tmp_path, _native_boot_re
         return None
 
     kids = until(running, timeout=2.0)
-    assert kids, [(s, children(s)) for s, _ in supervisors()]
+    assert kids, [(s, children(s)) for s, _ in supervisors(session)]
     for k in kids:
         assert children(k) == [], "a target has a child of its own"
         # The supervisor spawned `bingsu __exec-v2` as this pid, and the relay
@@ -1022,8 +1051,7 @@ def test_round_without_units_starts_no_supervisor(tmp_path, _native_boot_require
     seen = []
     for _ in range(3):
         session.prompt()
-        # This session's only: a supervisor holds its session lock in this runtime root.
-        seen += [p for p, _ in supervisors() if (lock_of(p) or "").startswith(str(root))]
+        seen += [p for p, _ in supervisors(session)]
     session.wait_quiet()
     assert seen == []
     assert list(root.glob("command-*.lock")) == [] and not session.neutral().exists()
