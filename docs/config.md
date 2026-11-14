@@ -514,17 +514,27 @@ file and starts no process. The only thing it does besides reading is to ask the
 line, and, when there is something to do, a diagnostic code that `bingsu help CODE` explains.
 
 ```console
-$ bingsu doctor
+$ bingsu doctor | cat
 bingsu doctor
-  ok      executable      ~/.local/bin/bingsu: only you and root can change it or the folders above it
-  ok      bingsu on PATH  ~/.local/bin/bingsu: the bingsu on PATH is this executable
+  ok      executable      ~/src/Bingsu/target/debug/bingsu: only you and root can change it or the folders above it
+  skipped bingsu on PATH  no bingsu is found on PATH here; the hook uses the path pinned by init
   warn    pinned folders  init has not run in this shell; commands read the current environment (W603; bingsu help W603)
-  ok      one build       bingsu-prompt is not installed here; the hook calls `bingsu prompt`; bingsu-collect is from this build
-  unknown shell           shell version not confirmed: no shell passed it to this command
+  warn    one build       bingsu-prompt beside bingsu is not from this build or fails the safety check (W605; bingsu help W605)
+  unknown shell           shell version not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
+  unknown hook version    hook compatibility not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
+  unknown hook order      hook order not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
+  unknown envelope        the last envelope not confirmed: no shell passed it; run the shell function bingsu_doctor in your shell to check this
   skipped seccomp         this platform has no seccomp
   ok      settings        the settings check out (0 warning(s))
-result: 4 ok, 1 warning(s), 0 failed, 1 unknown, 1 skipped
+  skipped terminal width  standard output is not a terminal; `--terminal` asks the controlling terminal anyway
+  skipped background      standard output is not a terminal; `--terminal` asks the controlling terminal anyway
+result: 2 ok, 2 warning(s), 0 failed, 4 unknown, 4 skipped
 ```
+
+This run is a development build outside a shell that ran `bingsu init`, with the output going to a pipe. In your own
+shell, run `bingsu_doctor` (a zsh function that `bingsu init zsh` defines) instead of `bingsu doctor`: it hands the check
+the facts only the shell knows, so the four `unknown` rows get an answer. The rows `terminal width` and `background` are
+`skipped` here only because the output is a pipe (see [Terminal rows](#terminal-rows)).
 
 | Check | What it looks at |
 | -- | -- |
@@ -532,15 +542,18 @@ result: 4 ok, 1 warning(s), 0 failed, 1 unknown, 1 skipped
 | `bingsu on PATH` | Whether the `bingsu` your shell finds on `PATH` is the one running now |
 | `pinned folders` | The folders `bingsu init` pinned in this shell. The runtime folder is checked for being replaced (a different folder at the same path) or removed. The settings, state and log folders get the safety check the helper uses (owner, permissions, links); a state or log folder that does not exist yet is accepted |
 | `one build` | That `bingsu`, `bingsu-prompt` and `bingsu-collect` come from the same build (read from the files, not by running them) |
-| `shell` | The shell version. Today this is always `unknown`: no shell passes its version to `doctor` yet, and bingsu never guesses a version from a path or a folder name |
+| `shell` | The shell and its version, as the shell reports them through `bingsu_doctor`. Without it the row is `unknown`: bingsu never guesses a version from a path or a folder name. A zsh older than 5.8 is a warning (W611) |
+| `hook version` | Whether the hook of your shell asks for a record version this bingsu reads (E608 when it does not: open a new shell or run `bingsu init` again in it) |
+| `hook order` | That the hook functions stand in the order bingsu needs: the capture hook first and the install hook last in `precmd_functions`, each once (W609) |
+| `envelope` | That the last words the hook gave the prompt call have the fields the prompt reads, in order (W610). It also carries the brightness hint (`COLORFGBG`) the prompt got, which the `background` row compares |
 | `seccomp` | Whether the kernel supports seccomp (Linux; the example above is from macOS, where it is skipped). It does not check whether the prompt's own filter was installed |
 | `settings` | A summary of `config check`; a settings folder that fails the safety check is a `fail` |
 | `terminal width` | How many cells the terminal moves the cursor for probe characters, against `width.ambiguous` and `width.emoji` ([below](#terminal-rows)) |
 | `background` | Whether the terminal's background is light or dark, against what the prompt draws for ([below](#terminal-rows)) |
 
 The exit code is 1 when any check fails; warnings, `unknown` and `skipped` give 0. `--format json` prints the same
-rows as a JSON document. The shell evidence a hook can give (hook order, the envelope a hook sent, the circuit
-breaker) is not part of this table yet.
+rows as a JSON document. `--evidence-stdin` is what the shell function uses to pass its record; run the function, not that
+flag.
 
 #### Terminal rows
 
@@ -548,7 +561,7 @@ The last two rows ask the terminal. They write a few characters to the screen, r
 so they run only when standard output is a terminal, or when you pass `--terminal`, which asks the controlling terminal
 (`/dev/tty`) even when the output goes to a pipe. Without a terminal, or when `bingsu` is not the job in the foreground,
 both rows are `skipped`. A terminal that does not answer within about 0.2 seconds gives `unknown`, never a warning.
-Ctrl-C stops the run with exit code 130 after the terminal is back in its normal state.
+Ctrl-C (the key, read as a character) stops the run with exit code 130 after the terminal is back in its normal state; a signal such as SIGTERM restores the terminal and ends the run by that signal (exit status 128 plus the signal, for example 143). No table is printed in either case.
 
 | Row | What it measures | A warning means |
 | -- | -- | -- |
