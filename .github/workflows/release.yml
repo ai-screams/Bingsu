@@ -5,7 +5,10 @@ name: Release
 # same build, package and verify jobs, no signing, no attestation, no release.
 # A pull request that touches this workflow or its tool runs the dry run too,
 # so a change here is seen end to end before it reaches main (a manual
-# dispatch needs the file on the default branch).
+# dispatch needs the file on the default branch). A pull request from a fork
+# takes the same path: its token is read-only, it receives no secret, and the
+# jobs that use environment `release`, secrets or write permissions run only on
+# a tag push.
 #
 # Trust, in order:
 #   meta        tag equals the crates' version; the tagged commit is on main
@@ -42,7 +45,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_RUST: "1.99.1"
+  RELEASE_RUST: "1.100.0"
   TARGETS: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,aarch64-apple-darwin
 
 jobs:

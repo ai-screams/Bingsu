@@ -576,6 +576,33 @@ def test_actions_are_pinned_and_no_cache_is_used():
     assert "rust-cache" not in text and "actions/cache" not in text
 
 
+# 이것을 실패시키는 것: release의 컴파일러가 PR CI가 시험한 컴파일러와 어긋나는 것(RELEASE_RUST나 ci.yml의 고정 판 한쪽만 바꾸는 것).
+def test_release_rust_is_the_toolchain_ci_tests_with():
+    release = re.search(r'(?m)^  RELEASE_RUST: "(\d+\.\d+\.\d+)"$', workflow_text()).group(1)
+    ci = (ROOT / ".github/workflows/ci.yml").read_text().replace("\r\n", "\n")
+    body = ci.split("\njobs:\n", 1)[1]
+    parts = re.split(r"(?m)^  ([a-z][a-z0-9-]*):\n", body)
+    pins = {}
+    for i in range(1, len(parts), 2):
+        if parts[i] in ("collector-msrv", "icount"):  # the MSRV job and the instruction-count job pin their own
+            continue
+        for value in re.findall(r"(?m)^\s+toolchain: (\S+)$", parts[i + 1]):
+            pins.setdefault(value, []).append(parts[i])
+    assert pins, "ci.yml pins no toolchain"
+    assert set(pins) == {release}, (release, pins)
+
+
+def test_pull_request_runs_never_reach_signing_or_publishing():
+    head = workflow_text().split("\njobs:\n", 1)[0]
+    assert "fork" in head
+    for name in ("sign-macos", "publish"):
+        body = jobs()[name]
+        assert "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')" in body, name
+        assert "pull_request" not in body, name
+    others = "".join(b for n, b in jobs().items() if n not in ("sign-macos", "publish"))
+    assert "environment:" not in others and "secrets." not in others and ": write" not in others
+
+
 def test_toolchain_is_the_pinned_release_and_rustup_is_asserted():
     text = workflow_text()
     lines = text.splitlines()
