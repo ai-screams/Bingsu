@@ -50,11 +50,9 @@ fn preview(icons: IconSet) -> ExitCode {
     };
     let home = TrustedEnv::capture().home;
     let (columns, colorterm, no_color) = TrustedEnv::terminal();
-    let width = columns
-        .as_deref()
-        .and_then(OsStr::to_str)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(80u16);
+    // The rule `bingsu explain` follows: COLUMNS, else the terminal, else 80.
+    // 이것을 실패시키는 것: COLUMNS만 읽는 것(셸은 COLUMNS를 넘기지 않아 터미널에서도 80), COLUMNS=0을 폭으로 받는 것.
+    let (width, _) = super::out_width::stdout_width(None, columns.as_deref());
     // The name column is `NAME_COLUMN` cells, so the line still fits.
     let width = width.saturating_sub(NAME_COLUMN);
     let input = PreviewInput {

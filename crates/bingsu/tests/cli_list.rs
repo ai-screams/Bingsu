@@ -1,6 +1,10 @@
 //! `bingsu list`: the rows, the usage exit, and that it starts no process.
 use std::process::Command;
 
+#[cfg(unix)]
+#[path = "support/pty.rs"]
+mod pty;
+
 fn bingsu() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_bingsu"));
     // No settings, no state: `list` reads none of them.
@@ -79,6 +83,46 @@ fn preview_draws_one_plain_line_per_preset_for_the_current_folder() {
         );
         assert!(l.chars().count() < 100, "{l}");
     }
+}
+
+// The preview takes its width as explain does: COLUMNS, else the terminal standard output is on,
+// else 80. A line ends one cell short of the width (the last column stays empty).
+// 이것을 실패시키는 것: 미리보기가 COLUMNS만 읽는 것(터미널에서도 80), COLUMNS=0을 폭으로 받는 것(60칸 바닥의
+// 69칸), 터미널이 COLUMNS를 이기는 것.
+#[cfg(unix)]
+#[test]
+fn preview_takes_the_width_from_columns_or_the_terminal() {
+    let dir = std::env::temp_dir().join("bingsu-list-preview-width");
+    std::fs::create_dir_all(&dir).unwrap();
+    let widest = |columns: Option<&str>, terminal: Option<u16>| -> usize {
+        let mut c = bingsu();
+        c.args(["list", "presets", "--preview", "--icons", "ascii"])
+            .current_dir(&dir)
+            .env("HOME", "/nonexistent-home")
+            .env("NO_COLOR", "1");
+        if let Some(v) = columns {
+            c.env("COLUMNS", v);
+        }
+        let out = match terminal {
+            Some(cols) => {
+                let (code, out) = pty::on_a_terminal(c, cols);
+                assert_eq!(code, Some(0), "{out}");
+                out
+            }
+            None => {
+                let o = c.output().unwrap();
+                assert_eq!(o.status.code(), Some(0), "{o:?}");
+                String::from_utf8(o.stdout).unwrap()
+            }
+        };
+        assert_eq!(out.lines().count(), 7, "{out}");
+        out.lines().map(|l| l.chars().count()).max().unwrap()
+    };
+    assert_eq!(widest(None, Some(123)), 122);
+    assert_eq!(widest(Some("100"), Some(123)), 99);
+    assert_eq!(widest(Some("0"), Some(123)), 122);
+    assert_eq!(widest(Some("0"), None), 79);
+    assert_eq!(widest(None, None), 79);
 }
 
 // 이것을 실패시키는 것: 미리보기나 목록이 프로세스를 띄우는 것(명령·수집 작업·도우미·git). Linux에서
