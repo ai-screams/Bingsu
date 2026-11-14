@@ -1531,6 +1531,96 @@ pub fn test_inherited_fd_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Each open descriptor of `pid` and its kind ("vnode", "socket", "pipe",
+/// or "other"), by number, from the kernel's table (tests). A spawned
+/// child's table is final when `posix_spawn` returns: XNU returns after the
+/// new image is in place.
+#[cfg(all(test, target_os = "macos"))]
+pub fn test_fd_table(pid: libc::pid_t) -> Vec<(i32, &'static str)> {
+    let mut table = [libc::proc_fdinfo {
+        proc_fd: -1,
+        proc_fdtype: 0,
+    }; 64];
+    let size = std::mem::size_of_val(&table) as libc::c_int;
+    // SAFETY: `table` is writable for `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            table.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // A full buffer may have cut the table short.
+    assert!(n > 0 && n < size, "{n}");
+    let count = n as usize / std::mem::size_of::<libc::proc_fdinfo>();
+    let mut seen: Vec<_> = table[..count]
+        .iter()
+        .map(|f| {
+            let kind = match f.proc_fdtype as libc::c_int {
+                libc::PROX_FDTYPE_VNODE => "vnode",
+                libc::PROX_FDTYPE_SOCKET => "socket",
+                libc::PROX_FDTYPE_PIPE => "pipe",
+                _ => "other",
+            };
+            (f.proc_fd, kind)
+        })
+        .collect();
+    seen.sort_unstable();
+    seen
+}
+
+/// The folder `pid` runs in, from the kernel (tests).
+#[cfg(all(test, target_os = "macos"))]
+pub fn test_cwd(pid: libc::pid_t) -> String {
+    // SAFETY: a zeroed proc_vnodepathinfo is a valid out-parameter.
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as libc::c_int;
+    // SAFETY: `info` is writable for `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+            size,
+        )
+    };
+    assert_eq!(n, size);
+    let path: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .map(|&c| c as u8)
+        .take_while(|&c| c != 0)
+        .collect();
+    String::from_utf8_lossy(&path).into_owned()
+}
+
+/// A descriptor without close-on-exec at `at` or above, as another thread
+/// or the shell may leave one in the helper (tests; hold
+/// `test_inherited_fd_lock` while it is open).
+#[cfg(all(test, target_os = "macos"))]
+pub fn test_inheritable_fd(at: i32) -> std::os::fd::OwnedFd {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    // SAFETY: NUL-terminated fixed path; the descriptor is owned at once.
+    let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    assert!(null >= 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: a fresh descriptor nothing else owns.
+    let null = unsafe { OwnedFd::from_raw_fd(null) };
+    // SAFETY: `null` is open; F_DUPFD leaves the copy inheritable.
+    let fd = unsafe { libc::fcntl(null.as_raw_fd(), libc::F_DUPFD, at) };
+    assert!(fd >= at, "{fd}");
+    // SAFETY: a fresh duplicate nothing else owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: a flag query on an open descriptor.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    assert_eq!(flags, 0, "the descriptor must be inheritable");
+    fd
+}
+
 /// Keep inherited descriptors alive before exec without running Rust in the
 /// child of a multithreaded test process. SIGKILL also skips all destructors.
 #[cfg(test)]

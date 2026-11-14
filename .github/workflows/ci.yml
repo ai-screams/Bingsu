@@ -296,7 +296,8 @@ jobs:
           grep -Fx 'test commands::command_grant::tests::roots_stay_unknown_unless_settled ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test commands::version_manager::tests::classify_table ... ok' "$RUNNER_TEMP/relay-native.txt"
       # The macOS relay (PR 10b): every relay::macos_tests case, the helper's script
-      # copy checks, the probe and the process-group reap pass; none is skipped.
+      # copy checks, the probe, the process-group reap and the descriptor tables of
+      # the supervisor, relay and collector spawns pass; none is skipped.
       # 이것을 실패시키는 것: macOS 중계 시험을 ignored로 바꾸거나 이 단언을 빼는 것.
       - name: Assert native macOS trusted relay passes
         if: runner.os == 'macOS'
@@ -321,6 +322,10 @@ jobs:
           grep -Fx 'test commands::command_grant::tests::roots_stay_unknown_unless_settled ... ok' "$RUNNER_TEMP/relay-macos.txt"
           grep -Fx 'test commands::collector_process::tests::group_exit_seen_late_is_not_reaped_before_its_group ... ok' "$RUNNER_TEMP/relay-macos.txt"
           grep -Fx 'test commands::collector_process::tests::a_dropped_group_leader_takes_its_group ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test commands::collector_process::tests::spawn_gives_only_the_fixed_slots_on_macos ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test commands::command_process::macos_tests::test_macos_supervisor_gets_exactly_six_fds ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test commands::command_process::macos_tests::test_macos_relay_gets_exactly_four_fds ... ok' "$RUNNER_TEMP/relay-macos.txt"
+          grep -Fx 'test commands::command_process::macos_tests::test_macos_relay_starts_with_an_empty_environment ... ok' "$RUNNER_TEMP/relay-macos.txt"
           grep -Fx 'test relay::macos_tests::test_macos_relay_runs_the_target_clean ... ok' "$RUNNER_TEMP/relay-macos.txt"
           grep -Fx 'test relay::macos_tests::test_macos_relay_refuses_an_expired_frame ... ok' "$RUNNER_TEMP/relay-macos.txt"
           grep -Fx 'test relay::macos_tests::test_set_id_targets_are_refused ... ok' "$RUNNER_TEMP/relay-macos.txt"
