@@ -99,6 +99,12 @@ bingsu is designed to start from a single set of color tokens and generate all o
 
 Windows is checked in CI. First-class support targets macOS and Linux.
 
+On Apple silicon, bingsu runs on macOS 11 (Big Sur) or later, the oldest version its build targets; CI tests on the
+current macOS runner. Command segments, and the versions that language segments show, need macOS 12.3 or later:
+before 12.3 the system lacks the path check (`AT_SYMLINK_NOFOLLOW_ANY`) that bingsu makes before it runs a program,
+so it runs none and those segments stay empty while the rest of the prompt works. `sw_vers -productVersion` prints
+your version. There is no release archive for Intel Macs; building with `cargo install` there is not tested.
+
 On Linux, the prompt installs a seccomp system call filter before rendering. A kernel without seccomp support still renders
 the prompt; a failed filter check or installation gives a minimal prompt with `degraded:sandbox` and a shell notice once per session.
 Without a usable runtime folder, the prompt still renders with `degraded:runtime-root`; `init` warns that saved state is unavailable.
