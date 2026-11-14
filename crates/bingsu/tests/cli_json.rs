@@ -214,6 +214,145 @@ fn explain_with_invalid_files_uses_the_published_settings() {
     schema(&[&j]);
 }
 
+// Without `--width`, explain decides at `COLUMNS` and says so in both forms; a missing or wrong
+// value keeps 80 and the "assumed" note.
+// 이것을 실패시키는 것: COLUMNS를 읽지 않는 것(40칸의 narrow 대신 80칸), text·JSON에서 출처를 빼거나 틀리게
+// 적는 것, 스키마가 `columns`를 모르는 것, 0이나 숫자 아닌 COLUMNS를 폭으로 받는 것.
+#[test]
+fn without_width_explain_reads_columns() {
+    let e = Env::new("cli_json", "columns");
+    let file = e.put("layout.toml", LAYOUT);
+    let shown = file.to_str().unwrap();
+    let run = |columns: Option<&str>, json: bool| {
+        let mut args = vec!["explain", "--config", shown];
+        if json {
+            args.extend(["--format", "json"]);
+        }
+        let mut c = e.cmd(&args);
+        if let Some(v) = columns {
+            c.env("COLUMNS", v);
+        }
+        let o = c.current_dir("/").output().unwrap();
+        assert_eq!(o.status.code(), Some(0), "{columns:?}: {}", text(&o.stderr));
+        text(&o.stdout)
+    };
+    let t = run(Some("40"), false);
+    assert!(t.contains("width: 40 cells (from COLUMNS)\n"), "{t}");
+    assert!(t.contains("layout: band `narrow`\n"), "{t}");
+    let j = run(Some("40"), true);
+    assert!(
+        j.contains("\"width\":40,\"width_source\":\"columns\""),
+        "{j}"
+    );
+    schema(&[&j]);
+    for bad in [None, Some("0"), Some("wide")] {
+        let t = run(bad, false);
+        assert!(
+            t.contains("width: 80 cells (assumed; give --width N)\n"),
+            "{bad:?}: {t}"
+        );
+        let j = run(bad, true);
+        assert!(
+            j.contains("\"width\":80,\"width_source\":\"default\""),
+            "{bad:?}: {j}"
+        );
+    }
+}
+
+/// What `bingsu ARGS` writes with standard output on a new pseudo-terminal of
+/// `cols` columns, `\r\n` read back as `\n`.
+#[allow(
+    clippy::unnecessary_mut_passed,
+    reason = "openpty takes the window size as *mut on macOS and *const on Linux"
+)]
+fn on_a_terminal(e: &Env, args: &[&str], cols: u16, columns: Option<&str>) -> String {
+    use std::io::Read as _;
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: an all-zero `winsize` is valid; the size is set below.
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    size.ws_col = cols;
+    size.ws_row = 24;
+    // SAFETY: two writable descriptor outputs; default termios.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    assert_eq!(rc, 0);
+    // SAFETY: the descriptor openpty just made, owned from here on.
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    // SAFETY: as above.
+    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+    for fd in [&master, &slave] {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: an open descriptor; other tests' children must not keep it.
+        let rc = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_eq!(rc, 0);
+    }
+    // Read while the child writes: once the slave closes, Linux may drop what
+    // is still queued.
+    let mut master = std::fs::File::from(master);
+    let reader = std::thread::spawn(move || {
+        let (mut out, mut buf) = (Vec::new(), [0u8; 4096]);
+        loop {
+            match master.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                // EIO: the last slave descriptor closed.
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        out
+    });
+    let status = {
+        // The command holds the slave: drop it before reading to the end.
+        let mut c = e.cmd(args);
+        if let Some(v) = columns {
+            c.env("COLUMNS", v);
+        }
+        c.current_dir("/")
+            .stdout(std::process::Stdio::from(slave))
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+    };
+    assert_eq!(status.code(), Some(0), "{args:?}");
+    let out = reader.join().unwrap();
+    String::from_utf8_lossy(&out).replace("\r\n", "\n")
+}
+
+// With standard output on a terminal and no COLUMNS (shells do not export it), explain decides at
+// the terminal's columns; COLUMNS, when given, still wins.
+// 이것을 실패시키는 것: 표준 출력의 터미널 칸 수를 묻지 않는 것(80으로 감), 출처를 text·JSON에 `terminal`로 적지
+// 않는 것, 스키마가 `terminal`을 모르는 것, 터미널이 COLUMNS를 이기는 것.
+#[test]
+fn without_width_or_columns_explain_asks_the_terminal() {
+    let e = Env::new("cli_json", "terminal");
+    let file = e.put("layout.toml", LAYOUT);
+    let shown = file.to_str().unwrap();
+    let t = on_a_terminal(&e, &["explain", "--config", shown], 123, None);
+    assert!(t.contains("width: 123 cells (from the terminal)\n"), "{t}");
+    let j = on_a_terminal(
+        &e,
+        &["explain", "--config", shown, "--format", "json"],
+        123,
+        None,
+    );
+    assert!(
+        j.contains("\"width\":123,\"width_source\":\"terminal\""),
+        "{j}"
+    );
+    schema(&[j.trim_end()]);
+    let t = on_a_terminal(&e, &["explain", "--config", shown], 123, Some("40"));
+    assert!(t.contains("width: 40 cells (from COLUMNS)\n"), "{t}");
+}
+
 // 이것을 실패시키는 것: 모르는 형식·중복·값 없는 `--format`을 받는 것.
 #[test]
 fn a_wrong_format_exits_2() {

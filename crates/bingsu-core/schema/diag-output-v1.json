@@ -123,7 +123,7 @@
           "enum": ["published", "published-files-changed", "published-files-invalid", "files-only", "file"]
         },
         "width": { "type": "integer", "minimum": 1 },
-        "width_source": { "enum": ["flag", "default"] },
+        "width_source": { "enum": ["flag", "columns", "terminal", "default"] },
         "band": { "type": ["string", "null"] },
         "lines": {
           "type": "array",

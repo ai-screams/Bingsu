@@ -36,7 +36,7 @@ use super::sys;
 use bingsu_core::color::osc11::REPLY_MAX;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -704,13 +704,22 @@ impl Terminal for RawGuard<'_> {
     }
 
     fn columns(&self) -> Option<u16> {
-        // SAFETY: an all-zero `winsize` is a valid value for the call to fill.
-        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-        // SAFETY: the descriptor is open and `size` is writable memory of the
-        // type TIOCGWINSZ fills.
-        let rc = unsafe { libc::ioctl(self.tty.file.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
-        (rc == 0 && size.ws_col > 0).then_some(size.ws_col)
+        columns_of(self.tty.file.as_fd())
     }
+}
+
+/// Columns of the terminal behind `fd` from `TIOCGWINSZ`; `None` when `fd`
+/// is not a terminal (a pipe or a file: the call fails) or the terminal
+/// reports 0. Asks nothing and changes no mode, so any descriptor will do,
+/// standard output included (`bingsu explain`).
+pub fn columns_of(fd: BorrowedFd<'_>) -> Option<u16> {
+    // SAFETY: an all-zero `winsize` is a valid value for the call to fill.
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: the descriptor is borrowed open for the call and `size` is
+    // writable memory of the type TIOCGWINSZ fills.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+    // 이것을 실패시키는 것: 0칸을 받는 것(columns_come_from_the_window_size의 0칸 터미널).
+    (rc == 0 && size.ws_col > 0).then_some(size.ws_col)
 }
 
 impl Tty {
