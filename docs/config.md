@@ -159,8 +159,10 @@ enabled = false
 ```
 
 `enabled = false` turns off any band, the built-in one or one a file of yours adds. Only a file you trust sets it: in
-a theme or another shape-only file it is dropped with a warning (W401), so a shared theme cannot turn a band off. A
-band that is off still counts toward the limit of bands a config may have.
+a theme or another shape-only file it is dropped with a warning (W401), so a shared theme cannot turn a band off, and
+a file that fails the safety check (which `bingsu config check` lists as "nothing in it runs") neither turns a band
+off nor turns back on a band your trusted file turned off. A band that is off still counts toward the limit of bands
+a config may have.
 
 Or keep the band and give it a template of your own:
 
