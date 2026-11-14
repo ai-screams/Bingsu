@@ -103,8 +103,7 @@ pub enum Untrusted {
     Unsafe(Refusal),
 }
 
-/// What the refresh helper may publish after this read (ruling P-R4, spec
-/// section 4 "표식을 새로 쓰는 조건" as amended): the files left out were
+/// What the refresh helper may publish after this read: the files left out were
 /// checked to the end, so the rest is verified and its execution units get
 /// a marker; the files left out are warned about.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,7 +111,7 @@ pub enum Verified {
     /// Publish the snapshot and a marker for its execution set. `left_out`:
     /// files dropped (rule 5) or not trusted to run (`Unsafe`), to warn.
     Publish { left_out: Vec<PathBuf> },
-    /// A trusted file failed: confirmed, so an invalid marker (spec 4).
+    /// A trusted file failed: confirmed, so an invalid marker.
     Invalid,
     /// An observation failed or changed before it could be confirmed:
     /// no new marker; the old one ages out after T.

@@ -1,6 +1,5 @@
-//! The refresh helper's config-source I/O meter (spec 9 "갱신 도우미의 축
-//! 아홉", 1435: one fixed cap per axis, no axis covers another, exceeding any
-//! one ends the check incomplete and leaves the marker as it was). One
+//! The refresh helper's config-source I/O meter: one fixed cap per axis, no axis covers another, exceeding any one ends
+//! the check incomplete and leaves the marker as it was. One
 //! `Loader` owns one meter, and refresh makes one `Loader` per round, so a
 //! meter covers the whole round: root discovery, path walks, every reference
 //! attempt (refused, duplicate, missing and cyclic ones included), conf.d

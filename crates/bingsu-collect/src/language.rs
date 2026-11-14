@@ -1,4 +1,4 @@
-//! Language detection (plan D1): marker files and version selection files
+//! Language detection: marker files and version selection files
 //! from the shell's folder up to the repository root, read under the read
 //! confinement already installed, through the same safe-read rules as every
 //! repository read (no symlink at the leaf, regular files only, bounded
@@ -116,8 +116,7 @@ fn unreadable(file: u8, level: u8) -> Version {
 /// One language: the nearest marker and the nearest version selection file
 /// (within a folder, in the query's order), in one pass from the shell's
 /// folder up, on one folder stack (each folder is opened once per language,
-/// not once per probe). A file over its cap has no value (C2 ruling Q4 for
-/// D1): `Refused` with an all-zero digest.
+/// not once per probe). A file over its cap has no value: `Refused` with an all-zero digest.
 fn detect(
     index: u8,
     query: &LanguageQuery,
@@ -235,7 +234,7 @@ fn read_version(
     ) {
         Ok(bytes) => Ok(Some(rule::version(&file.format, &bytes, i, level))),
         // The file over the format's own cap (by its size, or grown past it
-        // while read): no value (C2 ruling Q4 for D1). Any other `Limit` (what
+        // while read): no value. Any other `Limit` (what
         // the request may still read, the meter's byte, allocation or call
         // bounds) stops. Fails without the file test:
         // meter_limits_stop_instead_of_refusing.

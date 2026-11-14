@@ -1,12 +1,11 @@
-//! Per-call filesystem costs (spec section 9 M1 row (7), "lock and
-//! generation check" and the `statfs` of `init`). Every failed system call
+//! Per-call filesystem costs ("lock and generation check" and the `statfs` of `init`). Every failed system call
 //! is returned: a failure timed as a success would be a wrong number. The
 //! one exception is macOS `acl_probe_path`, whose "no ACL" answer cannot be
 //! told from a missing file (see there).
 //!
 //! The file reads open names relative to an fd of the runtime folder
 //! (`openat`), as the front does with the runtime-root fd it validated
-//! (spec section 4 "fd inheritance"); the folder is opened once, outside
+//! ; the folder is opened once, outside
 //! any timed call.
 use std::ffi::{CStr, CString};
 use std::io;
@@ -199,8 +198,7 @@ fn read_counted(
 }
 
 /// O_NOFOLLOW openat in `dir` + fstat owner check + non-blocking flock + 8-byte
-/// generation read (bytes 8..16 of the header) + unlock (spec section 4
-/// helper "concurrency" row). `Ok(true)` only when the lock file is ours,
+/// generation read (bytes 8..16 of the header) + unlock. `Ok(true)` only when the lock file is ours,
 /// the lock is free and the generation matches; every failed system call is
 /// an error, and the lock is released even when reading the generation fails.
 pub fn lock_and_read_generation(

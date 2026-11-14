@@ -1,12 +1,11 @@
-//! File cost rows (spec section 9 M1 row (7), "lock and generation check"
-//! and the `statfs` of `init`). Prints one JSON line per row; a row that
+//! File cost rows ("lock and generation check" and the `statfs` of `init`). Prints one JSON line per row; a row that
 //! fails carries `na` with the reason and the round. Rows take turns within
 //! each round, in alternating direction (`bingsu_bench::rounds::drive`).
 //! `--once` makes one pass of the reads inside the fsb marker window for the
 //! strace read-count test and touches nothing else.
 //! `--snapshot-present` times one row, `snapshot-present-read`: the three
 //! files of `bench/fixtures/make-snapshot-present.sh` read in one go (the
-//! file share of the redraw estimate, Task B6).
+//! file share of the redraw estimate).
 #![deny(unsafe_code)] // FFI lives in bingsu_bench::sys only
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -198,7 +197,7 @@ mod imp {
 
     /// Inside the fsb window: the folder open, then header, marker and the
     /// sweep files, which the caller made in `dir`. Nothing touches the
-    /// filesystem outside the window (closed-window rule, Task B1), so the
+    /// filesystem outside the window (closed-window rule), so the
     /// folder open is counted too; a failure exits non-zero.
     fn once(dir: &Path) {
         let mut buf = vec![0u8; BUF];

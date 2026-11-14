@@ -1,5 +1,5 @@
 //! Linux: VmSize of the collector stub right after its limits, for the
-//! "start address space + allowance" RLIMIT_AS rule (spec section 4). Runs
+//! "start address space + allowance" RLIMIT_AS rule. Runs
 //! the stub with `--mode limits --report-vm` and reads its `VM <KiB>` line.
 //! Elsewhere the stub prints `VM unsupported`, so the rows are `na`: a value
 //! that is not a number is never counted as 0.

@@ -1,4 +1,4 @@
-//! Nearest-rank median and p95 (spec section 8: 200+ runs, median and p95).
+//! Nearest-rank median and p95 (200+ runs, median and p95).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Summary {

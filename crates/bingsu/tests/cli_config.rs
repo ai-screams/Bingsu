@@ -1,6 +1,6 @@
 //! `bingsu config schema` prints the JSON Schema core makes from the key
-//! table (spec section 2 "JSON Schema"); `check`, `path` and `use` are the
-//! settings commands of Task N5.
+//! table; `check`, `path` and `use` are the
+//! settings commands.
 #![cfg(unix)]
 use bingsu_core::config::schema::{Which, schema};
 use std::process::Command;

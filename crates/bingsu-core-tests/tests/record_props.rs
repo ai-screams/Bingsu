@@ -1,5 +1,5 @@
 //! Layer 1 properties of the M1 record encoder, so the test crate has a
-//! real test from its first commit (Task A1).
+//! real test from its first commit.
 use bingsu_core::record::{Encoded, Fields, RS, US, encode_b1};
 use bingsu_core::status::Status;
 use proptest::prelude::*;

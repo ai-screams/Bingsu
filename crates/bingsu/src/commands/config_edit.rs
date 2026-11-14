@@ -1,7 +1,6 @@
 //! `bingsu config edit`: open the settings file in the user's editor, then
 //! check what was saved the way `config check` does and publish it the way
-//! `reload` does. The file is edited in place (spec section 4 "설정 편집
-//! 루프"): its owner, mode, links and `extends` paths stay as they are. A
+//! `reload` does. The file is edited in place: its owner, mode, links and `extends` paths stay as they are. A
 //! save that is not valid is not applied: the prompt keeps the previous
 //! settings, and the commands of the file stop running until a valid save,
 //! as for any invalid file on disk.

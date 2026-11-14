@@ -1,4 +1,4 @@
-//! X-11 current-runtime evidence. Minimum-version evidence remains decision 24.
+//! X-11 current-runtime evidence. Minimum-version evidence is recorded elsewhere.
 #![cfg(target_os = "macos")]
 #[allow(dead_code)]
 #[path = "../src/meter.rs"]

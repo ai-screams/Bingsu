@@ -1,5 +1,4 @@
-//! The builtin language versions of one command round (plan D3a, D3
-//! rulings Q1–Q7): for each language whose segment is drawn, what the
+//! The builtin language versions of one command round: for each language whose segment is drawn, what the
 //! helper shows without running anything (a version manager's fast path),
 //! hides, or runs as a fixed-profile probe. A probe runs the real
 //! executable the sanitized `PATH` or the manager's own install names,
@@ -36,8 +35,7 @@ pub(crate) fn runs(language: &Language, executable: &Path) -> bool {
 }
 
 /// How a builtin value was decided: part of its policy digest, so a value
-/// decided one way never stands for one decided another way (D3a ruling
-/// Q-D: a hidden or failed result never holds back a fast one).
+/// decided one way never stands for one decided another way (a hidden or failed result never holds back a fast one).
 const KIND_FAST: u8 = 1;
 const KIND_HIDDEN: u8 = 2;
 const KIND_RUN: u8 = 3;
@@ -226,8 +224,7 @@ pub(crate) fn plan(
                     return hide("DEVELOPER_DIR picks the developer tools");
                 }
                 // The real file the stub would hand the call to, judged
-                // like any executable; the stub itself never runs (D3a
-                // ruling i).
+                // like any executable; the stub itself never runs.
                 Stub::Real(real) => match exec_path::resolve_open(&real, c.repo, c.me, groups) {
                     Ok((found, checked)) => (found, checked, None),
                     Err(_) => return hide("the developer tools' python3 failed the checks"),
@@ -291,7 +288,7 @@ pub(crate) fn plan(
 }
 
 /// macOS's developer tool stubs bingsu meets among the builtin commands
-/// (D3a ruling i). Every developer tool in `/usr/bin` (python3, pip3, git,
+/// Every developer tool in `/usr/bin` (python3, pip3, git,
 /// clang, make and 77 more on macOS 27.2) is the same file: equal sha256
 /// (`ed6f5284033aa2aa…`), 196 KB, linking `/usr/lib/libxcselect.dylib`;
 /// without the developer tools installed it asks to install them, a dialog
@@ -495,7 +492,7 @@ mod tests {
     }
 
     // 내장 언어 하나의 결정: 관리자가 정한 설치 파일이나 PATH의 실제 실행 파일만 실행하고, shim·프록시·스크립트·
-    // 미설치·모르는 선택은 숨긴다(D3 판정 Q1·Q2, D3a 수용 조건). 이것을 실패시키는 것: 스크립트 거부를 지우는 것,
+    // 미설치·모르는 선택은 숨긴다. 이것을 실패시키는 것: 스크립트 거부를 지우는 것,
     // Run(None)을 숨기지 않는 것, 미설치를 숨기지 않는 것, override 값을 쓰지 않는 것(RUSTUP_TOOLCHAIN),
     // pyenv의 `system`을 쓰는 것, 지원하지 않는 관리자 shim을 실행하는 것, 정규 cwd가 없는데 rustup을 푸는 것.
     #[test]
@@ -567,7 +564,7 @@ mod tests {
                 Some(b"stable".to_vec())
             )
         );
-        // A `path` toolchain is never run (D2 ruling Q4).
+        // A `path` toolchain is never run.
         let path = Version::Path { file: 1, level: 0 };
         let p = plan_with(&s, &cargo, &[], "rust", &path);
         assert_eq!(p.action, Action::Hide("a path toolchain"));
@@ -579,7 +576,7 @@ mod tests {
         );
         let p = plan_with(&s, &cargo, &[], "rust", &Version::None);
         assert_eq!(p.action, Action::Hide("the manager's choice is not known"));
-        // RUSTUP_TOOLCHAIN names the toolchain (Q2); a path-shaped one is
+        // RUSTUP_TOOLCHAIN names the toolchain; a path-shaped one is
         // not a name.
         let p = plan_with(
             &s,
@@ -639,7 +636,7 @@ mod tests {
         );
         assert!(matches!(p.action, Action::Hide(_)), "{p:?}");
         // PYENV_DIR only moves the version file search, which an override
-        // skips: the override still names the version (ruling P2).
+        // skips: the override still names the version.
         let p = plan_with(
             &s,
             &shims,
@@ -841,7 +838,7 @@ mod tests {
     }
 
     // macOS 개발 도구 stub(/usr/bin/python3)은 실행하지 않는다. 선택된 개발자 폴더(xcode_select_link)를 먼저,
-    // 없으면 Command Line Tools를 쓰고, 그 아래 실제 python3가 없거나 둘 다 없으면 숨긴다(D3a 판정 i). stub 판정은
+    // 없으면 Command Line Tools를 쓰고, 그 아래 실제 python3가 없거나 둘 다 없으면 숨긴다. stub 판정은
     // 경로만 보고, 실험으로 stub을 실행하지 않는다. 이것을 실패시키는 것: stub 이름 검사를 지우는 것(아무 명령이나
     // 개발자 폴더로 돌림), 선택 링크보다 CLT를 먼저 보는 것, 둘 다 없을 때 stub을 그대로 쓰는 것, 개발자 폴더에
     // 실제 도구가 없을 때 그 경로를 돌려주는 것, macOS 밖에서도 stub으로 보는 것(Linux의 /usr/bin/python3는
@@ -888,7 +885,7 @@ mod tests {
     }
 
     // 실제 /usr/bin을 PATH로 두면(macOS의 python3 stub) 결정은 stub이 아닌 개발자 폴더의 파일을 실행한다. 개발자
-    // 폴더는 시험이 만든 fixture라 이 Mac에 도구가 있는지와 상관없다(D3a 재리뷰 L4). 이것을 실패시키는 것: RunFound에서
+    // 폴더는 시험이 만든 fixture라 이 Mac에 도구가 있는지와 상관없다. 이것을 실패시키는 것: RunFound에서
     // developer_tool의 답을 무시하고 찾은 stub을 그대로 쓰는 것.
     #[cfg(target_os = "macos")]
     #[test]
@@ -900,7 +897,7 @@ mod tests {
     }
 
     // 셸에 DEVELOPER_DIR이 있으면 xcode-select 선택보다 그것이 우선하므로, stub 대신 고를 파일을 모른다: 숨긴다
-    // (D3a 리뷰 M4). 환경 요약에도 그 이름이 들어간다. 개발자 폴더는 fixture다(재리뷰 L4). 이것을 실패시키는 것:
+    // . 환경 요약에도 그 이름이 들어간다. 개발자 폴더는 fixture다. 이것을 실패시키는 것:
     // DEVELOPER_DIR 검사를 지우는 것, python 언어 변수에서 DEVELOPER_DIR을 빼는 것.
     #[cfg(target_os = "macos")]
     #[test]

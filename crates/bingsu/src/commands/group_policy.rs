@@ -1,4 +1,4 @@
-//! Group write (spec section 2 safety row, decision 6 review): a
+//! Group write: a
 //! group-writable entry is safe only when every member of the group is root
 //! or the current user, and the members are asked again on every walk
 //! (`SystemGroups` lives for one walk). A group whose members cannot be
@@ -153,8 +153,8 @@ pub fn undecided_remedy(path: &std::path::Path) -> String {
 /// LDAP, SSSD, NIS and the like may not be enumerated (`getpwent` returns
 /// only what the source lists, and SSSD lists nothing by default), so a
 /// member whose primary group is the one in question could be missed. The
-/// rule then cannot confirm the members and says `Unknown` (spec section 2:
-/// members that cannot be confirmed are refused). Complete: the `passwd`
+/// rule then cannot confirm the members and says `Unknown` (members that cannot be confirmed are refused). Complete:
+/// the `passwd`
 /// and `group` lines of `nsswitch.conf` name only `files` and `systemd`
 /// (systemd's dynamic users get their own groups). No file, or no line,
 /// means glibc's default, `files`. Action items (`[NOTFOUND=return]`) are
@@ -390,7 +390,7 @@ mod tests {
         );
     }
 
-    // 네트워크 계정 출처가 있으면 계정 열거가 완전하지 않으므로 구성원을 확정할 수 없다(스펙 2절: 확정 못 하면 거부).
+    // 네트워크 계정 출처가 있으면 계정 열거가 완전하지 않으므로 구성원을 확정할 수 없다.
     // 이것을 실패시키는 것: sss·ldap·nis 출처를 완전한 열거로 보는 것, files·systemd만인 기본 설정을 불완전으로 보는 것,
     // 동작 항목([NOTFOUND=return])을 출처로 읽는 것.
     #[test]

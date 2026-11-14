@@ -23,7 +23,7 @@ fn write1(b: &[u8]) -> io::Result<()> {
     })
 }
 
-/// RLIMIT_CPU 1 s, RLIMIT_NOFILE 64, RLIMIT_FSIZE 0 (spec section 4).
+/// RLIMIT_CPU 1 s, RLIMIT_NOFILE 64, RLIMIT_FSIZE 0.
 pub fn set_limits() -> io::Result<()> {
     for (res, v) in [
         (libc::RLIMIT_CPU, 1),
@@ -134,7 +134,7 @@ pub fn sandbox() -> io::Result<()> {
     Ok(())
 }
 
-/// macOS has no supported execution ban (spec section 4, OS limit).
+/// macOS has no supported execution ban.
 #[cfg(not(target_os = "linux"))]
 pub fn sandbox() -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -270,7 +270,7 @@ pub fn probe_x32() -> io::Result<()> {
 }
 
 /// Linux: VmSize of this process right after the limits, for the
-/// RLIMIT_AS = start + allowance rule (spec section 4).
+/// RLIMIT_AS = start + allowance rule.
 pub fn report_vm() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {

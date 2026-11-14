@@ -142,7 +142,7 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
     let roots_in = loader.roots(BUILTIN_TOML.as_bytes());
     let loaded = load(roots_in, &mut loader, ctx::version());
     let mut report = report::from_loaded(loaded, Mode::Dark);
-    // The same `match` check the published snapshot gets (C4c ruling Q1).
+    // The same `match` check the published snapshot gets.
     super::command_match::check(&mut report);
     let before = loader.io_used();
     let verdict = if matches!(selection, Selection::Incomplete) {
@@ -686,8 +686,8 @@ pub(super) fn lookups(
 const SET_ID_REASON: &str = "setuid, setgid or file capabilities (bingsu runs no such program)";
 
 /// W411 for each unit whose script the executor refuses by its first line,
-/// or whose program is set-id (D3a/E2 ruling Q2: one code, the reason
-/// as its argument). The decision is the executor's (`exec_path::explain`,
+/// or whose program is set-id (one code, the reason as its argument). The decision is the executor's
+/// (`exec_path::explain`,
 /// core `head`), so `config check` warns about exactly what will not run.
 fn env_shebang_notes(
     report: &ConfigReport,

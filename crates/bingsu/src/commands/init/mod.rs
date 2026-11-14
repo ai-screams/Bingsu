@@ -1,5 +1,5 @@
 //! `bingsu init <shell>`: stdout carries only the connection script;
-//! diagnostics go to stderr (spec section 5 "init output").
+//! diagnostics go to stderr.
 pub(crate) mod exe_path;
 pub(super) mod pinned;
 pub(super) mod prime;

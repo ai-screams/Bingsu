@@ -1,8 +1,7 @@
 //! Other sessions' leftovers (m6-C4a7): every shell session that ran a
 //! command round leaves its lock `command-<digest>.lock` in the runtime root
 //! and, on the Linux atomic path, its cgroup parent `bingsu-cmd-<digest>`
-//! under the shell's cgroup. The collection GC reclaims a few each run
-//! (C4a7 ruling D), only through this runtime root's locks:
+//! under the shell's cgroup. The collection GC reclaims a few each run, only through this runtime root's locks:
 //!
 //! - A lock older than [`STALE_SECS`], not this session's, is taken without
 //!   blocking (a round in progress holds its own, so it stays) and checked
@@ -29,7 +28,7 @@ use std::{
     os::fd::AsFd,
 };
 
-/// A lock unchanged this long is stale (ruling: 24 h by ctime). The lock is
+/// A lock unchanged this long is stale (24 h by ctime). The lock is
 /// never written, so its ctime is when it was made.
 pub(crate) const STALE_SECS: i64 = 24 * 60 * 60;
 /// Locks taken (reclaim tried) in one GC run. A lock a round holds is not

@@ -1,5 +1,4 @@
-//! `bingsu init` contract (spec section 5 "connection" and "init output",
-//! section 4 "runtime root"). Install dirs live under CARGO_TARGET_TMPDIR,
+//! `bingsu init` contract. Install dirs live under CARGO_TARGET_TMPDIR,
 //! not /tmp, so no world-writable ancestor triggers the tamper warning.
 #![cfg(unix)]
 use std::os::unix::ffi::OsStrExt;

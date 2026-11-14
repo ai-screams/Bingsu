@@ -1,5 +1,4 @@
-//! `config check --explain`: the builtin language section (E2 rulings on
-//! the builtin section, D3a ruling Q4). For each builtin language a trusted
+//! `config check --explain`: the builtin language section. For each builtin language a trusted
 //! layout draws at some width, what a prompt in this folder would decide
 //! now: show a version without running anything, run a probe, or hide it
 //! and why. The decision is the helper's own (`builtin_probe::plan`, with
@@ -163,8 +162,7 @@ pub(crate) struct Place {
 }
 
 /// The folder facts the last round saved for `cwd`, if this build
-/// collected them for these roots in this boot (E2 builtin ruling Q1: the
-/// parts of the binding that do not depend on the terminal's width).
+/// collected them for these roots in this boot (the parts of the binding that do not depend on the terminal's width).
 pub(crate) fn saved_facts(
     place: &Place,
     cwd: &[u8],
@@ -448,8 +446,8 @@ mod tests {
         );
     }
 
-    // 그리는 언어만 보인다: 어느 폭의 줄이든 그 segment나 필드를 그리면 넣고, 그리지 않는 언어는 뺀다(E2 내장 판정
-    // Q5). 이것을 실패시키는 것: 첫 band의 줄만 보는 것(좁은 폭에서만 그리는 go가 빠짐), 필드 노드를 놓치는 것,
+    // 그리는 언어만 보인다: 어느 폭의 줄이든 그 segment나 필드를 그리면 넣고, 그리지 않는 언어는 뺀다. 이것을 실패시키는 것: 첫 band의 줄만 보는 것(좁은 폭에서만 그리는 go가 빠짐), 필드
+    // 노드를 놓치는 것,
     // 그리지 않는 언어까지 넣는 것.
     #[test]
     fn only_the_drawn_languages_are_explained() {
@@ -592,7 +590,7 @@ mod tests {
         );
     }
 
-    // 저장된 수집 응답은 폭과 무관한 binding 칸이 모두 맞을 때만 쓴다(E2 내장 판정 Q1): build, 두 뿌리, cwd, 시계의
+    // 저장된 수집 응답은 폭과 무관한 binding 칸이 모두 맞을 때만 쓴다: build, 두 뿌리, cwd, 시계의
     // boot·kind·domain·resume, 지금보다 늦지 않은 완료. 폭에 따르는 mask와 path_query는 보지 않는다. 이것을
     // 실패시키는 것: 그 비교를 하나씩 지우는 것, mask나 path_query를 비교하는 것(폭이 다른 프롬프트의 응답을 버림).
     #[test]

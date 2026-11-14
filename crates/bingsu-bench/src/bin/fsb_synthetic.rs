@@ -1,5 +1,4 @@
-//! Synthetic program with known filesystem calls for the budget scaffold
-//! (spec section 9 M1 row, change (6)). Inside its fsb window each role makes
+//! Synthetic program with known filesystem calls for the budget scaffold. Inside its fsb window each role makes
 //! exactly the calls of its formula with every coefficient = 1. Apart from
 //! the start-up prologue (the dynamic loader and std before main), every
 //! filesystem call this program makes itself is inside the window: names
@@ -254,7 +253,7 @@ mod imp {
         let rt = runtime_root();
         begin();
         // Per-session writer lock, separate from the helper's per-user
-        // snapshot lock (spec section 4), so the two never race.
+        // snapshot lock, so the two never race.
         let lock = openat(
             rt.as_raw_fd(),
             c"session.lock",
