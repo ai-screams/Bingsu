@@ -363,7 +363,7 @@ def test_record_only_cases_are_kept_but_not_judged(tmp_path):
     report = json.loads((tmp_path / "v.json").read_text())
     assert report["status"] == "PASS"
     row = report["time"]["prompt-commands-max"]
-    assert row["status"] == "RECORDED" and row["observed_status"] == "FAIL" and "U-23" in row["record_only"]
+    assert row["status"] == "RECORDED" and row["observed_status"] == "FAIL" and "+0.5 ms" in row["record_only"]
     assert gate.main(["--measurement", str(meas), *common[:-2]]) == 1
     meas.write_text(json.dumps({"cases": {"prompt-commands-max": paired((8e6, 9e6), (8e6, 9e6))}}))
     assert gate.main(["--measurement", str(meas), *common]) == 0

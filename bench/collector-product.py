@@ -72,7 +72,7 @@ SEGMENT_ROWS = (
          budget={"Linux": 1 * MS, "Darwin": 3 * MS},
          basis="dispatch가 prompt가 아니라고 판단하는 인자의 exec→usage 종료. prompt 인자 해석·bootstrap 제외"),
     dict(id="write-only-child", row="쓰기 전용 자식 생성", kind="unmeasurable",
-         budget={"Linux": MS // 2, "Darwin": 1 * MS}, basis="제품에 생성 지점 없음(U1)"),
+         budget={"Linux": MS // 2, "Darwin": 1 * MS}, basis="제품에 생성 지점 없음"),
     dict(id="helper-verification", row="도우미의 수집 생성 전 문맥·화면 검증", kind="record",
          field="verification_to_spawn_ns", source="bench/collector-product.py",
          basis="비동기 도우미 구간, 예산 없음(M1 측정)"),

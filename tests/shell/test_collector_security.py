@@ -2296,9 +2296,12 @@ def assert_fuzz_job(text, targets):
     assert f"toolchain: {env['FUZZ_TOOLCHAIN']}" in block
     commands = [command for step in steps for command in run_commands(step)]
     assert ["cargo", "install", "--locked", "cargo-fuzz", "--version", "=${CARGO_FUZZ_VERSION}"] in commands
-    fuzz, = [c for c in commands if c[1:3] == ["+$FUZZ_TOOLCHAIN", "fuzz"]]
+    build, = [c for c in commands if c[1:4] == ["+$FUZZ_TOOLCHAIN", "fuzz", "build"]]
+    fuzz, = [c for c in commands if c[1:4] == ["+$FUZZ_TOOLCHAIN", "fuzz", "run"]]
     for option in ("--sanitizer", "-max_total_time=900", "-rss_limit_mb=2048", "-timeout=10"):
         assert option in fuzz, option
+    # 이것을 실패시키는 것: build step과 run step의 build flag가 갈라져 run이 출력을 숨긴 채 다시 compile하는 것.
+    assert build[4:] == fuzz[4:len(build)], (build, fuzz)
     for step in steps:
         if "run" in step:
             assert step.get("shell") == "bash --noprofile --norc -euo pipefail {0}", step.get("name")
@@ -2309,9 +2312,42 @@ def assert_fuzz_job(text, targets):
     assert "  group: security-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}\n" in concurrency
     assert ("  cancel-in-progress: ${{ github.event_name != 'schedule' && "
             "github.event_name != 'workflow_dispatch' }}\n") in concurrency
-    # 이것을 실패시키는 것: crash 입력(저장소 바이트) artifact를 기본 90일 보존하는 것.
-    upload = block.split("uses: actions/upload-artifact@", 1)[1]
-    assert re.search(r"(?m)^          retention-days: 2$", upload), "crash input retention"
+    assert_fuzz_input_stays_private(block, steps, fuzz)
+
+
+def fuzz_job_steps(steps):
+    """The fuzz run step and the report that follows its failure."""
+    run, = [step for step in steps if step.get("id") == "fuzz"]
+    report, = [step for step in steps if step.get("if") == "failure() && steps.fuzz.outcome == 'failure'"]
+    return run, report
+
+
+def assert_fuzz_input_stays_private(block, steps, fuzz):
+    """A failing input of an unfixed crash never reaches the public log or an artifact (SECURITY.md)."""
+    # 이것을 실패시키는 것: crash 입력을 upload-artifact·cache 같은 다른 action으로 올리는 step을 더하는 것.
+    assert {uses.split("@")[0] for uses in re.findall(r"uses: (\S+)", block)} == {
+        "actions/checkout", "dtolnay/rust-toolchain"}, "fuzz job actions"
+    # 이것을 실패시키는 것: fuzz 실패를 continue-on-error로 삼켜 job을 초록으로 두는 것.
+    assert "continue-on-error" not in block
+    run, report = fuzz_job_steps(steps)
+    # 이것을 실패시키는 것: libFuzzer가 hex·text·Base64로 찍는 입력이 섞인 stdout·stderr를 로그로 내보내는 것
+    # (`| tee`, `2>&1` 빠짐, `2>&1 >` 순서, 로그를 cat).
+    assert [command[0] for command in run_commands(run)] == ["mkdir", "cargo", "grep"]
+    assert fuzz[-3:] == [">", "$RUNNER_TEMP/fuzz-$TARGET.log", "2>&1"], fuzz[-3:]
+    line, = [line for line in run["run"].splitlines() if " fuzz run " in line]
+    assert shell_operators(line) == [">", ">&"], line
+    assert run_commands(run)[2] == ["grep", "-F", "Done ", "$RUNNER_TEMP/fuzz-$TARGET.log"]
+    # 이것을 실패시키는 것: 실패 보고가 로그나 입력 바이트를 내보내는 것(cat·grep·tail·`$(...)`·find -exec cat·리다이렉트).
+    for line in report["run"].splitlines():
+        assert not shell_operators(line) and "$(" not in line and "`" not in line, line
+    commands = run_commands(report)
+    for command in commands:
+        assert command[0] in {"echo", "find"}, command
+        if command[0] == "find":
+            assert command[4:] in (["-printf", "%f %s bytes\\n"], ["-exec", "sha256sum", "{}", "+"]), command
+    # 이것을 실패시키는 것: 다시 찾는 명령이 실제 fuzz 명령과 다른 toolchain·target·flag를 적는 것.
+    refuzz, = [command for command in commands if command[0] == "echo" and command[1].startswith("cargo ")]
+    assert refuzz[1].split() == [word.replace("$RUNNER_TEMP/", "") for word in fuzz[:-3]], refuzz
 
 
 def test_security_fuzz_job_is_pinned_and_covers_every_target():
@@ -2338,7 +2374,28 @@ def test_security_fuzz_job_is_pinned_and_covers_every_target():
     ("run: cargo audit --file fuzz/collector/Cargo.lock", "run: cargo audit"),
     ("-${{ github.event_name }}\n  cancel", "\n  cancel"),
     ("cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}", "cancel-in-progress: true"),
-    ("          retention-days: 2\n", ""),
+    ("          grep -F 'Done '", "          grep -F 'INFO: Seed:'"),
+    ("--sanitizer address \"$TARGET\"\n", "--sanitizer address --no-default-features \"$TARGET\"\n"),
+    (" 2>&1\n", "\n"),
+    (' > "$RUNNER_TEMP/fuzz-$TARGET.log" 2>&1\n', ' 2>&1 | tee "$RUNNER_TEMP/fuzz-$TARGET.log"\n'),
+    (' > "$RUNNER_TEMP/fuzz-$TARGET.log" 2>&1\n', ' 2>&1 > "$RUNNER_TEMP/fuzz-$TARGET.log"\n'),
+    ("        id: fuzz\n", "        id: fuzz\n        continue-on-error: true\n"),
+    ("          echo \"Replay", "          cat \"$RUNNER_TEMP/fuzz-$TARGET.log\"\n          echo \"Replay"),
+    ("          echo \"Replay", "          echo \"$(tail -n 40 \"$RUNNER_TEMP/fuzz-$TARGET.log\")\"\n          echo \"Replay"),
+    ("-exec sha256sum {} +", "-exec cat {} +"),
+    (' > "$RUNNER_TEMP/fuzz-$TARGET.log" 2>&1\n', ' | cat > "$RUNNER_TEMP/fuzz-$TARGET.log" 2>&1\n'),
+    ("          grep -F 'Done ' \"$RUNNER_TEMP/fuzz-$TARGET.log\"\n",
+     "          grep -F 'Done ' \"$RUNNER_TEMP/fuzz-$TARGET.log\"\n          tail -n 50 \"$RUNNER_TEMP/fuzz-$TARGET.log\"\n"),
+    ("          echo \"Replay", "          echo \"`tail -n 40 \"$RUNNER_TEMP/fuzz-$TARGET.log\"`\"\n          echo \"Replay"),
+    ("          echo \"Replay", "          grep -F 'INFO: Seed:' \"$RUNNER_TEMP/fuzz-$TARGET.log\"\n          echo \"Replay"),
+    ("-printf '%f %s bytes\\n'", "-printf '%f %s bytes\\n' > \"$GITHUB_STEP_SUMMARY\""),
+    ("        if: failure() && steps.fuzz.outcome == 'failure'\n", "        if: failure()\n"),
+    ("seeds/$TARGET -- -max_total_time=900 -rss_limit_mb=2048 -timeout=10", "seeds/$TARGET -- -max_total_time=900 -rss_limit_mb=2048 -timeout=20"),
+    ("--sanitizer address $TARGET corpus/$TARGET", "--sanitizer address $TARGET corpus"),
+    ("      - name: Name the failing inputs by hash and size only\n",
+     "      - name: Keep crash inputs\n        if: failure()\n        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2\n"
+     "        with:\n          name: collector-fuzz\n          path: ${{ runner.temp }}/artifacts/\n"
+     "      - name: Name the failing inputs by hash and size only\n"),
 ])
 def test_security_fuzz_job_rejects_mutations(old, new):
     text = (ROOT / ".github/workflows/security.yml").read_text()
@@ -2354,6 +2411,88 @@ def test_security_fuzz_job_rejects_mutations(old, new):
     assert sorted(targets) == sorted(order)
     with pytest.raises((AssertionError, KeyError, TypeError, ValueError)):
         assert_fuzz_job(changed, order)
+
+
+# A stand-in for `cargo fuzz run`: it prints the input the way libFuzzer
+# (FuzzerUtil.cpp PrintHexArray and PrintASCII, FuzzerLoop.cpp Base64) and
+# cargo-fuzz (Debug) do, on stdout and stderr, then either writes crash-<sha1>
+# under -artifact_prefix and fails, or ends as libFuzzer does after
+# -max_total_time.
+FUZZ_STAND_IN = r"""
+import base64, hashlib, os, sys
+data = bytes.fromhex(os.environ["STAND_IN_INPUT"])
+prefix = next(arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("-artifact_prefix="))
+text = "".join({92: "\\\\", 34: '\\"'}.get(byte, chr(byte) if 32 <= byte < 127 else f"\\{byte:03o}") for byte in data)
+for stream in (sys.stdout, sys.stderr):
+    print("INFO: Seed: 4242", file=stream)
+    print("MS: 2 CMP-InsertByte- DE: \"" + text + "\"-", file=stream)
+    print("".join(f"0x{byte:x}," for byte in data), file=stream)
+    print(text, file=stream)
+    print("Base64: " + base64.b64encode(data).decode(), file=stream)
+    print(list(data), file=stream)
+    stream.flush()
+if os.environ["STAND_IN_MODE"] == "crash":
+    with open(prefix + "crash-" + hashlib.sha1(data).hexdigest(), "wb") as out:
+        out.write(data)
+    sys.exit(1)
+print("Done 7 runs in 1 second(s)", file=sys.stderr)
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the fuzz job runs on ubuntu (GNU find -printf)")
+@pytest.mark.parametrize("mode", ["crash", "done"])
+def test_fuzz_failure_keeps_the_input_out_of_the_log(tmp_path, mode):
+    """The committed run bodies, run as the job runs them: a crash fails the
+    step, and neither step prints any form of the input."""
+    import base64
+    import hashlib
+    # 이것을 실패시키는 것: fuzz step의 `2>&1`·파일 리다이렉트를 빼거나 `| tee`로 바꾸는 것, 보고 step에서 로그·입력을
+    # 출력하는 것(cat, find -exec cat), crash인데 step이 성공하는 것.
+    _, steps = workflow_job((ROOT / ".github/workflows/security.yml").read_text(), "fuzz")
+    run, report = fuzz_job_steps(steps)
+    data = b"bingsu-secret-crash-input\x00\xfe\\\""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "cargo").write_text("#!" + sys.executable + "\n" + FUZZ_STAND_IN)
+    (bin_dir / "cargo").chmod(0o755)
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir()
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "RUNNER_TEMP": str(runner_temp), "TARGET": "config",
+           "FUZZ_TOOLCHAIN": "nightly-2026-09-15", "STAND_IN_INPUT": data.hex(), "STAND_IN_MODE": mode,
+           "LC_ALL": "C"}
+
+    def step(body):
+        script = tmp_path / "step.sh"
+        script.write_text(body + "\n")
+        return subprocess.run(["bash", "--noprofile", "--norc", "-euo", "pipefail", str(script)], env=env,
+                              capture_output=True, timeout=60)
+
+    fuzzed = step(run["run"])
+    shown = fuzzed.stdout + fuzzed.stderr
+    if mode == "done":
+        assert fuzzed.returncode == 0 and fuzzed.stdout == b"Done 7 runs in 1 second(s)\n" and not fuzzed.stderr, fuzzed
+        return
+    assert fuzzed.returncode != 0 and not shown, fuzzed
+    reported = step(report["run"])
+    shown += reported.stdout + reported.stderr
+    for form in (b"bingsu-secret", b"0x62,0x69,0x6e", base64.b64encode(data)[:12], b"[98, 105, 110"):
+        assert form not in shown, (form, shown)
+    name = "crash-" + hashlib.sha1(data).hexdigest()
+    text = reported.stdout.decode()
+    assert reported.returncode == 0, reported
+    assert f"{name} {len(data)} bytes\n" in text, text
+    assert f"{hashlib.sha256(data).hexdigest()}  {runner_temp}/artifacts/config/{name}\n" in text, text
+    assert "seeds/config -- -max_total_time=900" in text and "INFO: Seed" not in text, text
+    assert text.endswith("--sanitizer address config FILE\n"), text
+
+
+def test_fuzz_leak_check_must_pass_on_linux_ci():
+    # 이것을 실패시키는 것: Linux CI가 이 확인을 건너뛰어도(skip) 초록인 것, 곧 아래 grep 줄을 지우는 것.
+    _, steps = workflow_job((ROOT / ".github/workflows/ci.yml").read_text(), "collector")
+    linux, = [step for step in steps if step.get("name") == "Assert native Linux M3b security passes"]
+    for mode in ("crash", "done"):
+        assert ["grep", "-Fx", f"PASSED tests/shell/test_collector_security.py::test_fuzz_failure_keeps_the_input_out_of_the_log[{mode}]",
+                "$RUNNER_TEMP/m3b-security.txt"] in run_commands(linux), mode
 
 
 F3_CASES = ("no-git", "git-clean", "git-dirty", "tracked-19000", "budget-bound")
