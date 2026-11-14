@@ -682,6 +682,8 @@ jobs:
           grep -F "PASSED tests/shell/test_collector_security.py::test_failure_modes_trace_collector_effects[--malformed-worker]" "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_native_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-security.txt"
           grep -F 'PASSED tests/shell/test_collector_security.py::test_shipped_collector_trace_has_no_forbidden_effect' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_fuzz_failure_keeps_the_input_out_of_the_log[crash]' "$RUNNER_TEMP/m3b-security.txt"
+          grep -Fx 'PASSED tests/shell/test_collector_security.py::test_fuzz_failure_keeps_the_input_out_of_the_log[done]' "$RUNNER_TEMP/m3b-security.txt"
       - if: runner.os == 'macOS'
         name: Assert native macOS M3b security passes
         run: |
