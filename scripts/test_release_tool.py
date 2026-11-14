@@ -569,11 +569,19 @@ def test_assets_reject_each_difference(tmp_path):
     assert any("state" in p for p in rt.check_assets(assets_of(out, state="starter"), out, VERSION, ALL_TARGETS))
     assert any("size" in p for p in rt.check_assets(assets_of(out, size=1), out, VERSION, ALL_TARGETS))
     assert any("digest" in p for p in rt.check_assets(assets_of(out, digest="sha256:" + "0" * 64), out, VERSION, ALL_TARGETS))
+    # 이것을 실패시키는 것: API가 digest를 주지 않을 때 비교를 건너뛰고 통과시키는 것.
+    assert any("no digest" in p for p in rt.check_assets(assets_of(out, digest=None), out, VERSION, ALL_TARGETS))
 
 
-def test_notes_name_the_tag_and_repo():
-    text = rt.notes("v0.1.0", "0.1.0", "ai-screams/Bingsu")
+# 이것을 실패시키는 것: 안내의 확인 명령에서 workflow·ref·commit 제약 중 하나를 빼는 것(제약 없는 attestation 확인을 안내하게 됨).
+def test_notes_give_the_same_attestation_constraints_publish_uses():
+    text = rt.notes("v0.1.0", "0.1.0", "ai-screams/Bingsu", "a" * 40)
     assert "gh release verify v0.1.0 --repo ai-screams/Bingsu" in text
+    assert "--signer-workflow ai-screams/Bingsu/.github/workflows/release.yml" in text
+    assert "--source-ref refs/tags/v0.1.0" in text and f"--source-digest {'a' * 40}" in text
+    publish = jobs()["publish"]
+    for flag in ("--signer-workflow", "--source-ref", "--source-digest"):
+        assert flag in publish
 
 
 # --- the workflow -----------------------------------------------------------
@@ -604,7 +612,7 @@ def test_workflow_triggers_and_defaults():
     assert paths == [".github/workflows/release.yml", "scripts/release_tool.py", "scripts/test_release_tool.py"]
     assert re.search(r"(?m)^permissions:\n  contents: read\n", head)
     assert "cancel-in-progress: false" in head
-    assert "group: release-${{ github.ref }}" in head
+    assert "group: release-${{ github.event_name }}-${{ github.ref }}" in head
     assert re.search(r'(?m)^  RELEASE_RUST: "\d+\.\d+\.\d+"$', head)
 
 
@@ -619,12 +627,27 @@ def test_only_signing_and_publish_enter_the_environment_and_only_publish_writes(
     assert "secrets." not in "".join(b for n, b in jobs().items() if n not in ("sign-macos",)).replace("secrets.GITHUB_TOKEN", "")
 
 
+TAG_RUN = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+
+
 # 이것을 실패시키는 것: dry-run이 서명·게시 job에 닿게 하는 if를 빼는 것.
 def test_dry_run_skips_signing_and_publishing():
-    cond = "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
     for name in ("sign-macos", "publish"):
-        assert cond in jobs()[name], name
-    assert "if: github.event_name" not in "".join(jobs()[n] for n in ("meta", "build", "package", "verify"))
+        assert f"if: {TAG_RUN}\n" in jobs()[name], name
+    assert "if: github.event_name" not in "".join(jobs()[n] for n in ("build", "package", "verify"))
+
+
+# 이것을 실패시키는 것: 정식 run 판단을 이벤트와 meta의 출력 두 곳에서 따로 내리는 것(태그 run에서 meta 출력이 비거나 true면
+# 서명 없는 zip이 서명 검사를 건너뛰고 publish까지 간다). 판단은 이벤트 식 하나이고, 서명·서명 검사는 그 식이 참이면 반드시 돈다.
+def test_the_release_decision_has_one_source():
+    text = workflow_text()
+    assert "needs.meta.outputs.dry_run" not in text and "steps.meta.outputs.dry_run" not in text
+    assert "dry_run:" not in text.split("\njobs:\n", 1)[1].split("  build:", 1)[0]
+    assert text.count(f"DRY_RUN: ${{{{ {TAG_RUN} && 'false' || 'true' }}}}") == 2, "package and verify"
+    assert f"!({TAG_RUN})" in jobs()["package"]
+    assert f"if: {TAG_RUN}\n" in jobs()["meta"] and f"if: ${{{{ !({TAG_RUN}) }}}}" in jobs()["meta"]
+    # the tag-run signature checks and the signed-zip path depend on DRY_RUN alone
+    assert text.count("env.DRY_RUN == 'false'") == 3 and '[ "$DRY_RUN" = false ]' in text
 
 
 def test_every_job_has_a_timeout_and_every_checkout_is_pinned_and_asserted():
@@ -746,7 +769,7 @@ def test_every_gh_call_names_its_repository():
             assert "repos/" in rest, rest
         else:
             assert '--repo "$GITHUB_REPOSITORY"' in rest, (kind, rest)
-    assert sum(1 for kind, _ in calls if kind == "release") == 2
+    assert sum(1 for kind, _ in calls if kind == "release") == 3, "create, edit, upload"
 
 
 # 이것을 실패시키는 것: 인증서를 가져온 뒤에 저장소 코드(release_tool.py)를 도는 것, stage를 가져오기 뒤로 옮기는 것.
@@ -758,6 +781,58 @@ def test_signing_job_runs_no_repository_code_after_the_certificate_import():
     assert "release_tool.py" not in after and "python3 scripts" not in after
     for tool in ("codesign", "ditto", "notarytool"):
         assert tool in after
+
+
+# 이것을 실패시키는 것: 인증서를 가져온 뒤에 python3(현재 폴더의 json.py 같은 모듈을 읽는 `-c`)이나 저장소 스크립트를 도는 것.
+def test_signing_job_has_no_python_after_the_certificate_import():
+    body = jobs()["sign-macos"]
+    after = body[body.index("import-codesign-certs"):]
+    assert "python" not in after and "release_tool" not in after
+    assert "jq -r" in after
+
+
+# 이것을 실패시키는 것: 기존 draft를 이어 쓸 때 제목·본문·prerelease를 이번 run의 값으로 맞추지 않는 것, 맞춘 뒤 대조를 빼는 것.
+def test_resumed_draft_is_set_and_checked_against_this_run():
+    body = jobs()["publish"]
+    assert 'gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file' in body
+    assert body.index("gh release edit") < body.index("gh release upload")
+    assert ".name == $tag and .prerelease == ($pre == \"true\")" in body and "--rawfile notes" in body
+    assert re.search(r"(?m)^          jq -es --arg tag", body), "the check is a command, not a comment"
+    assert body.index("jq -es --arg tag") < body.index("assets-check")
+
+
+# 이것을 실패시키는 것: gate가 `compare/main...<sha>`처럼 이름만 쓰는 것(`main`이라는 태그로 풀릴 수 있음),
+# 가지 끝을 전체 ref로 받지 않는 것.
+def test_gate_compares_by_the_sha_of_the_branch_tip(monkeypatch):
+    calls = []
+    tip, head = "c" * 40, SHA
+
+    def fake(path, *extra):
+        calls.append(path)
+        if "git/ref/tags/" in path:
+            return json.dumps(ref())
+        if "git/ref/heads/main" in path:
+            return json.dumps({"ref": "refs/heads/main", "object": {"type": "commit", "sha": tip}})
+        if "/compare/" in path:
+            return "behind\n"
+        if "/rules/branches/" in path:
+            return json.dumps([GOOD_RULES])
+        if "/check-runs" in path:
+            return "\n".join(json.dumps(dict(r, app_id=1)) for r in GOOD_RUNS)
+        raise AssertionError(path)
+
+    monkeypatch.setattr(rt, "gh_api", fake)
+    assert rt.run_gate("v0.1.0", head, "o/r") == []
+    compare = [c for c in calls if "/compare/" in c]
+    assert compare == [f"repos/o/r/compare/{tip}...{head}"]
+    # a tag named like the branch resolves to something that is not refs/heads/main
+    def tag_named_main(path, *extra):
+        if "git/ref/heads/main" in path:
+            return json.dumps({"ref": "refs/tags/main", "object": {"type": "commit", "sha": tip}})
+        return fake(path, *extra)
+    monkeypatch.setattr(rt, "gh_api", tag_named_main)
+    with pytest.raises(rt.ReleaseError, match="did not resolve"):
+        rt.run_gate("v0.1.0", head, "o/r")
 
 
 def test_verify_depends_on_package_and_publish_on_verify():

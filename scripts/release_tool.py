@@ -215,7 +215,12 @@ def gh_api(path: str, *extra: str):
 def run_gate(tag: str, sha: str, repo: str, branch: str = "main") -> list:
     base = f"repos/{repo}"
     ref_json = json.loads(gh_api(f"{base}/git/ref/tags/{tag}"))
-    compare = gh_api(f"{base}/compare/{branch}...{sha}", "--jq", ".status").strip()
+    # The branch tip by its full ref, then compared by sha: a bare `main` in
+    # the compare path could be read as a tag of that name.
+    tip = json.loads(gh_api(f"{base}/git/ref/heads/{branch}"))
+    if tip.get("ref") != f"refs/heads/{branch}" or tip["object"]["type"] != "commit":
+        raise ReleaseError(f"{branch} did not resolve to a branch commit: {tip.get('ref')!r}")
+    compare = gh_api(f"{base}/compare/{tip['object']['sha']}...{sha}", "--jq", ".status").strip()
     rules = json.loads(gh_api(f"{base}/rules/branches/{branch}", "--paginate", "--slurp"))
     rules = [rule for page in rules for rule in (page if isinstance(page, list) else [page])]
     lines = gh_api(f"{base}/commits/{sha}/check-runs?per_page=100", "--paginate", "--jq",
@@ -502,19 +507,23 @@ def check_assets(assets: list, folder: Path, version: str, targets: list) -> lis
         if asset.get("size") != path.stat().st_size:
             problems.append(f"{asset['name']}: size {asset.get('size')} differs from the file")
         digest = asset.get("digest")
-        if digest is not None and digest != "sha256:" + sha256_file(path):
+        if digest is None:
+            problems.append(f"{asset['name']}: the API reports no digest, so the upload cannot be compared")
+        elif digest != "sha256:" + sha256_file(path):
             problems.append(f"{asset['name']}: digest differs from the file")
     return problems
 
 
-def notes(tag: str, version: str, repo: str) -> str:
+def notes(tag: str, version: str, repo: str, sha: str) -> str:
     return (
         f"Bingsu {version}\n\n"
         "Each archive holds `bingsu`, `bingsu-prompt` and `bingsu-collect`; keep the three in one folder.\n\n"
         "Check what you downloaded:\n\n"
         "```sh\n"
         "sha256sum -c SHA256SUMS --ignore-missing\n"
-        f"gh attestation verify <archive> --repo {repo}\n"
+        f"gh attestation verify <archive> --repo {repo} \\\n"
+        f"  --signer-workflow {repo}/.github/workflows/release.yml \\\n"
+        f"  --source-ref refs/tags/{tag} --source-digest {sha}\n"
         f"gh release verify {tag} --repo {repo}\n"
         "```\n\n"
         "See CHANGELOG.md for what changed.\n"
@@ -568,7 +577,7 @@ def main(argv: list = None) -> int:
     add("verify-archive", "--dir", "--version", "--target", "--rustc", "--manifest", "--extract-to")
     add("static", "--dir")
     add("assets-check", "--json", "--dir", "--version", "--targets")
-    add("notes", "--tag", "--version", "--repo")
+    add("notes", "--tag", "--version", "--repo", "--sha")
     args = parser.parse_args(argv)
 
     try:
@@ -658,7 +667,7 @@ def dispatch(args) -> int:
         assets = json.loads(Path(args.json).read_text())
         return fail(check_assets(assets, Path(args.dir), args.version, targets()), "draft assets")
     if args.cmd == "notes":
-        sys.stdout.write(notes(args.tag, args.version, args.repo))
+        sys.stdout.write(notes(args.tag, args.version, args.repo, args.sha))
         return 0
     return 2
 
