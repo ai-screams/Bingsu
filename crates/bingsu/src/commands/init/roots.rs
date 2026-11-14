@@ -1,4 +1,4 @@
-//! Roots pinned by init (spec section 4 "runtime root"): create missing
+//! Roots pinned by init: create missing
 //! folders and secure the final folder, then judge the retained no-follow
 //! chain with the same rules as the helper (including local file system).
 use super::trusted_env::TrustedEnv;
@@ -229,7 +229,7 @@ pub fn runtime_candidate(env: &TrustedEnv, home: &Path) -> PathBuf {
     }
 }
 
-/// Pins the runtime folder (spec section 4 "runtime root"). The parent's
+/// Pins the runtime folder. The parent's
 /// existing part is canonicalized and opened by a no-follow walk from "/"
 /// (`runtime_root::open_chain`); every
 /// missing folder below it, and the last folder, is created with `mkdirat`
@@ -520,7 +520,7 @@ mod tests {
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
     }
 
-    // 사용자 결정: 그룹 구성원을 확정하지 못한 뿌리(Undecided)는 모양 전용으로 남기고,
+    // 그룹 구성원을 확정하지 못한 뿌리(Undecided)는 모양 전용으로 남기고,
     // 남이 쓸 수 있는 것으로 확정된 뿌리(Last)와 조상(Ancestor)은 지금처럼 버린다.
     // 이것을 실패시키는 것: Undecided 뿌리를 버리는 것(모양 전용 분기 삭제), Last·Ancestor 거부를 모양 전용으로
     // 받아 주는 것(`Some(_)` 분기를 모양 전용으로 바꾸기).
@@ -925,7 +925,7 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    // init도 상위 폴더 규칙을 건다(스펙 4절 "런타임 뿌리" 2): 그룹 쓰기 상위 폴더는 판정 P-R1의 oracle이 정한다.
+    // init도 상위 폴더 규칙을 건다: 그룹 쓰기 상위 폴더는 판정 P-R1의 oracle이 정한다.
     // 이것을 실패시키는 것: init의 pin이 기존 상위 폴더를 보지 않는 것, 거부 뒤 만든 폴더를 남기는 것,
     // 승인한 조상을 기록하지 않는 것, 앞단이 dev·ino·gid·mode가 다른 그룹 pin을 받는 것.
     #[test]

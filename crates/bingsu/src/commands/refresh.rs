@@ -285,7 +285,7 @@ fn run(
         None
     } else {
         let mut r = report::from_loaded(loaded, Mode::Dark);
-        // The `match` check (C4c ruling Q1): the snapshot published keeps a
+        // The `match` check: the snapshot published keeps a
         // unit whose pattern fails off, as config check reports it.
         super::command_match::check(&mut r);
         Some(r)

@@ -27,7 +27,7 @@ pub const MAX_PATTERN_BYTES: usize = 256;
 /// so a few more than that is plenty.
 pub const MAX_GROUPS: usize = 16;
 // No `dfa_size_limit`: the lazy DFA is a perf engine this build leaves out
-// (C4c ruling Q6), so its cap would change nothing and no test could tell.
+// , so its cap would change nothing and no test could tell.
 
 /// A checked pattern.
 #[derive(Clone, Debug)]
@@ -113,7 +113,7 @@ mod tests {
         Matcher::new(pattern).unwrap().value(line).into()
     }
 
-    // 값 규칙(스펙 908행): 이름 붙은 그룹 `value` → 첫 캡처 그룹 → 맞은 전체. 맞지 않거나 그 부분이 비거나 참여하지
+    // 값 규칙: 이름 붙은 그룹 `value` → 첫 캡처 그룹 → 맞은 전체. 맞지 않거나 그 부분이 비거나 참여하지
     // 않으면 빈 값(숨김). 이것을 실패시키는 것: 그룹 순서를 바꾸는 것(`(?P<value>b)(a)`가 a를 냄), 이름 그룹이
     // 있는데 첫 그룹을 쓰는 것, 캡처가 없는데 첫 그룹을 찾는 것(빈 값), 맞지 않을 때 원문을 내는 것.
     #[test]

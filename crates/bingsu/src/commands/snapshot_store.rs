@@ -213,7 +213,7 @@ pub(super) fn data_verdict(
 }
 /// Reads exactly the checked `len` bytes, with no end-check read: store files
 /// are replaced only by rename, so a published file never changes in place
-/// (spec 8 read-count rule). Callers compare the size again afterwards
+///. Callers compare the size again afterwards
 /// (`check_file` or the file stamp), which refuses a file that grew; a shorter
 /// file fails here.
 pub(super) fn read_exact_len(f: &mut impl Read, len: usize) -> Result<Vec<u8>, StoreError> {
@@ -405,7 +405,7 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 이름 바꾸기로만 교체되는 파일을 읽은 뒤 끝 확인 read를 하나 더 하는 것
-    // (스펙 8: 읽기 수는 ⌈바이트 / 버퍼⌉, 끝 확인 없음).
+    // (읽기 수는 ⌈바이트 / 버퍼⌉, 끝 확인 없음).
     #[test]
     fn published_store_reads_have_no_end_check() {
         let mut reader = CountingReader {

@@ -1,5 +1,4 @@
-//! The width table of `config check` (spec section 2 "폭 구간별 레이아웃",
-//! 검증 행): widths are a small integer range, so every width is tried and
+//! The width table of `config check`: widths are a small integer range, so every width is tried and
 //! the band it draws is shown as runs; a band no width chooses gets a
 //! warning at the place it is written. The choice itself is
 //! `bands::select` (M2), the one the renderer uses.

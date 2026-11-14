@@ -1,4 +1,4 @@
-//! Local edits of one config file (spec section 2 "설정 파서와 국소 편집"):
+//! Local edits of one config file:
 //! change only around the changed key and keep comments, order and the way
 //! the rest is written. The replacement value uses the caller's TOML spelling,
 //! including its quotes. These functions support local value edits; `config

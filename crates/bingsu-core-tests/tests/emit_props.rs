@@ -1,5 +1,4 @@
-//! Layer 1 properties of shell output (spec section 3 "셸 경계의 요구
-//! 행동"): hostile text and arbitrary styles through every shell, then a
+//! Layer 1 properties of shell output: hostile text and arbitrary styles through every shell, then a
 //! parser of each shell's field grammar reads the bytes back. Data bytes
 //! must never turn into prompt syntax (zsh `%`, bash SOH/STX, ESC).
 use bingsu_core::color::palette::{

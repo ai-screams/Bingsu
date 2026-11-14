@@ -1,4 +1,4 @@
-//! B1 record encoder (spec section 3). The shell side checks only the frame;
+//! B1 record encoder. The shell side checks only the frame;
 //! field content grammar is this producer's promise.
 use crate::status::{Status, is_valid_status};
 use alloc::vec::Vec;
@@ -168,7 +168,7 @@ fn encoded_len(parts: &[&[u8]; FIELD_COUNT], status: Status) -> Option<usize> {
 
 /// Appends a B1 record to `out`. A record over RECORD_MAX_BYTES first loses
 /// its vi command mode fields; if it is still over, the minimal record replaces
-/// it (spec section 3, size rule; the only formal bound). The length is computed before anything is copied; `out` keeps its prefix.
+/// it (the size rule; the only formal bound). The length is computed before anything is copied; `out` keeps its prefix.
 pub fn encode_b1(
     fields: &Fields<'_>,
     status: Status,

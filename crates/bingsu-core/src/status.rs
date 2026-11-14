@@ -1,5 +1,5 @@
 //! Status value `class ":" code` carried in the last record field
-//! (spec section 3 record ABNF, decision 19).
+//! .
 use alloc::vec::Vec;
 
 /// Known classes. Shells treat any other class as `degraded`.
@@ -78,7 +78,7 @@ impl Status {
     pub const ERROR_CONFIG_DEFAULT: Self = Self::new(StatusClass::Error, "config-default");
 
     /// Non-ok statuses that `init` embeds as constants in the shell reader,
-    /// so each gets its own fixed message (spec section 5 receive table).
+    /// so each gets its own fixed message.
     pub const KNOWN_NON_OK: &'static [Self] = &[
         Self::ERROR_BAD_ARGS,
         Self::ERROR_INTERNAL,

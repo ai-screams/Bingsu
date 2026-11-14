@@ -1,8 +1,7 @@
-//! The starter settings file `bingsu setup` writes (spec section 5 "최소 첫
-//! 설정"), and the comparison it prints instead when a file is already
+//! The starter settings file `bingsu setup` writes, and the comparison it prints instead when a file is already
 //! there. Pure: the text is built from two fixed choices, so no user
 //! string is ever put into the file. `colors.mode` is written here and in
-//! no other file (decision 18).
+//! no other file.
 use crate::config::tree::{self, Table, Value};
 use alloc::format;
 use alloc::string::{String, ToString};

@@ -1,5 +1,5 @@
-//! Shell input envelope, version `--ctx 1` (spec section 5). Hand-written
-//! parser on the prompt fast path (spec section 8 budget table).
+//! Shell input envelope, version `--ctx 1`. Hand-written
+//! parser on the prompt fast path.
 use crate::layout::PATH_BYTES_MAX;
 use crate::record::RecordVersion;
 use crate::root_arg::{
@@ -65,11 +65,9 @@ pub struct Envelope {
     /// `--shell`, a constant word of each shell's hook. `None`: the hook is
     /// older than the renderer, so only the shell-neutral minimal record.
     pub shell: Option<Shell>,
-    /// `--pwd "$PWD"`: display only, never opened or stat'ed (spec section
-    /// 4 front end). Not absolute or over PATH_BYTES_MAX: unknown (`None`).
+    /// `--pwd "$PWD"`: display only, never opened or stat'ed. Not absolute or over PATH_BYTES_MAX: unknown (`None`).
     pub pwd: Option<Vec<u8>>,
-    /// `--colorterm "$COLORTERM"`: `truecolor` or `24bit` (spec section 3
-    /// "색 출력"). Absent or anything else: 256 colors.
+    /// `--colorterm "$COLORTERM"`: `truecolor` or `24bit`. Absent or anything else: 256 colors.
     pub truecolor: bool,
     /// Display-only COLORFGBG observation; malformed or absent means dark.
     pub colorfgbg: Option<crate::color::palette::Mode>,
@@ -204,7 +202,7 @@ pub(crate) fn is_value_flag(a: &[u8]) -> bool {
 }
 
 /// Record version is settled first so every later error knows which
-/// minimal record to print (spec section 5 envelope rules). `--record` is
+/// minimal record to print. `--record` is
 /// counted in flag position only; two or more is `bad-args` whatever the
 /// values are (duplicate check before version check).
 pub(crate) fn record_version(args: &[&[u8]]) -> Result<RecordVersion, EnvelopeError> {

@@ -1,5 +1,4 @@
-//! The child of `spawn` holds only fds 0-2 (spec section 4: children never
-//! hold the shell's or our pipes), and the ready byte arrives.
+//! The child of `spawn` holds only fds 0-2 (children never hold the shell's or our pipes), and the ready byte arrives.
 //!
 //! The only test in this binary: tests running in parallel would open fds of
 //! their own and push the leaked fd's number past the probed range.

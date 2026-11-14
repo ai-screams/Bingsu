@@ -1,6 +1,5 @@
 //! fd 1/2 juggling and the write-only child spawn for the writer-order
-//! measurement (spec section 4 side-effect rules: release the shell's pipe
-//! first, new session, the child holds no fd other than 0-2).
+//! measurement (release the shell's pipe first, new session, the child holds no fd other than 0-2).
 //!
 //! fds 0-2 are never closed here, only replaced with dup2 (std treats them
 //! as open for the whole process). Callers must be single-threaded, as for
@@ -134,7 +133,7 @@ pub fn spawn_writer_child(spec: &SpawnSpec<'_>) -> io::Result<libc::pid_t> {
     ))
 }
 
-/// The write-only child (spec section 4): inherits whatever fds 0-2 are
+/// The write-only child: inherits whatever fds 0-2 are
 /// now, starts a new session and holds no other fd (Linux closefrom 3,
 /// macOS CLOEXEC_DEFAULT with 0-2 inherited explicitly), through the same
 /// posix_spawn path as `spawn::spawn`.

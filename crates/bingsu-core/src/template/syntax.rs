@@ -1,13 +1,12 @@
-//! Template syntax (spec section 3 "템플릿 문법"; ABNF in the M2 plan).
+//! Template syntax.
 //! Only `{` and `}` are special. Every construct is inside braces, so a new
-//! helper never changes how an existing theme parses (decision 10).
+//! helper never changes how an existing theme parses.
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Byte range in the template source. Kept in the syntax tree and in the
-/// compiled template's side table, never in render nodes (spec section 3
-/// "출처").
+/// compiled template's side table, never in render nodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
     pub start: u32,

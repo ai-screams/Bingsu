@@ -1,5 +1,5 @@
 //! macOS memory probes: proc_pid_rusage(RUSAGE_INFO_V4) for the memory
-//! watchdog (spec section 4, X-25), proc_pidinfo task info and RLIMIT_AS
+//! watchdog (X-25), proc_pidinfo task info and RLIMIT_AS
 //! for X-29. Struct layouts come from libc (<libproc.h>, <sys/resource.h>).
 //! Callers query only this process or its own children.
 use std::io;

@@ -1,5 +1,4 @@
-//! Instruction counts of field formatting (spec section 8 "측정과 게이트",
-//! section 9 M2 row). Each bench group is its own bench target: in one
+//! Instruction counts of field formatting. Each bench group is its own bench target: in one
 //! shared binary this count moved by 3.5% and 4.57% when unrelated benches
 //! joined, because the inlining of shared generic code changed.
 use bingsu_core::field::{Field, FieldValue};

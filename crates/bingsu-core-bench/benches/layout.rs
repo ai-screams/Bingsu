@@ -1,5 +1,4 @@
-//! Instruction counts of line layout (spec section 8 "측정과 게이트", section
-//! 9 M2 row). Each bench group is its own bench target, so the code
+//! Instruction counts of line layout. Each bench group is its own bench target, so the code
 //! generation of one binary does not depend on the benches of another.
 use bingsu_core::field::{BUILTIN, Value};
 use bingsu_core::icons::IconSet;

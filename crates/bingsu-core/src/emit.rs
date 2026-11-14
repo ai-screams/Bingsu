@@ -1,5 +1,4 @@
-//! Shell boundary output (spec section 3 "셸별 출력과 보안" step 3 and
-//! "셸 경계의 요구 행동"). Text is sanitized before it gets here and widths
+//! Shell boundary output. Text is sanitized before it gets here and widths
 //! are counted before escaping. What each shell needs from the producer:
 //!
 //! | shell | invisible bytes | producer escaping | left to the hook (M1) |
@@ -163,7 +162,7 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 셸별 감싸기(zsh `%{ %}`, bash SOH·STX, fish 없음)나 zsh `%` 이스케이프가 빠지는 것,
-    // zsh·fish 필드에 SOH·STX가 들어가는 것(스펙 3절 만드는 쪽 시험).
+    // zsh·fish 필드에 SOH·STX가 들어가는 것.
     #[test]
     fn per_shell_bytes() {
         let r = runs(&[("50% ", Style::default()), ("\u{276F}", red())]);
@@ -250,7 +249,7 @@ mod tests {
         assert_eq!(out(Shell::Fish, &r), b"\x1b[0mabcd[31me%");
     }
 
-    // 이것을 실패시키는 것: 스펙 5절 표의 바이트 예와 다른 readline 문자열(SOH·STX는 세 자리 `\001`·`\002`,
+    // 이것을 실패시키는 것: 표의 바이트 예와 다른 readline 문자열(SOH·STX는 세 자리 `\001`·`\002`,
     // ESC는 `\e`), `"`·`\` 이스케이프가 빠지는 것.
     #[test]
     fn readline_spec_vector() {

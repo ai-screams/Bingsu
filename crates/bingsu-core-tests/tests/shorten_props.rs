@@ -1,4 +1,4 @@
-//! Layer 1 property (spec section 3 "긴 이름 줄이기"): every built-in
+//! Layer 1 property: every built-in
 //! shortener result passes core's own validation, for any names.
 use bingsu_core::shorten::{
     Anchor, Keep, Method, PathFacts, ShortenRequest, Source, run_builtin, shorten, validate,

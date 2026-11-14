@@ -1,4 +1,4 @@
-//! Where a 64 KiB `$PWD` spends its instructions (M3a decision P17): each
+//! Where a 64 KiB `$PWD` spends its instructions: each
 //! stage of the dir segment on its own, for two inputs of exactly 65,536
 //! bytes: 32,768 one-letter steps, and one name of 65,535 bytes. The front
 //! end passes at most the last 4,096 steps (P14, `shell_values::path_facts`).

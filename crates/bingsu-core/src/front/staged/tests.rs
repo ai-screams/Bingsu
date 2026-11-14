@@ -1545,7 +1545,7 @@ mod cases {
         assert!(!record(&h.run(&args(), Mode::Dark)).contains("prod-cluster"));
     }
 
-    // 값은 text 세그먼트와 같은 칸 수로 잘린다(C4b 판정 Q3). 이것을 실패시키는 것: command 값을 자르지 않고
+    // 값은 text 세그먼트와 같은 칸 수로 잘린다. 이것을 실패시키는 것: command 값을 자르지 않고
     // 그리는 것.
     #[test]
     fn a_long_value_is_cut_to_the_segment_cells() {
@@ -1666,7 +1666,7 @@ mod cases {
     }
 
     // 다른 셸의 언어 값은 그리지 않는다: 응답 항목의 환경 요약값을 만든 frame과 이 프롬프트의 frame이 언어 변수에서
-    // 다르면 숨긴다(D3b Q1). frame이 없으면 응답을 읽지 않고 숨긴다. 언어 segment를 그리지 않는 설정은 응답을
+    // 다르면 숨긴다. frame이 없으면 응답을 읽지 않고 숨긴다. 언어 segment를 그리지 않는 설정은 응답을
     // 읽지 않는다. 이것을 실패시키는 것: 앞단에서 환경 요약값 비교를 지우는 것, draws_commands의 frame 조건을
     // 지우는 것, 언어 segment를 그리지 않을 때도 읽는 것.
     #[test]

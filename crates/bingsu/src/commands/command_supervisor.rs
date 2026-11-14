@@ -296,7 +296,7 @@ impl Supervisor {
         // results must not keep the supervisor from seeing it is gone.
         // No test for the failure: fcntl(F_SETFL) on an open pipe end cannot
         // be made to fail from a test; it stops the round (fail closed), the
-        // same class as the C1 macOS fcntl branch (user decision).
+        // same class as the C1 macOS fcntl branch.
         let blocked = nonblocking(grant_fd).and(nonblocking(result_fd)).is_err();
         Self {
             stopped: blocked,
@@ -535,7 +535,7 @@ impl Supervisor {
                     c.remove(&u.name);
                 }
                 // clone3 refused before any unit ran in a cgroup: the whole
-                // round takes the best-effort path (C3 rulings).
+                // round takes the best-effort path.
                 if clone3_missing && !self.runs.iter().any(|r| r.kill.is_some()) {
                     self.cgroup = None;
                     spawned = command_process::spawn(

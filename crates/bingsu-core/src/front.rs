@@ -72,7 +72,7 @@ fn render(parsed: &Envelope, shell: Shell, status: Status, out: &mut Vec<u8>) {
 }
 
 /// Shared snapshot/default rendering. Only the staged consumer enables P10;
-/// the legacy adapter remains disconnected pending its syscall-budget ruling.
+/// the legacy adapter remains disconnected pending its syscall budget.
 pub fn render_selected<L: LayoutView>(
     parsed: &Envelope,
     shell: Shell,
@@ -458,7 +458,7 @@ pub fn respond(argv: &[&[u8]]) -> Vec<u8> {
 /// What the adapter writes after `respond` panicked (unwind): the minimal
 /// record with `error:internal` when the envelope negotiated B1 by the
 /// parser's own pair rule (a `--record` in value position negotiates
-/// nothing), else nothing (spec section 6 rule 2).
+/// nothing), else nothing.
 pub fn after_panic(argv: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
     if envelope::record_version(argv).is_ok() {
@@ -486,8 +486,8 @@ pub fn runs_core(s: Sandbox) -> bool {
     !matches!(s, Sandbox::Blocked)
 }
 
-/// What the adapter writes when the filter was refused (`Sandbox::Blocked`,
-/// decision P18): the core does not run, so the record is the minimal one
+/// What the adapter writes when the filter was refused (`Sandbox::Blocked`): the core does not run, so the record is
+/// the minimal one
 /// with `degraded:sandbox` when the envelope negotiated B1 by the parser's
 /// own pair rule, else nothing.
 pub fn without_sandbox(argv: &[&[u8]]) -> Vec<u8> {
@@ -590,7 +590,7 @@ mod tests {
         assert!(!runs_core(Sandbox::Blocked));
     }
 
-    // 이것을 실패시키는 것: 기본 아이콘 집합을 nerd로 되돌리는 것(글꼴이 없으면 네모, 판정 P20), 기본 테마가 East Asian
+    // 이것을 실패시키는 것: 기본 아이콘 집합을 nerd로 되돌리는 것(글꼴이 없으면 네모), 기본 테마가 East Asian
     // Ambiguous 글자(예: U+25B6)를 쓰는 것(CJK 터미널이 두 칸으로 그려 정렬이 어긋남).
     #[test]
     fn default_prompt_glyphs_are_one_cell_under_both_profiles() {
@@ -643,7 +643,7 @@ mod tests {
                 "{c:?} is private use"
             );
             // U+2026: the spec's truncation ellipsis, chosen by the width
-            // profile itself (width::ellipsis); decision P21.
+            // profile itself (width::ellipsis).
             if c == '\u{2026}' {
                 continue;
             }

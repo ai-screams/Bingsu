@@ -1,4 +1,4 @@
-//! Collector cost matrix (spec section 9 M1 row). Prints one JSON line per
+//! Collector cost matrix. Prints one JSON line per
 //! row: measured rows carry `median_ns`/`p95_ns`, rows that cannot be
 //! measured carry `na` and the reason. Rows take turns within each round,
 //! in alternating direction (see `bingsu_bench::rounds::drive`). Single-threaded on purpose:

@@ -1,4 +1,4 @@
-//! The rows of `bingsu list` (plan D2): the names the settings accept. Each
+//! The rows of `bingsu list`: the names the settings accept. Each
 //! kind is read from the table the schema, the renderer or the palette
 //! reads (`config::keys`, `style::PRESETS`, `field::BUILTIN`,
 //! `color::palette::TOKENS`, `icons::ICONS`), so a list cannot drift from

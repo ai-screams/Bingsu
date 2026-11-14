@@ -77,8 +77,7 @@ impl TrustedEnv {
 
     /// The whole environment as a frame body (`NAME=VALUE\0` each), and the
     /// shell's `PWD`: `config check --explain` decides the builtin languages
-    /// as a prompt of the shell the user runs it from would (E2 builtin
-    /// ruling Q3).
+    /// as a prompt of the shell the user runs it from would.
     #[expect(
         clippy::disallowed_methods,
         reason = "the user's own command decides as their shell's prompt would"

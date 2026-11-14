@@ -107,8 +107,7 @@ pub fn marker(name: &CStr) -> io::Result<()> {
 }
 
 /// Duplicates `fd` onto `target` without FD_CLOEXEC, so spawned roles
-/// inherit the runtime-root fd (the reserved-fd hand-over of spec section 4
-/// "fd inheritance").
+/// inherit the runtime-root fd (the reserved-fd hand-over).
 ///
 /// # Safety
 ///

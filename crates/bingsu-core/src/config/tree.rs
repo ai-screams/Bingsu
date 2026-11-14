@@ -1,5 +1,4 @@
-//! A config file as an owned tree with byte spans (spec section 2 "설정
-//! 파서와 국소 편집": diagnostics and provenance carry a stable position,
+//! A config file as an owned tree with byte spans (diagnostics and provenance carry a stable position,
 //! file and byte range). The `toml` crate parses (no_std, `parse` feature);
 //! the rest of the config model sees only this tree, so the
 //! parser can change behind it.
@@ -11,7 +10,7 @@ use toml::de::{DeTable, DeValue};
 use toml_parser::lexer::TokenKind;
 use toml_parser::parser::{Event, EventKind, RecursionGuard};
 
-/// Per file (spec section 2 "`extends` 규칙": 256 KB per file).
+/// Per file.
 pub const FILE_BYTES_MAX: usize = 256 * 1024;
 
 /// Nesting of tables and arrays, counted together: a header `[a.b]` is two

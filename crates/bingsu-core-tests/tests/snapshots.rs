@@ -1,4 +1,4 @@
-//! Layer 2 render snapshots (spec section 7): fixed inputs (presets, color
+//! Layer 2 render snapshots: fixed inputs (presets, color
 //! depths, a width band) drawn for each shell and compared byte for byte with tests/golden/render/snapshots/
 //! (BINGSU_UPDATE_GOLDEN=1 rewrites them; review the diff), and the visible
 //! text equal across the three shells, the vi fields included.

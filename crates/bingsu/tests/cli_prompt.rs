@@ -1,6 +1,5 @@
 //! Golden vectors for the shell input envelope and version negotiation
-//! (spec section 5 "shell input envelope", section 3 "record version
-//! negotiation"). An envelope without `--shell` (every vector below but
+//! . An envelope without `--shell` (every vector below but
 //! `rendered_*`) yields the minimal record with a status; with `--shell` the
 //! built-in default theme is rendered.
 #![cfg(unix)]
@@ -399,8 +398,7 @@ fn rendered_record_for_each_shell() {
     }
 }
 
-// The prompt path reads no environment variable (spec section 4 "runtime
-// root" 7): the same arguments give the same bytes with an empty
+// The prompt path reads no environment variable: the same arguments give the same bytes with an empty
 // environment and with a hostile one. strace cannot see environment reads
 // (they are memory reads) or vDSO clock reads; this behavior test can.
 // 이것을 실패시키는 것: 앞단(어댑터나 core)이 환경 변수나 시계로 출력을 바꾸는 것.

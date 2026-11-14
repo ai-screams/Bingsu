@@ -1280,7 +1280,7 @@ fn marker_disagreeing_in_generation_or_summary_launches_no_unit() {
         assert!(got.units.is_empty(), "{what}");
     }
 }
-/// P-R4 (user ruling 2026-10-15): a file that fails its safety check or whose
+/// A file that fails its safety check or whose
 /// ACL cannot be decided is left out; the rest is verified and marked. Two
 /// approved units, then `damage` takes trust from the conf.d one only.
 fn assert_drops_only_that_files_units(damage: &str) {
@@ -2225,7 +2225,7 @@ fn scan_time_chmod_or_replace_keeps_marker() {
 }
 
 mod axes {
-    //! Helper I/O axes over whole refresh rounds .
+    //! Helper I/O axes over whole refresh rounds.
     use super::*;
     use crate::commands::io_meter::{
         self, AXIS_CAPS, AxisCaps, AxisExceeded, HelperAxis, TestCaps,
@@ -2817,7 +2817,7 @@ mod axes {
         }
     }
 
-    // 사용자 결정 자료의 "오늘 받아들여지는 설정을 거부하는 경우" 표에서 만들기 싼 행: 기준 revision 1d900e4에서는
+    // 오늘 받아들여지는 설정을 거부하는 경우 중 만들기 싼 행: 기준 revision 1d900e4에서는
     // 모두 발행됐고(신뢰 conf.d 300개는 Invalid), 이제는 Incomplete이며 snapshot·last-good·marker·sequence가
     // 그대로다. 넘는 축도 고정한다.
     // 이것을 실패시키는 것: 상한을 넘은 회차를 발행하거나 Invalid로 확인하는 것, 버린 테마 그래프의 시도를 R에서

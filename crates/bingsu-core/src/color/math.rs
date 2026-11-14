@@ -67,7 +67,7 @@ pub fn in_gamut(lin: [f64; 3]) -> bool {
 }
 
 /// Lowers chroma at the same L and H until the color is inside sRGB
-/// (gamut limiting, ADR-0004 rule 6). 40 halvings of a chroma below 0.5
+/// (gamut limiting). 40 halvings of a chroma below 0.5
 /// leave an error under 1e-12, far below one 8-bit step.
 pub fn clamp_chroma(c: Oklch) -> (Oklch, bool) {
     if in_gamut(oklch_to_linear(c)) {

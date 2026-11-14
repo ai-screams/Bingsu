@@ -56,7 +56,7 @@ const FISH: [&str; 2] = [
 const BASH_PRELUDE: &str = "if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 501 )); then\n";
 const BASH_EPILOGUE: &str = "else\n  printf '%s\\n' @MSG_BASH_TOO_OLD@ >&2\nfi\n";
 
-/// Each known non-ok status with its fixed line (spec section 5 receive table).
+/// Each known non-ok status with its fixed line.
 const NOTICES: [(&[u8], Status, MsgId); 12] = [
     (b"BAD_ARGS", Status::ERROR_BAD_ARGS, MsgId::NoticeBadArgs),
     (b"INTERNAL", Status::ERROR_INTERNAL, MsgId::NoticeInternal),

@@ -1,5 +1,4 @@
-//! Line assembly and the seven overflow steps (spec section 3 "한 줄 조립과
-//! 넘칠 때", "마지막 칸은 비운다"). left + fill + right = target width; when a
+//! Line assembly and the seven overflow steps. left + fill + right = target width; when a
 //! line overflows the steps apply in order and stop as soon as it fits, so a
 //! line never overflows at any width from 0 up.
 //!
@@ -950,7 +949,7 @@ impl<'l, 'i> Lay<'l, 'i> {
     }
 
     /// Step 6 draws no background at all, a `{@style:bg=…}` one included;
-    /// text color and attributes stay (ruling C, 2026-10-13).
+    /// text color and attributes stay.
     fn unblock(&self, mut s: Style) -> Style {
         if self.plain {
             s.bg = Color::Default;
@@ -1319,7 +1318,7 @@ fn with(spec_stack: &[Style], mut s: Style) -> Style {
     s
 }
 
-/// Separator cleanup (spec section 3 "템플릿 중간 표현"): a head or a
+/// Separator cleanup: a head or a
 /// separator needs a block after it before the next head or tail, a tail
 /// needs a block before it since the last head or tail (rulings A and B,
 /// 2026-10-13), a separator with no content before it goes, a separator
@@ -1646,8 +1645,7 @@ pub fn layout_line_into<R: Recorder>(
         if R::ENABLED {
             r.step(n, Step::ShortenNames);
         }
-        // Step 1: left before right (the path before right-side information,
-        // user decision 2026-10-02), each to "its width - overflow". A
+        // Step 1: left before right (the path before right-side information), each to "its width - overflow". A
         // segment on both sides is shortened again from its original text
         // with the same methods, which gives the same result.
         for right in [false, true] {
@@ -1698,8 +1696,7 @@ pub fn layout_line_into<R: Recorder>(
                 }
             }
         }
-        // Step 3: the whole right side, `required` included (ruling E,
-        // 2026-10-13: `required` only stops the hiding by choice).
+        // Step 3: the whole right side, `required` included (`required` only stops the hiding by choice).
         if R::ENABLED {
             r.step(n, Step::HideRight);
         }
@@ -2176,7 +2173,7 @@ pub(crate) mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: 0–200 어느 폭·어느 프로필에서든 줄이 목표 폭을 넘는 것(스펙 7절 1층).
+    // 이것을 실패시키는 것: 0–200 어느 폭·어느 프로필에서든 줄이 목표 폭을 넘는 것.
     // 경계가 실제로 닿는지(최소 프롬프트, `…`, amb=2의 `.`, 목표 폭에 꼭 맞는 줄) 센다.
     #[test]
     fn never_overflows_any_width() {
@@ -2615,7 +2612,7 @@ pub(crate) mod tests {
         assert_eq!(text(&one(t, &f, 80)[0].left), "~/Works");
     }
 
-    // 이것을 실패시키는 것: 1단계에서 오른쪽 값을 왼쪽 경로보다 먼저 줄이는 것(사용자 결정 2026-10-02).
+    // 이것을 실패시키는 것: 1단계에서 오른쪽 값을 왼쪽 경로보다 먼저 줄이는 것.
     #[test]
     fn step1_shortens_left_before_right() {
         let mut f = fixture(

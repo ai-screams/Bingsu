@@ -1,5 +1,4 @@
-//! The builtin version probes' fixed profiles (spec section 4 "language
-//! versions", profile rows; plan D3). The supervisor builds a probe's argv and
+//! The builtin version probes' fixed profiles. The supervisor builds a probe's argv and
 //! environment from this table alone; the grant only names the profile, the
 //! resolved executable and, for Rust, the toolchain the helper's resolver
 //! chose (a grammar-checked name). Nothing from the shell reaches a probe.
@@ -104,8 +103,8 @@ pub fn version(id: u8, line: &str) -> Option<&str> {
         .then_some(token)
 }
 
-/// The version a user-defined language's version command printed (D3c-2
-/// ruling Q1): the first word of the sanitized first line that, after one
+/// The version a user-defined language's version command printed: the first word of the sanitized first line that,
+/// after one
 /// leading `v` is taken off, begins with a digit and passes the version
 /// grammar. `deno 2.1.4 (stable)` gives `2.1.4`, `v20.1.0` gives `20.1.0`;
 /// a line with no such word gives no value.
@@ -137,7 +136,7 @@ pub fn digest(id: u8, kind: u8, parts: &[&[u8]]) -> [u8; 32] {
 mod tests {
     use super::*;
 
-    // 사용자 정의 language의 버전 토큰(D3c-2 Q1): 첫 줄의 단어 중 앞의 v 하나를 뗀 뒤 숫자로 시작하고 버전 문법을
+    // 사용자 정의 language의 버전 토큰: 첫 줄의 단어 중 앞의 v 하나를 뗀 뒤 숫자로 시작하고 버전 문법을
     // 통과하는 첫 단어다. 이것을 실패시키는 것: v를 떼지 않는 것, 숫자 시작 검사를 지우는 것(`deno`가 값이 됨),
     // 문법 검사를 지우는 것, 첫 단어만 보는 것.
     #[test]

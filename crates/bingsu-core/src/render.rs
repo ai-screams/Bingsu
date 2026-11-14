@@ -1,6 +1,5 @@
 //! One render: every line of the layout, the transient prompt, the vi
-//! symbols and the vi command mode lines, written for one shell (spec section
-//! 1 "호출은 한 번"). The mapping to record fields is `to_b1_fields`.
+//! symbols and the vi command mode lines, written for one shell. The mapping to record fields is `to_b1_fields`.
 use crate::bands::Band;
 use crate::color::palette::ResolvedPalette;
 use crate::color::sgr::ColorDepth;
@@ -329,8 +328,7 @@ pub fn render_vi_variants<R: Recorder>(
     }
 }
 
-/// The eleven B1 display fields: the prompt's seven (record change plan 12:
-/// `upper` is the seventh), then `vi`'s three lines and their names.
+/// The eleven B1 display fields: the prompt's seven (`upper` is the seventh), then `vi`'s three lines and their names.
 pub fn to_b1_fields<'a>(r: &'a RenderedPrompt, vi: &'a ViVariants) -> crate::record::Fields<'a> {
     crate::record::Fields {
         left: &r.left,

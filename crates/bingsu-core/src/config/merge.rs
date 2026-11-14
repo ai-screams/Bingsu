@@ -1,12 +1,11 @@
-//! Merging the sources (spec section 2 "합치기 규칙"): later wins, tables
+//! Merging the sources: later wins, tables
 //! merge deep, arrays are replaced whole (an explicit `[]` empties), and
 //! every value remembers where it came from: the file, the byte range, and
 //! the file's trust after taint (rule 6). Provenance lives beside the
 //! values here, not in render nodes.
 //!
 //! Execution keys from a shape-only file are not merged at all: they are
-//! dropped with a warning, so the earlier value stays (spec section 2 "키별
-//! 출처 검증"). From an unsafe file they are merged and marked, and the
+//! dropped with a warning, so the earlier value stays. From an unsafe file they are merged and marked, and the
 //! compile step does not run that segment.
 use crate::config::source::{LoadReport, Trust};
 use crate::config::tree::{Node, Span, Table, Value};
@@ -16,7 +15,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// What the key table says a path is (Task S3b), for shape-only sources.
+/// What the key table says a path is, for shape-only sources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
     /// A table row: a shape-only file may add keys inside.
@@ -27,7 +26,7 @@ pub enum Slot {
     Exec,
 }
 
-/// Is the key at this path an execution key? (The key table, Task S3b.)
+/// Is the key at this path an execution key? (The key table.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyClass {
     /// Proven to change only how the prompt looks.

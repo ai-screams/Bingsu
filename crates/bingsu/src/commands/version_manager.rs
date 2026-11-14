@@ -34,7 +34,7 @@ use super::sys;
 pub(crate) const SETTINGS_MAX: u64 = 65_536;
 
 /// The target triple this build runs as, in rustup's spelling, for a
-/// settings file without `default_host_triple` (D2 ruling Q8). A different
+/// settings file without `default_host_triple`. A different
 /// rustup host only misses the install check.
 pub(crate) const BUILD_HOST: &[u8] = build_host();
 
@@ -234,7 +234,7 @@ pub(crate) fn classify(
     Shim::None
 }
 
-/// The helper's trust rule for one opened folder or file (D2 ruling):
+/// The helper's trust rule for one opened folder or file:
 /// owned by root or `me`, nobody else can write it (group write refused,
 /// no ACL that allows writing), on a mount that enforces ownership.
 fn trusted(file: &File, me: u32) -> bool {
@@ -309,14 +309,14 @@ pub(crate) fn read_settings(home: &File, cwd: &[u8], me: u32) -> Settings {
     }
 }
 
-/// The links followed inside a version's `bin` (D3a ruling P1): CPython's
+/// The links followed inside a version's `bin`: CPython's
 /// own install makes `python3` a link to `python3.X`, one step.
 pub(crate) const BIN_LINKS_MAX: usize = 4;
 
 /// The command in a version's opened `bin`, as the name of the regular file
 /// it is: the name itself, or where its links lead, each link's target a
 /// bare name (no `/`) in the same folder, at most `BIN_LINKS_MAX` links
-/// (D3a ruling P1). The file must pass the trust rule.
+/// . The file must pass the trust rule.
 fn command_file(bin: &File, command: &[u8], me: u32) -> Result<Vec<u8>, Install> {
     let mut name = command.to_vec();
     for links in 0..=BIN_LINKS_MAX {
@@ -572,7 +572,7 @@ fn managed_file(manager: Manager, c: &Checked, command: &[u8]) -> PathBuf {
         None => c.value.clone(),
     };
     // pyenv: the regular file the install check reached, links followed
-    // (D3a ruling P1: the final name goes to the executable rules).
+    // (the final name goes to the executable rules).
     // Fails without it: bin_links_stay_in_the_folder (the run names
     // python3.12).
     let leaf = match manager {
@@ -587,7 +587,7 @@ fn managed_file(manager: Manager, c: &Checked, command: &[u8]) -> PathBuf {
 }
 
 /// The manager's override variable when it alone names a usable version
-/// (D3 rulings Q1 and Q2, P2): a grammar-checked name that is not pyenv's
+///: a grammar-checked name that is not pyenv's
 /// `system` (a `:` list never passes the grammar). For pyenv, only
 /// `PYENV_HOOK_PATH` beside it leaves the value unknown: pyenv-version-name
 /// (master) reads the version file only `if [ -z "${PYENV_VERSION:-}" ]`
@@ -610,8 +610,7 @@ fn override_value<'a>(manager: Manager, vars: &Environ<'a>) -> Option<&'a [u8]> 
     .then_some(value)
 }
 
-/// One builtin language's choice (D3 rulings Q1, Q2 and the D3a acceptance
-/// rules): what the resolver decided, turned into what runs. A manager's
+/// One builtin language's choice: what the resolver decided, turned into what runs. A manager's
 /// shim or proxy never runs: a decision to run with no usable name, a
 /// version that is not installed or an untrusted tree is hidden.
 pub(crate) fn choose(
@@ -835,7 +834,7 @@ mod tests {
     // 것: pyenv shims·cargo bin·asdf shims 폴더 비교를 지우는 것, 다른 언어의 관리자 폴더를 받는 것(rustc가 pyenv
     // shims에 있어도 pyenv가 아님), 연결된 rustup 바이너리를 놓치는 것, 이름 문자열로 비교하는 것(링크 별칭을
     // 놓침), 둘 다 없는 폴더를 같다고 보는 것, 파일이 실제로 있는 폴더를 보지 않는 것(다른 PATH 폴더의 링크),
-    // rustup proxy의 하드 링크를 놓치는 것(D3a 보안 리뷰 S-M1).
+    // rustup proxy의 하드 링크를 놓치는 것.
     #[test]
     fn classify_table() {
         let s = Scratch::new("classify");
@@ -1057,7 +1056,7 @@ mod tests {
         );
     }
 
-    // D2 판정(소유자 검사)과 리뷰 M7: 관리자 폴더, settings.toml, toolchains 폴더, 설치 leaf 가운데 남(그룹)이 쓸
+    // 소유자 검사: 관리자 폴더, settings.toml, toolchains 폴더, 설치 leaf 가운데 남(그룹)이 쓸
     // 수 있는 것이 있으면 settings는 모름, 설치 확인은 Untrusted다. 이것을 실패시키는 것: open_home·settings·
     // toolchains·leaf의 trusted 검사를 각각 지우는 것.
     #[test]
@@ -1104,7 +1103,7 @@ mod tests {
 
     // 리뷰 M7: pyenv 버전은 bin/<명령>이 신뢰할 수 있는 일반 파일로 있어야 설치된 것이다(pyenv 자신이 거기서 찾는다).
     // 이것을 실패시키는 것: bin 확인을 지우는 것(명령 없는 버전을 Present로 봄), 명령 자리의 폴더를 받는 것, 쓰기
-    // 가능한 명령 파일을 받는 것, 쓰기 가능하거나 링크인 bin 폴더를 받는 것(재리뷰 L5).
+    // 가능한 명령 파일을 받는 것, 쓰기 가능하거나 링크인 bin 폴더를 받는 것.
     #[test]
     fn pyenv_needs_the_command_in_the_version() {
         let s = Scratch::new("pyenv-bin");
@@ -1317,7 +1316,7 @@ mod tests {
         );
     }
 
-    // 재리뷰 L4: early()로 정해지는 다섯 경우(path, 환경 없음, override, 선택 없음, 값 없음)는 관리자 폴더를 한 번도
+    // early()로 정해지는 다섯 경우(path, 환경 없음, override, 선택 없음, 값 없음)는 관리자 폴더를 한 번도
     // 열지 않는다. 이것을 실패시키는 것: decide에서 early 호출을 지우는 것(홈을 연 뒤 plan이 정함).
     #[test]
     fn early_cases_open_no_folder() {
@@ -1346,8 +1345,8 @@ mod tests {
         }
     }
 
-    // 재리뷰 L3: settings를 읽은 뒤 설치 확인 전에 홈 경로가 다른 폴더로 바뀌어도, 설치 확인은 처음 연 fd 아래에서
-    // 한다(H2). 이것을 실패시키는 것: installed가 홈을 경로로 다시 여는 것(바뀐 빈 폴더에서 Absent → Run).
+    // settings를 읽은 뒤 설치 확인 전에 홈 경로가 다른 폴더로 바뀌어도, 설치 확인은 처음 연 fd 아래에서
+    // 한다. 이것을 실패시키는 것: installed가 홈을 경로로 다시 여는 것(바뀐 빈 폴더에서 Absent → Run).
     #[test]
     fn the_install_check_stays_on_the_opened_home() {
         let s = Scratch::new("swap");
@@ -1389,7 +1388,7 @@ mod tests {
     }
 
     // bin 안의 링크는 대상이 '/' 없는 이름이고 같은 bin 폴더의 신뢰된 일반 파일일 때만, 링크 4개까지 따라간다
-    // (D3a 판정 P1, CPython의 python3 -> python3.X). 실행 파일은 그 최종 이름이다. 이것을 실패시키는 것: 대상의
+    // (CPython의 python3 -> python3.X). 실행 파일은 그 최종 이름이다. 이것을 실패시키는 것: 대상의
     // '/' 검사를 지우는 것(../, 절대 경로로 다른 폴더), 링크 상한을 늘리는 것(5개), 최종 대상의 신뢰 검사를
     // 지우는 것(0777 대상), managed_file이 최종 이름 대신 명령 이름을 쓰는 것.
     #[test]
