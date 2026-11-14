@@ -20,7 +20,15 @@
 //! off, so Ctrl-S cannot stop the output under a query, and writes are
 //! non-blocking: a terminal that takes no output (its queue full) ends the
 //! write at the deadline, and what is still queued is dropped
-//! (`tcflush(TCOFLUSH)`) so half a request never reaches it later.
+//! (`tcflush(TCOFLUSH)`) so half a request never reaches it later. The
+//! flush cannot take back what the terminal (or, on Linux, the
+//! pseudo-terminal's reading side) already holds, so a request that was
+//! cut short, at the deadline or by a stop, is followed by bytes that end
+//! the sequence (`CANCEL`). One exception to the deadlines follows: those
+//! three bytes stay queued for a terminal that stopped reading, and when
+//! this process is the terminal's session leader (the terminal ran
+//! `bingsu` itself) its exit waits until the terminal reads them; a
+//! process started from a shell ends at once (macOS, measured).
 //!
 //! Replies carry no query number, so a reply must not be read as the answer
 //! to another query. Before each query the input queue is discarded (a
@@ -573,20 +581,28 @@ fn discard_output(fd: RawFd) {
     }
 }
 
-/// What ends an escape sequence the terminal began to read: CAN. xterm,
-/// VTE, Windows Terminal and ghostty drop a CSI or OSC sequence in progress
-/// on it; alacritty and wezterm end an OSC on it and carry it out; kitty
-/// ends a CSI on it but an OSC only on BEL or ST.
-const CANCEL: &[u8] = b"\x18";
+/// What ends an escape sequence the terminal began to read: CAN, then ST
+/// (`ESC \`). xterm, VTE, Windows Terminal and ghostty drop a CSI or OSC
+/// sequence in progress on CAN, and the ST that follows ends nothing. kitty
+/// drops a CSI on CAN but ends an OSC only on BEL or ST: there the ST ends
+/// it with a value that is no query (`?` and CAN; an OSC 11 value that is
+/// no color puts the default background back). alacritty and wezterm end an
+/// OSC on CAN and carry it out: when exactly `ESC ] 11 ; ?` had reached
+/// them, that is a query whose reply comes late. BEL is no choice (it rings
+/// outside a sequence), and neither is ST alone (every parser would carry
+/// out the half OSC).
+const CANCEL: &[u8] = b"\x18\x1b\\";
 
 /// After a request was cut short (the terminal took its first bytes, then
 /// nothing more), the terminal's parser is inside an escape sequence and
 /// would read later output (a table, the next question) as the rest of it.
-/// `discard_output` cannot take back what the terminal already read, so
-/// `CANCEL` is queued behind it, for the terminal to read next (what it does
-/// with it: `CANCEL`). One non-blocking write; if the terminal takes nothing, nothing
-/// more is done.
+/// What is still queued is dropped first (`discard_output`); what the
+/// terminal already holds stays, so `CANCEL` is queued behind it, for the
+/// terminal to read next. One non-blocking write, not tried again: the
+/// flush left room for its three bytes (Linux and macOS took them right
+/// after flushing a full queue).
 fn cancel_half_escape(fd: RawFd) {
+    discard_output(fd);
     let _ = write_once(fd, CANCEL);
 }
 
@@ -665,8 +681,9 @@ impl RawGuard<'_> {
     }
 
     /// Writes `bytes` until `deadline`. On a timeout what is still queued is
-    /// dropped (`discard_output`), and when the terminal took the first
-    /// bytes, the sequence it began is cancelled (`cancel_half_escape`).
+    /// dropped (`discard_output`). When the terminal took the first bytes and
+    /// the write ended at the deadline or a stop, the sequence it began is
+    /// cancelled (`cancel_half_escape`).
     fn send(&self, bytes: &[u8], deadline: Instant) -> std::io::Result<Sent> {
         let fd = self.tty.file.as_raw_fd();
         let wait = writable(fd);
@@ -696,11 +713,12 @@ impl RawGuard<'_> {
             },
             bytes,
         )?;
-        if let Sent::TimedOut { partial } = sent {
-            discard_output(fd);
-            if partial {
+        match sent {
+            Sent::TimedOut { partial: true } | Sent::Stopped { partial: true } => {
                 cancel_half_escape(fd);
             }
+            Sent::TimedOut { partial: false } => discard_output(fd),
+            Sent::All | Sent::Stopped { partial: false } => {}
         }
         Ok(sent)
     }
@@ -2005,6 +2023,14 @@ mod tests {
         /// full.
         const FULL_QUIET: Duration = Duration::from_millis(200);
 
+        /// The status flags the guard changes (`O_NONBLOCK`). The rest are not
+        /// compared: macOS adds a "written" bit (0x10000) to `F_GETFL` once
+        /// the descriptor took a write.
+        fn changed_flags(fd: RawFd) -> libc::c_int {
+            // SAFETY: `fd` is open; F_GETFL only reads its status flags.
+            unsafe { libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK }
+        }
+
         fn nonblocking(fd: RawFd) -> bool {
             // SAFETY: `fd` is open; F_GETFL only reads its status flags.
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -2047,10 +2073,7 @@ mod tests {
         fn full_queue_query_child() {
             let tty = take_terminal();
             let before = mode();
-            let flags = {
-                // SAFETY: the terminal's descriptor is open.
-                unsafe { libc::fcntl(tty.file.as_raw_fd(), libc::F_GETFL) }
-            };
+            let flags = changed_flags(tty.file.as_raw_fd());
             {
                 let mut g = tty.raw().unwrap();
                 say(&format!("filled {}", fill_output()));
@@ -2064,8 +2087,7 @@ mod tests {
             }
             say(&format!(
                 "flags restored {}",
-                // SAFETY: as above.
-                unsafe { libc::fcntl(tty.file.as_raw_fd(), libc::F_GETFL) } == flags
+                changed_flags(tty.file.as_raw_fd()) == flags
             ));
             say(&format!("restored {}", mode() == before));
         }
@@ -2092,9 +2114,9 @@ mod tests {
             say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
         }
 
-        // 터미널이 요청의 앞 3바이트(`ESC ] 1`)만 읽고 출력을 받지 않으면, 마감 뒤에 CANCEL이 따라오고 요청의 나머지는
-        // 오지 않는다. 이것을 실패시키는 것: 앞부분이 나간 시간 초과 뒤 cancel_half_escape를 부르지 않는 것(터미널은
-        // OSC 문자열 안에 남음).
+        // 터미널이 요청의 앞 3바이트(`ESC ] 1`)만 읽고 출력을 받지 않으면, 마감 뒤에 CANCEL(`CAN ESC \`)이 따라와
+        // 터미널이 읽은 바이트의 끝이 되고, 요청의 나머지는 오지 않는다. 이것을 실패시키는 것: CANCEL을 보내지 않는 것
+        // (터미널은 OSC 문자열 안에 남음), 앞부분이 나간 시간 초과에서 cancel_half_escape를 부르지 않는 것.
         #[test]
         fn a_request_cut_short_is_cancelled() {
             let mut t = start("cut_request_child", 80);
@@ -2102,11 +2124,49 @@ mod tests {
             t.expect(CANCEL);
             let (lines, all) = t.finish();
             assert_eq!(lines, ["silent"]);
+            assert!(all.ends_with(CANCEL), "{}", all.escape_ascii());
             assert!(
                 !all.windows(2).any(|w| w == b";?"),
                 "{}",
                 all.escape_ascii()
             );
+        }
+
+        // 신호로 멈춘 쓰기도 같다: 터미널이 앞 3바이트를 받은 뒤 SIGTERM이 오면 CANCEL이 따라오고, 프로세스는 터미널을
+        // 되돌린 뒤 그 신호로 끝난다. 이것을 실패시키는 것: 쓰기가 Stopped로 끝났을 때 cancel_half_escape를 부르지
+        // 않는 것.
+        #[test]
+        fn a_request_cut_short_by_a_signal_is_cancelled() {
+            use std::os::unix::process::ExitStatusExt;
+            let mut t = start("cut_by_signal_child", 80);
+            t.expect(&OSC11[..3]);
+            t.expect(CANCEL);
+            let (lines, status, out, err) = t.end();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
+            assert_eq!(lines, ["cancelled"]);
+            assert!(t.all.ends_with(CANCEL), "{}", t.all.escape_ascii());
+            assert!(t.mode_restored());
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn cut_by_signal_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            TERMINAL_ROOM.with(|r| r.set(Some(3)));
+            // The stop comes while the write waits for room (`send` sleeps
+            // to the 200 ms deadline after the first 3 bytes).
+            let stop = std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                // SAFETY: getpid takes no arguments and cannot fail.
+                let me = unsafe { libc::getpid() };
+                // SAFETY: sends SIGTERM to this process; the guard's handler takes it.
+                unsafe { libc::kill(me, libc::SIGTERM) };
+            });
+            say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+            stop.join().unwrap();
+            drop(g);
+            say("still running");
         }
 
         #[test]
