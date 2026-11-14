@@ -16,8 +16,8 @@ _bingsu_status_ok_core() {
   [[ $code != *[!abcdefghijklmnopqrstuvwxyz-]* ]]
 }
 
-# nocasematch would make [[ == ]] and the bracket tests below case-insensitive
-# (F-18): save, clear, restore. _bingsu_frame guards too (two layers).
+# nocasematch would make [[ == ]] and the bracket tests below case-insensitive:
+# save, clear, restore. _bingsu_frame guards too (two layers).
 _bingsu_status_ok() {
   local nm=0 r=0
   if shopt -q nocasematch; then nm=1; shopt -u nocasematch; fi
@@ -51,7 +51,7 @@ _bingsu_frame_core() {
   _bingsu_f=("${_bingsu_t[@]}")
 }
 
-# nocasematch would make [[ == ]] case-insensitive (F-18): save, clear, restore.
+# nocasematch would make [[ == ]] case-insensitive: save, clear, restore.
 _bingsu_frame() {
   local nm=0 r=0
   _bingsu_f=()

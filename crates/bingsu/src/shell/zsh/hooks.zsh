@@ -1,5 +1,5 @@
 # bingsu hooks for zsh (spec section 5). init redefines every function on
-# each run; hook registration happens once (F-23). @…@ markers are literal
+# each run; hook registration happens once. @…@ markers are literal
 # shell words embedded by init.
 # typeset keeps attributes set earlier in this shell (an integer would evaluate
 # the prompt text as arithmetic), so every owned name starts over; the three
@@ -130,10 +130,10 @@ _bingsu_notify() {
 # Sets PROMPT and RPROMPT from record fields, given by number (0: no upper
 # line). The numbers keep callers free of array syntax: this must run before
 # any `emulate` in its caller, because prompt options are read here, right
-# before installing (spec section 3 option table, F-18). Data never reaches
+# before installing (spec section 3 option table). Data never reaches
 # PROMPT unescaped: reference when PROMPT_SUBST is on, plain assignment
 # otherwise. Without a record, or with NO_PROMPT_PERCENT (the record is
-# %-escaped for it; option (b), question Q4), a constant.
+# %-escaped, which that option would show as it is), a constant.
 _bingsu_paint() {
   local o_subst=0 o_bang=0 o_pct=0
   [[ -o prompt_subst ]] && o_subst=1
@@ -143,7 +143,7 @@ _bingsu_paint() {
   local ps1 rps1
   if (( ${#_bingsu_f} && o_pct )); then
     ps1=$_bingsu_f[$2] rps1=$_bingsu_f[$3]
-    # Upper line (record change plan 12, R-04): joined by a constant newline, only
+    # Upper line: joined by a constant newline, only
     # when it is not empty, before any escaping so the escaping covers it.
     if (( $1 )) && [[ -n $_bingsu_f[$1] ]]; then ps1=$_bingsu_f[$1]$'\n'$ps1; fi
     if (( o_bang )); then ps1=${ps1//!/!!} rps1=${rps1//!/!!}; fi
@@ -327,7 +327,7 @@ _bingsu_trap_free() {
   functions[_bingsu_wrapped_$1]=:
 }
 
-# Takes over widget $1 once per shell (F-23): after a first run the chain may
+# Takes over widget $1 once per shell: after a first run the chain may
 # hold a plugin that wraps us, and saving that would make it call itself. The
 # mark is a widget, so no environment can carry it. add-zle-hook-widget keeps
 # its list in a dispatcher that a later add would re-enter through our saved
@@ -345,7 +345,7 @@ _bingsu_zle_wrap() {
   zle -N $1 $2
 }
 
-# Register once (F-23). Function bodies above are redefined on every init.
+# Register once. Function bodies above are redefined on every init.
 # Registration is decided by the arrays themselves, not by a flag: a flag
 # can arrive from the environment and silently switch bingsu off.
 () {
