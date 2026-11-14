@@ -1,4 +1,4 @@
-"""Version mixing (record change plan 12, security impact): the B1 readers of
+"""Version mixing, which has a security impact: the B1 readers of
 M1 and M3 (counts 7 and 8, kept in legacy/ as fixtures) with a new record, and
 the new reader with an old record, all fail and leave the field array empty. The new
 binary refuses an old snapshot frame and its helper regenerates the file."""

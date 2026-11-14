@@ -1,6 +1,5 @@
-"""bash security state machine and PS0 state machine (spec section 3 bash
-rows, section 5 "bash execution start time"). bash 5.1 (container) and
-current bash."""
+"""bash security state machine and PS0 state machine (bash execution start
+time). bash 5.1 (container) and current bash."""
 import itertools
 import os
 import re
@@ -183,7 +182,7 @@ def test_set_e_shell_survives_a_nonzero_status(tmp_path):
 CHK = r"""_chk() { local n=0 s=$PS0; while [[ $s == *'_bingsu_t0:0:'* ]]; do n=$((n+1)); s=${s#*'_bingsu_t0:0:'}; done; echo "PREFIX=$n"; }"""
 
 
-# PS0 acceptance list (spec section 5 "bash execution start time", confirmation row).
+# PS0 acceptance list (bash execution start time).
 # 이것을 실패시키는 것: 설치 hook이 `_bingsu_t0=`로 비우지 않는 것(엔터만 친 줄에 실행 시간이 붙음),
 # PS0에 _bingsu_ps0를 붙이지 않는 것(실행 시간 없음).
 def test_ps0_duration_cases(tmp_path):

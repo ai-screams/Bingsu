@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stripped size of the three combinations (spec section 8 capacity table):
+# Stripped size of the three combinations:
 # base; base + regex; base + regex + YAML/JSON. The last is compared with
 # 6 MB by summarize.py. Release builds with the probe's own Cargo.lock, in a
 # new target folder (removed on exit), so neither CARGO_TARGET_DIR nor an old

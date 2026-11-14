@@ -1,6 +1,6 @@
-"""zsh status notices (spec section 5, key rules and receive table): the hook
+"""zsh status notices (key rules and what the hook receives): the hook
 prints one fixed line per key change, on stderr, whatever the prompt shows.
-The key table rows are spec section 5 "시험", in a real interactive shell."""
+The key table rows run in a real interactive shell."""
 import os
 import shutil
 import subprocess
@@ -224,7 +224,7 @@ def test_unknown_code_text_stays_out_of_the_notice(tmp_path):
 
 
 # No status can hold a pattern character, so the table above cannot see this.
-# 이것을 실패시키는 것: `_bingsu_notice_due`를 패턴 비교로 만드는 것(`$~1`, 스펙 5절 구현 모양).
+# 이것을 실패시키는 것: `_bingsu_notice_due`를 패턴 비교로 만드는 것(`$~1`).
 def test_notice_due_compares_exactly(tmp_path):
     inst = Install(tmp_path)
     env = trusted_env(tmp_path)

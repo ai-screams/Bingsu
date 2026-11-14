@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """X-24: how often the write-only child runs with the default layout
 (time and duration segments). The child runs only when the session state
-(segment values and facts) changes (spec section 4 side-effect rules).
+(segment values and facts) changes.
 
 Model: state = (formatted time, cwd, last status, duration if >= 2 s).
 Git values are not modelled (M3), so the result is a lower bound.

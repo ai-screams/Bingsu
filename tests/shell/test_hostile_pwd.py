@@ -1,4 +1,4 @@
-"""Hostile folder names through the real binary (M3a Task V3): `$PWD` is
+"""Hostile folder names through the real binary: `$PWD` is
 untrusted data that reaches the record through `--pwd`, PathFacts and the
 renderer. Rows and expectations come from tests/hostile/classes.tsv
 (column `pwd`): `noexec` rows must be drawn as a rendered prompt without
@@ -26,8 +26,8 @@ CD = {"zsh": 'cd -- "$BINGSU_T_DIR"', "bash": 'cd -- "$BINGSU_T_DIR"', "fish": "
 def shown_leaf(payload: bytes) -> bytes:
     """The last folder name as the prompt must show it, computed here
     without the product code: invalid UTF-8 becomes U+FFFD, then control
-    (Cc), format (Cf, ZWJ kept), line and paragraph separators are removed
-    (spec section 3 step 1); a name left empty becomes U+FFFD."""
+    (Cc), format (Cf, ZWJ kept), line and paragraph separators are removed;
+    a name left empty becomes U+FFFD."""
     text = payload.rsplit(b"/", 1)[-1].decode("utf-8", "replace")
     keep = "".join(c for c in text if c == "\u200d" or unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp"))
     return (keep or "\ufffd").encode()

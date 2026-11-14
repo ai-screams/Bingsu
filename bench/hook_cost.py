@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Baseline (record only) of one install-hook run per shell, with the fake
-binary printing a fixed record (spec section 8: shell-side time, frame in M1)."""
+binary printing a fixed record (shell-side time only)."""
 import json
 import pathlib
 import platform

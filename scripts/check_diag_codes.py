@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnostic codes are append-only (spec section 6 "진단 구조"): every code
+"""Diagnostic codes are append-only: every code
 of the base branch's crates/bingsu-core/diag-codes.txt is still listed, with
 the same status, or moved from `stable` to `deprecated <version>`. A code is
 never removed, reused or brought back from deprecated. The file-backed test in

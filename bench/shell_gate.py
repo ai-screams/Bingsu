@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shell-side time gate (spec section 8): Enter to the next prompt in a real
+"""Shell-side time gate: Enter to the next prompt in a real
 interactive zsh, with bingsu replaced by a stand-in that prints a fixed record,
 so the hooks are what is timed. The base and candidate hooks alternate in the
 controlled protocol (bench/protocol.py), blocks it does not admit stay in the

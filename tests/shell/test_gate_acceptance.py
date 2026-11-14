@@ -165,8 +165,8 @@ M6_GATES = {
         "A unit that does not run shows why, with the diagnostic code",
         "W411 warns about exactly the first lines the executor refuses, with the reason",
     ),
-    # M6 D3a: the builtin language versions (D3 ruling Q7: the structural
-    # clauses; the multi-version and network observations are F1's).
+    # M6 D3a: the builtin language versions (the structural clauses; the
+    # multi-version and network observations are F1's).
     "GATE-LANG-PY": (
         "A Python probe runs exactly the resolved python with -I -S --version and an empty environment",
     ),
@@ -1376,7 +1376,7 @@ def assert_command_round_home(text):
 COMMAND_CGROUP_FILE = "tests/shell/test_command_cgroup.py"
 HELPER_STAGE_NODE = "tests/shell/test_prompt_env_paths.py::test_live_helper_calls_match_stage_formula"
 CGROUP_CELL_REASON = '#[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]'
-# A skip of this one is BLOCKED and recorded (plan C3: the survivor fixture depends on kernel and FUSE).
+# A skip of this one is BLOCKED and recorded (the survivor fixture depends on kernel and FUSE).
 CGROUP_RECORDED_ONLY = {"test_orphan_live_descendant_reclaimed"}
 # Asserted in both cells: the best-effort path works with or without delegation.
 CGROUP_BOTH_CELLS = {"test_best_effort_group_kill_under_the_filter"}

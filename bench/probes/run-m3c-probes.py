@@ -38,7 +38,7 @@ FIELDS = ("case", "environment", "arch", "cell", "status", "outcome", "evidence_
 ARCHES = ("x86_64", "aarch64")
 # Linux collection needs 5.9+ and the required kernel features; below it
 # the product collects nothing and the prompt stays normal. The macOS case is the current
-# macOS runtime; the minimum macOS VM is decision 24, never a substitute here.
+# macOS runtime; a run on the oldest macOS VM is separate, never a substitute here.
 LINUX_FLOOR = (5, 9)
 ALL_ENVIRONMENTS = ("macos-current", "linux-glibc", "linux-musl")
 
