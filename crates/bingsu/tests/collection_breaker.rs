@@ -1160,3 +1160,142 @@ fn e3_reads_and_writes_are_one_kib_units_and_cap_precedes_read() {
     ));
     assert_eq!(store::fixture_io().reads, 0);
 }
+
+// ---- doctor's read of one session's breaker (`peek`) ----------------------------------
+
+const OTHER_SESSION: &[u8] = b"fedcba9876543210fedcba9876543210";
+
+/// Every file and folder under `root` with what a write would change: kind, mode, size, modification
+/// time (ns), and a file's bytes.
+fn tree(root: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        names.sort();
+        for p in names {
+            let m = fs::symlink_metadata(&p).unwrap();
+            let bytes = if m.is_file() {
+                fs::read(&p).unwrap()
+            } else {
+                Vec::new()
+            };
+            out.push(format!(
+                "{} {:o} {} {}.{} {:?}",
+                p.display(),
+                m.mode(),
+                m.len(),
+                m.mtime(),
+                m.mtime_nsec(),
+                bytes
+            ));
+            if m.is_dir() {
+                walk(&p, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
+}
+
+// The breaker of one session is read, and only that one: session A is blocked for `/repo`, session B (made
+// by a collection that completed) is not, a session that was never made has no record, and a folder A never
+// tripped on is allowed. Reading changes nothing: not a byte, a mode or a modification time.
+// 이것을 실패시키는 것: 세션 키를 무시하고 다른 세션(또는 첫 세션)의 기록을 읽는 것, peek이 파일·폴더를 만들거나 고치는 것
+// (폴더 트리 비교), 차단을 ok로 매기는 것.
+#[test]
+fn peek_reads_only_its_own_session_and_changes_nothing() {
+    let f = Fixture::new();
+    f.trip();
+    match store::fixture_begin(&f.runtime, Some(OTHER_SESSION), Some(1), b"/repo", clock(1)) {
+        Decision::Run(Some(t)) => t
+            .finish(Progress::default(), EndReason::Complete, clock(2))
+            .unwrap(),
+        _ => panic!("the second session is admitted"),
+    }
+    let before = tree(&f.root);
+    let now = clock(5);
+    let peek = |session: &[u8], cwd: &[u8]| store::peek(&f.runtime, session, cwd, now);
+    assert_eq!(peek(SESSION, b"/repo").unwrap(), store::Peek::Blocked);
+    assert_eq!(peek(OTHER_SESSION, b"/repo").unwrap(), store::Peek::Allowed);
+    assert_eq!(peek(SESSION, b"/elsewhere").unwrap(), store::Peek::Allowed);
+    let never = b"00000000000000000000000000000000";
+    assert_eq!(peek(never, b"/repo").unwrap(), store::Peek::NoRecord);
+    assert_eq!(tree(&f.root), before, "peek wrote something");
+    for bad in [
+        &b""[..],
+        b"short",
+        b"0123456789ABCDEF0123456789ABCDEF",
+        b"../../etc/passwd/xxxxxxxxxxxxxx",
+    ] {
+        assert!(peek(bad, b"/repo").is_err(), "{bad:?}");
+    }
+    assert!(
+        peek(SESSION, b"repo").is_err(),
+        "a relative folder has no key"
+    );
+    assert_eq!(tree(&f.root), before);
+}
+
+// A record of another boot or clock says nothing about now, and an unsafe folder is an error, never a verdict.
+// 이것을 실패시키는 것: 다른 부팅의 기록을 Blocked로 매기는 것, 링크나 남이 쓸 수 있는 폴더의 기록을 읽는 것.
+#[test]
+fn peek_distrusts_another_clock_and_an_unsafe_folder() {
+    let f = Fixture::new();
+    f.trip();
+    let mut other_boot = clock(5);
+    other_boot.boot = [9; 16];
+    assert_eq!(
+        store::peek(&f.runtime, SESSION, b"/repo", other_boot).unwrap(),
+        store::Peek::Disabled
+    );
+    let dir = f.dir();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(store::peek(&f.runtime, SESSION, b"/repo", clock(5)).is_err());
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        store::peek(&f.runtime, SESSION, b"/repo", clock(5)).unwrap(),
+        store::Peek::Blocked
+    );
+    let moved = dir.with_file_name("moved");
+    fs::rename(&dir, &moved).unwrap();
+    symlink(&moved, &dir).unwrap();
+    assert!(store::peek(&f.runtime, SESSION, b"/repo", clock(5)).is_err());
+}
+
+// Every folder on the way, the control folder and `sessions` included, and the record itself must pass the helper's
+// checks: a damaged, group-readable or hard-linked record is an error, never "no record".
+// 이것을 실패시키는 것: control·sessions 단계의 `check_directory`를 빼는 것, 기록 읽기 오류(손상, 0644, 하드 링크)를 기록 없음으로 매기는 것.
+#[test]
+fn peek_refuses_an_unsafe_way_and_an_unsafe_record() {
+    let f = Fixture::new();
+    f.trip();
+    let ok = || store::peek(&f.runtime, SESSION, b"/repo", clock(5));
+    assert_eq!(ok().unwrap(), store::Peek::Blocked);
+    for dir in [
+        f.root.join(store::ROOT),
+        f.root.join(store::ROOT).join("sessions"),
+    ] {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ok().is_err(), "{}", dir.display());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(ok().unwrap(), store::Peek::Blocked);
+    }
+    let record = f.dir().join(store::RECORD);
+    let good = fs::read(&record).unwrap();
+    fs::write(&record, b"not a breaker record").unwrap();
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(ok().is_err(), "a damaged record");
+    fs::write(&record, &good).unwrap();
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(ok().is_err(), "a record others can read");
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(ok().unwrap(), store::Peek::Blocked);
+    let twin = f.dir().join("twin");
+    fs::hard_link(&record, &twin).unwrap();
+    assert!(ok().is_err(), "a record with another name");
+    fs::remove_file(&twin).unwrap();
+    assert_eq!(ok().unwrap(), store::Peek::Blocked);
+}

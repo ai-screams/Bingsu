@@ -82,6 +82,15 @@ pub fn runtime_pin(var: &[u8], home: &Path) -> Option<runtime_root::Pinned> {
     })
 }
 
+/// The runtime folder a value pins, opened with the checks of the runtime
+/// root: `None` unless the whole value passes `checked` and that folder is
+/// the pinned one and still safe. For a reader that needs this folder only
+/// (`doctor`'s breaker row): nothing stands in for a pin that does not hold.
+pub fn open_runtime(var: &[u8], me: u32, user: &[u8], home: &Path) -> Option<std::fs::File> {
+    let pin = runtime_pin(var, home)?;
+    runtime_root::open_runtime_root(&pin, me, &mut SystemGroups::new(user)).ok()
+}
+
 /// The pinned roots, re-checked now; `None` for a missing, garbled, forged
 /// or no longer matching value.
 /// `Roots.log` and `RuntimeRootPin.group_ok` are copied from the environment,
