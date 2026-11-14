@@ -1,4 +1,4 @@
-//! Linux seccomp for `bingsu prompt` :
+//! Linux seccomp for `bingsu prompt`:
 //! `prompt::dispatch` calls `enter` inside its panic guard
 //! after fixed helper spawn and core-directed fd preparation, before snapshot
 //! content decoding and rendering. From then
@@ -6,28 +6,29 @@
 //! crates/bingsu/prompt-syscalls.tsv (scripts/check_cli_prompt_forbid.py
 //! keeps the two equal), some with argument checks (`write` to fd 1 only,
 //! `mmap` anonymous private and never executable, `mprotect` never
-//! executable). Any other call fails with EPERM and has no effect
-//! (decision 2026-10-15): nothing happens, so the isolation is the same as
+//! executable). Any other call fails with EPERM and has no effect:
+//! nothing happens, so the isolation is the same as
 //! a kill. Whether the prompt carries on after a refused call is up to the
 //! caller: the verified LD_PRELOAD allocators (jemalloc, mimalloc) do, an
-//! allocator whose `brk` is refused faults. The rule for adding a row: the
-//! N4 option 3 adds held-fd read/close and CLOCK_BOOTTIME only; every
-//! pathname and fd-fact operation must complete before this filter.
+//! allocator whose `brk` is refused faults. The rule for adding a row:
+//! after the filter the prompt only reads and closes descriptors it already
+//! holds and reads CLOCK_BOOTTIME; every pathname and fd-fact operation must
+//! complete before this filter.
 //!
 //! The dynamic loader and any LD_PRELOAD library are platform TCB, like the
 //! kernel: they run before this filter (a constructor can even start a
 //! thread the filter never sees, as it applies to the calling thread) and
 //! can answer the kernel question for us. No in-process filter can guard
 //! against them. A wrong architecture and, on x86_64, an x32 ABI call are
-//! killed (no code makes them on purpose; the hand-written classic BPF of
-//! the M1 collector).
+//! killed (no code makes them on purpose; the M1 collector's hand-written
+//! classic BPF kills them the same way).
 //!
 //! Not covered by the kernel: the vDSO (clock_gettime, gettimeofday, time
 //! and getcpu run in user space without a system call) and CPU
 //! instructions (rdtsc, rdrand, cpuid). Those stay with the static gates
 //! and the TCB hash pin.
 //!
-//! `enter` reports one of three outcomes (decision P18, revised 2026-10-15):
+//! `enter` reports one of three outcomes:
 //! it first asks the kernel whether it has seccomp at all
 //! (`prctl(PR_GET_SECCOMP)`: EINVAL means "not configured with
 //! CONFIG_SECCOMP", man PR_GET_SECCOMP(2const)); then `Absent`, and the
@@ -207,7 +208,7 @@ fn errno() -> i32 {
 }
 
 /// The outcome from the kernel-support question and the install, each
-/// `Err(errno)` on failure (decision P18, revised 2026-10-15).
+/// `Err(errno)` on failure.
 fn outcome(query: Result<(), i32>, install: impl FnOnce() -> Result<(), i32>) -> Sandbox {
     match query {
         Err(libc::EINVAL) => Sandbox::Absent,

@@ -9,14 +9,15 @@ use crate::{
     snapshot_codec::Error,
 };
 use alloc::vec::Vec;
-/// Reserved M6 entry. No executor or additional spawn path is installed by N4.
+/// The relay's entry word: on Linux and macOS, `bingsu __exec-v2` runs the
+/// trusted relay.
 pub const ENTRY: &str = "__exec-v2";
 pub const PERMIT_ARG: &str = "--permit-fd=3";
 pub const PERMIT_FD: u8 = 3;
 /// Version word of the relay argv layout (the exec frame carries its own,
 /// `EXEC_VERSION`).
 pub const RELAY_VERSION: &str = "1";
-/// Largest permit plus exec frame on fd 3 (U-9d, 16 KB): the supervisor
+/// Largest permit plus exec frame on fd 3 (16 KB): the supervisor
 /// writes both into the empty input channel (a pipe; on macOS a socket pair)
 /// in one write before the spawn.
 pub const RELAY_INPUT_MAX: usize = 16 * 1024;
@@ -220,7 +221,7 @@ pub struct ExecFrame {
     /// Target envp as `NAME=VALUE\0` entries. Only `execveat` sees it.
     pub environment: Vec<u8>,
     /// The target the helper resolved, when it is group-writable and its
-    /// group was cleared (spec section 2 safety row): the relay accepts the
+    /// group was cleared: the relay accepts the
     /// group write only for this exact file, group and mode.
     pub pin: Option<ExecPin>,
     /// The interpreter the helper resolved for a `#!` target; `None` for a
@@ -232,8 +233,8 @@ pub struct ExecFrame {
     /// mount then holds only that one relay, which its deadline ends.
     pub cwd: Vec<u8>,
 }
-/// A script's interpreter as the helper resolved it (spec section 4 script
-/// row). The relay reads the `#!` line itself and runs the script only when
+/// A script's interpreter as the helper resolved it. The relay reads the
+/// `#!` line itself and runs the script only when
 /// the whole line after `#!` (interpreter and argument, untrimmed) is `line`
 /// byte for byte; it then opens `path`, which the
 /// helper reached by following root's and the user's symlinks (merged-/usr

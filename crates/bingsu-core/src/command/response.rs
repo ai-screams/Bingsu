@@ -1,4 +1,4 @@
-//! The command response (spec section 4 "cache"; U-16 K1, U-6 S1): one file
+//! The command response: one file
 //! per config context and cwd that holds the last result of each command
 //! unit. It is the cache too: a unit whose entry still matches its policy and
 //! original environment, within its cache time, does not run again. Several
@@ -18,14 +18,14 @@ use alloc::{string::String, vec::Vec};
 const MAGIC: &[u8; 8] = b"BNGCMD02";
 const VERSION: u16 = 2;
 pub const HEADER: usize = 64;
-/// Config unit entries in one response: one per unit that may run (U-9d).
+/// Config unit entries in one response: one per unit that may run.
 pub const CONFIG_ENTRIES_MAX: usize = crate::config::compile::MAX_EXEC_UNITS;
 /// Builtin language entries in one response: one per builtin language.
 pub const BUILTIN_ENTRIES_MAX: usize = super::builtin::LANGUAGES.len();
 /// Entries in one response: each origin has its own room, so builtin
-/// languages and 32 config units never push each other out (U-32).
+/// languages and 32 config units never push each other out.
 pub const ENTRIES_MAX: usize = CONFIG_ENTRIES_MAX + BUILTIN_ENTRIES_MAX;
-/// A value or a raw first line, in bytes (U-9c).
+/// A value or a raw first line, in bytes.
 pub const VALUE_MAX: usize = 4_096;
 /// A unit id, in bytes.
 pub const ID_MAX: usize = 256;
@@ -347,7 +347,7 @@ fn check_entries(entries: &[Entry], raw_text: Raw) -> Result<(), Error> {
         {
             return Err(Error::Limit);
         }
-        // The front reads values straight to the terminal (C4b): only
+        // The front reads values straight to the terminal: only
         // sanitized text, as `first_line` makes it. A failure has no value.
         let clean = |t: &str| t.chars().all(|c| !crate::sanitize::is_removed(c));
         if !clean(&e.value) || (raw_text == Raw::Checked && !clean(&e.raw)) {
@@ -447,8 +447,8 @@ pub fn merge(current: Option<&Response>, binding: &Binding, mine: &[Entry]) -> R
     }
 }
 
-/// What a unit shows: the first line of its stdout, sanitized by the
-/// section 3 rules (a CR before the line end is a control character it
+/// What a unit shows: the first line of its stdout, sanitized like every
+/// outside value (a CR before the line end is a control character it
 /// drops), at most `VALUE_MAX` bytes.
 pub fn first_line(stdout: &[u8]) -> String {
     let line = stdout.split(|&b| b == b'\n').next().unwrap_or_default();
@@ -482,7 +482,7 @@ pub fn entry_for(
         String::new()
     };
     // The value the prompt draws: the part of the first line it reads to
-    // cut it to a user segment's cells (m6-P1), so the response it decodes
+    // cut it to a user segment's cells, so the response it decodes
     // carries at most 272 bytes a unit instead of 4 KB. The raw line stays
     // whole for `match`. The prompt cuts command values with the same
     // `CUSTOM_TEXT_CELLS`; if command segments ever get more cells than

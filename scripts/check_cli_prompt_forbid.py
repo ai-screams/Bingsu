@@ -69,44 +69,44 @@ PROMPT_MANIFEST = {
     "dependencies": {"bingsu-core": {"path": "../bingsu-core"}, "bingsu-identity": {"path": "../bingsu-identity"}},
     "target": {"cfg(unix)": {"dependencies": {"libc": "0.2"}}},
 }
-# K38: copying a new hash can self-approve a change; these pins are a change-detection
+# Copying a new hash can self-approve a change; these pins are a change-detection
 # tripwire, not an independent proof that the TCB is safe.
 TCB_SHA256 = {
     "crates/bingsu-identity/Cargo.toml": "ff75b6ce44e1359c1e99593a65b93beb1a43605d38449cbb19abe34e981fecf0",
     "crates/bingsu-identity/build.rs": "10a627b742c558418ca780876fcd93b4cc12d2dae5295f32c0fe4caeaff66cad",
     "crates/bingsu-identity/src/lib.rs": "fd944c745ea76076f1c1c5f15ed0849df0045da526ab870459ce28880d48521d",
-    "crates/bingsu/src/prompt_read.rs": "c84ea1f15b273825d48f7d4f15df9d3457c275b15070d4e9dc8950360eaf3484",
+    "crates/bingsu/src/prompt_read.rs": "0f4886b584c9e55c0673058ff6efcee0d749f9a1f3f34d7d1172335c7387f2c4",
     "crates/bingsu-core/src/command/env_frame.rs": "13bbfb30d49aeca74ae63f848176111f9ab0f9766f8b208621261c3c49796070",
-    "crates/bingsu/src/prompt_spawn.rs": "538f1d543b3e4c55457f6b4672983433e18b0f46d47bf9166d5fbf562634e0a5",
-    "crates/bingsu/src/prompt_io.rs": "31dc5ba3b067a86a6f3ca2b3e4c849013259ae5e3882b592115bac846cff4d2e",
-    "crates/bingsu/src/prompt.rs": "6887ba8a12325f477ba2f02755a4ef505d2a9975c89403c79204d15166ade6b7",
+    "crates/bingsu/src/prompt_spawn.rs": "9943c19023affaa5dcd55a36b35d7c5d08647a3fb800c588e21b0e3993339b1d",
+    "crates/bingsu/src/prompt_io.rs": "79210722e8c41e4253b72d77958550fcefdb4c58ab3dea0b664e93f6d8e372b9",
+    "crates/bingsu/src/prompt.rs": "4b8f9f56e54e11ce01b6f81242934d5cbcb44f1da1c11f86f2fe8d1b0e507722",
     "crates/bingsu/src/main.rs": "012b20fb9bd130c577497c3dc8da4ccc19305c601d7aeaed35f6c7301f2e52b8",
-    "crates/bingsu/src/relay.rs": "68edcbba9cf5e5833a60ef35912df1c4a115d2c7455f09cb2b229ab65687b658",
-    "crates/bingsu-core/src/fs_trust.rs": "cc71c39796a8fbb553ab678ada14860caa14a5f57b09591b0669e9f654575df9",
-    "crates/bingsu-core/src/handoff.rs": "0672308c4c937ec7dd8c18bad014f5a18f924df9745ee0d72a8168b83614f6d6",
-    "crates/bingsu-core/src/command/response.rs": "76794b243832e39756e20e436383ad1919ac5a94b7f079b529f59db3e9d05a69",
-    "crates/bingsu-core/src/command/display.rs": "e1fcbe7c243614e6cc11215504590280f6dad9ff176cd6faf278e72d0c420047",
-    "crates/bingsu-core/src/command/path.rs": "37fd52810ec833f5235b11dd7d9797d496edc59290b9b1ecfcb48d49b9105177",
+    "crates/bingsu/src/relay.rs": "657ed164928bcaf58de82ab272d1c695f4eb4572495d3c0f053b403d5b16613e",
+    "crates/bingsu-core/src/fs_trust.rs": "c5015c2385fbef79a16a5be07f984abbe8a73b14c3409bc62c4b1ef64bbef013",
+    "crates/bingsu-core/src/handoff.rs": "a2fbac66aed7f3af54d78c33a6ac015a6e4c656ce25340a04386b32fa6fd6603",
+    "crates/bingsu-core/src/command/response.rs": "fd49a2551fbd0661fe7fb71f8c3d6f988725f29bcac28e956aa9cbc68ee2ad22",
+    "crates/bingsu-core/src/command/display.rs": "376780e89abd663e1bd4db1c495b55c5bbee7625d9e83e642c647f213f48cb5e",
+    "crates/bingsu-core/src/command/path.rs": "fabe23e9881ac0256a5a1613da36e5c2022afe1a284f3812eb4692d334daa47a",
     # The prompt links these and they decide what it reads and draws: the
     # unit judgement and digests display.rs checks (plan.rs, wire.rs), the
     # builtin languages' environment digest (builtin.rs), the front's read
     # plan (staged.rs) and the text it lets reach the terminal (sanitize.rs),
     # the characters a builtin version may draw (language.rs), and the
     # folder digest and text cleaning those digests use (cwd_hash.rs, field.rs).
-    "crates/bingsu-core/src/command/plan.rs": "5f27eb6a7ad3fbe6110a9139c0c2c0d8cbe78443657996da0fa6b475dbf67ea0",
-    "crates/bingsu-core/src/command/wire.rs": "fae927873d7ccce472eb3ff743cb45b8670f979319b0f5458af0e9375f1e9f9a",
-    "crates/bingsu-core/src/front/staged.rs": "9d00857fe58c170faa46752f3bb271e62352c5cff0c0fec81e05e280f1028444",
-    "crates/bingsu-core/src/sanitize.rs": "bab17056bdadd1721f4ad71a66576d50423500cbc7e0f52cc23c551051359532",
-    "crates/bingsu-core/src/command/builtin.rs": "ca84a653d01b513a3f47cf1d93777fe14f4bcaa5d44741e375f6693f599610fd",
-    "crates/bingsu-core/src/collection/language.rs": "447cfa20cb266b0b3b21a07e2d3cdce1fa949313ed5fb7d00b479863f3c5114e",
+    "crates/bingsu-core/src/command/plan.rs": "cc7b95c0a618255388b764ad116b018a17b893f71f10fcbc6bc74da6f1d85782",
+    "crates/bingsu-core/src/command/wire.rs": "5f3dda9a5835e3533de42c205af42f795421cc1c085b0918f0b0d4173aba5d5e",
+    "crates/bingsu-core/src/front/staged.rs": "a051e52a769a9754c262bf7aaf88efec9b80e441b0e88e43cc2d7d13d1cdca4e",
+    "crates/bingsu-core/src/sanitize.rs": "0e0817b571091f102bde7a1a0f884c6cdb8da35bbb7f3e3be26aee98d9f6a038",
+    "crates/bingsu-core/src/command/builtin.rs": "6d4bc235ce7776b91c8465210c7cafd86e33083a7cc09c8f598e6e399cd7e85c",
+    "crates/bingsu-core/src/collection/language.rs": "df76baf6d24e1d9b49c625825e446eab0d73e4aa49368c15d4419462c94829de",
     "crates/bingsu-core/src/collection/cwd_hash.rs": "63dd0e1ad5d643c100d8f0798729adab652533ef1c47f2a30253e8be1aff8549",
-    "crates/bingsu-core/src/field.rs": "a405d7a33cb39bdadf4466da2b3694c094dac4bc261d718c456e250aa3112ecb",
+    "crates/bingsu-core/src/field.rs": "c4a870a6ab580a303e3d14ccc03129c2b6a17cf4a77f9062b0bfca89fffee1f2",
     # The names the prompt keeps from its environment frame: data plan.rs reads
     # (keep.rs; no code of its own reaches the prompt binary).
     "crates/bingsu-core/src/command/keep.rs": "217bf65950b2e90607f0114cd5a8afcf36ef44cb76698a1cd82d44647c04cba6",
-    "crates/bingsu/src/sandbox.rs": "a8ef03197c75a326c365b3c2ac0ce0170df58b05b4d9af13c8d9e5064bcac929",
-    "crates/bingsu/Cargo.toml": "a037f727e79a3fdc1ef0cbd8861e73de01c2bd2f838d61fd3cf21a4bcf7cabe9",
-    "crates/bingsu/prompt-syscalls.tsv": "afc7097e055c590c531eb3814543450d8b711b9ea39400b1846263a0b00d50fd",
+    "crates/bingsu/src/sandbox.rs": "9fb81df86386aded6aef6cf8e485ab6d7fbba4d8ef11000586afa8dc7d2a44d6",
+    "crates/bingsu/Cargo.toml": "c20d60d7c262562331c44fc022c10bd00b1a2a9b53dcfd2ad358708775c27037",
+    "crates/bingsu/prompt-syscalls.tsv": "a324b6b21bbda01af82107ae3fecc29e6e2f8fb6d5ccb450bb7c5fc431901e02",
     "crates/bingsu-prompt/src/main.rs": "94585d3f07affd25f2a0b407e7c33759dd8b56f4fc5dd33587d96dd199c838cd",
     "crates/bingsu-prompt/Cargo.toml": "520a117c771ca2b087e0ca92f47593629d89aa23f353258fb76c17aaf791fe8c",
 }

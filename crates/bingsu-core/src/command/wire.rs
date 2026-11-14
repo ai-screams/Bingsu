@@ -42,7 +42,7 @@ impl Policy {
     /// `unsafe_shell = true`, a unit that sets both `command` and `shell`, an
     /// empty argv and a language unit without `interpreter` have none, so the
     /// helper cannot put them in a grant. A language unit runs as the argv
-    /// `interpreter` then its `version` arguments (D3c-2).
+    /// `interpreter` then its `version` arguments.
     pub fn from_config(p: &ExecPolicy) -> Option<Self> {
         match p {
             ExecPolicy::Command {
@@ -180,7 +180,7 @@ impl Message {
     }
 }
 
-/// Digest of a config unit's `match` (U-9c): the response entry carries it,
+/// Digest of a config unit's `match`: the response entry carries it,
 /// and the prompt draws an entry only when it equals the digest of the
 /// snapshot unit's pattern. No pattern is all zeros, as before `match`.
 pub fn pattern_digest(pattern: Option<&str>) -> [u8; 32] {
@@ -741,7 +741,7 @@ mod tests {
         );
     }
 
-    // D3a: probe의 toolchain 칸은 0(없음)이나 1(이름)만 받는다. 이것을 실패시키는 것: decode가 다른 태그를 없음으로
+    // probe의 toolchain 칸은 0(없음)이나 1(이름)만 받는다. 이것을 실패시키는 것: decode가 다른 태그를 없음으로
     // 읽는 것.
     #[test]
     fn decode_refuses_an_unknown_toolchain_tag() {

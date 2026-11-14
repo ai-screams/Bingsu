@@ -1,10 +1,9 @@
 //! Trusted relay, native executables and scripts on Linux and macOS
-//! (`bingsu __exec-v2`, spec section 4 "the place of the pre-exec check",
-//! rows native executable, script and macOS executable). The command
+//! (`bingsu __exec-v2`). The command
 //! supervisor spawns it with an empty environment and the permit and exec
 //! frame on fd 3 (fd 2 is its status pipe); the relay checks the target
 //! through one open descriptor, checks that its name is still that file,
-//! takes a fresh clock and runs it by name (U-18). Linux runs it with
+//! takes a fresh clock and runs it by name. Linux runs it with
 //! `execveat(folder, name, AT_SYMLINK_NOFOLLOW)` and a script as its checked
 //! interpreter with a sealed memfd copy of the script. macOS has neither
 //! `execveat` nor `fexecve`: it rechecks the whole canonical path with
@@ -43,7 +42,7 @@ pub(crate) const RELAY_EXEC: u8 = 123;
 pub(crate) const SCRIPT_MAX: usize = 64 * 1024;
 /// macOS `fstatat` flag (sys/fcntl.h, not in the libc crate): no symlink
 /// anywhere on the path. A macOS without it answers EINVAL, and the name
-/// check then refuses (C2 ruling Q3).
+/// check then refuses.
 #[cfg(target_os = "macos")]
 const AT_SYMLINK_NOFOLLOW_ANY: i32 = 0x0800;
 /// The seals of the script copy: its bytes and size are fixed, and nobody
@@ -93,8 +92,9 @@ fn take_status() -> Result<Option<OwnedFd>, Option<OwnedFd>> {
     let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
     // No test: opening /dev/null or the dup2 below cannot be made to fail
     // from a test without also failing the relay's other opens; either way
-    // the relay refuses (fail closed). Same class as the C1 macOS fcntl
-    // branch (user decision).
+    // the relay refuses (fail closed). An untested fail-closed branch is a
+    // deliberate exception here, like the macOS `F_SETFL` branch of
+    // `prompt_spawn`.
     if null < 0 {
         return Err(status);
     }
@@ -179,9 +179,9 @@ pub(crate) fn prepare(args: &[OsString]) -> Result<Target, u8> {
     if unsafe { libc::chdir(folder.as_ptr()) } != 0 {
         return Err(RELAY_EXEC);
     }
-    // U-17: a target that would run with other rights gains nothing; the
+    // A target that would run with other rights gains nothing; the
     // flag stays for every descendant. Set-id files are refused before this
-    // on every system (`allowed`, U-33), and file capabilities are refused by
+    // on every system (`allowed`), and file capabilities are refused by
     // the helper's lookup; this flag still holds for a capability set after
     // that check. Last of the checks, so `exec` keeps the clock read right
     // before execveat.
@@ -213,13 +213,14 @@ impl Target {
 
     /// The name check, the clock check and the exec back to back: nothing
     /// is built or freed between them (`self` drops only after a failed
-    /// exec). The target runs by its name (U-18): a program that tells its
+    /// exec). The target runs by its name: a program that tells its
     /// role from the executed name (uutils' multicall coreutils reads
     /// AT_EXECFN) refuses a `/dev/fd/N`. Right before, the name must still
     /// be the checked file: same device, inode and ctime, and not a symlink.
-    /// Linux runs the name in the folder the walk held; macOS runs the
-    /// canonical path, which only root, the user or a cleared group can
-    /// change (spec section 4 macOS executable row: an OS limit).
+    /// Linux runs the name in the folder the walk held. macOS has neither
+    /// `execveat` nor `fexecve`, so it runs the canonical path, which only
+    /// root, the user or a cleared group can change; the window between the
+    /// check and the exec there is an accepted OS limit.
     fn exec(self) -> u8 {
         // The name check first: on NFS or FUSE it can take long, and the
         // clock read must be the last step before execveat.
@@ -486,7 +487,7 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 /// `/proc/self/fd`, the same inode, and its first bytes say whether it is a
 /// script (`read_script`). An execute-only file cannot be opened for reading (EACCES), and
 /// without `/proc` there is no such path; then the `O_PATH` descriptor runs,
-/// as a native executable only (spec section 4 "native executable"): its
+/// as a native executable only: its
 /// `#!` line, if any, is never read, and the kernel's own script loader
 /// cannot open the folder descriptor it would hand the interpreter: the
 /// name runs as `/dev/fd/<folder>/<name>`, and the folder is close-on-exec
@@ -496,8 +497,8 @@ fn open_at(dir: i32, name: &[u8], flags: i32) -> Result<OwnedFd, i32> {
 /// no follow), then the regular file is opened for reading, and its
 /// descriptor must be the same inode. An execute-only file cannot be read
 /// and is refused: run by path, the kernel's own script loader would start
-/// whatever interpreter its `#!` line names, unchecked (C2 ruling Q4). A
-/// set-id file is refused (U-33, `allowed`), and so is one on a mount that
+/// whatever interpreter its `#!` line names, unchecked. A
+/// set-id file is refused (`allowed`), and so is one on a mount that
 /// is not local or ignores ownership.
 fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
     // A relative path would name a file in the inherited working folder.
@@ -535,7 +536,7 @@ fn open_target(path: &[u8], pin: Option<ExecPin>) -> Result<Opened, u8> {
             Err(Some(())) => (path_fd, false),
             Err(None) => return Err(RELAY_TARGET),
         };
-        // U-33: no target or interpreter with file capabilities, also when
+        // No target or interpreter with file capabilities, also when
         // the pin cannot tell (a setcap in the same coarse timestamp tick as
         // the lookup leaves the ctime unchanged).
         // 이것을 실패시키는 것: 이 확인을 지우는 것(root test_relay_refuses_a_capability_target,
@@ -687,7 +688,7 @@ fn read_at(fd: &OwnedFd, buf: &mut [u8], at: usize) -> Result<usize, i32> {
     usize::try_from(n).map_err(|_| errno())
 }
 
-/// The script row of spec section 4, on the body `read_script` read once:
+/// The script rule, on the body `read_script` read once:
 /// its whole `#!` line must be the line the helper resolved, the kernel must
 /// let the user execute the file (`may_execute`), and the interpreter must
 /// pass the same checks, be a native executable (no nested `#!`) and not be
@@ -814,7 +815,7 @@ fn may_execute_old(name: &CString) -> bool {
 /// Whether `now` is still the file `before` describes: a write, chmod,
 /// chown or ACL change moves the status change time. A rewrite within one
 /// timestamp tick keeps the ctime and is not caught; only trusted parties
-/// (the owner, root, a pinned group) can write the file (m6-B2a).
+/// (the owner, root, a pinned group) can write the file.
 fn unchanged(before: &libc::stat, now: &libc::stat) -> bool {
     let key = |s: &libc::stat| {
         (
@@ -902,8 +903,8 @@ fn c_strings<W: AsRef<[u8]>>(words: &[W]) -> Result<Vec<CString>, u8> {
 }
 
 /// macOS: whether `fd`'s mount enforces ownership, `None` (undecidable) when
-/// fstatfs fails or the mount is not local (spec section 4: a network file
-/// system's executable is refused).
+/// fstatfs fails or the mount is not local (a network file system's
+/// executable is refused).
 #[cfg(target_os = "macos")]
 fn local_ownership(fd: &OwnedFd) -> Option<bool> {
     // SAFETY: an all-zero statfs is a valid out-parameter value.
@@ -1012,12 +1013,11 @@ fn capability_answer(n: libc::ssize_t, errno: Option<i32>) -> bool {
 /// Only root or the user may change the file. Group write passes only with
 /// a pin, and a pin must name this file unchanged: same device, inode,
 /// group, mode and status change time as when the helper's group check
-/// cleared it (spec section 2 safety row; rewriting, chmod, chown and ACL
-/// changes move the ctime).
+/// cleared it (rewriting, chmod, chown and ACL changes move the ctime).
 /// `ownership`: whether the file's mount enforces ownership (Linux file
 /// systems do; macOS asks `local_ownership`).
 fn allowed(st: &libc::stat, pin: Option<ExecPin>, ownership: Option<bool>) -> Result<bool, u8> {
-    // U-33: no setuid or setgid target, on any system (the helper refuses
+    // No setuid or setgid target, on any system (the helper refuses
     // them too; this holds for a bit set after its check). 이것을 실패시키는
     // 것: 이 조건을 지우는 것, 두 비트 가운데 하나만 보는 것
     // (test_relay_refuses_set_id_targets, macOS test_set_id_targets_are_refused).
@@ -1041,7 +1041,7 @@ fn allowed(st: &libc::stat, pin: Option<ExecPin>, ownership: Option<bool>) -> Re
         // pin (an extended ACL under group write is undecided there and gets
         // no pin), and after that only the file's owner (root or the user,
         // checked below) or a holder of CAP_FOWNER can change it, both
-        // trusted (B2 ruling A-1; on macOS only the owner or root).
+        // trusted (on macOS only the owner or root).
         acl: AclFacts::None,
         ownership,
     };
@@ -1494,7 +1494,8 @@ mod tests {
         unsafe { libc::_exit(i32::from(code)) }
     }
 
-    // N-076. 이것을 실패시키는 것: prepare의 새 시계 확인(`frame.allows`)을 지우는 것.
+    // 마감이 지난 permit으로는 대상을 실행하지 않는다. 이것을 실패시키는 것: prepare의 새 시계 확인(`frame.allows`)을
+    // 지우는 것.
     #[test]
     fn test_relay_refuses_after_deadline() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
@@ -1545,7 +1546,7 @@ mod tests {
         ran(relay_cat(Origin::Builtin, t, b""));
     }
 
-    // N-077. 이것을 실패시키는 것: prepare의 close_range(CLOSE_RANGE_CLOEXEC)를 지우는 것
+    // 대상은 fd 0–2만 받는다. 이것을 실패시키는 것: prepare의 close_range(CLOSE_RANGE_CLOEXEC)를 지우는 것
     // (중계가 물려받은 fd 5가 대상에 남는다).
     #[test]
     fn test_relay_target_fds() {
@@ -1564,7 +1565,7 @@ mod tests {
         read_all(read.as_raw_fd())
     }
 
-    // 감독이 exec 성공과 중계 거부를 대상 종료 코드와 따로 안다(B1 판정). 이것을 실패시키는 것: relay()의
+    // 감독이 exec 성공과 중계 거부를 대상 종료 코드와 따로 안다. 이것을 실패시키는 것: relay()의
     // 상태 바이트 쓰기를 지우는 것(거부가 빈 EOF, 곧 "실행됨"으로 보임).
     #[test]
     fn test_relay_writes_refusal_to_status() {
@@ -1613,7 +1614,7 @@ mod tests {
         assert_eq!(fd2, Path::new("/dev/null"));
     }
 
-    // C2 수용 조건(B3 리뷰): fd 2 없이 떠도 대상은 fd 2에 /dev/null을 받는다(memfd나 열린 파일이 2를 받지
+    // 수용 조건: fd 2 없이 떠도 대상은 fd 2에 /dev/null을 받는다(memfd나 열린 파일이 2를 받지
     // 않음). 이 성질은 Rust 런타임이 main 전에 닫힌 0–2에 /dev/null을 여는 데서 온다(take_status의 dup2를
     // 지워도 통과함을 확인했다). 이것을 실패시키는 것: 그 정리를 하지 않는 런타임·대상으로 중계를 빌드하는 것.
     #[test]
@@ -1657,7 +1658,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // U-17. 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를 지우는 것(대상의 NoNewPrivs가 0).
+    // 대상은 no_new_privs로 돈다. 이것을 실패시키는 것: prepare의 PR_SET_NO_NEW_PRIVS를 지우는 것(대상의
+    // NoNewPrivs가 0).
     #[test]
     fn test_relay_target_has_no_new_privs() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
@@ -1670,7 +1672,7 @@ mod tests {
         assert_eq!(seen.no_new_privs, "1");
     }
 
-    // U-17: 플래그를 걸 수 없으면 대상을 실행하지 않는다. 이것을 실패시키는 것: prepare에서 prctl의
+    // no_new_privs 플래그를 걸 수 없으면 대상을 실행하지 않는다. 이것을 실패시키는 것: prepare에서 prctl의
     // 실패 분기(`!= 0` → RELAY_EXEC)를 지우는 것(EPERM을 무시하고 대상이 실행됨).
     #[test]
     fn test_relay_refuses_without_no_new_privs() {
@@ -1688,7 +1690,7 @@ mod tests {
         assert!(refused_with(&got, RELAY_EXEC), "{got:?}");
     }
 
-    // U-33: setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을 실패시키는
+    // setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을 실패시키는
     // 것: allowed의 set-id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
     #[test]
     fn test_relay_refuses_set_id_targets() {
@@ -1703,7 +1705,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// What the helper's lookup gives for `name` in `dir` (U-33): every
+    /// What the helper's lookup gives for `name` in `dir`: every
     /// target that would run carries its pin.
     fn looked_up(dir: &Path, name: &[u8]) -> Option<ExecPin> {
         crate::commands::exec_path::lookup(
@@ -1717,7 +1719,7 @@ mod tests {
         .pin
     }
 
-    // U-33: 조회한 뒤 대상이 바뀌면(이름 위로 다른 실행 파일을 옮김, chmod) relay가 조회의 pin으로 거부한다. 양성
+    // 조회한 뒤 대상이 바뀌면(이름 위로 다른 실행 파일을 옮김, chmod) relay가 조회의 pin으로 거부한다. 양성
     // 대조: 바뀌지 않은 대상은 실행된다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운 대상에만 pin을 주는 것.
     #[test]
     fn test_relay_refuses_a_target_changed_after_its_lookup() {
@@ -1738,7 +1740,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // U-33(root): 조회한 뒤 file capability를 붙인 대상은 relay가 거부한다(relay는 capability를 읽지 않고, setcap이
+    // root 시험: 조회한 뒤 file capability를 붙인 대상은 relay가 거부한다(relay는 capability를 읽지 않고, setcap이
     // 바꾼 ctime으로 잡는다). CI가 sudo로 --ignored로 돌린다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운
     // 대상에만 pin을 주는 것.
     #[test]
@@ -1759,7 +1761,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // U-33: relay의 capability 판정은 helper와 같다. 이것을 실패시키는 것: relay의 답 매핑을 helper와 다르게 바꾸는
+    // relay의 capability 판정은 helper와 같다. 이것을 실패시키는 것: relay의 답 매핑을 helper와 다르게 바꾸는
     // 것(다른 errno를 없음으로 봄, 길이 0을 없음으로 봄 등).
     #[test]
     fn test_relay_capability_rule_is_the_helpers() {
@@ -1782,7 +1784,7 @@ mod tests {
         }
     }
 
-    // U-33(root): file capability가 있는 대상은 pin 없이도 relay가 거부한다. 양성 대조: 속성을 지우면 돈다. CI가
+    // root 시험: file capability가 있는 대상은 pin 없이도 relay가 거부한다. 양성 대조: 속성을 지우면 돈다. CI가
     // sudo로 --ignored로 돌린다. 이것을 실패시키는 것: relay의 capability 확인을 지우는 것.
     #[test]
     #[ignore = "root: writing security.capability needs CAP_SETFCAP"]
@@ -1800,7 +1802,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // U-33(root): 조회와 같은 시각 tick 안에서 붙인 capability는 pin이 그대로 맞아 pin으로는 가리지 못한다. setcap 뒤
+    // root 시험: 조회와 같은 시각 tick 안에서 붙인 capability는 pin이 그대로 맞아 pin으로는 가리지 못한다. setcap 뒤
     // 그 파일의 지금 stamp로 pin을 만들어 넘기면 정확히 그 상태가 되고, relay의 capability 확인만 거부할 수 있다.
     // 이것을 실패시키는 것: relay의 capability 확인을 지우는 것.
     #[test]
@@ -1821,7 +1823,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // N-078. 이것을 실패시키는 것: 중계가 마감이나 permit을 대상 envp·argv에 넣는 것.
+    // 대상의 envp·argv에는 마감도 permit도 없다. 이것을 실패시키는 것: 중계가 마감이나 permit을 대상 envp·argv에
+    // 넣는 것.
     #[test]
     fn test_relay_no_deadline_env() {
         let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
@@ -2454,7 +2457,7 @@ mod tests {
         status.code()
     }
 
-    // U-18: 중계는 이름으로 실행하되, 바로 앞에서 그 이름이 검사한 파일(장치·inode·ctime)인지 다시 본다.
+    // 중계는 이름으로 실행하되, 바로 앞에서 그 이름이 검사한 파일(장치·inode·ctime)인지 다시 본다.
     // 검사 뒤 같은 이름에 다른 파일을 넣으면 실행하지 않는다(RELAY_TARGET). 이것을 실패시키는 것: exec의
     // still_named 재확인을 지우는 것(바꿔치기한 false가 실행되어 종료 코드 1).
     #[test]
@@ -2463,7 +2466,7 @@ mod tests {
         assert_eq!(swapped("rename"), Some(100 + i32::from(RELAY_TARGET)));
     }
 
-    // U-18: 시계는 이름 재확인 다음, execveat 바로 앞에서 읽는다. 재확인(fstatat)이 오래 걸려 그 사이 마감이
+    // 시계는 이름 재확인 다음, execveat 바로 앞에서 읽는다. 재확인(fstatat)이 오래 걸려 그 사이 마감이
     // 지나면 실행하지 않는다(RELAY_EXPIRED). 이것을 실패시키는 것: exec에서 시계 확인을 재확인 앞으로 되돌리는 것
     // (확인 뒤 지난 마감에도 true가 실행되어 종료 코드 0).
     #[test]
@@ -2472,7 +2475,7 @@ mod tests {
         assert_eq!(swapped("late"), Some(100 + i32::from(RELAY_EXPIRED)));
     }
 
-    // U-18: 재확인과 시계가 통과한 뒤 이름이 symlink로 바뀌어도 execveat의 AT_SYMLINK_NOFOLLOW가 따라가지
+    // 재확인과 시계가 통과한 뒤 이름이 symlink로 바뀌어도 execveat의 AT_SYMLINK_NOFOLLOW가 따라가지
     // 않는다(ELOOP, RELAY_EXEC). 이것을 실패시키는 것: execveat의 AT_SYMLINK_NOFOLLOW만 지우는 것(링크를 따라
     // false가 실행됨).
     #[test]
@@ -2481,7 +2484,7 @@ mod tests {
         assert_eq!(swapped("symlink-late"), Some(100 + i32::from(RELAY_EXEC)));
     }
 
-    // U-18: 검사 뒤 이름을 symlink로 바꾸면 따라가지 않는다. 재확인은 링크 자체를 보아 거부하고(RELAY_TARGET),
+    // 검사 뒤 이름을 symlink로 바꾸면 따라가지 않는다. 재확인은 링크 자체를 보아 거부하고(RELAY_TARGET),
     // 재확인이 없어도 execveat의 AT_SYMLINK_NOFOLLOW가 ELOOP로 막는다(RELAY_EXEC). 이것을 실패시키는 것:
     // 재확인과 NOFOLLOW를 함께 지우는 것(링크를 따라 false가 실행됨). NOFOLLOW만 지운 변이는 위
     // test_symlink_after_the_checks_is_not_followed가 잡는다.
@@ -3171,7 +3174,7 @@ mod tests {
 
     // 이것을 실패시키는 것: execute_verdict의 ENOSYS 조건을 지우는 것(모든 오류에서 대체 호출), ENOSYS에서
     // 대체 호출을 하지 않거나 그 답을 버리는 것, 성공을 거부하는 것.
-    // U-18 뒤에도 실행 전용 `#!` 스크립트는 커널이 싣지 않는다. 이름 실행의 경로가 `/dev/fd/<폴더>/<이름>`이고
+    // 이름으로 실행해도 실행 전용 `#!` 스크립트는 커널이 싣지 않는다. 이름 실행의 경로가 `/dev/fd/<폴더>/<이름>`이고
     // 그 폴더 fd가 close-on-exec라 binfmt_script가 ENOENT를 낸다(BINPRM_FLAGS_PATH_INACCESSIBLE). 그래서 줄이
     // 이름 붙인 인터프리터(검사하지 않은 `touch`)는 돌지 않고 결과는 RELAY_EXEC다. 이것을 실패시키는 것: exec 직전에
     // 폴더 fd의 FD_CLOEXEC를 끄는 것(touch가 돌아 카나리가 생기고 종료 코드가 touch의 것). 폴더를 O_CLOEXEC 없이
@@ -3543,7 +3546,7 @@ mod macos_tests {
         assert!(!String::from_utf8_lossy(&run.stdout).contains("SEEN "));
     }
 
-    // U-17·U-33(macOS): setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을
+    // macOS: setuid·setgid 비트가 있는 대상은 거부한다. 양성 대조: 같은 사본 0755는 돈다. 이것을
     // 실패시키는 것: allowed의 set-id 조건을 지우는 것, 또는 두 비트 가운데 하나만 보는 것.
     #[test]
     fn test_set_id_targets_are_refused() {
@@ -3557,7 +3560,7 @@ mod macos_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // U-33(macOS): 조회한 뒤 대상이 바뀌면(이름 위로 다른 사본을 옮김, chmod) relay가 조회의 pin으로 거부한다.
+    // macOS: 조회한 뒤 대상이 바뀌면(이름 위로 다른 사본을 옮김, chmod) relay가 조회의 pin으로 거부한다.
     // 양성 대조: 바뀌지 않은 대상은 돈다. 이것을 실패시키는 것: helper가 그룹 쓰기를 비운 대상에만 pin을 주는 것.
     #[test]
     fn test_relay_refuses_a_target_changed_after_its_lookup() {
@@ -3589,7 +3592,7 @@ mod macos_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // C2 판정 Q4: 읽을 수 없는 실행 전용 대상은 거부한다(경로 execve면 커널이 그 `#!` 줄의 인터프리터를 검사 없이
+    // 읽을 수 없는 실행 전용 대상은 거부한다(경로 execve면 커널이 그 `#!` 줄의 인터프리터를 검사 없이
     // 띄운다). 양성 대조: 같은 사본 0711(소유자가 읽음)은 돈다. 이것을 실패시키는 것: 읽기 열기의 EACCES에서
     // O_EXEC로 다시 열어 네이티브로 실행하는 대체 경로.
     #[test]
@@ -3642,14 +3645,14 @@ mod macos_tests {
         run
     }
 
-    // U-18: 재확인 바로 앞에 이름 자리에 다른 파일이 오면 거부한다. 이것을 실패시키는 것: still_named를 늘 참으로.
+    // 재확인 바로 앞에 이름 자리에 다른 파일이 오면 거부한다. 이것을 실패시키는 것: still_named를 늘 참으로.
     #[test]
     fn test_macos_swap_before_the_name_check_is_refused() {
         let run = swapped("rename", &live());
         assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
     }
 
-    // C2 판정 Q3: 검사한 폴더를 옮기고 그 자리에 링크를 두면 같은 inode·ctime이라도 거부한다(execve는 경로 전체를
+    // 검사한 폴더를 옮기고 그 자리에 링크를 두면 같은 inode·ctime이라도 거부한다(execve는 경로 전체를
     // 다시 해석한다). 이것을 실패시키는 것: 재확인의 AT_SYMLINK_NOFOLLOW_ANY를 AT_SYMLINK_NOFOLLOW로 바꾸는 것.
     #[test]
     fn test_macos_link_on_the_way_is_refused() {
@@ -3657,7 +3660,7 @@ mod macos_tests {
         assert_eq!(run.code, i32::from(RELAY_TARGET), "{run:?}");
     }
 
-    // U-18 순서: 재확인이 늦어 마감이 지나면 실행하지 않는다(시계는 재확인 뒤). 이것을 실패시키는 것: exec의
+    // 재확인이 늦어 마감이 지나면 실행하지 않는다(시계는 재확인 뒤). 이것을 실패시키는 것: exec의
     // 시계 확인을 still_named 앞으로 옮기는 것.
     #[test]
     fn test_macos_deadline_passing_during_the_name_check_is_refused() {
@@ -3790,7 +3793,7 @@ mod macos_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // C2 리뷰 Medium: 최종 재확인은 스크립트 사본도 본다. 인터프리터 재확인 때 사본 자리에 다른 0600 스크립트가
+    // 최종 재확인은 스크립트 사본도 본다. 인터프리터 재확인 때 사본 자리에 다른 0600 스크립트가
     // 오면 거부한다. 양성 대조: test_macos_script_copy_runs_through_its_interpreter. 이것을 실패시키는 것: exec의
     // 사본 still_named 검사를 지우는 것(바뀐 사본이 돈다).
     #[test]
@@ -3810,7 +3813,7 @@ mod macos_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // C2 리뷰 Low: 소유권을 무시하는 볼륨(`hdiutil attach -owners off`) 위의 대상은 거부한다(그 볼륨에서는 모든
+    // 소유권을 무시하는 볼륨(`hdiutil attach -owners off`) 위의 대상은 거부한다(그 볼륨에서는 모든
     // 파일이 지금 사용자 소유로 보인다). 양성 대조: 같은 dmg를 소유권을 지키게 붙이면 돈다. 이것을 실패시키는 것:
     // mount_ownership이 MNT_IGNORE_OWNERSHIP을 보지 않는 것.
     #[test]

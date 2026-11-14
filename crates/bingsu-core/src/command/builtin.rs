@@ -1,4 +1,4 @@
-//! The builtin languages (plan D3): for each, the response entry's id, its
+//! The builtin languages: for each, the response entry's id, its
 //! probe profile, the command its version comes from, the version manager
 //! bingsu resolves for it and the shell variables its value depends on. The
 //! helper decides and publishes a language's entry from this table, and the
@@ -57,7 +57,7 @@ pub const LANGUAGES: [Language; 4] = [
             b"PYENV_VERSION",
             b"PYENV_DIR",
             b"PYENV_HOOK_PATH",
-            // macOS: it picks the developer tools' python3 (D3a review M4).
+            // macOS: it picks the developer tools' python3.
             b"DEVELOPER_DIR",
         ],
     },
@@ -77,7 +77,7 @@ pub const LANGUAGES: [Language; 4] = [
     },
 ];
 
-/// Kept names a built-in language's digest leaves out (F1-b ruling).
+/// Kept names a built-in language's digest leaves out.
 pub const BUILTIN_DIGEST_SKIP: [&[u8]; 2] = [b"TERM", b"TZ"];
 
 /// The language of a query or entry id.
@@ -90,7 +90,7 @@ impl Language {
     /// over its own variables and `UNSUPPORTED`, without `TERM` or `TZ`:
     /// the probe gets the fixed environment of `profile::environment`, which
     /// holds neither, and a version does not depend on the terminal or the
-    /// time zone (F1-b ruling), so shells that differ only there share it.
+    /// time zone, so shells that differ only there share it.
     pub fn env_digest(&self, vars: &Environ<'_>) -> [u8; 32] {
         let names: Vec<Vec<u8>> = self
             .variables

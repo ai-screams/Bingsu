@@ -9,7 +9,7 @@ use bingsu_core::front::output::Deadline;
 use bingsu_core::snapshot::{Clock, ClockError};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Provisional whole-prompt budget (N6 ruling, 2026-10-18); N7 measures it.
+/// Provisional whole-prompt budget, until a measurement sets it.
 const PROMPT_BUDGET_NS: u64 = 50_000_000;
 
 // AtomicBool is lock-free on the supported aarch64/x86_64 targets. No other
@@ -148,7 +148,7 @@ pub(crate) fn entry_clock(deadline: Deadline, observed: Clock) -> Option<Clock> 
     })
 }
 
-/// Test builds count every executed read by the use its caller names (C3);
+/// Test builds count every executed read by the use its caller names;
 /// the argument and the counter do not exist in other builds.
 #[cfg(test)]
 #[derive(Clone, Copy)]

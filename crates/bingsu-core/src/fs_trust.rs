@@ -1,14 +1,14 @@
-//! Who may change a file or folder: the pure rules of spec section 2
-//! (`extends` safety row) and section 4 ("runtime root" 2), over facts the
+//! Who may change a file or folder: the pure rules for config files, the
+//! runtime root and executable targets, over facts the
 //! caller observed through an open descriptor (`fstat`, the ACL, the file
 //! system). The same functions serve `init` (the executable path and the
-//! roots it pins), the refresh helper and the prompt front end (N4), so the
+//! roots it pins), the refresh helper and the prompt front end, so the
 //! three cannot disagree about one folder.
 //!
 //! Group write is allowed only when every member of the group is root or
 //! the current user. Answering that needs the system's group database,
 //! which this crate cannot read: the caller passes a `GroupOracle`. What a
-//! caller may ask differs by place (Task R1 ruling P-R1): `init` and the
+//! caller may ask differs by place: `init` and the
 //! helper ask the system, the prompt front end cannot.
 
 /// Worse verdicts compare greater: Safe < Unknown < Tamperable.
@@ -36,8 +36,9 @@ pub enum AclFacts {
     Unknown,
     /// Linux: an extended POSIX access ACL exists. The mode's group bits
     /// are then its mask, the upper bound of every named user and group
-    /// entry (X-28): with no group write nobody named can write, and with
-    /// group write a named entry may, whatever the owning group's members.
+    /// entry, as the kernel checks them: with no group write nobody named
+    /// can write, and with group write a named entry may, whatever the
+    /// owning group's members.
     PosixExtended,
 }
 
@@ -88,14 +89,13 @@ const GROUP_WRITE: u32 = 0o020;
 const OTHER_WRITE: u32 = 0o002;
 
 /// Answers "may this group's members change files" for a group-writable
-/// entry. `at` is the entry, so an answer may be pinned to it (P-R1).
+/// entry. `at` is the entry, so an answer may be pinned to it.
 pub trait GroupOracle {
     fn group_write(&mut self, at: &Facts) -> Group;
 }
 
 /// A group-writable folder `init` cleared (its group's members were root
-/// and the user when `init` asked), pinned to the folder and its mode
-/// (ruling P-R1, spec change S-8).
+/// and the user when `init` asked), pinned to the folder and its mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GroupPin {
     pub dev: u64,
@@ -131,8 +131,7 @@ impl GroupOracle for PinnedGroupWrite<'_> {
     }
 }
 
-/// An oracle that never asks: group write is refused (spec section 4
-/// "runtime root" 2 as written).
+/// An oracle that never asks: group write is refused.
 pub struct RefuseGroupWrite;
 
 impl GroupOracle for RefuseGroupWrite {
@@ -204,12 +203,12 @@ pub enum Last {
     /// allows writing (runtime root).
     PrivateFolder,
     /// A file or folder `me` owns that nobody else can write (a config
-    /// file, spec section 2 safety row; the state root). Group write
+    /// file; the state root). Group write
     /// follows the oracle.
     Mine,
 }
 
-/// Spec section 4 "runtime root" 2, over the chain the walk opened: `/`,
+/// The runtime root rule, over the chain the walk opened: `/`,
 /// each folder below it, and the last entry. Every ancestor follows
 /// `entry_verdict`, with one exception: a root-owned sticky folder (`/tmp`)
 /// that others can write passes when the next name is owned by `me`. The
@@ -248,7 +247,7 @@ fn check_next(f: &Facts, me: u32, next: NextOwner) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// N4: check a non-final folder before requesting the next open. `/` is
+/// Check a non-final folder before requesting the next open. `/` is
 /// an ancestor, never a private runtime root. Return the next-owner duty.
 pub fn ancestor_verdict(
     f: &Facts,
@@ -278,7 +277,7 @@ pub fn ancestor_verdict(
     }
 }
 
-/// N4: only the final observation is checked for ownership and 0700.
+/// Only the final observation is checked for ownership and 0700.
 pub fn final_verdict(
     tail: &Facts,
     me: u32,
@@ -328,8 +327,8 @@ pub fn macos_ownership_enforced(flags: u32) -> bool {
     flags & MNT_IGNORE_OWNERSHIP == 0
 }
 
-/// Linux file systems that count as local (spec section 3 state file
-/// location: an `f_type` allowlist, FUSE refused). Network and FUSE file
+/// Linux file systems that count as local, for the state file (an `f_type`
+/// allowlist, FUSE refused). Network and FUSE file
 /// systems, and any type not on this list, are not local. Read-only local
 /// file systems (squashfs for snaps and AppImages, erofs, iso9660) are on
 /// the list: the executable path check uses the same answer, and a binary
@@ -421,7 +420,7 @@ mod tests {
         }
     }
 
-    // M1 Task A7 표 그대로(init 실행 파일 경로)와 Linux POSIX ACL 두 행. 이것을 실패시키는 것: 표의 어느 한 행이라도
+    // init 실행 파일 경로 판정 표 그대로와 Linux POSIX ACL 두 행. 이것을 실패시키는 것: 표의 어느 한 행이라도
     // 다르게 판정하는 것(특히 그룹 쓰기 mask 아래의 이름 붙은 ACL 항목을 그룹 구성원 판정으로 통과시키는 것).
     #[test]
     fn entry_rule_table() {
@@ -552,7 +551,7 @@ mod tests {
         walk_verdict(chain, ME, Last::PrivateFolder, Some(true), &mut Fixed(g))
     }
 
-    // 스펙 4절 "런타임 뿌리"의 경로 판정 예 다섯과 ACL 벡터 둘(보안 I6).
+    // 런타임 뿌리의 경로 판정 예 다섯과 ACL 벡터 둘.
     // 이것을 실패시키는 것: sticky 예외를 빼거나 넓히는 것, 그 바로 아래 소유자를 보지 않는 것, 그룹 쓰기를 묻지 않고
     // 통과시키는 것, 마지막 폴더의 0700·소유자·로컬을 보지 않는 것, allow ACL을 통과시키거나 deny ACL을 거부하는 것.
     #[test]
@@ -682,7 +681,7 @@ mod tests {
         assert_eq!(walk(&[], Group::HasOthers), Err(Refusal::Last));
     }
 
-    // 판정 P-R1(S-8): 앞단은 init이 확인해 기록한 그룹 쓰기 폴더만 받는다. 같은 폴더·gid·mode일 때만.
+    // 앞단은 init이 확인해 기록한 그룹 쓰기 폴더만 받는다. 같은 폴더·gid·mode일 때만.
     // 이것을 실패시키는 것: 기록과 견주지 않고 그룹 쓰기를 받는 것, 폴더 정체나 mode를 견주지 않는 것.
     #[test]
     fn the_front_end_takes_only_pinned_group_write() {
@@ -728,7 +727,7 @@ mod tests {
         );
     }
 
-    // 설정 파일(스펙 2절 안전 행): 내 파일이고 남이 못 쓴다. 그룹 쓰기는 구성원 판정.
+    // 설정 파일: 내 파일이고 남이 못 쓴다. 그룹 쓰기는 구성원 판정.
     // 이것을 실패시키는 것: 파일의 그룹·다른 사용자 쓰기를 보지 않는 것, root 소유 파일을 내 파일로 보는 것.
     #[test]
     fn config_files_are_mine_and_closed() {

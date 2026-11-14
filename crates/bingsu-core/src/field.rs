@@ -1,6 +1,5 @@
-//! Field types and value states (spec section 4 "필드 타입과 값 상태", M2
-//! types; the versioned schema is M3) and the public field names
-//! of the built-in segments (spec section 4 "세그먼트 선언", confirmed in M3).
+//! Field types and value states, and the public field names of the built-in
+//! segments.
 use crate::sanitize::sanitize_into_capped;
 use crate::width::{WidthProfile, ellipsis_cells, grapheme_width};
 use alloc::string::String;
@@ -278,9 +277,9 @@ const fn t(max_cells: u16) -> FieldType {
 use FieldType::{Bool, Count, Duration, Int};
 
 /// Public builtin field names, including the git stage schema.
-/// The four language segments (go, node, python, rust; plan D3a) carry one
-/// `version` text, at most the version grammar's 32 bytes; drawing them is
-/// D3b's.
+/// The four language segments (go, node, python, rust) carry one `version`
+/// text, at most the version grammar's 32 bytes; `command::display` draws
+/// them.
 /// Names follow one rule: one concept of another tool, one field (starship
 /// `git_status` variables ahead, behind, staged, modified, untracked,
 /// conflicted, stashed). Sorted by id; fields sorted by name.
@@ -431,7 +430,7 @@ pub enum ValueError {
 
 impl Value {
     /// `raw` is untrusted (a branch name, an environment value): sanitized
-    /// here (spec section 3 step 1) and cut to VALUE_MAX_CELLS cells and four
+    /// here and cut to VALUE_MAX_CELLS cells and four
     /// times as many bytes, which bounds the work of every later step for a
     /// 1 MiB name.
     pub fn new(raw: &[u8], fields: Vec<Field>) -> Self {
@@ -722,7 +721,7 @@ mod tests {
         }
     }
 
-    // C5: env 값처럼 정제 전 원문을 받을 때는 sanitized_prefix가 자르기에 필요한 만큼만 정제하고, 그 결과를 자른
+    // env 값처럼 정제 전 원문을 받을 때는 sanitized_prefix가 자르기에 필요한 만큼만 정제하고, 그 결과를 자른
     // 것은 원문 전체를 자른 것과 같다. 지워지는 글자(ESC, bidi 제어)는 상한에 세지 않는다. 이것을 실패시키는 것:
     // 원문을 바이트 상한에서 먼저 자르는 것(ESC 272개 뒤 VISIBLE, RLO 91개 뒤 dev가 사라짐), 상한을 40 B 이상 줄이는
     // 것. 16 B 줄인 변이는 통과한다: 첫 창이 상한 + 4 B를 읽어 남기는 글이 260 B 이상이 되고, 그 길이부터는 결과가
@@ -783,7 +782,7 @@ mod tests {
         assert_eq!(shown(&inputs[1]).as_str(), "dev");
     }
 
-    // m6-P1: helper가 저장하는 값 앞부분(read_prefix)을 자른 결과는 전체를 자른 결과와 같다. 0–64칸 모든 칸 수,
+    // helper가 저장하는 값 앞부분(read_prefix)을 자른 결과는 전체를 자른 결과와 같다. 0–64칸 모든 칸 수,
     // 폭 설정 네 가지, 넓은 글자·결합 글자·이모지 ZWJ·국기가 상한 근처에 걸치는 자리, 그리고 한 칸 폭인데 바이트
     // 상한(칸 × 4)을 넘는 긴 결합 클러스터에서. ASCII 앞머리 길이를 0부터 바꿔 자르기가 유니코드 꼬리 안에서
     // 끝나게 한다. 이것을 실패시키는 것: 앞부분을 260 B보다 앞에서 끊는 것(바이트 상한 256 B에서 끊으면 걸친 긴

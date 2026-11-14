@@ -1,6 +1,5 @@
-//! Sanitized `PATH` and executable lookup (spec section 4 "user command
-//! execution model", rows environment and executable lookup; section 2
-//! safety row for group write). Pure rules over the strings and the facts
+//! Sanitized `PATH` and executable lookup, and the group write rule for an
+//! executable. Pure rules over the strings and the facts
 //! the helper observed through open descriptors; the walk itself is the
 //! CLI's `exec_path`.
 use super::Error;
@@ -23,7 +22,7 @@ pub type Id = (u64, u64);
 /// not spelling: a case-only alias on a case-insensitive volume, a firmlink
 /// such as `/System/Volumes/Data` or a bind mount of the root reach the
 /// same `(dev, ino)`. A bind mount of a folder below the root is not seen;
-/// only root can make one (known-issues m6-B2a).
+/// only root can make one.
 pub fn outside_repo(chain: &[Id], repo: Option<Id>) -> bool {
     !repo.is_some_and(|r| chain.contains(&r))
 }
@@ -89,8 +88,8 @@ pub fn name(word: &[u8]) -> Name<'_> {
 }
 
 /// Symlinks on the way are followed only when root or the user owns them
-/// (spec section 4 native executable row: merged-/usr `/bin`, Homebrew
-/// `bin/x -> ../Cellar/…`); a link someone else owns could point anywhere.
+/// (merged-/usr `/bin`, Homebrew `bin/x -> ../Cellar/…`); a link someone
+/// else owns could point anywhere.
 pub fn link_owner_ok(uid: u32, me: u32) -> bool {
     uid == 0 || uid == me
 }
@@ -233,7 +232,7 @@ pub enum Head<'a> {
     /// No `#!`: the kernel loads it itself.
     Native,
     Script(Shebang<'a>),
-    /// A `#!` line the executor does not run (spec section 4 script row):
+    /// A `#!` line the executor does not run:
     /// longer than `SHEBANG_MAX`, with a NUL (the kernel would end the line
     /// there), a relative interpreter, or `/usr/bin/env`, which would pick the
     /// real interpreter from `PATH`.
