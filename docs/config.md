@@ -370,8 +370,10 @@ config checker and the renderer read, so a name it prints is a name the config a
 `bingsu list presets --preview` draws every preset once as the upper line of the default layout, with your current
 folder; the other values (a branch, a duration, the time) are samples. On a terminal it uses color unless `NO_COLOR` is
 set, and `--icons nerd|light|unicode|ascii` picks the icon set (`unicode` by default). The name takes 9 columns and the
-line is drawn for `max(60, $COLUMNS - 9)` cells (71 when `COLUMNS` is not set), so in a terminal narrower than 69
-columns the lines are wider than the terminal. It starts no command, reads no config and writes nothing.
+line is drawn for `max(60, W - 9)` cells, where W is the width `bingsu explain` uses without `--width`: `COLUMNS`, else
+the width of the terminal the output goes to, else 80 (71 cells through a pipe). A line leaves the last cell empty, so
+it is never shorter than 68 columns with the name, and in a terminal narrower than 68 columns it is wider than the
+terminal. It starts no command, reads no config and writes nothing.
 
 ```console
 $ bingsu list presets --preview --icons unicode

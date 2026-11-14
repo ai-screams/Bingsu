@@ -104,6 +104,8 @@ mod log;
 #[cfg(unix)]
 mod messages;
 #[cfg(unix)]
+mod out_width;
+#[cfg(unix)]
 pub(crate) mod refresh;
 #[cfg(unix)]
 mod reload;
