@@ -23,12 +23,13 @@
 //! (`tcflush(TCOFLUSH)`) so half a request never reaches it later. The
 //! flush cannot take back what the terminal (or, on Linux, the
 //! pseudo-terminal's reading side) already holds, so a request that was
-//! cut short, at the deadline or by a stop, is followed by bytes that end
-//! the sequence (`CANCEL`). One exception to the deadlines follows: those
-//! three bytes stay queued for a terminal that stopped reading, and when
-//! this process is the terminal's session leader (the terminal ran
-//! `bingsu` itself) its exit waits until the terminal reads them; a
-//! process started from a shell ends at once (macOS, measured).
+//! cut short, at the deadline, by a stop or by a write error, is followed by
+//! bytes that end the sequence (`CANCEL`), which may take up to
+//! `CANCEL_WAIT` (50 ms) past the deadline. One exception to the deadlines
+//! follows: those three bytes stay queued for a terminal that stopped
+//! reading, and when this process is the terminal's session leader (the
+//! terminal ran `bingsu` itself) its exit waits until the terminal reads
+//! them; a process started from a shell ends at once (macOS, measured).
 //!
 //! Replies carry no query number, so a reply must not be read as the answer
 //! to another query. Before each query the input queue is discarded (a
@@ -416,6 +417,13 @@ enum Sent {
     },
 }
 
+/// A write that failed. `partial`: the terminal took the first bytes.
+#[derive(Debug)]
+struct Failed {
+    error: std::io::Error,
+    partial: bool,
+}
+
 /// Writes all of `buf` through `write`, a non-blocking write. When the
 /// terminal takes nothing now (`WouldBlock`), `wait()` waits until it can
 /// (`false`: the deadline passed, or a stop was asked for). A write that a
@@ -425,13 +433,14 @@ fn write_checked(
     mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
     mut wait: impl FnMut() -> bool,
     mut buf: &[u8],
-) -> std::io::Result<Sent> {
+) -> Result<Sent, Failed> {
     let stopped = || STOP.load(Ordering::SeqCst);
     let whole = buf.len();
     while !buf.is_empty() {
         let partial = buf.len() < whole;
+        let failed = |error| Failed { error, partial };
         match write(buf) {
-            Ok(0) => return Err(std::io::Error::other("the terminal took no bytes")),
+            Ok(0) => return Err(failed(std::io::Error::other("the terminal took no bytes"))),
             Ok(n) => buf = &buf[n..],
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
                 if stopped() {
@@ -447,7 +456,7 @@ fn write_checked(
                     });
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(failed(e)),
         }
     }
     Ok(Sent::All)
@@ -593,25 +602,155 @@ fn discard_output(fd: RawFd) {
 /// out the half OSC).
 const CANCEL: &[u8] = b"\x18\x1b\\";
 
+/// How long the bytes of `CANCEL` may wait for room in the terminal's queue.
+const CANCEL_WAIT: Duration = Duration::from_millis(50);
+
 /// After a request was cut short (the terminal took its first bytes, then
-/// nothing more), the terminal's parser is inside an escape sequence and
-/// would read later output (a table, the next question) as the rest of it.
-/// What is still queued is dropped first (`discard_output`); what the
-/// terminal already holds stays, so `CANCEL` is queued behind it, for the
-/// terminal to read next. One non-blocking write, not tried again: the
-/// flush left room for its three bytes (Linux and macOS took them right
-/// after flushing a full queue).
+/// nothing more: a deadline, a stop or a write error), the terminal's parser
+/// is inside an escape sequence and would read later output (a table, the
+/// next question) as the rest of it. What is still queued is dropped first
+/// (`discard_output`); what the terminal already holds stays, so `CANCEL` is
+/// queued behind it, for the terminal to read next. The flush leaves room
+/// for its three bytes (Linux and macOS took them at once right after
+/// flushing a full queue), but another writer of the same terminal can fill
+/// the queue again in between and leave room for only `CAN ESC`, and a
+/// lone ESC would start a new sequence: the rest is written as room comes,
+/// for at most `CANCEL_WAIT`; the wait for room ignores the stop flag (a
+/// write that a signal interrupts while a stop is asked for still ends it).
+/// Past that it is given up.
 fn cancel_half_escape(fd: RawFd) {
     discard_output(fd);
-    let _ = write_once(fd, CANCEL);
+    let wait = ready(fd, false, true);
+    let until = Instant::now() + CANCEL_WAIT;
+    #[cfg(test)]
+    let takes = std::cell::Cell::new(test_terminal::CANCEL_TAKES.with(std::cell::Cell::take));
+    let _ = write_checked(
+        |b| {
+            #[cfg(test)]
+            if let Some(r) = test_terminal::cancel_write(&takes, b, |b| write_once(fd, b)) {
+                return r;
+            }
+            write_once(fd, b)
+        },
+        || wait(until),
+        CANCEL,
+    );
 }
 
+/// A terminal that takes only part of a write, for tests: `send` and
+/// `cancel_half_escape` consult these before each write and wait.
 #[cfg(test)]
-thread_local! {
-    /// How many bytes of a request the terminal takes before it stops
-    /// taking output (tests only): `send` then sleeps to its deadline and
-    /// gives up with the rest unwritten.
-    static TERMINAL_ROOM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+mod test_terminal {
+    use super::STOP;
+    use std::cell::{Cell, RefCell};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    /// What the terminal does once it took its bytes of a request.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Then {
+        /// Takes nothing more; the write waits to its deadline.
+        Stall,
+        /// The next write fails (EIO).
+        Fail,
+        /// Takes nothing more; the write tells `STOPPER` and waits until a
+        /// signal asks to stop.
+        Stop,
+    }
+
+    thread_local! {
+        /// How many bytes of the next request the terminal takes, then what.
+        pub(super) static ROOM: Cell<Option<(usize, Then)>> = const { Cell::new(None) };
+        /// How many bytes of the next cancel the terminal takes in its first
+        /// write; it then reports itself full once.
+        pub(super) static CANCEL_TAKES: Cell<Option<usize>> = const { Cell::new(None) };
+        /// Told once a request ending in `Then::Stop` took its bytes.
+        pub(super) static STOPPER: RefCell<Option<std::sync::mpsc::Sender<()>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// A request write on `fd` under `room`: `None` writes as usual. Once
+    /// the terminal took its bytes, this waits until the test's terminal
+    /// says it read them (`read_by_the_terminal`), so the flush that follows
+    /// cannot take them back (as a terminal that read the start of a request
+    /// and then stopped).
+    pub(super) fn write(
+        room: &Cell<Option<(usize, Then)>>,
+        fd: std::os::fd::RawFd,
+        b: &[u8],
+    ) -> Option<std::io::Result<usize>> {
+        let (left, then) = room.get()?;
+        Some(match (left, then) {
+            (0, Then::Fail) => Err(std::io::Error::from_raw_os_error(libc::EIO)),
+            (0, _) => Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+            _ => {
+                let n = super::write_once(fd, &b[..b.len().min(left)]);
+                if let Ok(n) = n {
+                    room.set(Some((left - n, then)));
+                    if n == left {
+                        read_by_the_terminal(fd);
+                    }
+                }
+                n
+            }
+        })
+    }
+
+    /// What the test's terminal sends once it read the start of a request.
+    pub(super) const READ: u8 = b'!';
+
+    /// Waits (at most 5 s) until the test's terminal sends `READ`, and reads
+    /// it. Asking the pseudo-terminal does not do: on Linux written bytes
+    /// leave its output queue at once, but a flush right after still drops
+    /// those its reading side has not taken in yet.
+    fn read_by_the_terminal(fd: std::os::fd::RawFd) {
+        if super::ready(fd, false, false)(Instant::now() + Duration::from_secs(5)) {
+            let mut byte = 0u8;
+            // SAFETY: `fd` is the open terminal; one writable byte.
+            let n = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
+            assert_eq!((n, byte), (1, READ), "the terminal said it read the start");
+        }
+    }
+
+    /// A request's wait under `room`: `None` waits as usual.
+    pub(super) fn wait(room: &Cell<Option<(usize, Then)>>, deadline: Instant) -> Option<bool> {
+        match room.get()? {
+            (0, Then::Stall) => {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                Some(false)
+            }
+            (0, Then::Stop) => {
+                if let Some(tell) = STOPPER.with(|s| s.borrow_mut().take()) {
+                    let _ = tell.send(());
+                }
+                let until = Instant::now() + Duration::from_secs(5);
+                while !STOP.load(Ordering::SeqCst) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+
+    /// A cancel write under `takes`: the first write takes that many bytes,
+    /// the next finds no room; `None` writes as usual.
+    pub(super) fn cancel_write(
+        takes: &Cell<Option<usize>>,
+        b: &[u8],
+        mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
+    ) -> Option<std::io::Result<usize>> {
+        match takes.get()? {
+            0 => {
+                takes.set(None);
+                Some(Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)))
+            }
+            n => {
+                takes.set(Some(0));
+                Some(write(&b[..b.len().min(n)]))
+            }
+        }
+    }
 }
 
 /// One `write(2)` on `fd`: the bytes taken.
@@ -682,37 +821,39 @@ impl RawGuard<'_> {
 
     /// Writes `bytes` until `deadline`. On a timeout what is still queued is
     /// dropped (`discard_output`). When the terminal took the first bytes and
-    /// the write ended at the deadline or a stop, the sequence it began is
-    /// cancelled (`cancel_half_escape`).
+    /// the write ended at the deadline, a stop or an error, the sequence it
+    /// began is cancelled (`cancel_half_escape`) before the result returns.
     fn send(&self, bytes: &[u8], deadline: Instant) -> std::io::Result<Sent> {
         let fd = self.tty.file.as_raw_fd();
         let wait = writable(fd);
         #[cfg(test)]
-        let room = std::cell::Cell::new(TERMINAL_ROOM.with(std::cell::Cell::take));
-        let sent = write_checked(
+        let room = std::cell::Cell::new(test_terminal::ROOM.with(std::cell::Cell::take));
+        let written = write_checked(
             |b| {
                 #[cfg(test)]
-                let b = match room.get() {
-                    Some(0) => return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
-                    Some(left) => {
-                        let b = &b[..b.len().min(left)];
-                        room.set(Some(left - b.len()));
-                        b
-                    }
-                    None => b,
-                };
+                if let Some(r) = test_terminal::write(&room, fd, b) {
+                    return r;
+                }
                 write_once(fd, b)
             },
             || {
                 #[cfg(test)]
-                if room.get() == Some(0) {
-                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-                    return false;
+                if let Some(go_on) = test_terminal::wait(&room, deadline) {
+                    return go_on;
                 }
                 wait(deadline)
             },
             bytes,
-        )?;
+        );
+        let sent = match written {
+            Ok(sent) => sent,
+            Err(Failed { error, partial }) => {
+                if partial {
+                    cancel_half_escape(fd);
+                }
+                return Err(error);
+            }
+        };
         match sent {
             Sent::TimedOut { partial: true } | Sent::Stopped { partial: true } => {
                 cancel_half_escape(fd);
@@ -1115,9 +1256,27 @@ mod tests {
         STOP.store(false, Ordering::SeqCst);
         assert!(matches!(got, Ok(Sent::Stopped { partial: false })));
         assert_eq!(calls, 1);
-        assert!(
-            write_checked(|_| Err(Error::from_raw_os_error(libc::EIO)), || true, b"x").is_err()
-        );
+        // 이것을 실패시키는 것: 일부를 쓴 뒤의 오류(Ok(0), EIO)를 partial false로 알리는 것(반쪽 escape를 끊지
+        // 않음), 아무것도 못 쓴 오류를 true로 알리는 것.
+        let got = write_checked(|_| Err(Error::from_raw_os_error(libc::EIO)), || true, b"x");
+        assert!(matches!(got, Err(Failed { partial: false, .. })), "{got:?}");
+        for after in [Ok(0), Err(Error::from_raw_os_error(libc::EIO))] {
+            let mut after = Some(after);
+            let mut calls = 0;
+            let got = write_checked(
+                |b| {
+                    calls += 1;
+                    if calls == 1 {
+                        Ok(b.len() - 4)
+                    } else {
+                        after.take().unwrap()
+                    }
+                },
+                || true,
+                b"\x1b]11;?\x1b\\",
+            );
+            assert!(matches!(got, Err(Failed { partial: true, .. })), "{got:?}");
+        }
         // 이것을 실패시키는 것: 터미널이 지금 받지 않을 때(WouldBlock) 기다리지 않고 오류로 끝내는 것, 기다림이
         // 마감으로 끝났는데 계속 쓰는 것, 마감과 정지 요청을 바꿔 알리는 것.
         let (mut calls, mut waits) = (0, 0);
@@ -2121,6 +2280,7 @@ mod tests {
         fn a_request_cut_short_is_cancelled() {
             let mut t = start("cut_request_child", 80);
             t.expect(&OSC11[..3]);
+            t.send(&[test_terminal::READ]);
             t.expect(CANCEL);
             let (lines, all) = t.finish();
             assert_eq!(lines, ["silent"]);
@@ -2132,14 +2292,73 @@ mod tests {
             );
         }
 
+        // 쓰기가 오류로 끝나도 같다: 터미널이 앞부분을 받은 뒤 쓰기가 EIO로 끝나면, 오류를 돌려주기 전에 CANCEL을
+        // 보낸다. 질의(OSC 11)와 Terminal::write 둘 다. 이것을 실패시키는 것: 일부를 쓴 뒤 오류로 끝난 쓰기에서
+        // cancel_half_escape를 부르지 않는 것(`?`로 바로 돌아감).
+        #[test]
+        fn a_write_that_fails_after_its_start_is_cancelled() {
+            let mut t = start("cut_by_error_child", 80);
+            t.expect(&OSC11[..3]);
+            t.send(&[test_terminal::READ]);
+            t.expect(CANCEL);
+            t.expect(b"\x1b[31");
+            t.send(&[test_terminal::READ]);
+            t.expect(CANCEL);
+            let (lines, all) = t.finish();
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert!(lines[0].starts_with("error "), "{lines:?}");
+            assert_eq!(lines[1], "write failed true");
+            assert!(all.ends_with(CANCEL), "{}", all.escape_ascii());
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn cut_by_error_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            test_terminal::ROOM.with(|r| r.set(Some((3, test_terminal::Then::Fail))));
+            say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+            test_terminal::ROOM.with(|r| r.set(Some((4, test_terminal::Then::Fail))));
+            say(&format!(
+                "write failed {}",
+                g.write(b"\x1b[31mred").is_err()
+            ));
+        }
+
+        // CANCEL의 쓰기가 짧아도(다른 writer가 flush 뒤 큐를 다시 채워 `CAN ESC`만 들어감) 자리가 나면 나머지를
+        // 마저 써, 터미널이 읽은 바이트가 `CAN ESC \`로 끝난다(ESC 하나가 매달리지 않음). 이것을 실패시키는 것:
+        // CANCEL을 write 한 번으로만 쓰는 것.
+        #[test]
+        fn a_short_cancel_is_finished() {
+            let mut t = start("short_cancel_child", 80);
+            t.expect(&OSC11[..3]);
+            t.send(&[test_terminal::READ]);
+            t.expect(CANCEL);
+            let (lines, all) = t.finish();
+            assert_eq!(lines, ["silent"]);
+            assert!(all.ends_with(CANCEL), "{}", all.escape_ascii());
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn short_cancel_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            test_terminal::ROOM.with(|r| r.set(Some((3, test_terminal::Then::Stall))));
+            test_terminal::CANCEL_TAKES.with(|c| c.set(Some(2)));
+            say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+        }
+
         // 신호로 멈춘 쓰기도 같다: 터미널이 앞 3바이트를 받은 뒤 SIGTERM이 오면 CANCEL이 따라오고, 프로세스는 터미널을
-        // 되돌린 뒤 그 신호로 끝난다. 이것을 실패시키는 것: 쓰기가 Stopped로 끝났을 때 cancel_half_escape를 부르지
-        // 않는 것.
+        // 되돌린 뒤 그 신호로 끝난다. 신호는 hook이 "앞부분을 썼다"고 알린 뒤에 보내고, 쓰기는 시간이 아니라 정지를
+        // 기다리므로 늘 Stopped로 끝난다. 이것을 실패시키는 것: 쓰기가 Stopped로 끝났을 때 cancel_half_escape를
+        // 부르지 않는 것.
         #[test]
         fn a_request_cut_short_by_a_signal_is_cancelled() {
             use std::os::unix::process::ExitStatusExt;
             let mut t = start("cut_by_signal_child", 80);
             t.expect(&OSC11[..3]);
+            t.send(&[test_terminal::READ]);
             t.expect(CANCEL);
             let (lines, status, out, err) = t.end();
             assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
@@ -2153,11 +2372,13 @@ mod tests {
         fn cut_by_signal_child() {
             let tty = take_terminal();
             let mut g = tty.raw().unwrap();
-            TERMINAL_ROOM.with(|r| r.set(Some(3)));
-            // The stop comes while the write waits for room (`send` sleeps
-            // to the 200 ms deadline after the first 3 bytes).
-            let stop = std::thread::spawn(|| {
-                std::thread::sleep(Duration::from_millis(50));
+            // The stop comes once the terminal took the first 3 bytes, while
+            // the write waits for room (it waits for the stop, not for time).
+            let (tell, told) = std::sync::mpsc::channel();
+            test_terminal::STOPPER.with(|s| *s.borrow_mut() = Some(tell));
+            test_terminal::ROOM.with(|r| r.set(Some((3, test_terminal::Then::Stop))));
+            let stop = std::thread::spawn(move || {
+                told.recv().unwrap();
                 // SAFETY: getpid takes no arguments and cannot fail.
                 let me = unsafe { libc::getpid() };
                 // SAFETY: sends SIGTERM to this process; the guard's handler takes it.
@@ -2174,7 +2395,7 @@ mod tests {
         fn cut_request_child() {
             let tty = take_terminal();
             let mut g = tty.raw().unwrap();
-            TERMINAL_ROOM.with(|r| r.set(Some(3)));
+            test_terminal::ROOM.with(|r| r.set(Some((3, test_terminal::Then::Stall))));
             say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
         }
 
