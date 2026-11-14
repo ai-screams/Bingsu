@@ -13,6 +13,7 @@
 //! its facts and hands them to a pure `judge_*` function, which the tests
 //! feed with good and bad facts.
 use super::{
+    collection_breaker::{self, Peek},
     collector::Sibling,
     config_inspect::{Inspection, exit_for, inspect_config, refusal_text},
     ctx::{self, EXIT_FAILED, EXIT_UNFINISHED, EXIT_USAGE, User},
@@ -186,6 +187,11 @@ pub(super) const ITEMS: &[Item] = &[
         id: "envelope",
         title: "envelope",
         run: |c| doctor_evidence::judge_envelope(&c.evidence),
+    },
+    Item {
+        id: "breaker",
+        title: "breaker",
+        run: run_breaker,
     },
     Item {
         id: "seccomp",
@@ -563,6 +569,114 @@ fn run_build_identity(c: &Ctx) -> Finding {
         sibling_state(c, exe, Sibling::COLLECTOR),
         sibling_state(c, exe, Sibling::PROMPT),
     )
+}
+
+// ---- the collection breaker -------------------------------------------------------
+
+/// What reading this session's breaker gave: `Err` when it could not be read
+/// safely.
+fn judge_breaker(read: Result<Peek, ()>) -> Finding {
+    match read {
+        Ok(Peek::Blocked) => finding(
+            Status::Warn,
+            "collection is switched off for this folder in this shell session for a while (the same mount missed its deadline three times in a row); the prompt still draws",
+            Some(codes::COLLECTION_BREAKER_ON),
+        ),
+        Ok(Peek::NoRecord) => finding(
+            Status::Ok,
+            "this session has no breaker record for this folder: collection is not switched off",
+            None,
+        ),
+        Ok(Peek::Allowed) => finding(Status::Ok, "collection is on for this folder", None),
+        Ok(Peek::Probe) => finding(
+            Status::Ok,
+            "the wait is over: the next prompt tries collection in this folder again",
+            None,
+        ),
+        Ok(Peek::Disabled) => finding(
+            Status::Unknown,
+            "the breaker record is from another boot or clock, so it says nothing about now",
+            None,
+        ),
+        Err(()) => finding(
+            Status::Unknown,
+            "the breaker record could not be read safely; the pinned folders check says whether the runtime folder is safe",
+            None,
+        ),
+    }
+}
+
+/// A breaker row that cannot be confirmed, with the reason.
+fn breaker_unknown(why: &str) -> Finding {
+    finding(
+        Status::Unknown,
+        format!("the collection breaker is not confirmed: {why}"),
+        None,
+    )
+}
+
+/// The folder key the prompt used: the shell's `PWD`, as the prompt's own
+/// envelope rule takes it (an absolute path of a bounded length). The string is
+/// the key as it is: the helper keys the breaker by the `$PWD` the shell passed,
+/// and the folder is never looked at here, since a stopped mount is exactly
+/// when the breaker is on and a look at it would stop this command too.
+fn shell_pwd(pwd: Option<&OsStr>) -> Result<Vec<u8>, &'static str> {
+    let Some(pwd) = pwd else {
+        return Err(
+            "the shell does not export PWD to its commands, so the folder the prompt used is not known",
+        );
+    };
+    // `--width` is a required word of the envelope; its value does not matter here.
+    let argv: [&[u8]; 8] = [
+        b"--ctx",
+        b"1",
+        b"--record",
+        b"B1",
+        b"--width",
+        b"80",
+        b"--pwd",
+        pwd.as_bytes(),
+    ];
+    match bingsu_core::envelope::parse(&argv) {
+        Ok(e) => e.pwd.ok_or(
+            "PWD is not an absolute path the prompt accepts, so the folder it used is not known",
+        ),
+        Err(_) => Err("PWD could not be read as the prompt reads it"),
+    }
+}
+
+fn run_breaker(c: &Ctx) -> Finding {
+    let session = match doctor_evidence::session_of(&c.evidence) {
+        Ok(s) => s,
+        Err(f) => return f,
+    };
+    // The runtime folder is the one init pinned in this shell and nothing else:
+    // a pin that no longer holds (the folder was made again) must not let the
+    // folder in its place stand in for it, since an empty folder has no record.
+    let Some(value) = TrustedEnv::pinned_roots() else {
+        return breaker_unknown(
+            "init has not pinned the folders in this shell (see the pinned folders check)",
+        );
+    };
+    let Some(runtime) = pinned::open_runtime(
+        value.as_bytes(),
+        c.user.me,
+        &c.user.pw.name,
+        &c.user.pw.home,
+    ) else {
+        return breaker_unknown(
+            "the folders init pinned do not hold now (see the pinned folders check)",
+        );
+    };
+    let (_, pwd) = TrustedEnv::shell();
+    let cwd = match shell_pwd(pwd.as_deref()) {
+        Ok(cwd) => cwd,
+        Err(why) => return breaker_unknown(why),
+    };
+    let Ok(now) = crate::prompt_io::observe_clock() else {
+        return judge_breaker(Err(()));
+    };
+    judge_breaker(collection_breaker::peek(&runtime, &session, &cwd, now).map_err(|_| ()))
 }
 
 // ---- seccomp -------------------------------------------------------------------
@@ -1377,6 +1491,39 @@ mod tests {
             doc,
             "{\"schema\":1,\"command\":\"doctor\",\"result\":\"invalid\",\"items\":[],\"exit_code\":1,\"error\":\"cannot read the account\"}\n"
         );
+    }
+
+    // 이것을 실패시키는 것: 차단을 정상으로 매기는 것, 기록이 없는 것을 경고로 매기는 것, 읽기 실패·다른 부팅 기록을 정상이나
+    // 경고로 매기는 것(모름이어야 한다), 경고에서 진단 코드를 빼는 것.
+    #[test]
+    fn the_breaker_follows_what_peek_found() {
+        is(
+            &judge_breaker(Ok(Peek::Blocked)),
+            Status::Warn,
+            Some(codes::COLLECTION_BREAKER_ON),
+        );
+        for p in [Peek::NoRecord, Peek::Allowed, Peek::Probe] {
+            is(&judge_breaker(Ok(p)), Status::Ok, None);
+        }
+        is(&judge_breaker(Ok(Peek::Disabled)), Status::Unknown, None);
+        let f = judge_breaker(Err(()));
+        is(&f, Status::Unknown, None);
+        assert!(f.text.contains("pinned folders"), "{}", f.text);
+    }
+
+    // 이것을 실패시키는 것: PWD가 없는데 다른 값(현재 폴더, 물리 경로)으로 키를 만드는 것, 프롬프트의 봉투 규칙을 어기는 PWD(상대 경로,
+    // 너무 긴 값)를 키로 쓰는 것, PWD 문자열을 고치는 것(링크로 들어간 폴더의 논리 경로를 그대로 써야 helper와 같은 키가 된다).
+    #[test]
+    fn the_folder_key_is_the_shells_pwd_string_or_nothing() {
+        assert_eq!(
+            shell_pwd(Some(OsStr::new("/home/me/link/dir"))).unwrap(),
+            b"/home/me/link/dir"
+        );
+        assert!(shell_pwd(None).is_err());
+        assert!(shell_pwd(Some(OsStr::new(""))).is_err());
+        assert!(shell_pwd(Some(OsStr::new("relative"))).is_err());
+        let long = format!("/{}", "a".repeat(70_000));
+        assert!(shell_pwd(Some(OsStr::new(&long))).is_err());
     }
 
     const NORMAL: Cells = [1, 2, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1];

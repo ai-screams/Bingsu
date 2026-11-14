@@ -64,5 +64,11 @@
     "after": "603b9c4c7f6cd94e9e427d42ec695bd6fe754aae69a52c86f11a2ddb7fe69a3d",
     "kind": "meaning",
     "reason": "Adds the two terminal measurements of `bingsu doctor`: W613 (the terminal draws probe characters in other widths than the settings assume) and W614 (the terminal's background is the other brightness than the prompt draws for under `colors.mode = \"auto\"`). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
+  },
+  {
+    "before": "603b9c4c7f6cd94e9e427d42ec695bd6fe754aae69a52c86f11a2ddb7fe69a3d",
+    "after": "78fd46fa9a4189c0ae1815e34056b4ea48c0f7c9e57f8217a3f541492d68709e",
+    "kind": "meaning",
+    "reason": "Adds W612, the collection breaker finding of `bingsu doctor` (collection is switched off for the folder in this shell session). Every existing code keeps its number, status, arguments and text; no code is reused or deprecated."
   }
 ]
