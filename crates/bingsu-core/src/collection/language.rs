@@ -1,6 +1,5 @@
-//! Language detection inputs and results (spec section 4 "language versions"
-//! rows detection and version selection files; plan D1). The worker reads the
-//! marker and version selection files under its read confinement; this module
+//! Language detection inputs and results. The worker reads the marker and
+//! version selection files under its read confinement; this module
 //! holds the pure parts: the fixed built-in table, the request's query
 //! limits, the version string grammar, the per-format extraction and the wire
 //! encoding of both sides. Nothing here touches a file.
@@ -17,11 +16,11 @@ pub const NAME_MAX: usize = 255;
 pub const ID_MAX: usize = 64;
 /// Folders looked at: the shell's folder and up to this many above it, never
 /// past the repository root. It equals the discovery's own bound, so a
-/// repository found is always within reach (C2 ruling Q2 for D1).
+/// repository found is always within reach.
 pub const DETECT_LEVELS: usize = 32;
-/// The version string grammar's length bound (spec line 935).
+/// The version string grammar's length bound.
 pub const VERSION_MAX: usize = 32;
-/// The largest version selection file read (C2 ruling Q4 for D1); `go.mod`
+/// The largest version selection file read; `go.mod`
 /// may hold a long module list before its `toolchain` line.
 pub const FILE_MAX: u64 = 4_096;
 pub const GO_MOD_MAX: u64 = 16_384;
@@ -104,16 +103,15 @@ const fn line(name: &'static [u8]) -> (&'static [u8], u8) {
 /// One built-in language: its id, markers and version files (name, format
 /// tag). Within a level the files are tried in this order, the order the
 /// language's version manager reads them. `.tool-versions` is not read: the
-/// managers bingsu resolves (rustup, pyenv) do not read it (ruling Q3 for
-/// D2, spec revision candidate S-29).
+/// managers bingsu resolves (rustup, pyenv) do not read it.
 pub struct Builtin {
     pub id: &'static [u8],
     pub markers: &'static [&'static [u8]],
     pub files: &'static [(&'static [u8], u8)],
 }
 
-/// The four built-in languages (spec section 4: Node, Python, Rust, Go).
-/// D3 opens the segments that request them.
+/// The four built-in languages: Node, Python, Rust and Go. Their versions
+/// come from the builtin probes (`command::builtin`).
 pub const BUILTIN: [Builtin; 4] = [
     Builtin {
         id: b"node",
@@ -134,7 +132,7 @@ pub const BUILTIN: [Builtin; 4] = [
         id: b"rust",
         markers: &[b"Cargo.toml"],
         // With both in one folder rustup reads `rust-toolchain` and warns
-        // (rustup 1.29.2, ruling Q9 for D2). Fails without this order:
+        // (rustup 1.29.2). Fails without this order:
         // formats_follow_the_managers_order.
         files: &[line(b"rust-toolchain"), (b"rust-toolchain.toml", 2)],
     },
@@ -189,10 +187,9 @@ pub fn name_ok(name: &[u8]) -> bool {
         && name != b".."
 }
 
-/// The version string grammar (spec line 935): `[0-9A-Za-z._+-]`, 1–32
+/// The version string grammar: `[0-9A-Za-z._+-]`, 1–32
 /// bytes, no `..`, and starting with `[0-9A-Za-z]`, so no value reads as an
-/// option, a hidden name or a bare `.` (security review M1 for D1, which
-/// replaces the earlier "not starting with `-`"). Control characters and
+/// option, a hidden name or a bare `.`. Control characters and
 /// `/` are outside the set.
 pub fn version_ok(value: &[u8]) -> bool {
     (1..=VERSION_MAX).contains(&value.len())
@@ -211,8 +208,7 @@ pub enum Candidate<'a> {
     Malformed,
     Value(&'a [u8]),
     /// `rust-toolchain.toml` names a `path` toolchain (with or without a
-    /// channel): no value, and the version command is not run (spec Rust
-    /// profile row; ruling Q4 for D2).
+    /// channel): no value, and the version command is not run.
     Path,
 }
 
@@ -427,8 +423,8 @@ fn toml_channel(bytes: &[u8]) -> Option<Candidate<'_>> {
     }
 }
 
-/// `toolchain go<version>`; without it the `go` directive's version (C2
-/// ruling Q5 for D1: the Go 1.21+ meaning of a missing toolchain line).
+/// `toolchain go<version>`; without it the `go` directive's version (the Go
+/// 1.21+ meaning of a missing toolchain line).
 fn go_mod(bytes: &[u8]) -> Candidate<'_> {
     let mut go = Candidate::Absent;
     for l in lines(bytes) {

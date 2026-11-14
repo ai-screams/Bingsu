@@ -14,11 +14,11 @@ use crate::{
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Config units spawned in one round (U-9d).
+/// Config units spawned in one round.
 pub const CONFIG_MAX: usize = 8;
-/// Builtin probes spawned in one round (U-9d): the four languages.
+/// Builtin probes spawned in one round: the four languages.
 pub const PROBE_MAX: usize = 4;
-/// Longest run of one unit (U-9d, 1,000 ms); a longer `timeout` is cut to it.
+/// Longest run of one unit (1,000 ms); a longer `timeout` is cut to it.
 pub const TIMEOUT_MAX: u64 = 1_000_000_000;
 /// `timeout` when the config sets none (spec: 200 ms).
 pub const TIMEOUT_DEFAULT: u64 = 200_000_000;
@@ -75,7 +75,7 @@ pub fn runnable(u: &ExecUnit) -> Option<Runnable> {
 
 /// The policy digest a unit's response entry is bound to: the grant's
 /// (`wire::policy_digest`) for a command, and for a language unit that one
-/// with its `detect_files` too (D3c-2 ruling Q3), so other files that mark
+/// with its `detect_files` too, so other files that mark
 /// the language never stand for the value decided with these. The grant
 /// keeps `policy_digest`, which the supervisor checks the unit against.
 pub fn entry_digest(r: &Runnable) -> [u8; 32] {
@@ -154,7 +154,7 @@ impl<'a> Environ<'a> {
     }
 }
 
-/// What an env segment draws for variable `name` of this environment (C5):
+/// What an env segment draws for variable `name` of this environment:
 /// its raw value sanitized up to what the cut reads
 /// (`Clean::sanitized_prefix`), never copied whole; nothing when it is unset
 /// or named twice (`Environ` drops both). An empty value draws nothing as
@@ -170,12 +170,12 @@ pub fn env_segment_value(vars: &Environ<'_>, name: &str) -> Option<String> {
 /// Kept names a config unit's digest leaves out. `TERM` is still passed to
 /// the command, but a command runs with its output on a pipe, not on that
 /// terminal, so two shells in one folder with different terminals share the
-/// value instead of hiding each other's (F1-b ruling). A command that prints
+/// value instead of hiding each other's. A command that prints
 /// by `TERM` can show the value made under another terminal's `TERM`.
 pub const DIGEST_SKIP: [&[u8]; 1] = [b"TERM"];
 
-/// The original environment digest of a config unit (spec section 4
-/// "cache", U-16): the keep list but `DIGEST_SKIP` (`LC_*` by prefix) and
+/// The original environment digest of a config unit, the cache's key: the
+/// keep list but `DIGEST_SKIP` (`LC_*` by prefix) and
 /// the unit's `env_allow`, as the shell gave them, before any sanitizing.
 /// The prompt computes the same from its own environment, so a response is
 /// shown only to a shell whose values it ran with. Names in byte order, each
@@ -264,7 +264,7 @@ pub fn with_dir(argv: &[Vec<u8>], dir: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// The folder whose identity stands for the repository the shell is in, for
-/// the `PATH` and executable rules (C2 ruling J9): the repository root this
+/// the `PATH` and executable rules: the repository root this
 /// round's collection reported for `cwd` (component `component` of it, as
 /// the collector found it), else `cwd` itself. The fallback misses a root
 /// above `cwd` when the shell is in a subfolder of a repository.
@@ -363,7 +363,7 @@ mod tests {
         }
     }
 
-    // D3c-2: 사용자 정의 language 단위는 argv [interpreter, version…]로, 자기 cwd·env_allow로 실행한다.
+    // 사용자 정의 language 단위는 argv [interpreter, version…]로, 자기 cwd·env_allow로 실행한다.
     // interpreter가 없거나 비면 실행하지 않는다. 이것을 실패시키는 것: language를 grant 정책으로 바꾸지 않는 것,
     // version 인자를 빼는 것, 빈 interpreter를 받는 것, language의 cwd·env_allow 대신 기본값을 쓰는 것.
     #[test]
@@ -382,7 +382,7 @@ mod tests {
         assert!(runnable(&unit(language(Some(""), &["deno.json"]))).is_none());
     }
 
-    // 항목의 정책 요약값: 명령은 grant 요약값 그대로, language는 detect_files까지 묶는다(D3c-2 Q3). 감지 이름이
+    // 항목의 정책 요약값: 명령은 grant 요약값 그대로, language는 detect_files까지 묶는다. 감지 이름이
     // 다르면 요약값이 다르다. 이것을 실패시키는 것: language에도 grant 요약값만 쓰는 것, 명령의 요약값을 바꾸는 것,
     // 이름마다의 길이 머리를 빼는 것(["ab","c"]와 ["a","bc"]가 같아짐).
     #[test]
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(target_environment(&vars, &[], b""), b"HOME=/h\0".to_vec());
     }
 
-    // 수용 조건(A4): `{dir}` 값에 셸 문자·줄바꿈이 있어도 argv 원소 하나로 남는다. 이것을 실패시키는 것:
+    // 수용 조건: `{dir}` 값에 셸 문자·줄바꿈이 있어도 argv 원소 하나로 남는다. 이것을 실패시키는 것:
     // with_dir가 값을 공백·줄바꿈으로 나누거나 단어 안의 `{dir}`도 바꾸는 것.
     #[test]
     fn dir_value_stays_one_word() {
@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(got, vec![b"ls".to_vec(), dir.to_vec(), b"x{dir}".to_vec()]);
     }
 
-    // J9: 수집이 알린 저장소 루트가 있으면 그 폴더, 없으면 셸 폴더. 이것을 실패시키는 것: component를
+    // 수집이 알린 저장소 루트가 있으면 그 폴더, 없으면 셸 폴더. 이것을 실패시키는 것: component를
     // 무시하고 늘 cwd를 쓰는 것, take의 `+ 1`을 지우는 것(루트 한 단계 위가 됨).
     #[test]
     fn repo_folder_prefers_the_collected_root() {
@@ -643,8 +643,9 @@ mod tests {
         }
     }
 
-    // 수용 조건(A3 L-5). 이것을 실패시키는 것: result_fits의 순번 검사를 지우는 것, origin별 목록 대신
-    // 두 목록 합을 보는 것, `approved_at <= ended_at`을 지우는 것.
+    // 결과는 grant의 자리(origin과 순번) 하나를 가리키고, 승인보다 먼저 끝나지 않는다. 이것을 실패시키는 것:
+    // result_fits의 순번 검사를 지우는 것, origin별 목록 대신 두 목록 합을 보는 것, `approved_at <= ended_at`을
+    // 지우는 것.
     #[test]
     fn result_must_name_a_grant_place() {
         let mut g = grant();
@@ -662,7 +663,7 @@ mod tests {
         assert!(!result_fits(&g, &outcome(Origin::Config, 1, 5, 6)));
     }
 
-    // 같은 자리의 둘째 결과는 받지 않는다(첫 결과가 선다, C4 Q5). 이것을 실패시키는 것: accept의 중복 검사를
+    // 같은 자리의 둘째 결과는 받지 않는다(첫 결과가 선다). 이것을 실패시키는 것: accept의 중복 검사를
     // 지우는 것, origin을 보지 않는 것(같은 index의 다른 origin 결과까지 거부), accept가 result_fits를 건너뛰는 것.
     #[test]
     fn a_second_result_for_one_place_is_rejected() {

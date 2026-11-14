@@ -1,8 +1,8 @@
-//! Untrusted text cleanup, step 1 of spec section 3 "셸별 출력과 보안".
+//! Untrusted text cleanup, the first step before any shell output.
 //! Branch and folder names, environment values, command output and theme,
 //! template and icon text all pass through here before width counting and
 //! shell escaping. Every outside value goes through this function; the type
-//! that forces it (`Clean`) is Task A6.
+//! that forces it is `field::Clean`.
 use crate::ucd::REMOVED_FORMAT;
 use alloc::string::String;
 
@@ -136,8 +136,8 @@ fn capped_in_windows(input: &[u8], out: &mut String, limit: usize, first: usize)
 /// and C1 controls.
 pub fn sanitize(input: &[u8]) -> String {
     // The output is at most 3 times the input (one invalid byte becomes the
-    // 3-byte U+FFFD); a reallocation is therefore bounded, and the cap on the
-    // value's byte length is Task A6.
+    // 3-byte U+FFFD); a reallocation is therefore bounded, and
+    // `field::Clean::new` caps the value's byte length.
     let mut out = String::with_capacity(input.len());
     sanitize_into(input, &mut out);
     out

@@ -1,4 +1,4 @@
-//! What the prompt draws from a command response (C4b): a unit's value only
+//! What the prompt draws from a command response: a unit's value only
 //! when every part of the response that ran it matches this prompt. The
 //! prompt reads the response the helper published for its context and cwd,
 //! and draws an entry when
@@ -12,14 +12,13 @@
 //!   the unit's `env_allow`) is the one the entry ran with;
 //! - the entry succeeded (a failure shows nothing) and its pattern digest
 //!   is the one of the unit's `match` in this snapshot (all zeros without
-//!   one): the helper applied that pattern, and the prompt never runs one
-//!   (U-9c). An entry matched under an older `match` shows nothing until the
+//!   one): the helper applied that pattern, and the prompt never runs one.
+//!   An entry matched under an older `match` shows nothing until the
 //!   helper applies the new one;
 //! - for a config unit, the marker makes the snapshot's units eligible for
-//!   display (the security review's C4b condition). A builtin probe has no
-//!   such condition (D3 ruling Q3).
+//!   display. A builtin probe has no such condition.
 //!
-//! A builtin language's version (`builtin_value`, D3b rulings Q1–Q3) needs
+//! A builtin language's version (`builtin_value`) needs
 //! the same binding, clock, completion and success, and this shell's
 //! environment digest over the language's variables
 //! (`builtin::Language::env_digest`), so a shell whose `PATH`, `HOME` or

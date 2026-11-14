@@ -14,8 +14,8 @@
 //! libc names used here to equal its `libc` column, on Linux the seccomp
 //! filter allows only its `syscall` column, and the strace test checks the
 //! calls the prompt makes.
-// Prompt path: the clippy.toml rules (environment reads among them, spec 4
-// rule 7, F-01) are forbidden here. Unlike the crate-wide deny, forbid cannot
+// Prompt path: the clippy.toml rules (environment reads among them)
+// are forbidden here. Unlike the crate-wide deny, forbid cannot
 // be switched off with #[expect] or #[allow]. scripts/check_cli_prompt_forbid.py
 // checks this line.
 #![forbid(
@@ -103,12 +103,12 @@ fn exit(code: i32) -> ! {
 /// The prompt process. After fail-closed deadline setup, the silent panic hook
 /// and unwind guard protect BPF construction, filter installation and the
 /// record for a refused filter. The default hook writes to
-/// stderr before unwinding (spec section 6 rule 1); this one does nothing.
+/// stderr before unwinding; this one does nothing.
 /// After an unwind panic the record is `front::after_panic`'s; a second
 /// panic inside that aborts with rc 101, and the shell draws its own
-/// minimal prompt (spec section 6 rule 2). Whether the core runs is
+/// minimal prompt. Whether the core runs is
 /// `front::runs_core`; after pre-filter preparation, a refused filter
-/// (decision P18) supplies only `without_sandbox`: the record-version pair
+/// supplies only `without_sandbox`: the record-version pair
 /// rule and the minimal record, no snapshot decoding or render.
 fn run_prompt(
     deadline: Option<front::output::Deadline>,

@@ -18,7 +18,7 @@ bench-stubs = ["dep:bingsu-bench", "bingsu-identity/bench-build"]
 [dependencies]
 bingsu-core = { path = "../bingsu-core" }
 bingsu-identity = { path = "../bingsu-identity" }
-# `match` of command segments (C4c): regex in the CLI only, never in core.
+# `match` of command segments: regex in the CLI only, never in core.
 bingsu-match = { path = "../bingsu-match" }
 bingsu-bench = { path = "../bingsu-bench", optional = true }
 # YAML config files (conf.d, extends, config use): an event parser that never

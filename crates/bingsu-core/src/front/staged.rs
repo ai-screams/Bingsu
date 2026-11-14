@@ -1,7 +1,7 @@
-//! N4 sans-I/O continuation. Only this module chooses names, descriptors and read
+//! The prompt's sans-I/O continuation. Only this module chooses names, descriptors and read
 //! lengths. An executor observes facts, never manufactures a safety verdict.
 //! The CLI preopens `Prefetch` before confinement, then satisfies this continuation
-//! from the held descriptors and cached facts (N4 option 3, 2026-10-17).
+//! from the held descriptors and cached facts.
 use super::output::Deadline;
 use crate::collection::{
     response::{self, Completed},
@@ -20,9 +20,8 @@ use crate::status::Status;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 /// The files the prompt prefetches from the collection store of its cwd: the
-/// collection responses and the command response (C4b ruling Q1: opened
-/// with the others before the filter, read only when the snapshot draws a
-/// command segment).
+/// collection responses and the command response (opened with the others
+/// before the filter, read only when the snapshot draws a command segment).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectionCopy {
     Current,
@@ -346,8 +345,8 @@ impl ReadPlan {
         self.entry = Some(entry);
         self
     }
-    /// The environment frame the prompt wrote for the helper (C4b ruling Q6:
-    /// one environ pass serves both). Its checksum is checked here, once: a
+    /// The environment frame the prompt wrote for the helper (one environ pass
+    /// serves both). Its checksum is checked here, once: a
     /// frame that fails is no environment.
     pub fn with_environment(mut self, frame: Option<Vec<u8>>) -> Self {
         self.environment = frame.filter(|f| crate::command::env_frame::body(f).is_some());
@@ -1050,7 +1049,7 @@ fn custom_values(
 
 /// Finish never observes the OS. COLORFGBG comes only from the display envelope,
 /// separate from snapshot identity. Saved OSC 11 observation is deferred until
-/// its observation file and address are defined (N4 review ruling).
+/// its observation file and address are defined.
 pub fn finish(plan: ReadPlan, observed: Observed) -> Response {
     let catalog = Catalog {
         segments: plan.catalog.segments,

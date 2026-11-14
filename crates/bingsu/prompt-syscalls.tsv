@@ -1,7 +1,7 @@
 # The system calls `bingsu prompt` may make once the Linux seccomp filter
 # is on (crates/bingsu/src/sandbox.rs RULES, with the argument checks named
 # in `why`), one row each; any other call fails with EPERM and has no
-# effect. N4 option 3 (2026-10-17) adds only held-fd reads/closes and
+# effect. Reading from held descriptors adds only held-fd reads/closes and
 # CLOCK_BOOTTIME observations; all pathname and fd-fact calls precede the filter.
 # `syscall` is the kernel name (`-` for a constant row),
 # `libc` the function or constant the adapter (crates/bingsu/src/prompt.rs)
@@ -14,8 +14,8 @@
 # function row makes its row's syscall). A task that adds a call adds its
 # row here in the same pull request.
 syscall	libc	why
-write	write	the record; fd 1 only (spec section 6 rule 3)
-exit_group	_exit	no atexit handlers (spec section 4)
+write	write	the record; fd 1 only
+exit_group	_exit	no atexit handlers
 -	EINTR	the retry condition of write
 exit	-	glibc's _exit falls back to it; ends the calling thread only
 brk	-	std's allocator (glibc malloc) growing the heap

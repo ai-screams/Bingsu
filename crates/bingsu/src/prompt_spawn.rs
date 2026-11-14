@@ -14,7 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 
 /// Starts the refresh helper (unless the shell asked for a redraw) and
 /// returns the shell's environment frame: the one pass over environ serves
-/// the helper's fd 4 and the prompt's command display (C4b ruling Q6).
+/// the helper's fd 4 and the prompt's command display.
 /// `None` for an environment over the frame cap, as the helper sees it.
 /// The helper is the hook's `--helper-exe=` word, else `fallback`
 /// (`front::helper_exe`): argv0 for `bingsu prompt`, none for `bingsu-prompt`.
@@ -219,7 +219,7 @@ fn env_pipe_ends() -> Option<[i32; 2]> {
     {
         // A blocking write could wait on the helper: without the flag, no socket.
         // No test: F_SETFL fails only on an invalid fd, which a test cannot
-        // produce here. Kept by user decision (2026-11-04).
+        // produce here; the check stays without one.
         // SAFETY: the write end made above; changes only its status flags.
         if unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
             // SAFETY: both ends made above, closed exactly once.

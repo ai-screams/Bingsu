@@ -1,4 +1,4 @@
-//! N4 pre-filter TCB. Only `prepare` is callable from the prompt adapter, once
+//! The prompt's pre-filter TCB. Only `prepare` is callable from the prompt adapter, once
 //! immediately before confinement. `Prepared::respond` has no path effects:
 //! pending core opens/inspections consume already-held fds and cached facts.
 #![forbid(
@@ -153,8 +153,8 @@ fn prefetch_collections(
     let Some(directory) = directory else {
         return [None, None, None];
     };
-    // The command response opens with the collection responses (C4b ruling
-    // Q1): no pathname call may follow the filter, and the snapshot that
+    // The command response opens with the collection responses: no pathname
+    // call may follow the filter, and the snapshot that
     // says whether a command segment is drawn is read only after it. One
     // the snapshot does not need is closed unread.
     staged::CollectionCopy::ALL.map(|copy| {
@@ -662,7 +662,7 @@ fn acl(fd: i32, deadline: Option<Deadline>) -> AclFacts {
         )
     };
     if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF) {
-        // R1's sole O_PATH ACL fallback names this owned descriptor, never argv.
+        // The sole O_PATH ACL fallback names this owned descriptor, never argv.
         let Ok(path) = CString::new(format!("/proc/self/fd/{fd}")) else {
             return AclFacts::Unknown;
         };
@@ -946,7 +946,7 @@ pub(crate) mod tests {
             let (f, b, path) = collection_fixture(&cwd);
             publish_fixture(&f, &b, 98, b"PREVIOUS");
             publish_fixture(&f, &b, 99, b"CURRENT");
-            // Prefetch takes the command copy by its size alone (C4b ruling Q1).
+            // Prefetch takes the command copy by its size alone.
             fs::write(path.join("command"), [0; 64]).unwrap();
             fs::set_permissions(path.join("command"), fs::Permissions::from_mode(0o600)).unwrap();
             let p = fixture_prepared(&f, 100);
@@ -1471,7 +1471,7 @@ pub(crate) mod tests {
             Self::at(base, fixed_clock(None).observe().unwrap(), false)
         }
         /// A store published under `clock`; `boundary` uses the 4096-band
-        /// forest of the N1 boundary fixture (crates/bingsu/examples/n7_front_cost.rs).
+        /// forest of the boundary fixture in crates/bingsu/examples/n7_front_cost.rs.
         fn at(base: PathBuf, clock: Clock, boundary: bool) -> Self {
             fs::create_dir(&base).unwrap();
             fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1955,7 +1955,7 @@ pub(crate) mod tests {
         }
     }
 
-    // Segment budget row "front snapshot read" (spec section 8): the window opens when
+    // Segment budget row "front snapshot read": the window opens when
     // clock preparation returns, immediately before the first runtime-root
     // directory open, and closes when the read continuation is done, after the
     // snapshot, marker and collection reads and the final clock that the pair
@@ -2144,7 +2144,7 @@ pub(crate) mod tests {
         unsafe { libc::_exit(0) }
     }
 
-    // ---- C3: executed front clock reads per use (GATE-CLOCK-READS.1) ----
+    // ---- Executed front clock reads per use (GATE-CLOCK-READS.1) ----
     // Kept apart from the shared fixtures above. The two hooks in `before`/`after`
     // and the one in the Linux ACL alias fallback record effect boundaries only.
     pub(crate) mod clock_reads {
