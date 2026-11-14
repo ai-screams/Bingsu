@@ -133,7 +133,7 @@ _bingsu_notify() {
 # before installing (spec section 3 option table). Data never reaches
 # PROMPT unescaped: reference when PROMPT_SUBST is on, plain assignment
 # otherwise. Without a record, or with NO_PROMPT_PERCENT (the record is
-# %-escaped for it; option (b), question Q4), a constant.
+# %-escaped, which that option would show as it is), a constant.
 _bingsu_paint() {
   local o_subst=0 o_bang=0 o_pct=0
   [[ -o prompt_subst ]] && o_subst=1

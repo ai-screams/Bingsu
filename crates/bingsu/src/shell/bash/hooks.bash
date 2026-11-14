@@ -183,7 +183,7 @@ _bingsu_install() {
   fi
   # Exactly one bingsu prefix while PS0 expands, none otherwise.
   if (( exp0 )); then PS0=$_bingsu_ps0$_bingsu_ps0_orig; else PS0=$_bingsu_ps0_orig; fi
-  # The prompt ran without its system call filter (decision P18): said once
+  # The prompt ran without its system call filter: said once
   # per session, with a constant from init. The status is the last element;
   # a failed frame leaves the array empty, where [-1] would print an error.
   if [[ ${_bingsu_f[13]-} == @STATUS_SANDBOX@ && -z ${_bingsu_warned_sandbox-} ]]; then

@@ -107,7 +107,7 @@ function fish_prompt
     # data from being read as a format.
     if _bingsu_frame "$_bingsu_rec"
         set -g _bingsu_rps1 $_bingsu_f[4]
-        # The prompt ran without its system call filter (decision P18): said
+        # The prompt ran without its system call filter: said
         # once per session, with a constant from init.
         if test "$_bingsu_f[-1]" = @STATUS_SANDBOX@; and not set -q _bingsu_warned_sandbox[1]
             set -g _bingsu_warned_sandbox 1
