@@ -31,3 +31,11 @@
 | `prompt-main/windows_runs.rs` | Prompt binary shape | The binary without prompt files exits 0 instead of 2. | Reject, even with updated TCB hash pins. |
 | `prompt-main/inner_attr.rs` | Prompt binary shape | An inner attribute lets the forbidden calls through. | Reject, even with updated TCB hash pins. |
 | `prompt-main/trailing.rs` | Prompt binary shape | An exported function after the last pinned item replaces a C symbol. | Reject, even with updated TCB hash pins. |
+| `wt/crates/bingsu-core/src/test_file/any_test.rs` | Test-only file | `#![cfg(any(test, x))]` as the first attribute; the file's `as_ptr` call must still be found. | Reject the file as production code. |
+| `wt/crates/bingsu-core/src/test_file/not_test.rs` | Test-only file | `#![cfg(not(test))]` as the first attribute; the file's `as_ptr` call must still be found. | Reject the file as production code. |
+| `wt/crates/bingsu-core/src/test_file/cfg_attr.rs` | Test-only file | `#![cfg_attr(test, …)]` as the first attribute; the file's `as_ptr` call must still be found. | Reject the file as production code. |
+| `wt/crates/bingsu-core/src/test_file/after_doc.rs` | Test-only file | `#![cfg(test)]` after a `//!` doc comment; the file's `as_ptr` call must still be found. | Reject the file as production code. |
+| `wt/crates/bingsu-core/src/test_file/in_module.rs` | Test-only file | `#![cfg(test)]` inside a module, not at the file's start; the file's `as_ptr` call must still be found. | Reject the file as production code. |
+| `wt/crates/bingsu-core/src/test_file/after_item.rs` | Test-only file | `#![cfg(test)]` after an item; the file's `as_ptr` call must still be found. | Reject the file as production code. |
+| `wt/crates/bingsu-core/src/test_file/crate_root.rs` | Test-only file | `#![cfg(test)]` on a crate root (`lib.rs`); the file's `as_ptr` call must still be found. | Reject the file as production code. |
+| `wt/crates/bingsu-core/src/test_file/exempt.rs` | Test-only file | `#![cfg(test)]` as the first attribute after a plain `//` comment. | Accept: no finding for the file. |
