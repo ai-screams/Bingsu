@@ -19,6 +19,8 @@ use bingsu_core::{
 use std::{ffi::OsStr, fs::File, io, os::fd::AsFd};
 
 mod catalog_codec;
+#[cfg(test)]
+mod tests;
 
 pub(crate) const MAX_STORES: u64 = 128;
 pub(crate) const MAX_NODES: u64 = 8_192;
@@ -1488,40 +1490,79 @@ fn evict(
         if let Some(lock) = &lock {
             snapshot_store::same_name(lock, dir.as_fd(), LOCK)?;
         }
-        if name != TOMBSTONE {
-            if !sys::at_stamp(parent.as_fd(), OsStr::new(TOMBSTONE))
-                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
-            {
-                return Err(StoreError::Busy);
-            }
-            sys::rename_at(parent.as_fd(), OsStr::new(name), OsStr::new(TOMBSTONE))?;
-            *catalog.entries[i].path.last_mut().unwrap() = TOMBSTONE.into();
-        }
-        snapshot_store::same_name(&dir, parent.as_fd(), TOMBSTONE)?;
         // Lock is last, after the public store name has disappeared. An
         // interrupted tombstone can never be reopened for a worker spawn.
-        for file_name in FILES {
-            if collection_store::remove_checked(
-                &dir,
-                file_name,
-                collection_store::file_cap(file_name),
-                me,
-            )? {
-                report.removed_files += 1;
-            }
-        }
-        sys::remove_dir_at(parent.as_fd(), OsStr::new(TOMBSTONE))?;
-        report.removed_dirs += 1;
-        catalog.bytes = catalog.bytes.saturating_sub(actual_bytes);
-        catalog.stores = catalog.stores.saturating_sub(1);
-        catalog.nodes = catalog.nodes.saturating_sub(1);
-        catalog.entries.remove(i);
-        catalog.next = i.min(catalog.entries.len()) as u32;
+        retire_store(
+            catalog,
+            i,
+            report,
+            &Victim {
+                parent: &parent,
+                dir: &dir,
+                name,
+            },
+            TOMBSTONE,
+            FILES
+                .iter()
+                .map(|file_name| (*file_name, collection_store::file_cap(file_name))),
+            me,
+        )?;
         drop(lock);
         catalog.prune = entry.path[..entry.path.len() - 1].to_vec();
         prune(runtime, me, catalog, report)?;
     }
     catalog.next = 0;
+    Ok(())
+}
+
+/// The folder an eviction is about to remove, opened and checked by the
+/// caller: its parent, itself and the name it has there.
+struct Victim<'a> {
+    parent: &'a File,
+    dir: &'a File,
+    name: &'a str,
+}
+
+// The tail both evictions share: rename the folder to `tomb` (the caller's
+// policy for what the tombstone is called), check it is the same folder,
+// remove its files (each under its own cap), remove the folder, and take it
+// out of the catalog's totals. The caller has done every check and holds the
+// folder's locks, orders `files` so the lock file comes last, and has set
+// `entries[index].bytes` to the folder's real size: that is what comes off
+// the totals.
+fn retire_store<'a>(
+    catalog: &mut Catalog,
+    index: usize,
+    report: &mut GcReport,
+    victim: &Victim<'_>,
+    tomb: &str,
+    files: impl Iterator<Item = (&'a str, usize)>,
+    me: u32,
+) -> Result<(), StoreError> {
+    let Victim { parent, dir, name } = *victim;
+    if name != tomb {
+        if !sys::at_stamp(parent.as_fd(), OsStr::new(tomb))
+            .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+        {
+            return Err(StoreError::Busy);
+        }
+        sys::rename_at(parent.as_fd(), OsStr::new(name), OsStr::new(tomb))?;
+        *catalog.entries[index].path.last_mut().unwrap() = tomb.into();
+    }
+    snapshot_store::same_name(dir, parent.as_fd(), tomb)?;
+    for (file, cap) in files {
+        if collection_store::remove_checked(dir, file, cap, me)? {
+            report.removed_files += 1;
+        }
+    }
+    sys::remove_dir_at(parent.as_fd(), OsStr::new(tomb))?;
+    report.removed_dirs += 1;
+    let bytes = catalog.entries[index].bytes;
+    catalog.bytes = catalog.bytes.saturating_sub(bytes);
+    catalog.stores = catalog.stores.saturating_sub(1);
+    catalog.nodes = catalog.nodes.saturating_sub(1);
+    catalog.entries.remove(index);
+    catalog.next = index as u32;
     Ok(())
 }
 
@@ -1579,37 +1620,26 @@ fn evict_breaker(
         snapshot_store::same_name(lock, dir.as_fd(), collection_breaker::LOCK)?;
     }
     snapshot_store::same_name(&dir, parent.as_fd(), name)?;
-    if name != &tomb {
-        if !sys::at_stamp(parent.as_fd(), OsStr::new(&tomb))
-            .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
-        {
-            return Err(StoreError::Busy);
-        }
-        sys::rename_at(parent.as_fd(), OsStr::new(name), OsStr::new(&tomb))?;
-        catalog.entries[index].path[2] = tomb.clone();
-    }
-    snapshot_store::same_name(&dir, parent.as_fd(), &tomb)?;
-    for file in collection_breaker::FILES {
-        if collection_store::remove_checked(
-            &dir,
-            file,
-            if file == collection_breaker::LOCK {
+    retire_store(
+        catalog,
+        index,
+        report,
+        &Victim {
+            parent: &parent,
+            dir: &dir,
+            name,
+        },
+        &tomb,
+        collection_breaker::FILES.iter().map(|file| {
+            let cap = if *file == collection_breaker::LOCK {
                 0
             } else {
                 bingsu_core::collection::breaker::MAX_BYTES
-            },
-            me,
-        )? {
-            report.removed_files += 1;
-        }
-    }
-    sys::remove_dir_at(parent.as_fd(), OsStr::new(&tomb))?;
-    report.removed_dirs += 1;
-    catalog.bytes = catalog.bytes.saturating_sub(bytes);
-    catalog.stores = catalog.stores.saturating_sub(1);
-    catalog.nodes = catalog.nodes.saturating_sub(1);
-    catalog.entries.remove(index);
-    catalog.next = index as u32;
+            };
+            (*file, cap)
+        }),
+        me,
+    )?;
     Ok(true)
 }
 
