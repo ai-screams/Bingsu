@@ -544,6 +544,9 @@ struct Extensions {
     tree: Option<(std::ops::Range<usize>, usize)>,
 }
 
+/// Walk the extensions after the entry table: refuse a split index's `link`
+/// and any unknown lowercase extension, check `sdir`, and keep the TREE range
+/// and its reservation only when there is exactly one TREE.
 fn scan_extensions(bytes: &[u8], mut pos: usize, end: usize) -> Result<Extensions, ReadError> {
     let mut sparse = false;
     let mut tree = None;
