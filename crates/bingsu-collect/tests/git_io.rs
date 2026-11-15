@@ -672,6 +672,7 @@ fn gix_io_has_no_ambient_path_escape() {
         include_str!("../src/git/worktree.rs"),
         include_str!("../src/git/stage_b.rs"),
         include_str!("../src/git/untracked.rs"),
+        include_str!("../src/git/pattern_caps.rs"),
     ];
     for source in files {
         for forbidden in [
