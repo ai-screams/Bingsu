@@ -247,8 +247,8 @@ pub const HELP: &[Help] = &[
     ),
     h(
         c::EXEC_KEY_IGNORED,
-        "A key that runs something or reaches the environment is set in a shape-only file, so it is dropped.",
-        "A shape-only file is read for colors and layout only; it may change how the prompt looks but never what runs.\nThemes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.\nA file in your config folder whose own folder fails the safety check is a different case (W405).",
+        "A key that only a trusted file may set (one that runs something, reaches the environment, or turns a layout band off) is set in a shape-only file, so it is dropped.",
+        "A shape-only file is read for colors and layout only; it may change how the prompt looks, but it never sets what runs, reads the environment or turns a layout band off.\nThemes, `extends` files outside your config folder, and every file in a config folder that `bingsu init` marked shape-only are shape-only.\nA file in your config folder whose own folder fails the safety check is a different case (W405).",
         "Put the key in your own config file in the config folder (`bingsu config path` shows where it is).\nRun `bingsu config check` for the details.",
     ),
     h(
@@ -399,7 +399,7 @@ pub const HELP: &[Help] = &[
         c::BAND_TEMPLATE_REPLACES_LINES,
         "At some widths a layout band draws its own template, so layout lines you wrote are not used there.",
         "A band chosen for a width range takes its lines from `[layout]` unless it has its own template; a template replaces the lines. The built-in theme has such a band, `narrow`, for widths under 60.",
-        "To draw your segments at those widths too, give the band a template of your own, for example:\n[layout.when.narrow.style]\ntemplate = \"{dir} {git}{@nl}{char}\"\nThen run `bingsu config check` to see the widths again.",
+        "Turn the band off in your own config file (a theme cannot set `layout.when.narrow.enabled`):\n[layout.when.narrow]\nenabled = false\nThose widths then go to the next band that fits them, or to your `[layout]` lines when none does.\nOr give the band a template of your own, for example:\n[layout.when.narrow.style]\ntemplate = \"{dir} {git}{@nl}{char}\"\nThen run `bingsu config check` to see the widths again.",
     ),
 ];
 

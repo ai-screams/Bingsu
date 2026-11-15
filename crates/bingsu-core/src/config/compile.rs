@@ -368,7 +368,42 @@ struct Layout {
     template: Option<MNode>,
 }
 
-fn layouts(r: &MTable) -> Vec<Layout> {
+/// The bands of `when` (the `layout.when` table) that are on: a band with
+/// `enabled = false` is left out of the band choice, the width table and the
+/// compiled variants, so its widths go to the next band that fits them and
+/// only then to the default layout (the first band that fits wins,
+/// `bands::select`). `layouts` and
+/// `bands_of` both walk bands through this, which keeps a band's index the
+/// same in both. The band count limit and the layout budget still count
+/// every band written, off or not.
+///
+/// `off` comes from `off_bands`, once per compile.
+fn live_bands<'a>(when: &'a [MEntry], off: &'a BTreeSet<&str>) -> impl Iterator<Item = &'a MEntry> {
+    when.iter().filter(move |b| !off.contains(b.key.as_str()))
+}
+
+/// The names of the bands turned off: `enabled = false` read from
+/// `trusted`, the merge of the trusted sources alone (as `approved` does for
+/// layouts), because `enabled` is an execution key. A shape-only file's value
+/// is already dropped at the merge (W401), and one from a file that failed
+/// the safety check (Unsafe) neither turns a band off nor turns back on a
+/// band a trusted file turned off. One pass over the trusted bands, so a
+/// compile reads it once and every band choice looks a name up in the set.
+pub fn off_bands(trusted: &MTable) -> BTreeSet<&str> {
+    // 이것을 실패시키는 것: `enabled = false`인 구간을 남기는 것(내장 narrow를 끌 수 없음), `enabled` 없는
+    // 구간이나 `true`인 구간을 빼는 것, 전체 병합의 값을 읽는 것(안전 검사에 실패한 파일이 구간을 끄거나
+    // 신뢰 파일이 끈 구간을 다시 켬).
+    entries(trusted, &["layout", "when"])
+        .iter()
+        .filter(|b| {
+            matches!(&b.node.value, MValue::Table(bt)
+                if bt.get("enabled").is_some_and(|n| n.value == MValue::Scalar(Value::Bool(false))))
+        })
+        .map(|b| b.key.as_str())
+        .collect()
+}
+
+fn layouts(r: &MTable, off: &BTreeSet<&str>) -> Vec<Layout> {
     let empty = Line {
         enabled: true,
         ..Line::default()
@@ -385,7 +420,7 @@ fn layouts(r: &MTable) -> Vec<Layout> {
         table: None,
         template: base_template.clone(),
     }];
-    for b in entries(&layout, &["when"]) {
+    for b in live_bands(entries(&layout, &["when"]), off) {
         if let MValue::Table(bt) = &b.node.value {
             let template = get(bt, &["style", "template"])
                 .cloned()
@@ -561,9 +596,9 @@ fn band_index(names: &[String], name: &Option<String>) -> Option<u16> {
 }
 
 /// Every id on a drawn line, with where. Bands are indexed by `names`.
-fn drawn(r: &MTable, names: &[String]) -> BTreeMap<String, Vec<LayoutRef>> {
+fn drawn(r: &MTable, off: &BTreeSet<&str>, names: &[String]) -> BTreeMap<String, Vec<LayoutRef>> {
     let mut out: BTreeMap<String, Vec<LayoutRef>> = BTreeMap::new();
-    for lay in layouts(r) {
+    for lay in layouts(r, off) {
         let band = band_index(names, &lay.name);
         if let Some(t) = &lay.template {
             // A template replaces the lines: what it names is what is drawn.
@@ -708,13 +743,14 @@ pub struct Bands {
     pub notes: Vec<Diagnostic>,
 }
 
-pub fn bands_of(m: &Merged) -> Result<Bands, Vec<Diagnostic>> {
+/// `off` names the bands turned off (`off_bands`).
+pub fn bands_of(m: &Merged, off: &BTreeSet<&str>) -> Result<Bands, Vec<Diagnostic>> {
     let r = &m.root;
     check_band_count(r)?;
     let mut bands = Vec::new();
     let mut names = Vec::new();
     let mut nodes: Vec<Vec<MNode>> = Vec::new();
-    for b in entries(r, &["layout", "when"]) {
+    for b in live_bands(entries(r, &["layout", "when"]), off) {
         let MValue::Table(bt) = &b.node.value else {
             continue;
         };
@@ -913,7 +949,9 @@ pub fn compile(
         }
     }
     let base_preset = s(r, &["style", "preset"]).unwrap_or(default_str("style.preset"));
-    let banded = bands_of(m)?;
+    // `off` above is the built-in segments turned off; these are the bands.
+    let bands_off = off_bands(&trusted.root);
+    let banded = bands_of(m, &bands_off)?;
     notes.extend(banded.notes.iter().cloned());
     let profile = WidthProfile::new(
         int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
@@ -925,7 +963,7 @@ pub fn compile(
     // shape-only source may re-order or resize bands, but must not make a band
     // reachable that the trusted sources never reach. A trusted merge whose
     // bands fail to order approves nothing.
-    let approved_bands = bands_of(trusted).map_or_else(
+    let approved_bands = bands_of(trusted, &bands_off).map_or_else(
         |_| BTreeSet::new(),
         |t| {
             let full = &banded.names;
@@ -950,8 +988,8 @@ pub fn compile(
     let custom = if declares_custom(r) {
         custom_segments(
             r,
-            &drawn(r, &banded.names),
-            &drawn(&trusted.root, &banded.names),
+            &drawn(r, &bands_off, &banded.names),
+            &drawn(&trusted.root, &bands_off, &banded.names),
             banded.names.len(),
             &reach,
             profile,
@@ -963,7 +1001,7 @@ pub fn compile(
     let texts: Vec<&str> = custom.iter().map(|c| c.id.as_str()).collect();
     let mut variants = Vec::new();
     let mut mask = 0u32;
-    for lay in layouts(r) {
+    for lay in layouts(r, &bands_off) {
         let bt = lay.table.as_ref();
         let preset_node = bt
             .and_then(|bt| get(bt, &["style", "preset"]))
@@ -1128,7 +1166,14 @@ pub fn compile(
             }
         }
     }
-    let exec_units = exec_units(r, &trusted.root, &band_names, &reach, &mut notes)?;
+    let exec_units = exec_units(
+        r,
+        &trusted.root,
+        &bands_off,
+        &band_names,
+        &reach,
+        &mut notes,
+    )?;
     let icons = IconSet::parse(s(r, &["icons"]).unwrap_or(default_str("icons")))
         .unwrap_or(IconSet::Unicode);
     let duration_min_ms = optional_duration(s(r, &["segment", "duration", "min"]))
@@ -1548,12 +1593,13 @@ fn command_form(id: &str, seg: &MNode, t: &MTable, notes: &mut Vec<Diagnostic>) 
 fn exec_units(
     r: &MTable,
     trusted: &MTable,
+    off: &BTreeSet<&str>,
     names: &[String],
     reach: &Reach,
     notes: &mut Vec<Diagnostic>,
 ) -> Result<Vec<ExecUnit>, Vec<Diagnostic>> {
     // A unit runs when a trusted layout draws it and it is still drawn.
-    let (approved, shown) = (drawn(trusted, names), drawn(r, names));
+    let (approved, shown) = (drawn(trusted, off, names), drawn(r, off, names));
     let mut out = Vec::new();
     for e in entries(r, &["segment"]) {
         let MValue::Table(t) = &e.node.value else {
@@ -2565,15 +2611,16 @@ mod tests {
             band_notes(&both)[0].2,
             Some("layout.line1 and layout.line2")
         );
-        // A theme's band template over the user's lines is the same surprise.
-        let theme = read(
+        // A band template another file writes (here a trusted one, "t") over the user's lines is
+        // the same surprise.
+        let other_file = read(
             "extends = [\"t\"]\n[layout.line1]\nleft = [\"dir\"]\n",
             &[(
                 "t",
                 "[layout.when.mid]\nmin_cols = 60\nmax_cols = 79\n[layout.when.mid.style]\ntemplate = \"{dir}{@nl}{char}\"\n",
             )],
         );
-        let bands: Vec<_> = band_notes(&theme).iter().map(|n| (n.0, n.1)).collect();
+        let bands: Vec<_> = band_notes(&other_file).iter().map(|n| (n.0, n.1)).collect();
         assert_eq!(
             bands,
             [(Some("narrow"), Some("0-59")), (Some("mid"), Some("60-79"))]
@@ -2622,6 +2669,195 @@ mod tests {
         assert!(codes_of(&never).contains(&codes::BAND_NEVER_CHOSEN));
         let names: Vec<_> = band_notes(&never).iter().map(|n| n.0).collect();
         assert_eq!(names, [Some("narrow")]);
+    }
+
+    // `layout.when.<band>.enabled = false` turns a band off: its widths go to the next band that
+    // fits, else to the default layout (here the user's lines at 59 as at 60, the built-in narrow
+    // being the only band). Without the key, or with `true`, nothing changes.
+    // 이것을 실패시키는 것: 꺼진 구간을 구간 고르기·폭 표(bands_of)에 남기는 것, 그 variant를 컴파일(layouts)에
+    // 남기는 것, 59/60 경계에서 다른 variant를 고르는 것, 꺼진 구간에 N504·W407을 내는 것, `true`를 끔으로 읽는 것.
+    #[test]
+    fn a_band_turned_off_draws_the_default_layout_at_its_widths() {
+        let user = "[layout.line1]\nleft = [\"dir\"]\nright = [\"time\"]\n";
+        let on = read(user, &[]);
+        let off = read(
+            &alloc::format!("{user}[layout.when.narrow]\nenabled = false\n"),
+            &[],
+        );
+        let runs = |r: &crate::config::report::ConfigReport| -> Vec<(u16, u16, Option<String>)> {
+            r.widths
+                .iter()
+                .map(|w| (w.from, w.to, w.band.clone()))
+                .collect()
+        };
+        assert_eq!(
+            runs(&on),
+            [(0, 59, Some(String::from("narrow"))), (60, u16::MAX, None)]
+        );
+        assert_eq!(runs(&off), [(0, u16::MAX, None)]);
+        assert!(codes_of(&on).contains(&codes::BAND_TEMPLATE_REPLACES_LINES));
+        assert_eq!(codes_of(&off), []);
+        let (c_on, c_off) = (on.snapshot.unwrap(), off.snapshot.unwrap());
+        assert_eq!((c_on.bands.len(), c_on.variants.len()), (1, 2));
+        assert_eq!((c_off.bands.len(), c_off.variants.len()), (0, 1));
+        for (w, band) in [(59, Some(0)), (60, None)] {
+            assert_eq!(
+                crate::bands::select(&c_on.band_order, &c_on.bands, w),
+                band,
+                "{w}"
+            );
+            assert_eq!(
+                crate::bands::select(&c_off.band_order, &c_off.bands, w),
+                None,
+                "{w}"
+            );
+        }
+        assert_eq!(c_off.variants[0], c_on.variants[0]);
+        let explicit = read(
+            &alloc::format!("{user}[layout.when.narrow]\nenabled = true\n"),
+            &[],
+        );
+        assert_eq!(explicit.snapshot.unwrap().variants, c_on.variants);
+    }
+
+    /// The built-in theme, the trusted `root`, then `unsafe_text` from a file that failed the
+    /// safety check (Unsafe), applied after `root`.
+    fn read_with_unsafe(root: &str, unsafe_text: &str) -> crate::config::report::ConfigReport {
+        use crate::config::source::tests::{files, opened};
+        crate::config::report::report(
+            vec![
+                crate::config::report::tests::builtin(),
+                opened("root", root, 1),
+                opened("unsafe-band", unsafe_text, 2),
+            ],
+            &mut files(&[]),
+            [0, 3, 0],
+            Mode::Dark,
+        )
+    }
+
+    const BAND_OFF: &str = "[layout.when.narrow]\nenabled = false\n";
+    const BAND_ON: &str = "[layout.when.narrow]\nenabled = true\n";
+
+    /// The band chosen in each run of the width table.
+    fn band_runs(r: &crate::config::report::ConfigReport) -> Vec<Option<String>> {
+        r.widths.iter().map(|w| w.band.clone()).collect()
+    }
+
+    // A file that failed the safety check neither turns a band off nor turns back on a band a
+    // trusted file turned off: `enabled` is read from the trusted sources alone. One test per case.
+    // 이것을 실패시키는 것(세 시험 모두): `enabled`를 전체 병합(안전 검사에 실패한 파일 포함)에서 읽는 것.
+    #[test]
+    fn an_unsafe_true_does_not_turn_back_on_a_trusted_false() {
+        let r = read_with_unsafe(BAND_OFF, BAND_ON);
+        assert!(r.snapshot.is_some(), "{:?}", codes_of(&r));
+        assert_eq!(band_runs(&r), [None]);
+    }
+
+    #[test]
+    fn an_unsafe_false_does_not_turn_a_band_off() {
+        assert_eq!(
+            band_runs(&read_with_unsafe("", BAND_OFF)),
+            [Some(String::from("narrow")), None]
+        );
+    }
+
+    #[test]
+    fn an_unsafe_false_does_not_override_a_trusted_true() {
+        assert_eq!(
+            band_runs(&read_with_unsafe(BAND_ON, BAND_OFF)),
+            [Some(String::from("narrow")), None]
+        );
+    }
+
+    // Every place that walks the bands takes the trusted on/off: here a trusted band `b` that a
+    // file failing the safety check tries to turn off draws a text and a command segment of the
+    // user's at 100 columns and up.
+    // 이것을 실패시키는 것: 컴파일 variant(layouts)가 전체 병합의 켜짐/꺼짐을 읽는 것(variant 수가 구간 수 + 1과
+    // 어긋남), 사용자 세그먼트의 그려짐(custom_segments의 drawn)이나 명령 실행의 그려짐(exec_units의 drawn)이
+    // 그것을 읽는 것(text 세그먼트가 빠지거나 명령이 실행되지 않음).
+    #[test]
+    fn every_band_walk_takes_the_trusted_on_or_off() {
+        let root = "[segment.\"custom/t\"]\nkind = \"text\"\ntext = \"T\"\n\
+            [segment.\"custom/k\"]\nkind = \"command\"\ncommand = [\"k\"]\n\
+            [layout.when.b]\nmin_cols = 100\nenabled = true\n\
+            [layout.when.b.line1]\nleft = [\"custom/t\", \"custom/k\", \"char\"]\n";
+        let r = read_with_unsafe(root, "[layout.when.b]\nenabled = false\n");
+        let runs = band_runs(&r);
+        let c = r.snapshot.unwrap();
+        assert_eq!(c.variants.len(), c.bands.len() + 1);
+        assert_eq!(
+            runs,
+            [Some(String::from("narrow")), None, Some(String::from("b"))]
+        );
+        assert!(c.custom.iter().any(|u| u.id == "custom/t"));
+        let unit = c.exec_units.iter().find(|u| u.id == "custom/k").unwrap();
+        assert_eq!(unit.not_run, None);
+    }
+
+    // The width table that `config check` shows when the settings do not compile takes the
+    // trusted on/off too.
+    // 이것을 실패시키는 것: 컴파일이 실패했을 때의 폭 표(report의 대체 경로)가 전체 병합의 켜짐/꺼짐을 읽는 것.
+    #[test]
+    fn the_width_table_without_a_snapshot_takes_the_trusted_on_or_off() {
+        let r = read_with_unsafe(&alloc::format!("colr = 1\n{BAND_OFF}"), BAND_ON);
+        assert!(r.snapshot.is_none());
+        assert_eq!(band_runs(&r), [None]);
+    }
+
+    // The first band that fits a width still wins: with narrow off, a band of the user's that
+    // also covers 59 columns is chosen there, and the default layout only past it.
+    // 이것을 실패시키는 것: 꺼진 구간의 폭을 다른 구간을 보지 않고 바로 기본 레이아웃으로 보내는 것.
+    #[test]
+    fn a_band_turned_off_leaves_its_widths_to_the_next_band() {
+        let wide =
+            "[layout.when.wide]\nmax_cols = 79\n[layout.when.wide.line1]\nleft = [\"dir\"]\n";
+        let runs = |r: &crate::config::report::ConfigReport| -> Vec<(u16, u16, Option<String>)> {
+            r.widths
+                .iter()
+                .map(|w| (w.from, w.to, w.band.clone()))
+                .collect()
+        };
+        let s = |t: &str| Some(String::from(t));
+        let on = read(wide, &[]);
+        assert_eq!(
+            runs(&on),
+            [
+                (0, 59, s("narrow")),
+                (60, 79, s("wide")),
+                (80, u16::MAX, None)
+            ]
+        );
+        let off = read(
+            &alloc::format!("{wide}[layout.when.narrow]\nenabled = false\n"),
+            &[],
+        );
+        assert_eq!(runs(&off), [(0, 79, s("wide")), (80, u16::MAX, None)]);
+        let c = off.snapshot.unwrap();
+        assert_eq!(crate::bands::select(&c.band_order, &c.bands, 59), Some(0));
+    }
+
+    // Only a trusted file turns a band off: from a theme the key is dropped with W401 and the band
+    // stays.
+    // 이것을 실패시키는 것: `layout.when.*.enabled`를 모양 전용 키로 두는 것(남의 테마가 구간을 끔).
+    #[test]
+    fn only_a_trusted_file_turns_a_band_off() {
+        let r = read(
+            "extends = [\"shape-t\"]\n",
+            &[("shape-t", "[layout.when.narrow]\nenabled = false\n")],
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| {
+                d.code == codes::EXEC_KEY_IGNORED
+                    && d.args
+                        .iter()
+                        .any(|a| a.name == "key" && a.value == "layout.when.narrow.enabled")
+            }),
+            "{:?}",
+            r.diagnostics
+        );
+        let widths: Vec<_> = r.widths.iter().map(|w| w.band.as_deref()).collect();
+        assert_eq!(widths, [Some("narrow"), None]);
     }
 
     // 이것을 실패시키는 것: 꺼진 내장 세그먼트를 그리거나 수집 mask에 남기는 것, 그려지는 세그먼트를 mask에서 빠뜨리는 것.

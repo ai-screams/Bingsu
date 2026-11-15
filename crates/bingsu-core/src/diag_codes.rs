@@ -326,7 +326,7 @@ pub const CODES: &[CodeInfo] = &[
     stable(
         EXEC_KEY_IGNORED,
         "`{key}` is ignored here",
-        "this file is trusted for colors and layout only; execution keys are not allowed",
+        "this file is trusted for colors and layout only; keys that run commands, read the environment or turn a layout band off come only from trusted files",
         "put the key in a trusted config file; run `bingsu config check` for folder safety details",
     ),
     stable(
@@ -480,7 +480,7 @@ pub const CODES: &[CodeInfo] = &[
         BAND_TEMPLATE_REPLACES_LINES,
         "at widths {widths} the band `{band}` draws its own template in place of {lines}",
         "a band's template replaces the layout lines the band would take from `[layout]`",
-        "to draw your segments at those widths too, write `layout.when.{band}.style.template` yourself",
+        "turn the band off with `layout.when.{band}.enabled = false` in a trusted file (another band that fits those widths still wins), or write `layout.when.{band}.style.template` yourself",
     ),
 ];
 
@@ -494,7 +494,7 @@ mod tests {
         let c = CODES.iter().find(|c| c.code == EXEC_KEY_IGNORED).unwrap();
         assert_eq!(
             c.why,
-            "this file is trusted for colors and layout only; execution keys are not allowed"
+            "this file is trusted for colors and layout only; keys that run commands, read the environment or turn a layout band off come only from trusted files"
         );
         assert!(c.fix.contains("bingsu config check"));
     }

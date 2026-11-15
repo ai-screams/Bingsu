@@ -237,6 +237,14 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
+              "enabled": {
+                "type": "boolean",
+                "examples": [false],
+                "description": "Use this band; false turns it off: its widths go to the next band that fits, else the default layout.",
+                "x-bingsu-description-ko": "이 구간을 씀. false면 끄고, 그 폭은 맞는 다음 구간이, 없으면 기본 레이아웃이 그림.",
+                "x-bingsu-level": "advanced",
+                "x-bingsu-exec": true
+              },
               "line1": {
                 "type": "object",
                 "properties": {

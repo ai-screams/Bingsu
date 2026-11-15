@@ -215,6 +215,43 @@ fn check_compares_requires_with_the_running_pre_release() {
     }
 }
 
+// `[layout.when.narrow] enabled = false` in the user's own config: check shows one run of the
+// default layout for every width and no N504, and explain at 59 columns uses the default layout.
+// Without the key, N504 names the key as a way out.
+// 이것을 실패시키는 것: 끈 구간을 config check 폭 표나 explain의 구간 고르기에 남기는 것, N504 fix가 키를
+// 안내하지 않는 것.
+#[test]
+fn a_band_turned_off_leaves_the_width_table_and_explain() {
+    let e = Env::new("cli_config", "band-off");
+    let lines = "[layout.line1]\nleft = [\"dir\"]\nright = [\"time\"]\n";
+    e.put_config(
+        "config.toml",
+        &format!("{lines}\n[layout.when.narrow]\nenabled = false\n"),
+    );
+    let (code, stdout, _) = out(&e.run(&["config", "check"]));
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout
+            .contains("widths (columns -> layout):\n  0+         (default layout)\nresult: valid"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("N504"), "{stdout}");
+    let (code, stdout, _) = out(&e.run(&["explain", "--width", "59"]));
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.contains("layout: the default layout (no band matches)\n"),
+        "{stdout}"
+    );
+    e.put_config("config.toml", lines);
+    let (_, stdout, _) = out(&e.run(&["config", "check"]));
+    assert!(
+        stdout.contains(
+            "turn the band off with `layout.when.narrow.enabled = false` in a trusted file"
+        ),
+        "{stdout}"
+    );
+}
+
 // A command whose script starts with `#!/usr/bin/env` is warned about by check (W411), which stays
 // valid; the warning names the segment.
 // 이것을 실패시키는 것: check 경로에서 W411 진단을 보고서에 더하지 않는 것, 경고를 오류로 세는 것.
