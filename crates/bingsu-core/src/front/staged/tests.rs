@@ -643,16 +643,51 @@ mod cases {
     /// A command segment turned off: the snapshot keeps the unit, which does
     /// not run under any marker.
     const DISABLED: &str = "[segment.\"custom/yes\"]\nkind='command'\ncommand=['echo','yes']\nenabled=false\n[layout.line2]\nleft=['custom/yes','char']";
+    /// A user language segment: a config unit like a command.
+    const LANGUAGE: &str = "[segment.\"custom/deno\"]\nkind='language'\ndetect_files=['deno.json']\ninterpreter='/bin/deno'\n[layout.line2]\nleft=['custom/deno','char']";
+    /// A command drawn only in a band that the prompt's 80 columns do not select.
+    const BAND_ONLY: &str = "[segment.\"custom/yes\"]\nkind='command'\ncommand=['echo','yes']\n\
+        [layout.when.wide]\nmin_cols=120\n[layout.when.wide.line2]\nleft=['custom/yes','char']";
+    /// A unit that is turned off next to one that runs, in both orders.
+    const OFF_FIRST: &str = "[segment.\"custom/a\"]\nkind='command'\ncommand=['echo','a']\nenabled=false\n\
+        [segment.\"custom/b\"]\nkind='command'\ncommand=['echo','b']\n[layout.line2]\nleft=['custom/a','custom/b','char']";
+    const OFF_LAST: &str = "[segment.\"custom/a\"]\nkind='command'\ncommand=['echo','a']\n\
+        [segment.\"custom/b\"]\nkind='command'\ncommand=['echo','b']\nenabled=false\n[layout.line2]\nleft=['custom/a','custom/b','char']";
+    /// A builtin language only: a probe, which no marker gates.
+    const BUILTIN_ONLY: &str = "[layout.line2]\nleft=['node','char']";
     // A refusal warns (status, `!`, the hook's notice) only when it holds back a config unit that would run
-    // under a valid marker; an invalid marker (the helper found the settings failed, the old screen stays)
-    // warns always. Units never run under a refusal either way.
+    // under a valid marker, wherever a band draws it; an invalid marker (the helper found the settings
+    // failed, the old screen stays) warns always. Units never run under a refusal either way, and a redraw
+    // shows the same status and record.
     // 이것을 실패시키는 것: 실행할 단위가 없는데 trust 상태를 내는 것(경고와 문구가 뜸), 단위가 있는데 숨기는
     // 것(명령이 든 새 설정의 Missing이 조용해짐), 단위 판정에서 not_run을 빼는 것(꺼진 단위만 있어도 경고),
-    // 무효 marker(Invalid: 설정 실패, 옛 화면 유지)를 숨기는 것, refusal에도 단위를 승인하는 것(`eligible = true`).
+    // 명령 단위만 세는 것(language 단위), 첫 단위만 보는 것, 이 폭에 그려지는 단위만 세는 것(넓은 구간에만 있는
+    // 명령), 무효 marker(Invalid: 설정 실패, 옛 화면 유지)를 숨기는 것, refusal에도 단위를 승인하는 것
+    // (`eligible = true`), redraw만 다른 상태를 내는 것.
     #[test]
     fn a_refusal_warns_only_when_it_holds_back_a_unit() {
-        for case in 0..TRUST_CASES {
-            for (text, holds) in [("", false), (DISABLED, false), (UNIT, true)] {
+        let fixtures = [
+            ("", false, 0),
+            (DISABLED, false, 1),
+            (BUILTIN_ONLY, false, 0),
+            (UNIT, true, 1),
+            (LANGUAGE, true, 1),
+            (BAND_ONLY, true, 1),
+            (OFF_FIRST, true, 2),
+            (OFF_LAST, true, 2),
+        ];
+        let mut redraw = args();
+        redraw.push(b"--redraw");
+        for (text, holds, units) in fixtures {
+            // The fixture is what it says: its units, and whether one runs.
+            let units_of = snapshot(text).config.exec_units;
+            assert_eq!(units_of.len(), units, "{text}");
+            assert_eq!(
+                units_of.iter().any(|u| u.not_run.is_none()),
+                holds,
+                "{text}"
+            );
+            for case in 0..TRUST_CASES {
                 let (mut h, want) = trust_case_on(case, text);
                 let r = h.run(&args(), Mode::Dark);
                 let shown = if holds || want == Status::DEGRADED_TRUST_INVALID {
@@ -667,6 +702,13 @@ mod cases {
                     "case {case} {text}"
                 );
                 assert!(r.execution.units().is_empty(), "case {case} {text}");
+                let (mut again, _) = trust_case_on(case, text);
+                let redrawn = again.run(&redraw, Mode::Dark);
+                assert_eq!(
+                    (redrawn.status, &redrawn.record),
+                    (r.status, &r.record),
+                    "case {case} {text}"
+                );
             }
         }
     }

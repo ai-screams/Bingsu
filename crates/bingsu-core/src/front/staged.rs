@@ -907,10 +907,12 @@ pub struct Response {
 }
 
 /// The status of a prompt whose marker refuses execution. A refusal holds
-/// back only the snapshot's config units that would run (`not_run` comes
-/// from the settings alone, never from the marker): they do not run and
-/// their values are not drawn (`command::display`). With none of them the
-/// prompt draws what a valid marker would give it, so it shows no warning.
+/// back the snapshot's config units with no `not_run` (the rule of
+/// `execution.units`; `not_run` comes from the settings, never from the
+/// marker): they do not run and their values are not drawn
+/// (`command::display`). Without such a unit the warning would tell of
+/// nothing held back, so there is none; a clock that failed during this
+/// prompt still leaves its folder facts out, as before.
 /// An invalid marker is the helper's verdict that the settings failed (a
 /// compile failure, say) while the prompt keeps the older screen, so it
 /// warns either way: the user's change did not apply.
