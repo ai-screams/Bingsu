@@ -547,9 +547,15 @@ mod cases {
         }
     }
     const TRUST_CASES: u8 = 15;
+    /// Each marker refusal on a snapshot that draws a command, with its status.
     fn trust_case(case: u8) -> (Harness, Status) {
+        trust_case_on(case, UNIT)
+    }
+    /// The same refusal on the snapshot of `text`.
+    fn trust_case_on(case: u8, text: &str) -> (Harness, Status) {
         let mut h = Harness::new();
-        let s = snapshot("");
+        let s = snapshot(text);
+        h.current = Some(s.encode(1, 0).unwrap());
         let mut m = marker(&s);
         let want = match case {
             0 => {
@@ -632,6 +638,36 @@ mod cases {
             assert!(record(&r).contains('!'));
             // A safe compiled screen collects independently of command eligibility.
             assert_eq!(r.worker_mask, 10);
+        }
+    }
+    /// A command segment turned off: the snapshot keeps the unit, which does
+    /// not run under any marker.
+    const DISABLED: &str = "[segment.\"custom/yes\"]\nkind='command'\ncommand=['echo','yes']\nenabled=false\n[layout.line2]\nleft=['custom/yes','char']";
+    // A refusal warns (status, `!`, the hook's notice) only when it holds back a config unit that would run
+    // under a valid marker; an invalid marker (the helper found the settings failed, the old screen stays)
+    // warns always. Units never run under a refusal either way.
+    // 이것을 실패시키는 것: 실행할 단위가 없는데 trust 상태를 내는 것(경고와 문구가 뜸), 단위가 있는데 숨기는
+    // 것(명령이 든 새 설정의 Missing이 조용해짐), 단위 판정에서 not_run을 빼는 것(꺼진 단위만 있어도 경고),
+    // 무효 marker(Invalid: 설정 실패, 옛 화면 유지)를 숨기는 것, refusal에도 단위를 승인하는 것(`eligible = true`).
+    #[test]
+    fn a_refusal_warns_only_when_it_holds_back_a_unit() {
+        for case in 0..TRUST_CASES {
+            for (text, holds) in [("", false), (DISABLED, false), (UNIT, true)] {
+                let (mut h, want) = trust_case_on(case, text);
+                let r = h.run(&args(), Mode::Dark);
+                let shown = if holds || want == Status::DEGRADED_TRUST_INVALID {
+                    want
+                } else {
+                    Status::OK_NONE
+                };
+                assert_eq!(r.status, shown, "case {case} {text}");
+                assert_eq!(
+                    record(&r).contains('!'),
+                    shown != Status::OK_NONE,
+                    "case {case} {text}"
+                );
+                assert!(r.execution.units().is_empty(), "case {case} {text}");
+            }
         }
     }
     // 이것을 실패시키는 것: redraw에서 표식·시각 판정을 건너뛰어 fresh로 그리거나 다른 상태를 내는 것.
