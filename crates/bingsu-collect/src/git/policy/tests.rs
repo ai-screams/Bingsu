@@ -1,4 +1,7 @@
-use super::{pattern_caps::PART_WEIGHT, *};
+use super::{
+    pattern_caps::{PART_WEIGHT, class_bytes, star_runs},
+    *,
+};
 use gix_attributes::search::MetadataCollection;
 use std::time::{Duration, Instant};
 

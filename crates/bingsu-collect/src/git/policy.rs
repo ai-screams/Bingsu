@@ -11,8 +11,8 @@ use std::{borrow::Cow, path::Path};
 #[path = "policy/pattern_caps.rs"]
 mod pattern_caps;
 use pattern_caps::{
-    attribute_names, attribute_part_bytes, attribute_parts, class_bytes, is_comment,
-    name_table_bytes, over_caps, quoted, star_runs, weight,
+    attribute_names, attribute_part_bytes, attribute_parts, name_table_bytes, over_caps, quoted,
+    scan_caps, weight,
 };
 
 const INVALID: ReadError = ReadError::Io(libc::EINVAL);
@@ -268,7 +268,7 @@ pub struct Patterns {
 }
 impl Patterns {
     /// Fuzz and seed replay only: one file's bytes, charged like a read file,
-    /// under the source path the caller picks (the label add_buffer branches on).
+    /// under the source path the caller picks (the label add_attributes and add_ignore check).
     /// collector_fuzz is set by fuzz/collector's build script, never a feature.
     #[cfg(any(test, collector_fuzz))]
     pub(crate) fn fuzz_bytes(
@@ -392,34 +392,7 @@ impl Patterns {
         axis: Axis,
         meter: &mut Meter,
     ) -> Result<(), ReadError> {
-        let (mut lines, mut words) = (0usize, 0usize);
-        let mut wild = false;
-        for line in bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-            lines += 1;
-            // Comments count toward neither cap: both gix parsers skip them
-            // before building anything, so they cost only the byte scan, and
-            // that time and memory stay bounded by the file's byte cap (256
-            // KiB), which parser_reservation charges at 8 bytes per byte.
-            // 이것을 실패시키는 것: 주석 줄도 단어로 세는 것(1,205줄 형태 시험과
-            // comments-past-word-cap seed가 Limit이 된다).
-            if is_comment(line, kind) {
-                continue;
-            }
-            words += line
-                .split(u8::is_ascii_whitespace)
-                .filter(|w| !w.is_empty())
-                .count();
-            let (runs, globstars) = star_runs(line);
-            // 이것을 실패시키는 것: 두 비교 중 하나를 지우거나 `>`를 `>=`로 바꾸는 것
-            // (cap/cap+1 seed와 policy 시험의 고정 판정이 바뀐다).
-            wild |= runs > STAR_RUNS || globstars > GLOBSTAR_RUNS;
-            // 이것을 실패시키는 것: 이 비교를 지우거나 `>=`로 바꾸는 것(class-bytes
-            // 24/25 seed의 판정이 바뀐다).
-            wild |= class_bytes(line) > CLASS_BYTES;
-        }
-        if bytes.contains(&0) || words > 2048 || wild {
-            return Err(ReadError::Limit);
-        }
+        let (lines, words) = scan_caps(bytes, kind)?;
         meter.charge_axis(axis, lines as u64)?;
         let input_bytes = bytes
             .len()
@@ -435,140 +408,114 @@ impl Patterns {
             .reserve(reserve, meter)?;
         meter.event("before_pattern_parse");
         if matches!(kind, PatternKind::Attributes) {
-            // The lower parser is deliberately lenient; do not silently drop
-            // malformed policy. Custom macros are deferred, explicitly Partial,
-            // to avoid unbounded recursive expansion from hostile definitions.
-            // Caps and weights also apply to the pattern gix builds when it
-            // unquotes one (`"\052\052/a"` matches as `**/a`). Unquoted patterns
-            // only lose bytes, so their raw line already weighs at least as much
-            // (attribute_unquoted_text_never_outweighs_its_line pins it).
-            let any_quote = bytes.contains(&b'"');
-            let line_count = if any_quote {
-                bytes.split(|b| *b == b'\n').count()
-            } else {
-                0
-            };
-            let mut scratch = meter.path_allocation();
-            scratch.reserve(2 * line_count, meter)?;
-            let mut parsed = vec![0u16; line_count];
-            let mut lines_left = bytes.split(|b| *b == b'\n').enumerate();
-            for item in gix_attributes::parse(bytes) {
-                let (pattern, assignments, line) = item.map_err(|_| INVALID)?;
-                let gix_attributes::parse::Kind::Pattern(pattern) = pattern else {
-                    return Err(super::UNSUPPORTED);
-                };
-                for assignment in assignments {
-                    assignment.map_err(|_| INVALID)?;
-                }
-                if !any_quote {
-                    continue;
-                }
-                let index = line.wrapping_sub(1);
-                let raw = lines_left
-                    .find(|(i, _)| *i == index)
-                    .map_or(&[][..], |(_, l)| l);
-                // 이것을 실패시키는 것: 따옴표 판정을 끄거나 뒤집는 것(따옴표 seed가
-                // Limit 대신 Ok가 되거나 interval 시험의 검사 횟수가 바뀐다).
-                if !quoted(raw, index) {
-                    continue;
-                }
-                // 이것을 실패시키는 것: 이 검사를 지우는 것(따옴표 seed가 Limit 대신
-                // Ok가 된다).
-                if over_caps(&pattern.text) {
-                    return Err(ReadError::Limit);
-                }
-                if let Some(slot) = parsed.get_mut(index) {
-                    *slot = weight(&pattern.text) as u16;
-                }
-            }
-            let info = source == Path::new("info/attributes");
-            // The shared name table holds the names already there plus at most
-            // this file's distinct names; it grows from what earlier files
-            // charged.
-            let (new_names, new_bytes) = attribute_names(bytes, words, &mut scratch, meter)?;
-            let held = self.metadata.iter().count();
-            let names = held.checked_add(new_names).ok_or(ReadError::Limit)?;
-            let name_bytes = self
-                .name_bytes
-                .checked_add(new_bytes)
-                .ok_or(ReadError::Limit)?;
-            let names = names.max(self.names);
-            let part_bytes = attribute_part_bytes(bytes, &parsed, source.as_os_str().len())
-                .and_then(|parts| {
-                    let grown = name_table_bytes(names, name_bytes)?
-                        .checked_sub(name_table_bytes(self.names, self.name_bytes)?)?;
-                    parts.checked_add(grown)
-                })
-                .ok_or(ReadError::Limit)?;
-            self.allocation
-                .get_or_insert_with(|| meter.path_allocation())
-                .reserve(part_bytes, meter)?;
-            (self.names, self.name_bytes) = (names, name_bytes);
-            let list = if info {
-                &mut self.info_attributes
-            } else {
-                &mut self.attributes
-            };
-            let mut start = 0usize;
-            for (end, weight, fixed) in attribute_parts(bytes, &parsed) {
-                // A later part starts at the previous line's `\n`: gix-attributes
-                // strips a byte-order mark at a buffer's start, and a line that
-                // only begins like one must stay an ordinary line.
-                // 이것을 실패시키는 것: `start - 1` 대신 `start`부터 자르는 것
-                // (part 첫 줄의 `+/v8`을 BOM으로 떼어 차등 시험이 갈린다).
-                let from = start.saturating_sub(1);
-                let mut search = gix_attributes::Search::default();
-                // 이것을 실패시키는 것: 이 오류를 버리는 것(부모 없는 source 시험이
-                // 빈 Search를 Ok로 받아들인다).
-                search
-                    .add_patterns_buffer(
-                        &bytes[from..end],
-                        source.clone(),
-                        if info { None } else { Some(Path::new("")) },
-                        &mut self.metadata,
-                        false,
-                    )
-                    .map_err(|_| INVALID)?;
-                list.push(AttributePart {
-                    search,
-                    weight,
-                    fixed,
-                });
-                start = end;
-            }
-            self.words = self.words.checked_add(words).ok_or(ReadError::Limit)?;
-            self.retained_bytes = self
-                .retained_bytes
-                .checked_add(input_bytes)
-                .ok_or(ReadError::Limit)?;
+            self.add_attributes(bytes, source, words, input_bytes, meter)
         } else {
-            let info =
-                source == Path::new("info/exclude") || source == Path::new("<global-excludes>");
-            // On failure nothing is pushed, so `last()` below would weigh the
-            // previous file's list.
-            // 이것을 실패시키는 것: 이 오류를 버리는 것(부모 없는 source 시험이 Ok를
-            // 받는다).
-            self.ignore
+            self.add_ignore(bytes, source)
+        }
+    }
+
+    /// Parse an attribute file's parts after add_buffer charged it: grow the
+    /// shared name table by the file's new names and keep its parts.
+    fn add_attributes(
+        &mut self,
+        bytes: &[u8],
+        source: std::path::PathBuf,
+        words: usize,
+        input_bytes: usize,
+        meter: &mut Meter,
+    ) -> Result<(), ReadError> {
+        let (parsed, mut scratch) = attribute_line_weights(bytes, meter)?;
+        let info = source == Path::new("info/attributes");
+        // The shared name table holds the names already there plus at most
+        // this file's distinct names; it grows from what earlier files
+        // charged.
+        let (new_names, new_bytes) = attribute_names(bytes, words, &mut scratch, meter)?;
+        let held = self.metadata.iter().count();
+        let names = held.checked_add(new_names).ok_or(ReadError::Limit)?;
+        let name_bytes = self
+            .name_bytes
+            .checked_add(new_bytes)
+            .ok_or(ReadError::Limit)?;
+        let names = names.max(self.names);
+        let part_bytes = attribute_part_bytes(bytes, &parsed, source.as_os_str().len())
+            .and_then(|parts| {
+                let grown = name_table_bytes(names, name_bytes)?
+                    .checked_sub(name_table_bytes(self.names, self.name_bytes)?)?;
+                parts.checked_add(grown)
+            })
+            .ok_or(ReadError::Limit)?;
+        self.allocation
+            .get_or_insert_with(|| meter.path_allocation())
+            .reserve(part_bytes, meter)?;
+        (self.names, self.name_bytes) = (names, name_bytes);
+        let list = if info {
+            &mut self.info_attributes
+        } else {
+            &mut self.attributes
+        };
+        let mut start = 0usize;
+        for (end, weight, fixed) in attribute_parts(bytes, &parsed) {
+            // A later part starts at the previous line's `\n`: gix-attributes
+            // strips a byte-order mark at a buffer's start, and a line that
+            // only begins like one must stay an ordinary line.
+            // 이것을 실패시키는 것: `start - 1` 대신 `start`부터 자르는 것
+            // (part 첫 줄의 `+/v8`을 BOM으로 떼어 차등 시험이 갈린다).
+            let from = start.saturating_sub(1);
+            let mut search = gix_attributes::Search::default();
+            // 이것을 실패시키는 것: 이 오류를 버리는 것(부모 없는 source 시험이
+            // 빈 Search를 Ok로 받아들인다).
+            search
                 .add_patterns_buffer(
-                    bytes,
-                    source,
+                    &bytes[from..end],
+                    source.clone(),
                     if info { None } else { Some(Path::new("")) },
-                    gix_ignore::search::Ignore {
-                        support_precious: false,
-                    },
+                    &mut self.metadata,
+                    false,
                 )
                 .map_err(|_| INVALID)?;
-            let list = self.ignore.patterns.last().map_or(&[][..], |l| &l.patterns);
-            // gix-ignore only drops bytes (a leading `!`, a `\` before `!`, `#`
-            // or `$`, a leading `/`, a trailing `/`, unescaped trailing spaces)
-            // and never unquotes, so its text never weighs more than the raw
-            // line the caps checked; ignore_text_never_outweighs_its_line pins it.
-            self.ignore_weights.push(
-                list.iter()
-                    .map(|m| weight(&m.pattern.text) as u16)
-                    .collect(),
-            );
+            list.push(AttributePart {
+                search,
+                weight,
+                fixed,
+            });
+            start = end;
         }
+        self.words = self.words.checked_add(words).ok_or(ReadError::Limit)?;
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_add(input_bytes)
+            .ok_or(ReadError::Limit)?;
+        Ok(())
+    }
+
+    /// Parse an ignore file after add_buffer charged it and keep its pattern
+    /// weights.
+    fn add_ignore(&mut self, bytes: &[u8], source: std::path::PathBuf) -> Result<(), ReadError> {
+        let info = source == Path::new("info/exclude") || source == Path::new("<global-excludes>");
+        // On failure nothing is pushed, so `last()` below would weigh the
+        // previous file's list.
+        // 이것을 실패시키는 것: 이 오류를 버리는 것(부모 없는 source 시험이 Ok를
+        // 받는다).
+        self.ignore
+            .add_patterns_buffer(
+                bytes,
+                source,
+                if info { None } else { Some(Path::new("")) },
+                gix_ignore::search::Ignore {
+                    support_precious: false,
+                },
+            )
+            .map_err(|_| INVALID)?;
+        let list = self.ignore.patterns.last().map_or(&[][..], |l| &l.patterns);
+        // gix-ignore only drops bytes (a leading `!`, a `\` before `!`, `#`
+        // or `$`, a leading `/`, a trailing `/`, unescaped trailing spaces)
+        // and never unquotes, so its text never weighs more than the raw
+        // line the caps checked; ignore_text_never_outweighs_its_line pins it.
+        self.ignore_weights.push(
+            list.iter()
+                .map(|m| weight(&m.pattern.text) as u16)
+                .collect(),
+        );
         Ok(())
     }
 
@@ -746,6 +693,62 @@ impl Patterns {
         }
         Ok(())
     }
+}
+
+/// Check every attribute line once and weigh the patterns gix unquotes:
+/// the weight per line (0 for an unquoted one), and the reservation that pays
+/// for those weights, which add_attributes also charges its name sort to.
+fn attribute_line_weights(
+    bytes: &[u8],
+    meter: &mut Meter,
+) -> Result<(Vec<u16>, crate::meter::PathAllocation), ReadError> {
+    // The lower parser is deliberately lenient; do not silently drop
+    // malformed policy. Custom macros are deferred, explicitly Partial,
+    // to avoid unbounded recursive expansion from hostile definitions.
+    // Caps and weights also apply to the pattern gix builds when it
+    // unquotes one (`"\052\052/a"` matches as `**/a`). Unquoted patterns
+    // only lose bytes, so their raw line already weighs at least as much
+    // (attribute_unquoted_text_never_outweighs_its_line pins it).
+    let any_quote = bytes.contains(&b'"');
+    let line_count = if any_quote {
+        bytes.split(|b| *b == b'\n').count()
+    } else {
+        0
+    };
+    let mut scratch = meter.path_allocation();
+    scratch.reserve(2 * line_count, meter)?;
+    let mut parsed = vec![0u16; line_count];
+    let mut lines_left = bytes.split(|b| *b == b'\n').enumerate();
+    for item in gix_attributes::parse(bytes) {
+        let (pattern, assignments, line) = item.map_err(|_| INVALID)?;
+        let gix_attributes::parse::Kind::Pattern(pattern) = pattern else {
+            return Err(super::UNSUPPORTED);
+        };
+        for assignment in assignments {
+            assignment.map_err(|_| INVALID)?;
+        }
+        if !any_quote {
+            continue;
+        }
+        let index = line.wrapping_sub(1);
+        let raw = lines_left
+            .find(|(i, _)| *i == index)
+            .map_or(&[][..], |(_, l)| l);
+        // 이것을 실패시키는 것: 따옴표 판정을 끄거나 뒤집는 것(따옴표 seed가
+        // Limit 대신 Ok가 되거나 interval 시험의 검사 횟수가 바뀐다).
+        if !quoted(raw, index) {
+            continue;
+        }
+        // 이것을 실패시키는 것: 이 검사를 지우는 것(따옴표 seed가 Limit 대신
+        // Ok가 된다).
+        if over_caps(&pattern.text) {
+            return Err(ReadError::Limit);
+        }
+        if let Some(slot) = parsed.get_mut(index) {
+            *slot = weight(&pattern.text) as u16;
+        }
+    }
+    Ok((parsed, scratch))
 }
 
 pub(crate) fn parser_reservation(bytes: usize, words: usize) -> Result<usize, ReadError> {
