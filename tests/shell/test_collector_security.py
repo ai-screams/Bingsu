@@ -917,12 +917,86 @@ def rust_attributes(source, item):
     return [re.findall(r"#\[([^\]]*)\]", group) for group in groups]
 
 
+def lint_only_cfg_attr(attr):
+    """Whether `attr` is `cfg_attr(<predicate>, allow(...))` or the same with
+    `expect`: a lint level under a condition, which can neither remove an item
+    nor turn a test off. Anything else inside a cfg_attr (cfg, ignore, path,
+    test or a second attribute) is not."""
+    found = re.fullmatch(r"\s*cfg_attr\s*\((.*)\)\s*", attr, re.S)
+    if not found:
+        return False
+    body, parts, depth, start, quoted = found[1], [], 0, 0, False
+    for i, c in enumerate(body):
+        if quoted:
+            quoted = not (c == '"' and body[i - 1] != "\\")
+        elif c == '"':
+            quoted = True
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+    parts.append(body[start:])
+    lint = r'\s*(?:allow|expect)\s*\(\s*[\w:]+(?:\s*,\s*[\w:]+)*(?:\s*,\s*reason\s*=\s*"[^"\\]*")?\s*,?\s*\)\s*'
+    return len(parts) == 2 and re.fullmatch(lint, parts[1]) is not None
+
+
 def assert_cfgs_hold(row, attributes, platforms):
     for attr in attributes:
-        assert not re.match(r"\s*cfg_attr\b", attr), (row["id"], "conditional attributes")
+        # A lint level under cfg_attr keeps the item; any other cfg_attr could hide it.
+        assert not re.match(r"\s*cfg_attr\b", attr) or lint_only_cfg_attr(attr), (row["id"], "conditional attributes")
         cfg = re.fullmatch(r"\s*cfg\s*\((.*)\)\s*", attr, re.S)
         if cfg:
             assert all(rust_cfg_holds(cfg[1], platform) for platform in platforms), (row["id"], "disabled cfg", attr)
+
+
+# 이것을 실패시키는 것: lint 전용 cfg_attr(조건 아래의 allow·expect)를 거부하는 것(오탐), cfg_attr 안의 ignore·cfg·path나
+# 두 번째 속성을 받는 것(시험이나 모듈이 그 플랫폼에서 꺼질 수 있음).
+@pytest.mark.parametrize("attr, ok", [
+    ('cfg_attr(\n    not(test),\n    allow(dead_code, reason = "the helper calls it from the next change")\n)', True),
+    ('cfg_attr(test, expect(clippy::unwrap_used))', True),
+    ('cfg_attr(not(test), ignore)', False),
+    ('cfg_attr(test, cfg(target_os = "macos"))', False),
+    ('cfg_attr(test, path = "other.rs")', False),
+    ('cfg_attr(test, allow(dead_code), ignore)', False),
+], ids=["allow", "expect", "ignore", "cfg", "path", "second"])
+def test_cfgs_hold_take_only_a_lint_level_under_cfg_attr(attr, ok):
+    row = {"id": "X"}
+    if ok:
+        assert_cfgs_hold(row, [attr], {"linux", "macos"})
+    else:
+        with pytest.raises(AssertionError):
+            assert_cfgs_hold(row, [attr], {"linux", "macos"})
+
+
+def rust_test_attributes(row, source, path, base, platforms):
+    """The attributes of the one `#[test]` fn `base` in `source`, whose own
+    cfgs hold on `platforms`."""
+    groups = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(base) + r"\s*\(")
+    groups = [group for group in groups if group]
+    assert len(groups) == 1, (row["id"], "test declaration", path, base)
+    attributes, = groups
+    assert "test" in [a.strip() for a in attributes], (row["id"], "not a test")
+    assert_cfgs_hold(row, attributes, platforms)
+    return attributes
+
+
+def rust_libtest_module(row, source, path, name, target, read, platforms):
+    """The libtest module prefix (`a::b::`) of `name`, the `module::path::fn`
+    of a test in `path`: the file's own modules come from the declarations
+    that reach it, the inline ones from `name`, and every one's cfgs hold on
+    `platforms`."""
+    # 이것을 실패시키는 것: 표의 모듈 경로를 믿는 것(파일 경로와 mod 선언에서 유도한 경로와 다름).
+    modules = rust_module_path(row, path, target, read, platforms)
+    inline = name.split("::")[len(modules):-1]
+    assert name.split("::")[:len(modules)] == modules, (row["id"], "module path", name, modules)
+    for inner in inline:
+        found = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?mod\s+" + re.escape(inner) + r"\s*\{")
+        assert len(found) == 1, (row["id"], "inline module", inner)
+        assert_cfgs_hold(row, found[0], platforms)
+    return "::".join(modules + inline) + "::" if modules + inline else ""
 
 
 def rust_module_path(row, path, target, read, platforms):
@@ -1117,14 +1191,8 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
             if row.get("gate") in release_gates:
                 assert_release_cells(row, hits)
         else:
-            groups = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(base) + r"\s*\(")
-            groups = [group for group in groups if group]
-            assert len(groups) == 1, (row["id"], "test declaration", path, base)
-            attributes, = groups
-            assert "test" in [a.strip() for a in attributes], (row["id"], "not a test")
-            platforms = ["linux"] if row["platform"].startswith("Linux") else (
-                ["macos"] if row["platform"] == "macOS" else ["linux", "macos"])
-            assert_cfgs_hold(row, attributes, platforms)
+            platforms = row_platforms(row)
+            attributes = rust_test_attributes(row, source, path, base, platforms)
             ignored = any(re.match(r"\s*ignore\b", attr) for attr in attributes)
             # A cgroup cell test runs only in the cell job, ignored elsewhere.
             in_cell = ignored and target == "bin:bingsu" and [a.strip() for a in attributes].count(CELL_IGNORE) == 1
@@ -1155,17 +1223,9 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                           "crates/bingsu/src/prompt_read.rs": "prompt_read::tests::"}.get(path, "")
                 assert name == base, (row["id"], "historical rows name the function only", name)
             else:
-                # 이것을 실패시키는 것: 표의 모듈 경로를 믿는 것(파일 경로와 mod 선언에서 유도한 경로와 다름).
                 cargo_target = target.split(":", 1)[-1]
-                modules = rust_module_path(row, path, target, read, platforms)
-                inline = name.split("::")[len(modules):-1]
-                assert name.split("::")[:len(modules)] == modules, (row["id"], "module path", name, modules)
-                for inner in inline:
-                    found = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?mod\s+" + re.escape(inner) + r"\s*\{")
-                    assert len(found) == 1, (row["id"], "inline module", inner)
-                    assert_cfgs_hold(row, found[0], platforms)
+                module = rust_libtest_module(row, source, path, name, target, read, platforms)
                 selection = ["--lib"] if target == "lib" else ["--bin" if target.startswith("bin:") else "--test", cargo_target]
-                module = "::".join(modules + inline) + "::" if modules + inline else ""
             runnable = [run for _, run in commands if run[:2] == ["cargo", "test"] and "--no-run" not in run
                         and ["-p", crate] in [run[i:i+2] for i in range(len(run))]
                         and selection in [run[i:i + len(selection)] for i in range(len(run))]

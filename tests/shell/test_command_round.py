@@ -1100,22 +1100,44 @@ def test_supervised_rounds_counts_rounds_that_ran_the_units():
         supervised_rounds(session)
 
 
-# tests/command-acceptance.tsv의 행마다 실제 시험이 있다(넘긴 행은 "-"와 넘긴 Task). 이것을 실패시키는
-# 것: 표의 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것.
+def cargo_target(path):
+    """The cargo target that builds the Rust test file `path`."""
+    from conftest import ROOT
+    crate, kind = path.split("/")[1:3]
+    if kind == "tests":
+        return "test:" + path.split("/")[3].removesuffix(".rs")
+    return "lib" if (ROOT / f"crates/{crate}/src/lib.rs").exists() else f"bin:{crate}"
+
+
+# tests/command-acceptance.tsv의 행마다 그 플랫폼에서 실제로 도는 시험이 있다(넘긴 행은 "-"와 넘긴 Task). Rust 행은
+# gate 표처럼 `파일::모듈경로::이름`이고 같은 정적 검사를 받는다: `#[test]` 선언 하나, fn·파일 모듈·inline 모듈의 cfg가
+# 행의 플랫폼에서 성립, `#[ignore]`는 cgroup 셀 job이 돌리고 단언하는 셀 시험의 표시만. 이것을 실패시키는 것: 표의
+# 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것, 시험에 `#[ignore]`를 붙이는 것, 셀 밖 시험에 셀
+# 표시를 붙이는 것, 시험이나 그 모듈의 cfg를 행의 플랫폼에서 꺼지게 바꾸는 것.
 def test_command_table_names_real_tests():
     import csv, re
     from conftest import ROOT
+    from test_collector_security import CELL_IGNORE, row_platforms, rust_libtest_module, rust_test_attributes
+    from test_gate_acceptance import cgroup_cell_tests
     rows = list(csv.DictReader((ROOT / "tests/command-acceptance.tsv").read_text().splitlines(), delimiter="\t"))
     assert rows and len({r["id"] for r in rows}) == len(rows)
+    cells = cgroup_cell_tests()
+    read = lambda p: (ROOT / p).read_text()
     for row in rows:
         if row["stage"] not in ("C2", "C3", "C4"):
             assert (row["platform"], row["test"]) == ("-", "-"), row["id"]
             continue
-        path, name = row["test"].split("::")
-        source = (ROOT / path).read_text()
-        pattern = (rf"^def {re.escape(name)}\(" if path.endswith(".py")
-                   else rf"^\s*fn {re.escape(name)}\(\)")
-        assert len(re.findall(pattern, source, re.M)) == 1, (row["id"], path, name)
+        path, name = row["test"].split("::", 1)
+        source = read(path)
+        if path.endswith(".py"):
+            assert len(re.findall(rf"^def {re.escape(name)}\(", source, re.M)) == 1, (row["id"], path, name)
+            continue
+        platforms = row_platforms(row)
+        base = name.rsplit("::", 1)[-1]
+        attributes = rust_test_attributes(row, source, path, base, platforms)
+        module = rust_libtest_module(row, source, path, name, cargo_target(path), read, platforms)
+        ignored = [a.strip() for a in attributes if re.match(r"\s*ignore\b", a)]
+        assert not ignored or (ignored == [CELL_IGNORE] and module + base in cells), (row["id"], "ignored test", ignored)
 
 
 # 단위가 없는 회차는 감독을 띄우지 않는다. 감독은 세션 잠금을 얻은 뒤에만 생성되므로 잠금 파일과 중립 폴더가
