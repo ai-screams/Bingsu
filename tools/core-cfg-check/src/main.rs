@@ -533,6 +533,16 @@ impl<'ast> Visit<'ast> for ProductionGlobs<'_> {
     }
 }
 
+/// A test-only file: its first inner attribute is exactly `#![cfg(test)]`,
+/// so rustc builds it only into test binaries (it is a child module file
+/// declared with `mod x;`). The same policy as an inline `#[cfg(test)]`
+/// item, applied to a file's shape. A crate root is never one, and the
+/// attribute must come first: a doc comment or another attribute before it
+/// leaves the file checked as production code.
+fn is_test_file(attrs: &[syn::Attribute], crate_root: bool) -> bool {
+    !crate_root && is_test_item(attrs.get(..1).unwrap_or_default())
+}
+
 fn is_test_item(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         matches!(&a.meta, syn::Meta::List(l)
@@ -905,6 +915,15 @@ fn check(
     };
     if library {
         let mut tests = TestSpans(Vec::new());
+        if is_test_file(&file.attrs, crate_root) {
+            let end = proc_macro2::LineColumn {
+                line: usize::MAX,
+                column: usize::MAX,
+            };
+            tests
+                .0
+                .push((proc_macro2::LineColumn { line: 1, column: 0 }, end));
+        }
         tests.visit_file(&file);
         ProductionGlobs {
             tests: &tests,
@@ -935,7 +954,7 @@ fn check(
     };
     attrs.visit_file(&file);
     let allowed_cfg = attrs.allowed_cfg;
-    if addresses {
+    if addresses && !is_test_file(&file.attrs, crate_root) {
         let mut fns = FnNames(Vec::new());
         fns.visit_file(&file);
         Addresses {
