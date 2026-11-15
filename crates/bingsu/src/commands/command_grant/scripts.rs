@@ -11,16 +11,16 @@ use super::*;
 #[derive(Default)]
 pub(super) struct Scripts {
     #[cfg(target_os = "macos")]
-    pub(super) runtime: Option<File>,
+    runtime: Option<File>,
     #[cfg(target_os = "macos")]
-    pub(super) me: u32,
+    me: u32,
     #[cfg(target_os = "macos")]
-    pub(super) tag: String,
+    tag: String,
     /// `None` until the first script; then the folder, if it passed.
     #[cfg(target_os = "macos")]
-    pub(super) copies: Option<Option<exec_path::ScriptCopies>>,
+    copies: Option<Option<exec_path::ScriptCopies>>,
     #[cfg(target_os = "macos")]
-    pub(super) made: Vec<std::path::PathBuf>,
+    made: Vec<std::path::PathBuf>,
 }
 
 impl Scripts {
@@ -43,7 +43,7 @@ impl Scripts {
     /// Fails without the laziness: test_macos_unit_is_one_process_the_relay_execs_into
     /// (a round without scripts makes no folder).
     #[cfg(target_os = "macos")]
-    pub(super) fn copies(&mut self) -> Option<&exec_path::ScriptCopies> {
+    fn copies(&mut self) -> Option<&exec_path::ScriptCopies> {
         if self.copies.is_none() {
             let opened = self
                 .runtime

@@ -36,7 +36,7 @@ pub(crate) struct Search {
     pub(crate) repo: Vec<bingsu_core::command::path::Id>,
     pub(crate) folders: Vec<std::path::PathBuf>,
     /// No collected repository root: the shell's folder stood for it.
-    pub(super) fallback: bool,
+    fallback: bool,
 }
 
 /// The repositories the shell is in, by identity, for the PATH and

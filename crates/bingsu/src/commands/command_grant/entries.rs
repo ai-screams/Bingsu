@@ -3,7 +3,7 @@ use super::*;
 
 impl Publish {
     /// The `match` of runnable unit `id`.
-    pub(super) fn pattern(&self, id: &str) -> Option<&str> {
+    fn pattern(&self, id: &str) -> Option<&str> {
         self.patterns
             .iter()
             .find(|(u, _)| u == id)
@@ -19,7 +19,7 @@ impl Publish {
     /// cwd: the store of the collection response, under its lock. A store another round holds is no publication: the
     /// next round
     /// runs those units again.
-    pub(super) fn publish_entries(
+    fn publish_entries(
         &self,
         entries: &[response::Entry],
     ) -> Result<response::Response, StoreError> {
@@ -40,12 +40,7 @@ impl Publish {
 }
 
 /// A builtin entry decided without running anything, at `now`.
-pub(super) fn decided(
-    p: &Planned,
-    now: u64,
-    status: response::Status,
-    value: String,
-) -> response::Entry {
+fn decided(p: &Planned, now: u64, status: response::Status, value: String) -> response::Entry {
     response::Entry {
         origin: Origin::Builtin,
         id: p.language.id.to_owned(),
@@ -131,12 +126,7 @@ impl Round {
 
     /// Adds `probe` to the grant unless its cached result stands or it does
     /// not fit the grant frame.
-    pub(super) fn run_probe(
-        &mut self,
-        p: &Planned,
-        probe: wire::Probe,
-        current: Option<&response::Entry>,
-    ) {
+    fn run_probe(&mut self, p: &Planned, probe: wire::Probe, current: Option<&response::Entry>) {
         if !self.probes_allowed {
             self.hidden.push(NEUTRAL_REFUSED);
             return;
@@ -215,7 +205,7 @@ impl Round {
 
     /// A failed entry for unit `id`, attempted and ended at `now`: the
     /// failure cache keeps it 10 s, then it is the unit tried longest ago.
-    pub(super) fn unresolved_entry(&self, id: &str, now: u64) -> Option<response::Entry> {
+    fn unresolved_entry(&self, id: &str, now: u64) -> Option<response::Entry> {
         let (_, r) = self.runnable.iter().find(|(u, _)| u == id)?;
         let env = self.publish.environments.iter().find(|(u, _)| u == id)?.1;
         let failed = Outcome {
@@ -234,7 +224,7 @@ impl Round {
     /// The response entries of this round's config results (builtin probes
     /// are D3's): each bound to the unit's policy digest and the original
     /// environment digest it ran with.
-    pub(super) fn entries(&self, results: &[Outcome]) -> Vec<response::Entry> {
+    fn entries(&self, results: &[Outcome]) -> Vec<response::Entry> {
         let probes = results
             .iter()
             .filter(|o| o.origin == Origin::Builtin)
@@ -275,7 +265,7 @@ impl Round {
     /// A probe's entry: its version cut from the first line it printed
     /// (`Python 3.12.1` shows `3.12.1`); a line with no version is a failed
     /// probe with no value.
-    pub(super) fn probe_entry(&self, o: &Outcome) -> Option<response::Entry> {
+    fn probe_entry(&self, o: &Outcome) -> Option<response::Entry> {
         let p = self.probes.get(usize::from(o.index))?;
         let mut e = response::entry_for(
             p.language.id.to_owned(),
