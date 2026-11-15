@@ -2635,6 +2635,97 @@ fn index_budget_precedes_parser_and_split_is_partial() {
     ));
 }
 
+/// A version 4 index whose entries store each path as a strip count over the
+/// previous path plus the rest, the strip written as Git's offset varint
+/// (varint.c encode_varint: big-endian groups, one less per continuation).
+fn idx_v4(paths: &[&[u8]]) -> Vec<u8> {
+    let mut out = b"DIRC".to_vec();
+    out.extend_from_slice(&4u32.to_be_bytes());
+    out.extend_from_slice(&(paths.len() as u32).to_be_bytes());
+    let mut previous: &[u8] = b"";
+    for path in paths {
+        let common = previous
+            .iter()
+            .zip(path.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        out.extend_from_slice(&[0; 24]);
+        out.extend_from_slice(&0o100644u32.to_be_bytes());
+        out.extend_from_slice(&[0; 32]);
+        out.extend_from_slice(&(path.len().min(0xfff) as u16).to_be_bytes());
+        let mut strip = previous.len() - common;
+        let mut groups = vec![(strip & 127) as u8];
+        while strip >> 7 != 0 {
+            strip = (strip >> 7) - 1;
+            groups.push(128 | (strip & 127) as u8);
+        }
+        out.extend(groups.iter().rev());
+        out.extend_from_slice(&path[common..]);
+        out.push(0);
+        previous = path;
+    }
+    seal(&mut out);
+    out
+}
+
+// A strip of 250 is written [0x80, 0x7a]: the one added per continuation
+// byte is what makes it 250 rather than 122.
+// 이것을 실패시키는 것: v4_strip에서 이어지는 바이트마다 1을 더하지 않는 것(두 번째 경로를 128바이트
+// 길게 세어 IndexBytes가 경로 바이트 합보다 커진다).
+#[test]
+fn v4_strip_counts_one_per_continuation_byte() {
+    let long = [b"d/".as_slice(), &[b'x'; 248]].concat();
+    let mut bytes = idx_v4(&[&long, b"e"]);
+    let mut m = meter();
+    let state = safe_index::parse(&mut bytes, &mut m).unwrap();
+    let paths: usize = state.entries().iter().map(|e| e.path(&state).len()).sum();
+    assert_eq!(state.entries()[1].path(&state), b"e".as_slice());
+    assert_eq!(paths, 251);
+    assert_eq!(m.budget.used(Axis::IndexBytes), paths as u64);
+}
+
+// A cache tree for an index of `count` entries at the root, valid for both
+// the framing check and gix.
+fn root_tree(count: usize) -> Vec<u8> {
+    [format!("\0{count} 0\n").as_bytes(), &[0x11; 20]].concat()
+}
+
+// 이것을 실패시키는 것: TREE가 둘 이상일 때 버리지 않는 것(마지막 TREE가 gix에 넘어가 state에 남는다).
+#[test]
+fn a_second_tree_extension_drops_the_cache_tree() {
+    let mut bytes = idx_fixture(3, 2);
+    extension(&mut bytes, b"TREE", &root_tree(3));
+    let state = safe_index::parse(&mut bytes, &mut meter()).unwrap();
+    assert!(state.tree().is_some(), "one TREE is kept");
+    let mut bytes = idx_fixture(3, 2);
+    extension(&mut bytes, b"TREE", &root_tree(3));
+    extension(&mut bytes, b"TREE", &root_tree(3));
+    let state = safe_index::parse(&mut bytes, &mut meter()).unwrap();
+    assert!(
+        state.tree().is_none(),
+        "two TREE extensions leave no cache tree"
+    );
+    assert_eq!(state.entries().len(), 3);
+}
+
+// The deadline falls while the entries are framed: parse stops there, before
+// it charges the path bytes.
+// 이것을 실패시키는 것: scan_entries의 항목마다 하는 meter.check를 빼는 것(훑기가 끝까지 가서
+// IndexBytes를 계상한 뒤에야 멈춘다).
+#[test]
+fn entry_framing_checks_the_deadline_per_entry() {
+    let mut bytes = idx_fixture(100, 2);
+    let mut m = meter();
+    // parse's own check and the IndexEntries charge pass, then half the entries.
+    m.checks_left.set(Some(2 + 50));
+    assert!(matches!(
+        safe_index::parse(&mut bytes, &mut m),
+        Err(E::Deadline)
+    ));
+    assert_eq!(m.budget.used(Axis::IndexEntries), 100);
+    assert_eq!(m.budget.used(Axis::IndexBytes), 0);
+}
+
 // 이것을 실패시키는 것: parser 예약을 실측 peak 아래로 줄이거나 측정에서 실제 gix 호출을 빼는 것.
 #[test]
 fn object_index_parser_peaks_are_precharged() {
