@@ -258,7 +258,7 @@ impl<'ast> Visit<'ast> for AttrCheck<'_> {
                     reason: "feature attribute enables unstable language items".to_owned(),
                 });
             } else if name == "cfg" {
-                let only_test = matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "test");
+                let only_test = is_test_args(&attr.meta);
                 if only_test {
                     self.allowed_cfg += 1;
                 } else {
@@ -533,11 +533,30 @@ impl<'ast> Visit<'ast> for ProductionGlobs<'_> {
     }
 }
 
+/// A test-only file: its first inner attribute is exactly `#![cfg(test)]`,
+/// so rustc builds it only into test binaries (it is a child module file
+/// declared with `mod x;`). The same policy as an inline `#[cfg(test)]`
+/// item, applied to a file's shape. Only a library child module file can be
+/// one: a crate root (`lib.rs`) and a `--test-targets` file (each is the root
+/// of its own test crate) never are, and the
+/// attribute must come first: a doc comment or another attribute before it
+/// leaves the file checked as production code.
+fn is_test_file(attrs: &[syn::Attribute], library: bool, crate_root: bool) -> bool {
+    library && !crate_root && is_test_item(attrs.get(..1).unwrap_or_default())
+}
+
+/// The arguments of a `cfg` attribute are exactly `(test)`, with parentheses:
+/// rustc rejects `cfg[test]` and `cfg{test}` without stripping the item, so
+/// they are not test code here. The attribute's name is checked by the caller.
+fn is_test_args(meta: &syn::Meta) -> bool {
+    matches!(meta, syn::Meta::List(l)
+        if matches!(l.delimiter, syn::MacroDelimiter::Paren(_)) && l.tokens.to_string() == "test")
+}
+
 fn is_test_item(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        matches!(&a.meta, syn::Meta::List(l)
-        if l.path.is_ident("cfg") && l.tokens.to_string() == "test")
-    })
+    attrs
+        .iter()
+        .any(|a| a.path().is_ident("cfg") && is_test_args(&a.meta))
 }
 
 impl<'ast> Visit<'ast> for Addresses<'_> {
@@ -905,6 +924,15 @@ fn check(
     };
     if library {
         let mut tests = TestSpans(Vec::new());
+        if is_test_file(&file.attrs, library, crate_root) {
+            let end = proc_macro2::LineColumn {
+                line: usize::MAX,
+                column: usize::MAX,
+            };
+            tests
+                .0
+                .push((proc_macro2::LineColumn { line: 1, column: 0 }, end));
+        }
         tests.visit_file(&file);
         ProductionGlobs {
             tests: &tests,
@@ -935,7 +963,7 @@ fn check(
     };
     attrs.visit_file(&file);
     let allowed_cfg = attrs.allowed_cfg;
-    if addresses {
+    if addresses && !is_test_file(&file.attrs, library, crate_root) {
         let mut fns = FnNames(Vec::new());
         fns.visit_file(&file);
         Addresses {

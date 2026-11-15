@@ -83,6 +83,38 @@ class BypassGates(unittest.TestCase):
         self.assert_rejected(self.run_gate("check_core_cfg.py", "--phase", "tokens"),
                              "closure stored in a tuple or struct field")
 
+    def run_core_file(self, fixture, name="zz.rs"):
+        shutil.copyfile(FIXTURES / "wt/crates/bingsu-core/src/test_file" / fixture,
+                        self.root / "crates/bingsu-core/src" / name)
+        return self.run_gate("check_core_cfg.py", "--phase", "tokens")
+
+    # 이것을 실패시키는 것: 첫 inner attribute 검사를 느슨하게 하여 `#![cfg(test)]`가 아닌 모양
+    # (조건 변형, 문서 뒤, 모듈 안, 항목 뒤, crate root)의 파일 전체를 시험 코드로 면제하는 것.
+    def test_only_a_leading_cfg_test_exempts_a_file(self):
+        for fixture, name, reason in [
+                ("any_test.rs", "zz.rs", "as_ptr exposes an address"),
+                ("not_test.rs", "zz.rs", "as_ptr exposes an address"),
+                ("cfg_attr.rs", "zz.rs", "as_ptr exposes an address"),
+                ("after_doc.rs", "zz.rs", "as_ptr exposes an address"),
+                ("in_module.rs", "zz.rs", "as_ptr exposes an address"),
+                ("after_item.rs", "zz.rs", "unparsable"),
+                ("crate_root.rs", "lib.rs", "as_ptr exposes an address")]:
+            with self.subTest(fixture=fixture):
+                out = self.run_core_file(fixture, name)
+                self.assert_rejected(out, reason)
+                if reason.startswith("as_ptr"):
+                    # the finding is the fixture's own, not one of the copied files'
+                    self.assertRegex(out.stderr, rf"crates/bingsu-core/src/{name}:\d+: {reason}")
+
+    # 이것을 실패시키는 것: 면제 자체를 지우는 것(정상 형태가 위반으로 잡힘). 위 시험의 거부가 면제 부재 때문이
+    # 아니라 fixture의 다른 결함 때문에 나는 것을 막는 대조군이다.
+    def test_a_leading_cfg_test_after_a_plain_comment_exempts_the_file(self):
+        # The copied pinned files fail on their own here, so the gate's exit code is not the
+        # verdict: the fixture's file must not be named in any finding.
+        out = self.run_core_file("exempt.rs")
+        self.assertNotIn("zz.rs", out.stdout + out.stderr)
+        self.assertNotIn("as_ptr", out.stdout + out.stderr)
+
     # 이것을 실패시키는 것: prompt_io 토큰 단계에서 외부 mod를 허용하는 것.
     def test_k68_cfg_module_after_hash_renewal(self):
         self.replace_tcb("crates/bingsu/src/prompt_io.rs", "k68/bin/src/prompt_io.rs")

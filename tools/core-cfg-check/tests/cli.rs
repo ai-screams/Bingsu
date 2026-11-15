@@ -1501,3 +1501,82 @@ fn function_item_constructors_cannot_be_ordered() {
     );
     passes("enum E { Unit } use E::Unit as Data; fn f() { consume(Data); }");
 }
+
+// A child module file of tests starts with `#![cfg(test)]`: rustc builds it
+// only into test binaries, so it gets the policy an inline `#[cfg(test)]`
+// item has. The rest of this block is what keeps that from becoming a door.
+// 이것을 실패시키는 것: 파일 첫 inner attribute 검사를 빼는 것(면제가 사라져 정상 형태가 실패), 첫 자리 조건이나
+// 정확한 `cfg(test)` 비교를 빼는 것(아래 변형이 통과), crate root를 제외하는 조건을 빼는 것(lib.rs가 통째로 면제).
+const PROBE: &str = "fn f(a: &[u8]) { let _ = a.as_ptr(); }\n";
+
+#[test]
+fn a_test_only_file_is_checked_as_test_code() {
+    passes(&format!("#![cfg(test)]\n{PROBE}"));
+    passes(&format!("// note\n#![cfg(test)]\n{PROBE}"));
+    passes(&format!("#![cfg(test)]\nuse super::*;\n#[test]\n{PROBE}"));
+}
+
+#[test]
+fn only_the_exact_first_inner_cfg_test_exempts_a_file() {
+    fails_with(PROBE, "as_ptr");
+    for head in [
+        "#![cfg(any(test, x))]",
+        "#![cfg(not(test))]",
+        "#![cfg(all(test))]",
+        "#![cfg_attr(test, allow(dead_code))]",
+    ] {
+        // The address finding itself, not just any rejection: other checks (the cfg
+        // count) reject these inputs on their own and would hide a lost finding.
+        fails_with(&format!("{head}\n{PROBE}"), "as_ptr exposes an address");
+    }
+    // not the first attribute, or not inner
+    fails_with(&format!("//! doc\n#![cfg(test)]\n{PROBE}"), "as_ptr");
+    fails_with(
+        &format!("#![allow(dead_code)]\n#![cfg(test)]\n{PROBE}"),
+        "as_ptr",
+    );
+    fails_with(&format!("#[cfg(test)]\nmod m {{}}\n{PROBE}"), "as_ptr");
+    fails_with(&format!("mod a {{ #![cfg(test)] }}\n{PROBE}"), "as_ptr");
+    fails_with(&format!("{PROBE}#![cfg(test)]\n"), "");
+}
+
+#[test]
+fn a_crate_root_is_never_a_test_only_file() {
+    let (ok, stderr) = run_root(&format!(
+        "#![cfg(test)]\n#![no_std]\n#![forbid(unsafe_code)]\n{PROBE}"
+    ));
+    assert!(!ok && stderr.contains("as_ptr"), "{stderr}");
+}
+
+// rustc rejects `cfg[test]` and `cfg{test}` without stripping the item, so they are no test code:
+// not as a file's first attribute, and not inline.
+// 이것을 실패시키는 것: 구분자(괄호) 조건을 `is_cfg_test`에서 빼는 것.
+#[test]
+fn only_parenthesised_cfg_test_counts_as_test_code() {
+    for head in ["#![cfg[test]]", "#![cfg{test}]"] {
+        fails_with(&format!("{head}\n{PROBE}"), "as_ptr exposes an address");
+    }
+    for attr in ["#[cfg[test]]", "#[cfg{test}]"] {
+        fails_with(&format!("{attr}\n{PROBE}"), "as_ptr exposes an address");
+    }
+    passes(&format!("#[cfg(test)]\n{PROBE}"));
+}
+
+// A `--test-targets` file is the root of its own test crate: a leading `#![cfg(test)]` does not exempt it.
+// 이것을 실패시키는 것: `is_test_file`의 `library` 조건을 빼는 것.
+#[test]
+fn a_test_target_is_not_a_test_only_module_file() {
+    let lib = fixture("pub fn f() {}\n");
+    let test = fixture(&format!("#![cfg(test)]\n{PROBE}"));
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg(&lib)
+        .arg("--test-targets")
+        .arg(&test)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success() && stderr.contains("as_ptr exposes an address"),
+        "{stderr}"
+    );
+}
