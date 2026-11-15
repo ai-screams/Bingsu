@@ -95,7 +95,7 @@ TCB_SHA256 = {
     # folder digest and text cleaning those digests use (cwd_hash.rs, field.rs).
     "crates/bingsu-core/src/command/plan.rs": "cc7b95c0a618255388b764ad116b018a17b893f71f10fcbc6bc74da6f1d85782",
     "crates/bingsu-core/src/command/wire.rs": "5f3dda9a5835e3533de42c205af42f795421cc1c085b0918f0b0d4173aba5d5e",
-    "crates/bingsu-core/src/front/staged.rs": "a051e52a769a9754c262bf7aaf88efec9b80e441b0e88e43cc2d7d13d1cdca4e",
+    "crates/bingsu-core/src/front/staged.rs": "663389092bfb657981c7998a327d4c0a4da03b2a0ed4d18f1fa19095745e5e67",
     "crates/bingsu-core/src/sanitize.rs": "0e0817b571091f102bde7a1a0f884c6cdb8da35bbb7f3e3be26aee98d9f6a038",
     "crates/bingsu-core/src/command/builtin.rs": "6d4bc235ce7776b91c8465210c7cafd86e33083a7cc09c8f598e6e399cd7e85c",
     "crates/bingsu-core/src/collection/language.rs": "df76baf6d24e1d9b49c625825e446eab0d73e4aa49368c15d4419462c94829de",

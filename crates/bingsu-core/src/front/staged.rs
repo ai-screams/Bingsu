@@ -906,6 +906,23 @@ pub struct Response {
     pub status: Status,
 }
 
+/// The status of a prompt whose marker refuses execution. A refusal holds
+/// back the snapshot's config units with no `not_run` (the rule of
+/// `execution.units`; `not_run` comes from the settings, never from the
+/// marker): they do not run and their values are not drawn
+/// (`command::display`). Without such a unit the warning would tell of
+/// nothing held back, so there is none; a clock that failed during this
+/// prompt still leaves its folder facts out, as before.
+/// An invalid marker is the helper's verdict that the settings failed (a
+/// compile failure, say) while the prompt keeps the older screen, so it
+/// warns either way: the user's change did not apply.
+fn refusal_status(refusal: Refusal, config: &FrontConfig) -> Status {
+    if refusal == Refusal::Invalid || config.exec_units().iter().any(|u| u.not_run.is_none()) {
+        trust_status(refusal)
+    } else {
+        Status::OK_NONE
+    }
+}
 fn trust_status(refusal: Refusal) -> Status {
     match refusal {
         Refusal::Missing => Status::DEGRADED_TRUST_UNVERIFIED,
@@ -1115,7 +1132,7 @@ pub fn finish_with_catalog(
                 Status::ERROR_CONFIG_LAST_GOOD
             } else {
                 match eligibility {
-                    Err(why) => trust_status(why),
+                    Err(why) => refusal_status(why, &s.config),
                     Ok(_) => Status::OK_NONE,
                 }
             };
