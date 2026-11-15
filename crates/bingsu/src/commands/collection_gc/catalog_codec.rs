@@ -1,6 +1,10 @@
-//! The catalog's byte form: pure encode and decode, no I/O. The bytes are
-//! checked (magic, size cap, CRC) before any name in them is trusted. The
-//! types it reads and builds stay private to the parent module.
+//! The catalog's byte form: pure encode and decode, no I/O. A small checked
+//! binary catalog, independent of the worker wire. The bytes are checked
+//! (magic, size cap, CRC) before any name in them is trusted, and no input
+//! string is a filesystem path until the grammar and exact root bytes
+//! validate; the grammar and counter checks reuse the parent's rules
+//! (`component`, `descend`, `entry_valid`, `location`). The types it reads
+//! and builds stay private to the parent module.
 use super::{
     CATALOG_MAX, Catalog, Cursor, Entry, MAX_DEPTH, MAX_SCAN_DEPTH, MAX_STORES, RESERVATION,
     component, descend, entry_valid, location,
@@ -8,8 +12,6 @@ use super::{
 use crate::commands::snapshot_store::StoreError;
 use bingsu_core::snapshot::{self, Clock};
 
-// A small checked binary catalog, independent of the worker wire. No input
-// string is a filesystem path until the grammar and exact root bytes validate.
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), StoreError> {
     if out.len().saturating_add(4).saturating_add(bytes.len()) > CATALOG_MAX {
         return Err(StoreError::Unsafe);
