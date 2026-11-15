@@ -900,8 +900,8 @@ mod tests {
         std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
     }
 
-    // 이것을 실패시키는 것: 링크 지점의 판정이 이미 거부를 쥔 뒤에도 마지막 파일의 판정을 위해 oracle을 다시 묻는 것
-    // (`a`를 두 번 물음), 첫 거부를 마지막 거부로 덮는 것, 거부 위치를 그 노드가 아닌 곳으로 두는 것.
+    // 이것을 실패시키는 것: 링크 지점과 folder_target 판정이 이미 거부를 쥔 뒤에도 마지막 파일의 판정을 위해
+    // oracle을 다시 묻는 것(`a`를 세 번 물음), 첫 거부를 뒤 거부로 덮는 것, 거부 위치를 그 노드가 아닌 곳으로 두는 것.
     #[test]
     fn a_held_refusal_is_not_asked_again_at_the_last_name_and_blocks_where_it_began() {
         let base = tree("held");
@@ -918,8 +918,10 @@ mod tests {
             Some(base.join("a").as_path())
         );
         let a = ino(&base.join("a"));
-        // The link's own verdict asks about `a` twice, as before the walk was
-        // split into stages; the last name's verdict adds nothing once held.
+        // The link's parent verdict asks about `a` once and the folder_target
+        // step after the link asks once more, as before the walk was split
+        // into stages; the last name's verdict adds nothing once a refusal
+        // is held (a third ask).
         assert_eq!(
             oracle.0.iter().filter(|&&i| i == a).count(),
             2,
