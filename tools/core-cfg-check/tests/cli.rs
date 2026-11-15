@@ -1547,3 +1547,36 @@ fn a_crate_root_is_never_a_test_only_file() {
     ));
     assert!(!ok && stderr.contains("as_ptr"), "{stderr}");
 }
+
+// rustc rejects `cfg[test]` and `cfg{test}` without stripping the item, so they are no test code:
+// not as a file's first attribute, and not inline.
+// 이것을 실패시키는 것: 구분자(괄호) 조건을 `is_cfg_test`에서 빼는 것.
+#[test]
+fn only_parenthesised_cfg_test_counts_as_test_code() {
+    for head in ["#![cfg[test]]", "#![cfg{test}]"] {
+        fails_with(&format!("{head}\n{PROBE}"), "as_ptr exposes an address");
+    }
+    for attr in ["#[cfg[test]]", "#[cfg{test}]"] {
+        fails_with(&format!("{attr}\n{PROBE}"), "as_ptr exposes an address");
+    }
+    passes(&format!("#[cfg(test)]\n{PROBE}"));
+}
+
+// A `--test-targets` file is the root of its own test crate: a leading `#![cfg(test)]` does not exempt it.
+// 이것을 실패시키는 것: `is_test_file`의 `library` 조건을 빼는 것.
+#[test]
+fn a_test_target_is_not_a_test_only_module_file() {
+    let lib = fixture("pub fn f() {}\n");
+    let test = fixture(&format!("#![cfg(test)]\n{PROBE}"));
+    let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+        .arg(&lib)
+        .arg("--test-targets")
+        .arg(&test)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success() && stderr.contains("as_ptr exposes an address"),
+        "{stderr}"
+    );
+}
