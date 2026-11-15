@@ -1664,7 +1664,7 @@ HELPER_STAGES = {"unchanged": ("unchanged",), "publish": ("publish",),
 #   /usr and /usr/bin walks and the target's header pread: exec_path's
 #     PATH and target checks (C2; miss only).
 #   the collection catalog, GC lock, store folders, collection.lock,
-#     command and .command.stage: the response store (C4 ruling P1) and the
+#     command and .command.stage: the response store and the
 #     GC after publication (hit reads the response only).
 COMMAND_UNIT = "[segment.\"custom/probe\"]\nkind='command'\ncommand=['/usr/bin/true']\n"
 COMMAND_SCREEN = "[layout.line1]\nleft=['char']\n[layout.line2]\nleft=[{shown}'char']\n"
@@ -2206,7 +2206,7 @@ def folder_outside_repository(parent, prefix):
     """A new folder under `parent`, outside every git repository and with no
     ancestor writable by group or others. A builtin stage's language tools
     live there: the round leaves PATH folders inside the shell's repository,
-    or any folder above it holding `.git`, out of its lookup (C2 ruling J9),
+    or any folder above it holding `.git`, out of its lookup,
     and a fixture base next to the build output sits in the source checkout,
     as on a CI runner. The collect and builtin stages' shell folder too, to
     keep the collector's discovery shallow."""

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write the B1 record golden vectors (spec section 3, M1 status grammar).
+"""Write the B1 record golden vectors (M1 status grammar).
 
 Usage: make_vectors.py OUT_DIR CANARY_PATH
 Hostile vectors embed CANARY_PATH; if any shell executes them the file

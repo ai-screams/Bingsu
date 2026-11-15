@@ -1,7 +1,7 @@
-"""A prompt call that a signal ended (spec section 6 rule 2; decisions P18,
-P19): the shell draws its own fallback and does not call the binary again
-until the next command. Before this rule fish 3.6 reported the signal,
-redrew the prompt, called the binary again and looped (a defect since M1).
+"""A prompt call that a signal ended: the shell draws its own fallback and
+does not call the binary again until the next command. Before this rule
+fish 3.6 reported the signal, redrew the prompt, called the binary again and
+looped (a defect since M1).
 Also: a run of `degraded:sandbox` records is reported once. zsh reports it
 again after it went away (test_zsh_notices.py); bash and fish move to that key
 rule in M5."""

@@ -1,5 +1,5 @@
-# Binary size probe for the three dependency combinations (spec section 8
-# capacity table). Not a workspace member; versions are pinned by its lock.
+# Binary size probe for the three dependency combinations.
+# Not a workspace member; versions are pinned by its lock.
 [package]
 name = "bingsu-size-probe"
 version = "0.0.0"

@@ -1,4 +1,4 @@
-"""Shell-side gates for zsh (spec section 7): calls per prompt, what the hooks
+"""Shell-side gates for zsh: calls per prompt, what the hooks
 execute, and one notice across the widgets. Counts, never times. The redraw
 gate names D3's tests in test_zsh_hooks.py. Rows are in tests/gate-acceptance.tsv."""
 import os

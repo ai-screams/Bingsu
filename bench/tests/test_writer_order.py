@@ -1,6 +1,6 @@
 """Effect of the fd cleanup order on a shell's $(...): the front must
-release fds 1 and 2 before spawning a child that outlives it (spec section 4
-side-effect rules; earlier experiment: about 1 s delay in all three shells).
+release fds 1 and 2 before spawning a child that outlives it (an earlier
+experiment saw about 1 s of delay in all three shells).
 Subprocesses only: no terminal, no GUI."""
 import os
 import re

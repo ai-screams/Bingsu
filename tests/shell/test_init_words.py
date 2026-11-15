@@ -1,6 +1,5 @@
-"""Runtime root and fixed-path words arrive at the binary as single words
-(spec section 9 M1 row, change (1)); init twice redefines the call with the
-new runtime root."""
+"""Runtime root and fixed-path words arrive at the binary as single words;
+init twice redefines the call with the new runtime root."""
 import importlib.util
 import os
 import pathlib

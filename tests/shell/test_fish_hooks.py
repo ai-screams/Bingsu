@@ -1,4 +1,4 @@
-"""fish connection (spec section 5 fish column). fish 3.6 (container) and
+"""fish connection. fish 3.6 (container) and
 current fish.
 
 fish draws the output of fish_prompt and fish_right_prompt; it never

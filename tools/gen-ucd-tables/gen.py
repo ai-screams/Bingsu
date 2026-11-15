@@ -23,7 +23,7 @@ SHA256 = {
 # Width classes (src/width.rs maps them to cells).
 NARROW, WIDE, AMBIGUOUS, ZERO, UNASSIGNED = 0, 1, 2, 3, 4
 # Format characters (gc=Cf) that sanitize keeps: ZWJ, which emoji sequences
-# need (spec section 3 step 1). Every other Cf is removed.
+# need. Every other Cf is removed.
 KEEP_CF = {0x200D}
 MAX_CP = 0x10FFFF
 # Verified inputs live in the repository; fetch.sh only serves a version bump.

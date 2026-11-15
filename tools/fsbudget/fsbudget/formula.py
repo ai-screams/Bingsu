@@ -1,4 +1,4 @@
-"""Budget formulas (spec section 8 "filesystem call budget formula").
+"""Filesystem-call budget formulas.
 
 Coefficient values and per-axis caps are M3; M1 evaluates the shape with
 caller-provided coefficients (all 1 for the synthetic program)."""
@@ -58,7 +58,7 @@ class HelperAxes:
     R: int  # references and candidates tried
     D: int  # source folders listed (conf.d)
     # Directory entries per folder. An axis with its own cap (M3) but no term
-    # in any call formula: recorded per fixture (spec 9 M1 row, change (6)).
+    # in any call formula: recorded per fixture.
     E_n: list[int] = field(default_factory=list)
     E_b: list[int] = field(default_factory=list)  # directory bytes per folder
     M: int = 0  # unique mounts (statfs)
@@ -104,7 +104,7 @@ def synthetic_helper_expected(ax: HelperAxes, co: Coeffs, changed: bool, buf: in
     e["flock"] = 1
     e["read"] += 2
     e["write"] = 1 + (ceil_div(snapshot_bytes, buf) if changed else 0)
-    e["fsync"] = 0  # boot-scoped runtime files are not fsynced (spec 3 state file rule)
+    e["fsync"] = 0  # boot-scoped runtime files are not fsynced
     e["renameat"] = 2 if changed else 1
     e["unlinkat"] = 0
     return e
@@ -537,7 +537,7 @@ def _recover(e: dict) -> None:
 def _store_read(e: dict, size: int, buf: int) -> None:
     # LockedStore::read of a present file: open_data's check, stamp, check,
     # the exact-length read, stamp and name identity. These files are replaced
-    # only by rename, so there is no end-check read (spec 8 read-count rule).
+    # only by rename, so there is no end-check read.
     _add(e, "open")
     _add(e, "check_data")
     _add(e, "metadata")
@@ -933,7 +933,7 @@ def _collection_gc(e: dict, p: HelperPlan) -> None:
 
 
 def _session_sweep(e: dict, p: HelperPlan) -> None:
-    # command_sessions::reclaim_stale (m6-C4a7, ruling D) after the stores'
+    # command_sessions::reclaim_stale after the stores'
     # own work: the runtime root's listing, one block and the block that ends
     # it (each: open ".", seek, getdents, the next position), and a stat of
     # each session lock's name, at most EXAMINE_MAX. The fixtures have none
@@ -975,7 +975,7 @@ PROCS_PREADS = -(-PROCS_MAX // (PREAD_CHUNK - PID_LINE_MAX + 1)) + 1
 
 
 def _command_session(e: dict, p: HelperPlan) -> None:
-    """command_grant's session lock and session_reclaim (C3, C4 ruling Q4):
+    """command_grant's session lock and session_reclaim:
     every round of a config with command units takes them, even with nothing
     to run."""
     _close_only_lock(e, create=True)
@@ -1251,8 +1251,8 @@ def helper_builtin_expected(plan: HelperPlan, *, deadline: bool = False) -> dict
 
 
 def helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
-    """Full-path helper-role calls of one release refresh helper run (spec 8 stage
-    table): runtime/context walks and lock, unchanged revalidation, change
+    """Full-path helper-role calls of one release refresh helper run:
+    runtime/context walks and lock, unchanged revalidation, change
     publication and the failure path. Boot-scoped runtime files are never
     fsynced; renew is absent because the fixture has no approval record.
     For collect this is the complete prefix + tail sum; live checks use
@@ -1456,7 +1456,7 @@ def collection_front_expected(directories: int, file_sizes: tuple[int | None, ..
     `directories` counts successfully inspected private collection directories;
     a failed directory open contributes one attempt and no facts. With all
     three, the prefetch opens three files: the collection response, the
-    previous response and the command response (C4b ruling Q1: opened with
+    previous response and the command response (opened with
     them before the filter, read only when the snapshot draws a command
     segment). None file sizes mean ENOENT slots. Body sizes name only records
     whose header was accepted and that were read (a command response the
@@ -1638,7 +1638,7 @@ def front_attempts_expected(C: int, attempts: list[FrontAttempt], chunk: int,
     prefetched regardless of selection. ClockPins prepares nine descriptors
     (one O_PATH root), reads the 37-byte boot ID and EOF, and three links.
     O_PATH ACL queries each require the counted /proc/self/fd fallback.
-    The immutable snapshot/marker reads have no EOF probe (spec 1435).
+    The immutable snapshot/marker reads have no EOF probe.
     """
     # 이것을 실패시키는 것: 음수 축·0 청크 또는 고정 marker 208 변경을 허용하는 것.
     if C < 1 or chunk <= 0 or marker != 208:

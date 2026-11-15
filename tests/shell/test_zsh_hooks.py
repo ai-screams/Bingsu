@@ -1,6 +1,5 @@
-"""zsh security state machine (spec section 3 option table, section 5 two
-hooks, section 7 security table rows for zsh). Runs on zsh 5.8 (container)
-and the current zsh."""
+"""zsh security state machine (option table, the two hooks, security rows).
+Runs on zsh 5.8 (container) and the current zsh."""
 import itertools
 import os
 import re
@@ -212,7 +211,7 @@ def test_no_duration_without_datetime_module(tmp_path):
 def test_empty_pipestatus_falls_back_to_status(tmp_path):
     r, argv = install_once(tmp_path, b'_bingsu_p=(); _bingsu_s=3; _bingsu_install; print -r -- "RC=$?"\n')
     assert opt(argv, b"--status") == b"3" and opt(argv, b"--pipestatus") == b"3", argv
-    # The install hook hands the saved status on (spec section 7 "공존 종료 코드").
+    # The install hook hands the saved status on to the next hooks.
     assert r.stdout == b"RC=3\n", r.stdout
 
 
@@ -309,7 +308,7 @@ def test_init_survives_missing_datetime_module(tmp_path):
 
 
 # Hooks between the save hook and the install hook do not count as command
-# time (spec section 5: the save hook records the end time).
+# time: the save hook records the end time.
 # 이것을 실패시키는 것: 종료 시각을 설치 hook에서 읽는 것(사이 hook의 0.5초가 들어감).
 def test_duration_excludes_hooks_between_save_and_install(tmp_path):
     rc_after = ("_slow() { sleep 0.5 }\n"
@@ -705,7 +704,7 @@ def test_init_twice_wraps_once(tmp_path):
 
 # Ctrl-C ends the line, so its new prompt makes the one call a prompt makes
 # (precmd_functions run; only a `precmd` function is skipped after an interrupt).
-# 이것을 실패시키는 것: transient가 bingsu를 부르는 것(스펙 1313행, 호출 0).
+# 이것을 실패시키는 것: transient가 bingsu를 부르는 것(호출 0이어야 함).
 def test_transient_makes_no_bingsu_call(tmp_path):
     s, inst, screen = typed_screen(tmp_path)
     settle(screen)
@@ -947,7 +946,7 @@ def to_main(screen, want="INS>"):
     assert screen.wait(lambda v: want in v.lines()[v.cursor()[0]], stable=True), screen.lines()
 
 
-# 스펙 1313행: 모드 전환은 bingsu를 부르지 않는다.
+# 모드 전환은 bingsu를 부르지 않는다.
 # 이것을 실패시키는 것: 위젯이 `_bingsu_call`을 부르는 것, 키 입력마다 그리는 것.
 def test_vi_switch_makes_no_bingsu_call(tmp_path):
     s, inst, screen = typed_screen(tmp_path, VI, record=fields(**VI_RECORD))
@@ -1115,7 +1114,7 @@ def test_same_width_makes_no_call(tmp_path):
     s.kill()
 
 
-# 신호를 합친 결과는 시간이 아니라 호출 수로 판정한다(스펙 581행).
+# 신호를 합친 결과는 시간이 아니라 호출 수로 판정한다.
 # 이것을 실패시키는 것: 끝난 뒤 폭을 다시 보지 않는 것(마지막 폭이 그려지지 않음).
 def test_winch_burst_ends_at_final_width(tmp_path):
     s, inst, screen = typed_screen(tmp_path, record=fields())
@@ -1402,7 +1401,7 @@ def test_winch_on_a_continuation_line_leaves_it_alone(tmp_path):
     assert not redraws(inst) and not any("then" in line for line in lines), lines
 
 
-# 스펙 3절: 저장한 봉투가 없으면 다시 그리지 않는다.
+# 저장한 봉투가 없으면 다시 그리지 않는다.
 # 이것을 실패시키는 것: 빈 봉투로 부르는 것(종료 코드 없는 redraw), 그 판정을 사용자 옵션 아래에서 하는 것.
 @pytest.mark.parametrize("options", ["", "setopt no_unset ksh_arrays"])
 def test_no_saved_words_no_redraw(tmp_path, options):

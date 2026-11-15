@@ -1,5 +1,5 @@
-"""Builtin language versions through the real helper, supervisor and relay
-(plan D3a): a drawn language segment starts a round without config units,
+"""Builtin language versions through the real helper, supervisor and relay:
+a drawn language segment starts a round without config units,
 its probe runs the real executable once and its version is published to the
 command response; a version manager's fast path publishes without running.
 The language command is `version-stub` (crates/bingsu-bench) copied under
@@ -56,7 +56,7 @@ def session_with(tmp_path, *segments):
     session = BuiltinSession(tmp_path)
     session.env["HOME"] = str(session.base)
     # The shell's folder stands for the repository, and `PATH` folders inside
-    # it are left out (C2 ruling J9): the tools live beside it.
+    # it are left out: the tools live beside it.
     session.pwd = session.base / "work"
     session.pwd.mkdir()
     session.level = "info"
@@ -143,8 +143,8 @@ def test_explain_shows_what_a_round_would_decide(tmp_path, _native_boot_required
     assert "python  shows 3.12.1" in explain(session)
 
 
-# D3b: 앞단이 이 셸의 내장 언어 버전을 프롬프트에 그린다. 같은 폴더라도 언어 변수가 다른 셸(여기서는 volta
-# 폴더 변수)에는 그 값을 그리지 않는다(D3b Q1). 이것을 실패시키는 것: 앞단이 언어 segment의 응답 값을 채우지
+# 앞단이 이 셸의 내장 언어 버전을 프롬프트에 그린다. 같은 폴더라도 언어 변수가 다른 셸(여기서는 volta
+# 폴더 변수)에는 그 값을 그리지 않는다. 이것을 실패시키는 것: 앞단이 언어 segment의 응답 값을 채우지
 # 않는 것, 앞단의 환경 요약값 비교를 빼는 것(다른 셸에도 보임).
 def test_builtin_version_is_drawn_for_its_own_shell(tmp_path, _native_boot_required):
     session = session_with(tmp_path, "node")
@@ -373,7 +373,7 @@ def deep(base, repo):
 
 
 # 폴더 사실이 저장소를 확정하지 못하면(별칭 경로, 탐색 깊이 제한) 내장 언어를 정하지 않는다. 저장소 안 node도, 밖
-# node도 실행하지 않고 PATH도 걷지 않는다(D3a 재리뷰 H1, M3). 이것을 실패시키는 것: 미확정을 저장소 밖으로 보는
+# node도 실행하지 않고 PATH도 걷지 않는다. 이것을 실패시키는 것: 미확정을 저장소 밖으로 보는
 # 것(셸 폴더가 저장소를 대신해 /repo/bin/node가 실행됨), 할 일이 없는 회차에도 PATH를 걷는 것.
 @pytest.mark.parametrize("where", ["alias", "deep"])
 def test_unsettled_repository_decides_no_language(tmp_path, where, _native_boot_required):
@@ -394,7 +394,7 @@ def test_config_units_still_search_beside_an_unsettled_language(tmp_path, _nativ
 
 
 # git과 언어 segment를 함께 그려도 git 값이 실제 프롬프트에 보인다. 도우미 요청의 mask와 앞단이 기대하는 binding이
-# 같은 규칙에서 나오기 때문이다(D3a 재리뷰 M2). 이것을 실패시키는 것: 언어 회차의 dir 비트를 도우미 쪽에서만
+# 같은 규칙에서 나오기 때문이다. 이것을 실패시키는 것: 언어 회차의 dir 비트를 도우미 쪽에서만
 # 더하는 것(수집 응답 전체가 거부되어 git 표시가 사라짐).
 def test_git_shows_beside_a_language_segment(tmp_path, _native_boot_required):
     session = BuiltinSession(tmp_path)

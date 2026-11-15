@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time `init` adds to shell start (spec section 8, the "새 터미널 탭을 열 때" row).
+"""Time `init` adds to shell start, as when a new terminal tab opens.
 
 The spec defines the row for a shell that finds a valid screen snapshot of the
 same boot and settings context. So before any timing the first product prompt

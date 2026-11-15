@@ -1,4 +1,4 @@
-"""The first visible prompt (M3a Task V3): the real binary renders the
+"""The first visible prompt: the real binary renders the
 built-in default theme for each shell, two lines, through the M1 hooks."""
 import os
 import pathlib

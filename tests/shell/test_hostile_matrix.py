@@ -21,7 +21,7 @@ ROWS = matrix.rows()
 # Every fallback prompt (all three hooks) ends with this mark.
 MINIMAL = "❯ ".encode()
 LOCALES = ("en_US.UTF-8", "C", "ko_KR.UTF-8")
-# The hook paths that escape data (spec section 3 option table): bash with
+# The hook paths that escape data: bash with
 # promptvars off doubles `\`, zsh with PROMPT_BANG doubles `!`. Without these
 # bash takes the reference path and zsh (-f) the plain assignment; fish has
 # one path.

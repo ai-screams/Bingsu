@@ -314,7 +314,7 @@ def test_supervisor_keeps_its_cgroup_parent_from_children(tmp_path):
     session.wait_quiet(timeout=8)
 
 
-# 후보가 없는 회차라도 설정에 명령 단위가 있으면 잠금 직후 회수한다(C4 판정 Q4). 감독 SIGKILL로 남은 대상은, 그
+# 후보가 없는 회차라도 설정에 명령 단위가 있으면 잠금 직후 회수한다. 감독 SIGKILL로 남은 대상은, 그
 # 단위가 화면에서 빠져(not_run) 실행할 것이 없는 다음 프롬프트에서 끝난다. 이것을 실패시키는 것: prepare의
 # 후보 없는 회차 회수를 지우는 것(남은 대상이 계속 산다). 명령 단위가 아예 없는 설정은 잠금도 회수도 하지
 # 않는다(test_command_round.py::test_round_without_units_starts_no_supervisor).

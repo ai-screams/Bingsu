@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Summarize M1 measurements against the spec's hypotheses (spec section 8).
+"""Summarize M1 measurements against their hypothesized limits.
 
 Usage: summarize.py PATH...   (each a folder of *.jsonl rows and hyperfine
 *.json, or one such file). Several paths are how results from different runs
 (a warm and a --cold-once folder, the B3/B4 row files) are put together; the
 merge is explicit, never "whatever is in the folder".
-Never changes a target: an overrun prints OVER and goes to the user
-(spec section 8 "gate reinforcement", last rule).
+Never changes a target: an overrun prints OVER and goes to the user.
 
 Input that cannot be read is an error (exit 2), never a zero: a missing
 path, a line that is not JSON (NaN and Infinity included), a row of an

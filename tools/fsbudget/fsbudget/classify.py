@@ -1,4 +1,4 @@
-"""Map syscalls to the call kinds of the budget formula (spec 8).
+"""Map syscalls to the call kinds of the budget formula.
 
 Default deny: a syscall is either in NON_FS (never a filesystem call, with
 the reason in the comment), fd-dependent (FD_DEPENDENT, decided by what the
@@ -9,7 +9,7 @@ path, a path strace can place: absolute, or relative to a dirfd that -y
 names as a file. A path relative to the cwd (AT_FDCWD or a legacy path
 call) is `unknown-fs`. So are pathless calls on file fds and any syscall
 nobody has classified yet; the scaffold rejects `unknown-fs` for gated
-roles (spec 8 front table: "other filesystem calls = 0"). A harmless
+roles (the front makes no other filesystem calls). A harmless
 syscall that shows up as `unknown-fs` in CI goes into NON_FS with its
 reason, never silently.
 """
@@ -212,7 +212,7 @@ HELPER_LEGACY_PATH_KINDS = {
 
 
 def helper_kind(c: Call) -> str | None:
-    """Refresh helper vocabulary for the per-stage gate (spec 8 stage table).
+    """Refresh helper vocabulary for the per-stage gate.
 
     Each shape is one the helper's own code makes, named by what it does:
     Rust File::metadata is fd statx; Path::symlink_metadata is absolute-path

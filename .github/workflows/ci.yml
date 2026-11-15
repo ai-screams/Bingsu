@@ -1049,7 +1049,7 @@ jobs:
       - run: python3 -B tools/gen-ucd-tables/test_gen.py
       - run: python3 -B tools/gen-ucd-tables/gen.py --check crates/bingsu-core/src/ucd.rs
 
-  # Instruction counts of core paths (spec section 8 "측정과 게이트", M2).
+  # Instruction counts of core paths (M2).
   # Callgrind counts do not drift for one binary and one Valgrind, so the
   # base tip and the PR are measured in this job on this runner and
   # compared. The checkout is the merge commit of the base tip and the PR

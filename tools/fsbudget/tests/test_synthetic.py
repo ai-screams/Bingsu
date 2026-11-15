@@ -1,4 +1,4 @@
-"""The scaffold's deterministic gate (spec section 9 M1 row, change (6)):
+"""The scaffold's deterministic gate:
 on a synthetic program with known calls, classification, attribution and
 formula values must match exactly, and the marker windows must be clean.
 Linux only (strace)."""

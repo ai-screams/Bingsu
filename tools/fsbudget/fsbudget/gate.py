@@ -1,5 +1,5 @@
 """Compare measured counts with expected counts per role and per kind.
-A surplus in one kind is never offset by slack in another (spec 8). A gated
+A surplus in one kind is never offset by slack in another. A gated
 role with no measured calls at all is a violation in either mode: its calls
 went to another role or nowhere, and `le` would otherwise pass it empty.
 Calls of a task attribution could not place (role `unresolved`) are a
@@ -181,7 +181,7 @@ def check_command(attribution, expected, *, evidence=None):
     install (and, on the atomic path, the unit cgroup reclaim after it) are
     exact; from the next clock observation (its boot_id open) on they are the
     GC's, held to an upper bound. The round must install its response.
-    Calls of the supervisor, relay and target are other roles (Q7)."""
+    Calls of the supervisor, relay and target are other roles."""
     from collections import Counter
     from .classify import split_args
 
