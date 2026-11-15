@@ -302,75 +302,6 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 let done = round.grant(permit, repo, &languages, sys::current_uid(), &mut groups);
-                for why in &done.hidden {
-                    report(&mut groups, LogLevel::Info, why);
-                }
-                // What the round read (D3a re-review M3): a round with
-                // nothing to decide walks no PATH and resolves no folder.
-                if done.searched {
-                    report(
-                        &mut groups,
-                        LogLevel::DebugLog,
-                        "command round: PATH searched",
-                    );
-                }
-                for _ in 0..done.resolved {
-                    report(
-                        &mut groups,
-                        LogLevel::DebugLog,
-                        "command round: shell folder resolved for rustup",
-                    );
-                }
-                if done.unresolved > 0 {
-                    report(
-                        &mut groups,
-                        LogLevel::Info,
-                        "command round: a unit's executable was not found or failed the checks",
-                    );
-                }
-                if done.failed {
-                    report(
-                        &mut groups,
-                        LogLevel::Error,
-                        "command round failed: the shell's folder could not be read",
-                    );
-                }
-                if done.send_failed {
-                    report(
-                        &mut groups,
-                        LogLevel::Error,
-                        "command round failed: the grant could not be sent in time",
-                    );
-                }
-                if done.oversize > 0 {
-                    report(
-                        &mut groups,
-                        LogLevel::Info,
-                        "command round: a unit's environment is over the relay input cap",
-                    );
-                }
-                if done.repo_fallback {
-                    report(
-                        &mut groups,
-                        LogLevel::Info,
-                        "command round: no collected repository root; the shell's folder stands for it",
-                    );
-                }
-                let dropped = done.dropped;
-                if dropped.malformed + dropped.duplicate > 0 {
-                    let text = format!(
-                        "command environment: {} malformed entries and {} duplicated names left out",
-                        dropped.malformed, dropped.duplicate
-                    );
-                    log::event(
-                        e.log_level,
-                        log_root,
-                        sys::current_uid(),
-                        &mut groups,
-                        LogLevel::Info,
-                        &text,
-                    );
-                }
                 // A command response reserves GC capacity like a collection
                 // response: a round that published (or tried to) runs the
                 // reclaim too, or command-only layouts fill the budget and
@@ -379,24 +310,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 {
                     collection_runtime = command_runtime.take();
                 }
-                if done.publish_failed {
-                    report(
-                        &mut groups,
-                        LogLevel::Info,
-                        "command round: results not published; the store was busy or refused",
-                    );
-                }
-                if done.rejected > 0 {
-                    report(
-                        &mut groups,
-                        LogLevel::Error,
-                        "command round: results rejected",
-                    );
-                }
-                for note in &done.notes {
-                    report(&mut groups, LogLevel::Info, note);
-                }
-                report(&mut groups, LogLevel::DebugLog, "command round finished");
+                report_command_round(&done, &report, &mut groups, e.log_level, log_root);
             }
             None => {
                 for note in round.abandon() {
@@ -419,44 +333,168 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if let Some(text) = command_skip.and_then(command_grant::Skip::message) {
         report(&mut groups, LogLevel::Info, text);
     }
-    if let Some(runtime) = collection_runtime
+    reclaim_collection(
+        collection_runtime,
+        &mut clock,
+        e.session.as_deref(),
+        &report,
+        &mut groups,
+    );
+    exit_after_report(
+        collection_outcome,
+        filter_failed,
+        &result,
+        &report,
+        &mut groups,
+    )
+}
+
+/// What a command round's report says in the log, in the order the round
+/// found it. Strings that are not `'static` (the dropped-entries count) go
+/// to `log::event` directly, as in `run`.
+fn report_command_round(
+    done: &command_grant::Report,
+    report: &dyn Fn(&mut SystemGroups, LogLevel, &'static str),
+    groups: &mut SystemGroups,
+    log_level: LogLevel,
+    log_root: Option<&Path>,
+) {
+    for &why in &done.hidden {
+        report(groups, LogLevel::Info, why);
+    }
+    // What the round read (D3a re-review M3): a round with
+    // nothing to decide walks no PATH and resolves no folder.
+    if done.searched {
+        report(groups, LogLevel::DebugLog, "command round: PATH searched");
+    }
+    for _ in 0..done.resolved {
+        report(
+            groups,
+            LogLevel::DebugLog,
+            "command round: shell folder resolved for rustup",
+        );
+    }
+    if done.unresolved > 0 {
+        report(
+            groups,
+            LogLevel::Info,
+            "command round: a unit's executable was not found or failed the checks",
+        );
+    }
+    if done.failed {
+        report(
+            groups,
+            LogLevel::Error,
+            "command round failed: the shell's folder could not be read",
+        );
+    }
+    if done.send_failed {
+        report(
+            groups,
+            LogLevel::Error,
+            "command round failed: the grant could not be sent in time",
+        );
+    }
+    if done.oversize > 0 {
+        report(
+            groups,
+            LogLevel::Info,
+            "command round: a unit's environment is over the relay input cap",
+        );
+    }
+    if done.repo_fallback {
+        report(
+            groups,
+            LogLevel::Info,
+            "command round: no collected repository root; the shell's folder stands for it",
+        );
+    }
+    let dropped = done.dropped;
+    if dropped.malformed + dropped.duplicate > 0 {
+        let text = format!(
+            "command environment: {} malformed entries and {} duplicated names left out",
+            dropped.malformed, dropped.duplicate
+        );
+        log::event(
+            log_level,
+            log_root,
+            sys::current_uid(),
+            groups,
+            LogLevel::Info,
+            &text,
+        );
+    }
+    if done.publish_failed {
+        report(
+            groups,
+            LogLevel::Info,
+            "command round: results not published; the store was busy or refused",
+        );
+    }
+    if done.rejected > 0 {
+        report(groups, LogLevel::Error, "command round: results rejected");
+    }
+    for &note in &done.notes {
+        report(groups, LogLevel::Info, note);
+    }
+    report(groups, LogLevel::DebugLog, "command round finished");
+}
+/// Runs the collection reclaim after the round, if a collection or a command
+/// round published, and logs what it says.
+fn reclaim_collection(
+    runtime: Option<std::fs::File>,
+    clock: &mut impl ClockSource,
+    session: Option<&[u8]>,
+    report: &dyn Fn(&mut SystemGroups, LogLevel, &'static str),
+    groups: &mut SystemGroups,
+) {
+    if let Some(runtime) = runtime
         && let Ok(now) = clock.observe()
     {
-        let outcome = collection_gc::reclaim(
-            &runtime,
-            now,
-            collection_gc::GcBudget::default(),
-            e.session.as_deref(),
-        )
-        .map(|gc| match gc.stop {
-            collection_gc::GcStop::Complete => Ok(()),
-            stop => Err(stop),
-        });
+        let outcome =
+            collection_gc::reclaim(&runtime, now, collection_gc::GcBudget::default(), session).map(
+                |gc| match gc.stop {
+                    collection_gc::GcStop::Complete => Ok(()),
+                    stop => Err(stop),
+                },
+            );
         let (_, message) = collection_result(outcome);
         if let Some((severity, text)) = message {
-            report(&mut groups, severity, text);
+            report(groups, severity, text);
         }
     }
+}
+
+/// The last log lines (the collection's outcome, a missing helper filter,
+/// the refresh result) and the exit code: 1 when the refresh was incomplete
+/// or invalid.
+fn exit_after_report(
+    collection_outcome: Option<(LogLevel, &'static str)>,
+    filter_failed: bool,
+    result: &RefreshResult,
+    report: &dyn Fn(&mut SystemGroups, LogLevel, &'static str),
+    groups: &mut SystemGroups,
+) -> ExitCode {
     if let Some((severity, text)) = collection_outcome {
-        report(&mut groups, severity, text);
+        report(groups, severity, text);
     }
     if filter_failed {
         report(
-            &mut groups,
+            groups,
             LogLevel::Error,
             "refresh incomplete: helper TSYNC filter unavailable",
         );
     }
     match result {
-        RefreshResult::Published { .. } => report(&mut groups, LogLevel::Info, "refresh published"),
+        RefreshResult::Published { .. } => report(groups, LogLevel::Info, "refresh published"),
         RefreshResult::Revalidated { .. } => {
-            report(&mut groups, LogLevel::DebugLog, "refresh revalidated")
+            report(groups, LogLevel::DebugLog, "refresh revalidated")
         }
-        RefreshResult::Busy => report(&mut groups, LogLevel::DebugLog, "refresh busy"),
-        RefreshResult::Invalid => report(&mut groups, LogLevel::Error, "refresh invalid"),
-        RefreshResult::Incomplete => report(&mut groups, LogLevel::Error, "refresh incomplete"),
+        RefreshResult::Busy => report(groups, LogLevel::DebugLog, "refresh busy"),
+        RefreshResult::Invalid => report(groups, LogLevel::Error, "refresh invalid"),
+        RefreshResult::Incomplete => report(groups, LogLevel::Error, "refresh incomplete"),
     }
-    if matches!(result, RefreshResult::Incomplete | RefreshResult::Invalid) {
+    if matches!(*result, RefreshResult::Incomplete | RefreshResult::Invalid) {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -1022,5 +1060,79 @@ mod env_tests {
         let mut bad = frame.clone();
         *bad.last_mut().unwrap() ^= 1;
         assert_eq!(read_env_why(pipe_with(&bad)), Err(NoEnv::Damaged));
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::{command_grant, report_command_round};
+    use crate::commands::group_policy::SystemGroups;
+    use bingsu_core::envelope::LogLevel;
+    use std::cell::RefCell;
+
+    // 이것을 실패시키는 것: 보고 줄의 순서를 바꾸는 것(로그를 읽는 사람이 라운드가 본 순서를 따라가므로 순서가 계약),
+    // 한 줄을 빼거나 수준을 바꾸는 것, 마지막 "finished" 줄을 앞이나 빼는 것, 세는 줄(`resolved`)의 횟수를 바꾸는 것.
+    #[test]
+    fn a_round_reports_what_it_found_in_the_order_it_found_it() {
+        let done = command_grant::Report {
+            hidden: vec!["hidden: a reason"],
+            searched: true,
+            resolved: 2,
+            unresolved: 1,
+            failed: true,
+            send_failed: true,
+            oversize: 1,
+            repo_fallback: true,
+            publish_failed: true,
+            rejected: 1,
+            notes: vec!["a note"],
+            ..Default::default()
+        };
+        let lines = RefCell::new(Vec::new());
+        let report = |_: &mut SystemGroups, level: LogLevel, text: &'static str| {
+            lines.borrow_mut().push((level, text));
+        };
+        let mut groups = SystemGroups::new(b"nobody");
+        report_command_round(&done, &report, &mut groups, LogLevel::Info, None);
+        let want = [
+            (LogLevel::Info, "hidden: a reason"),
+            (LogLevel::DebugLog, "command round: PATH searched"),
+            (
+                LogLevel::DebugLog,
+                "command round: shell folder resolved for rustup",
+            ),
+            (
+                LogLevel::DebugLog,
+                "command round: shell folder resolved for rustup",
+            ),
+            (
+                LogLevel::Info,
+                "command round: a unit's executable was not found or failed the checks",
+            ),
+            (
+                LogLevel::Error,
+                "command round failed: the shell's folder could not be read",
+            ),
+            (
+                LogLevel::Error,
+                "command round failed: the grant could not be sent in time",
+            ),
+            (
+                LogLevel::Info,
+                "command round: a unit's environment is over the relay input cap",
+            ),
+            (
+                LogLevel::Info,
+                "command round: no collected repository root; the shell's folder stands for it",
+            ),
+            (
+                LogLevel::Info,
+                "command round: results not published; the store was busy or refused",
+            ),
+            (LogLevel::Error, "command round: results rejected"),
+            (LogLevel::Info, "a note"),
+            (LogLevel::DebugLog, "command round finished"),
+        ];
+        assert_eq!(*lines.borrow(), want);
     }
 }
