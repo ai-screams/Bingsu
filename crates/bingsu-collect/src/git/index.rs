@@ -411,6 +411,57 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
         checksum(bytes)?;
     }
     let end = bytes.len() - 20;
+    let scan = scan_entries(bytes, version, entries, end, meter)?;
+    meter.charge_axis(Axis::IndexBytes, scan.paths as u64)?;
+    let entry_end = scan.end;
+    let Extensions { sparse, tree } = scan_extensions(bytes, entry_end, end)?;
+    let tree_bytes = tree.as_ref().map_or(0, |(range, _)| range.len());
+    let tree_allocation = tree.as_ref().map_or(0, |(_, reservation)| *reservation);
+    let reservation = decode_reservation(entries, &scan, tree_bytes, tree_allocation)?;
+    meter.allocation(reservation)?;
+    // Compact the same safe-read bytes only after checking the original hash.
+    // No second pathname read and no independent cache-tree object parser.
+    if let Some((range, _)) = tree {
+        bytes.copy_within(range, entry_end);
+    }
+    let mut parser_end = entry_end + tree_bytes;
+    if sparse {
+        bytes[parser_end..parser_end + 8].copy_from_slice(b"sdir\0\0\0\0");
+        parser_end += 8;
+    }
+    bytes[parser_end..parser_end + 20].fill(0);
+    let (state, _) = gix_index::State::from_bytes(
+        &bytes[..parser_end + 20],
+        std::time::UNIX_EPOCH.into(),
+        Kind::Sha1,
+        gix_index::decode::Options {
+            thread_limit: Some(1),
+            alloc_limit_bytes: Some(reservation),
+            ..Default::default()
+        },
+    )
+    .map_err(|_| INVALID)?;
+    validate(&state, meter)?;
+    Ok(state)
+}
+
+/// Where the entry table ends and how many path bytes it names in all and in
+/// its longest path.
+struct EntryScan {
+    end: usize,
+    paths: usize,
+    longest: usize,
+}
+
+/// Frame every entry, checking the deadline once per entry, and bound its path
+/// before gix reads it.
+fn scan_entries(
+    bytes: &[u8],
+    version: usize,
+    entries: usize,
+    end: usize,
+    meter: &mut Meter,
+) -> Result<EntryScan, ReadError> {
     let mut pos = 12usize;
     let mut previous = 0usize;
     let mut paths = 0usize;
@@ -426,20 +477,9 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
         }
         let mut prefix = 0;
         if version == 4 {
-            let mut strip = 0usize;
-            loop {
-                let byte = *bytes.get(pos).ok_or(INVALID)?;
-                pos += 1;
-                strip = strip
-                    .checked_mul(128)
-                    .and_then(|n| n.checked_add((byte & 127) as usize))
-                    .ok_or(INVALID)?;
-                if byte & 128 == 0 {
-                    break;
-                }
-                strip = strip.checked_add(1).ok_or(INVALID)?;
-            }
-            prefix = previous.checked_sub(strip).ok_or(INVALID)?;
+            prefix = previous
+                .checked_sub(v4_strip(bytes, &mut pos)?)
+                .ok_or(INVALID)?;
         }
         let suffix = bytes
             .get(pos..end)
@@ -471,8 +511,40 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
             return Err(INVALID);
         }
     }
-    meter.charge_axis(Axis::IndexBytes, paths as u64)?;
-    let entry_end = pos;
+    Ok(EntryScan {
+        end: pos,
+        paths,
+        longest,
+    })
+}
+
+/// How many bytes of the previous path a v4 entry drops before its own suffix
+/// (Git's offset varint), read from `pos` onward.
+fn v4_strip(bytes: &[u8], pos: &mut usize) -> Result<usize, ReadError> {
+    let mut strip = 0usize;
+    loop {
+        let byte = *bytes.get(*pos).ok_or(INVALID)?;
+        *pos += 1;
+        strip = strip
+            .checked_mul(128)
+            .and_then(|n| n.checked_add((byte & 127) as usize))
+            .ok_or(INVALID)?;
+        if byte & 128 == 0 {
+            break;
+        }
+        strip = strip.checked_add(1).ok_or(INVALID)?;
+    }
+    Ok(strip)
+}
+
+/// What the extension pass keeps: whether the index is sparse, and the TREE
+/// cache's range with its decoding scratch, only when there is exactly one.
+struct Extensions {
+    sparse: bool,
+    tree: Option<(std::ops::Range<usize>, usize)>,
+}
+
+fn scan_extensions(bytes: &[u8], mut pos: usize, end: usize) -> Result<Extensions, ReadError> {
     let mut sparse = false;
     let mut tree = None;
     let mut trees = 0;
@@ -512,40 +584,25 @@ pub(crate) fn parse(bytes: &mut [u8], meter: &mut Meter) -> Result<gix_index::St
     if trees != 1 {
         tree = None;
     }
-    let tree_bytes = tree.as_ref().map_or(0, |(range, _)| range.len());
-    let tree_allocation = tree.as_ref().map_or(0, |(_, reservation)| *reservation);
+    Ok(Extensions { sparse, tree })
+}
+
+/// The allocation bound handed to gix's decoder.
+fn decode_reservation(
+    entries: usize,
+    scan: &EntryScan,
+    tree_bytes: usize,
+    tree_allocation: usize,
+) -> Result<usize, ReadError> {
     // gix estimates path capacity from the entire supplied slice, extensions
     // included. Charge that estimate as well as bounded TREE decoding scratch.
-    let backing = paths.max(entry_end.saturating_sub(12 + entries * 62) + tree_bytes);
-    let reservation = entries
+    let backing = scan
+        .paths
+        .max(scan.end.saturating_sub(12 + entries * 62) + tree_bytes);
+    entries
         .checked_mul(std::mem::size_of::<gix_index::Entry>())
-        .and_then(|n| n.checked_add(3 * backing + 3 * longest + tree_allocation + 4096))
-        .ok_or(ReadError::Limit)?;
-    meter.allocation(reservation)?;
-    // Compact the same safe-read bytes only after checking the original hash.
-    // No second pathname read and no independent cache-tree object parser.
-    if let Some((range, _)) = tree {
-        bytes.copy_within(range, entry_end);
-    }
-    let mut parser_end = entry_end + tree_bytes;
-    if sparse {
-        bytes[parser_end..parser_end + 8].copy_from_slice(b"sdir\0\0\0\0");
-        parser_end += 8;
-    }
-    bytes[parser_end..parser_end + 20].fill(0);
-    let (state, _) = gix_index::State::from_bytes(
-        &bytes[..parser_end + 20],
-        std::time::UNIX_EPOCH.into(),
-        Kind::Sha1,
-        gix_index::decode::Options {
-            thread_limit: Some(1),
-            alloc_limit_bytes: Some(reservation),
-            ..Default::default()
-        },
-    )
-    .map_err(|_| INVALID)?;
-    validate(&state, meter)?;
-    Ok(state)
+        .and_then(|n| n.checked_add(3 * backing + 3 * scan.longest + tree_allocation + 4096))
+        .ok_or(ReadError::Limit)
 }
 
 /// Also validate caller-supplied (including later sparse-expanded) states.
