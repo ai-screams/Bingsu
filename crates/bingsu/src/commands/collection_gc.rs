@@ -1496,13 +1496,12 @@ fn evict(
             catalog,
             i,
             report,
-            &Retiring {
+            &Victim {
                 parent: &parent,
                 dir: &dir,
                 name,
-                tomb: TOMBSTONE,
-                bytes: actual_bytes,
             },
+            TOMBSTONE,
             FILES
                 .iter()
                 .map(|file_name| (*file_name, collection_store::file_cap(file_name))),
@@ -1516,37 +1515,31 @@ fn evict(
     Ok(())
 }
 
-/// The folder an eviction is about to remove, already opened and checked.
-struct Retiring<'a> {
+/// The folder an eviction is about to remove, opened and checked by the
+/// caller: its parent, itself and the name it has there.
+struct Victim<'a> {
     parent: &'a File,
     dir: &'a File,
     name: &'a str,
-    /// The name the folder is renamed to before anything in it goes.
-    tomb: &'a str,
-    /// What the catalog charged for it.
-    bytes: u64,
 }
 
-// The tail both evictions share: rename the folder to its tombstone name,
-// check it is the same folder, remove its files (each under its own cap),
-// remove the folder, and take it out of the catalog's totals. The caller has
-// done every check and holds the folder's locks, and orders `files` so the
-// lock file comes last.
+// The tail both evictions share: rename the folder to `tomb` (the caller's
+// policy for what the tombstone is called), check it is the same folder,
+// remove its files (each under its own cap), remove the folder, and take it
+// out of the catalog's totals. The caller has done every check and holds the
+// folder's locks, orders `files` so the lock file comes last, and has set
+// `entries[index].bytes` to the folder's real size: that is what comes off
+// the totals.
 fn retire_store<'a>(
     catalog: &mut Catalog,
     index: usize,
     report: &mut GcReport,
-    folder: &Retiring<'_>,
+    victim: &Victim<'_>,
+    tomb: &str,
     files: impl Iterator<Item = (&'a str, usize)>,
     me: u32,
 ) -> Result<(), StoreError> {
-    let Retiring {
-        parent,
-        dir,
-        name,
-        tomb,
-        bytes,
-    } = *folder;
+    let Victim { parent, dir, name } = *victim;
     if name != tomb {
         if !sys::at_stamp(parent.as_fd(), OsStr::new(tomb))
             .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
@@ -1564,6 +1557,7 @@ fn retire_store<'a>(
     }
     sys::remove_dir_at(parent.as_fd(), OsStr::new(tomb))?;
     report.removed_dirs += 1;
+    let bytes = catalog.entries[index].bytes;
     catalog.bytes = catalog.bytes.saturating_sub(bytes);
     catalog.stores = catalog.stores.saturating_sub(1);
     catalog.nodes = catalog.nodes.saturating_sub(1);
@@ -1630,13 +1624,12 @@ fn evict_breaker(
         catalog,
         index,
         report,
-        &Retiring {
+        &Victim {
             parent: &parent,
             dir: &dir,
             name,
-            tomb: &tomb,
-            bytes,
         },
+        &tomb,
         collection_breaker::FILES.iter().map(|file| {
             let cap = if *file == collection_breaker::LOCK {
                 0

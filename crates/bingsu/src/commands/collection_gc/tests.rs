@@ -1,9 +1,9 @@
 //! The shared tail of the two evictions, on a real folder under a private
 //! temporary root.
-use super::{Catalog, Entry, GcReport, Retiring, retire_store};
+use super::{Catalog, Entry, GcReport, Victim, retire_store};
 use crate::commands::{snapshot_store::StoreError, sys};
 use bingsu_core::snapshot::Clock;
-use std::{fs, fs::File, path::PathBuf};
+use std::{fs, fs::File, os::unix::fs::PermissionsExt, path::PathBuf};
 
 fn clock() -> Clock {
     Clock {
@@ -45,7 +45,7 @@ fn entry(path: &[&str], bytes: u64) -> Entry {
 
 // What each call below leaves behind. A catalog of three entries, the middle
 // one retired.
-fn retire_middle(tomb: &str, name: &str, path_len: usize) -> (Catalog, GcReport, PathBuf) {
+fn retire_middle(tomb: &str, name: &str, path_len: usize) -> (Catalog, GcReport) {
     let root = Root::new(&format!("{name}-{path_len}"));
     let runtime = File::open(&root.0).unwrap();
     let parent_path = root.0.join("p");
@@ -69,19 +69,18 @@ fn retire_middle(tomb: &str, name: &str, path_len: usize) -> (Catalog, GcReport,
         &mut catalog,
         1,
         &mut report,
-        &Retiring {
+        &Victim {
             parent: &parent,
             dir: &dir,
             name,
-            tomb,
-            bytes: 20,
         },
+        tomb,
         std::iter::empty(),
         sys::current_uid(),
     )
     .unwrap();
     assert!(!parent_path.join(name).exists() && !parent_path.join(tomb).exists());
-    (catalog, report, root.0.clone())
+    (catalog, report)
 }
 
 // 이것을 실패시키는 것: `catalog.next`를 지운 자리 다음(`index + 1`)이나 0으로 두는 것, 합계를 줄이지 않거나
@@ -89,7 +88,7 @@ fn retire_middle(tomb: &str, name: &str, path_len: usize) -> (Catalog, GcReport,
 #[test]
 fn retiring_one_store_takes_it_out_of_the_totals_and_points_at_its_successor() {
     for (name, tomb) in [("store", ".store.gc"), (".s.gc", ".s.gc")] {
-        let (catalog, report, _) = retire_middle(tomb, name, 3);
+        let (catalog, report) = retire_middle(tomb, name, 3);
         assert_eq!((catalog.stores, catalog.nodes, catalog.bytes), (2, 8, 40));
         assert_eq!(catalog.entries.len(), 2);
         assert_eq!(catalog.entries[1].path.last().unwrap(), "last");
@@ -120,17 +119,16 @@ fn the_rename_changes_only_the_last_component_of_the_entry_path() {
             &mut catalog,
             0,
             &mut report,
-            &Retiring {
+            &Victim {
                 parent: &parent,
                 dir: &dir,
                 name: "store",
-                tomb: ".store.gc",
-                bytes: 5,
             },
+            ".store.gc",
             std::iter::empty(),
             sys::current_uid(),
         );
-        assert!(failed.is_err());
+        assert!(matches!(failed, Err(StoreError::Io(_))), "{failed:?}");
         let mut want: Vec<String> = vec!["a".into(); len - 1];
         want.push(".store.gc".into());
         assert_eq!(catalog.entries[0].path, want);
@@ -155,17 +153,85 @@ fn a_taken_tombstone_name_stops_the_retirement_before_any_rename() {
         &mut catalog,
         0,
         &mut report,
-        &Retiring {
+        &Victim {
             parent: &parent,
             dir: &dir,
             name: "store",
-            tomb: ".store.gc",
-            bytes: 5,
         },
+        ".store.gc",
         std::iter::empty(),
         sys::current_uid(),
     );
     assert!(matches!(busy, Err(StoreError::Busy)));
     assert_eq!(catalog.entries[0].path, ["a", "b", "store"]);
     assert!(parent_path.join("store").exists());
+}
+
+// A folder holding a data file and the lock file, each with its own cap.
+fn folder_with(tag: &str, files: &[(&str, &[u8])]) -> (Root, PathBuf, File, File, Catalog) {
+    let root = Root::new(tag);
+    let runtime = File::open(&root.0).unwrap();
+    let parent_path = root.0.join("p");
+    fs::create_dir_all(parent_path.join("store")).unwrap();
+    for (name, bytes) in files {
+        let path = parent_path.join("store").join(name);
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let parent = File::open(&parent_path).unwrap();
+    let dir = File::open(parent_path.join("store")).unwrap();
+    let mut catalog = Catalog::empty(&runtime).unwrap();
+    catalog.entries = vec![entry(&["a", "b", "store"], 5)];
+    (root, parent_path, parent, dir, catalog)
+}
+
+// 이것을 실패시키는 것: 파일 제거 루프를 빼는 것(제거 수가 0이고 폴더가 남음), 파일별 상한을 무시하는 것.
+#[test]
+fn every_file_the_caller_names_goes_before_the_folder() {
+    let (_root, parent_path, parent, dir, mut catalog) =
+        folder_with("files", &[("data", b"abc"), ("lock", b"")]);
+    let mut report = GcReport::default();
+    retire_store(
+        &mut catalog,
+        0,
+        &mut report,
+        &Victim {
+            parent: &parent,
+            dir: &dir,
+            name: "store",
+        },
+        ".store.gc",
+        [("data", 10usize), ("lock", 0)].into_iter(),
+        sys::current_uid(),
+    )
+    .unwrap();
+    assert_eq!((report.removed_files, report.removed_dirs), (2, 1));
+    assert!(!parent_path.join("store").exists() && !parent_path.join(".store.gc").exists());
+}
+
+// 이것을 실패시키는 것: 상한을 넘는 파일을 지우는 것, 반복자가 준 순서를 바꾸는 것(락 파일이 마지막이어야
+// 앞 파일이 실패했을 때 락이 남는다), 실패한 뒤에도 계속 지우는 것.
+#[test]
+fn a_file_over_its_cap_stops_the_removal_and_leaves_the_lock_for_last() {
+    let (_root, parent_path, parent, dir, mut catalog) =
+        folder_with("cap", &[("data", b"abcdef"), ("lock", b"")]);
+    let mut report = GcReport::default();
+    let failed = retire_store(
+        &mut catalog,
+        0,
+        &mut report,
+        &Victim {
+            parent: &parent,
+            dir: &dir,
+            name: "store",
+        },
+        ".store.gc",
+        [("data", 3usize), ("lock", 0)].into_iter(),
+        sys::current_uid(),
+    );
+    assert!(failed.is_err(), "{failed:?}");
+    assert_eq!(report.removed_files, 0);
+    assert!(parent_path.join(".store.gc/lock").exists());
+    assert!(parent_path.join(".store.gc/data").exists());
+    assert_eq!(catalog.entries.len(), 1);
 }
