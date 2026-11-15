@@ -217,10 +217,27 @@ pub(crate) struct Publish {
     budget: super::command_match::Budget,
 }
 
-/// Decides the round and, when it has units, takes the session lock and
-/// spawns the supervisor. Only the runtime root is touched here, before the
-/// marker; the units are resolved in `Round::grant`, after it.
-pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
+/// What a round's cache decides before anything is locked or spawned: the
+/// units still to run, what to publish for those that hit, and the response
+/// the cache was read from.
+struct CachePlan<'a> {
+    /// The user-defined language units that may run, cache hits included.
+    language_units: Vec<String>,
+    /// The units to run: those whose entry was not a cache hit.
+    runnable: Vec<(&'a str, plan::Runnable)>,
+    patterns: Vec<(String, Option<String>)>,
+    binding: Option<response::Binding>,
+    current: Option<response::Response>,
+    environments: Vec<(String, [u8; 32])>,
+    attempts: Vec<(String, u64)>,
+    reapplied: Vec<response::Entry>,
+    budget: super::command_match::Budget,
+    builtins: Vec<&'static Language>,
+}
+
+/// The cache plan of a round. Reads the stored command response once, without
+/// the lock, and takes out the units whose entry still stands.
+fn plan_cache<'a>(i: &Inputs<'a>) -> CachePlan<'a> {
     let language_units: Vec<String> = i
         .config
         .exec_units
@@ -303,42 +320,83 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         })
         .unwrap_or_default();
     let builtins = i.builtins.to_vec();
-    // A drawn builtin language spawns the supervisor even with no config
-    // unit: whether it runs is known only once the
-    // collection answered, after the marker.
-    // Fails without it: test_builtin_probe_runs_once_and_is_cached.
-    if runnable.is_empty() && builtins.is_empty() {
-        // A config with command units reclaims what an earlier supervisor of
-        // the session left even when no unit runs this round;
-        // one without any touches nothing. A busy lock is a live supervisor.
-        #[cfg(target_os = "linux")]
-        if let (false, Some(session)) = (i.config.exec_units.is_empty(), i.session)
-            && let Some(root) = root_id(i)
-            && let Ok(_lock) = close_only_lock(i.runtime, &lock_name(session, root), i.me, true)
-        {
-            let _ = session_reclaim(i, session, root);
-        }
-        // The context is duplicated only for entries to publish: a round
-        // with nothing to do keeps the helper's descriptor calls (fsbudget).
-        // Fails without the order: test_live_helper_calls_match_stage_formula.
-        if !reapplied.is_empty()
-            && let Some(binding) = binding
-            && let Ok(context) = i.context.try_clone()
-        {
-            i.reapply.set(Some(Box::new(Publish {
-                context,
-                binding,
-                clock: i.now,
-                environments,
-                attempts,
-                patterns,
-                reapplied,
-                budget,
-            })));
-            return Err(Skip::Reapplied);
-        }
-        return Err(Skip::NoUnits);
+    CachePlan {
+        language_units,
+        runnable,
+        patterns,
+        binding,
+        current,
+        environments,
+        attempts,
+        reapplied,
+        budget,
+        builtins,
     }
+}
+
+/// A round that has nothing to spawn for. A config with command units
+/// reclaims what an earlier supervisor of the session left even when no unit
+/// runs this round; one without any touches nothing. The re-matched cache
+/// hits are queued for publication when there are any.
+fn idle_round(i: &Inputs<'_>, plan: CachePlan<'_>) -> Skip {
+    let CachePlan {
+        patterns,
+        binding,
+        environments,
+        attempts,
+        reapplied,
+        budget,
+        ..
+    } = plan;
+    // A config with command units reclaims what an earlier supervisor of
+    // the session left even when no unit runs this round;
+    // one without any touches nothing. A busy lock is a live supervisor.
+    #[cfg(target_os = "linux")]
+    if let (false, Some(session)) = (i.config.exec_units.is_empty(), i.session)
+        && let Some(root) = root_id(i)
+        && let Ok(_lock) = close_only_lock(i.runtime, &lock_name(session, root), i.me, true)
+    {
+        let _ = session_reclaim(i, session, root);
+    }
+    // The context is duplicated only for entries to publish: a round
+    // with nothing to do keeps the helper's descriptor calls (fsbudget).
+    // Fails without the order: test_live_helper_calls_match_stage_formula.
+    if !reapplied.is_empty()
+        && let Some(binding) = binding
+        && let Ok(context) = i.context.try_clone()
+    {
+        i.reapply.set(Some(Box::new(Publish {
+            context,
+            binding,
+            clock: i.now,
+            environments,
+            attempts,
+            patterns,
+            reapplied,
+            budget,
+        })));
+        return Skip::Reapplied;
+    }
+    Skip::NoUnits
+}
+
+/// The round that has something to run: the checks, in the order they end a
+/// round, then the session lock, the reclaim, the neutral folder, the
+/// channels and the supervisor. The order is what the helper's descriptor
+/// calls and the `Skip` an unrunnable round reports depend on.
+fn spawn_round(i: &Inputs<'_>, plan: CachePlan<'_>) -> Result<Round, Skip> {
+    let CachePlan {
+        language_units,
+        runnable,
+        patterns,
+        binding,
+        current,
+        environments,
+        attempts,
+        reapplied,
+        budget,
+        builtins,
+    } = plan;
     // Another unix has no trusted relay and runs nothing. No CI target is
     // such a unix, so no test runs this branch; `cfg!` keeps it compiled on
     // Linux and macOS too.
@@ -464,6 +522,21 @@ pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
         hidden: Vec::new(),
         _lock: lock,
     })
+}
+
+/// Decides the round and, when it has units, takes the session lock and
+/// spawns the supervisor. Only the runtime root is touched here, before the
+/// marker; the units are resolved in `Round::grant`, after it.
+pub(crate) fn prepare(i: &Inputs<'_>) -> Result<Round, Skip> {
+    let plan = plan_cache(i);
+    // A drawn builtin language spawns the supervisor even with no config
+    // unit: whether it runs is known only once the collection answered,
+    // after the marker.
+    // Fails without it: test_builtin_probe_runs_once_and_is_cached.
+    if plan.runnable.is_empty() && plan.builtins.is_empty() {
+        return Err(idle_round(i, plan));
+    }
+    spawn_round(i, plan)
 }
 
 /// The permit of the marker this round installed: its clock and trust
@@ -1250,13 +1323,13 @@ mod tests {
         std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
     }
 
-    // 회차의 허가·결과 통로는 command_process::channel로 만든다(macOS는 소켓). prepare를 끝까지 도는 단위 시험이
+    // 회차의 허가·결과 통로는 command_process::channel로 만든다(macOS는 소켓). spawn_round를 끝까지 도는 단위 시험이
     // 없어 소스로 본다. 이것을 실패시키는 것: 둘 중 하나를 파이프로 만드는 것(macOS에서 512바이트 파이프가 가득
     // 차면 감독과 도우미가 마감까지 돎).
     #[test]
     fn a_round_makes_its_channels_with_channel() {
         let src = include_str!("command_grant.rs").replace("\r\n", "\n");
-        let body = &src[src.find("pub(crate) fn prepare(").unwrap()..];
+        let body = &src[src.find("\nfn spawn_round(").unwrap()..];
         let body = &body[..body.find("\n}\n").unwrap()];
         assert_eq!(body.matches("command_process::channel()").count(), 2);
         assert!(!body.contains("pipe()"));
@@ -1349,6 +1422,83 @@ mod tests {
         assert_eq!(
             name["command-".len()..name.len() - ".lock".len()],
             parent["bingsu-cmd-".len()..]
+        );
+    }
+
+    // `prepare`의 순서는 helper의 descriptor 호출 수와 `Skip` 우선순위를 정한다. 코드가 세 함수로 나뉜 뒤에도 같은
+    // 순서임을 글자로 고정한다(CRLF는 맞춘다).
+    fn source_of(start: &str) -> String {
+        let all = include_str!("command_grant.rs").replace("\r\n", "\n");
+        let from = all.find(start).unwrap_or_else(|| panic!("no {start}"));
+        let end = all[from..].find("\n}\n").unwrap() + from;
+        all[from..end].to_owned()
+    }
+
+    fn in_order(text: &str, steps: &[&str]) {
+        let mut at = 0;
+        for step in steps {
+            let found = text[at..]
+                .find(step)
+                .unwrap_or_else(|| panic!("`{step}` is missing or out of order"));
+            at += found + step.len();
+        }
+    }
+
+    // 이것을 실패시키는 것: 세션 잠금 전에 회수하는 것, 회수를 환경 확인 뒤로 미루는 것(환경 프레임이 없어도 회수해야
+    // 함), neutral 검사를 spawn 뒤로 옮기는 것, 채널을 만들기 전에 spawn하는 것, `Publish`의 컨텍스트 복제를
+    // spawn 앞으로 옮기는 것.
+    #[test]
+    fn a_round_that_spawns_keeps_its_steps_in_order() {
+        let text = source_of("\nfn spawn_round(");
+        in_order(
+            &text,
+            &[
+                "NoRelay",
+                "NoSession",
+                "root_id(i)",
+                "close_only_lock(",
+                "session_reclaim(i, session, root)",
+                "NoEnvironment",
+                "neutral(i.runtime",
+                "probes_allowed = false",
+                "command_process::channel()",
+                "spawn_supervisor(",
+                "i.context.try_clone()",
+            ],
+        );
+        assert_eq!(text.matches("try_clone").count(), 1);
+    }
+
+    // 이것을 실패시키는 것: 일 없는 회차에서 컨텍스트를 복제하는 것(helper의 descriptor 호출이 늘어남), 복제를
+    // `reapplied`가 비었는지 보기 전에 하는 것, 잠금 없이 회수하는 것, 회수를 복제 뒤로 옮기는 것.
+    #[test]
+    fn a_round_with_nothing_to_spawn_clones_the_context_only_for_entries_to_publish() {
+        let idle = source_of("\nfn idle_round(");
+        in_order(
+            &idle,
+            &[
+                "root_id(i)",
+                "close_only_lock(",
+                "session_reclaim(i, session, root)",
+                "reapplied.is_empty()",
+                "i.context.try_clone()",
+                "Skip::Reapplied",
+                "Skip::NoUnits",
+            ],
+        );
+        assert_eq!(idle.matches("try_clone").count(), 1);
+        // The cache plan reads and clones nothing, and `prepare` only chooses.
+        assert!(!source_of("\nfn plan_cache<").contains("try_clone"));
+        let prepare = source_of("\npub(crate) fn prepare(");
+        assert!(!prepare.contains("try_clone"));
+        in_order(
+            &prepare,
+            &[
+                "plan_cache(i)",
+                "plan.runnable.is_empty()",
+                "idle_round(i, plan)",
+                "spawn_round(i, plan)",
+            ],
         );
     }
 }
