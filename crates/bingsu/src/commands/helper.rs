@@ -1135,4 +1135,67 @@ mod report_tests {
         ];
         assert_eq!(*lines.borrow(), want);
     }
+
+    // The same report written the way `run` writes it: every line, the one
+    // with a count included, goes to one log file, so the file's order is the
+    // order the round reported in.
+    fn logged(done: &command_grant::Report, tag: &str) -> Vec<String> {
+        use crate::commands::{log, sys};
+        use std::os::unix::fs::PermissionsExt;
+        let base =
+            std::env::temp_dir().join(format!("bingsu-helper-report-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = std::fs::canonicalize(&base).unwrap().join("log");
+        let report = |groups: &mut SystemGroups, level: LogLevel, text: &'static str| {
+            log::event(
+                LogLevel::DebugLog,
+                Some(&root),
+                sys::current_uid(),
+                groups,
+                level,
+                text,
+            )
+        };
+        let mut groups = SystemGroups::new(b"nobody");
+        report_command_round(done, &report, &mut groups, LogLevel::DebugLog, Some(&root));
+        let text = std::fs::read_to_string(root.join("refresh.log")).unwrap_or_default();
+        std::fs::remove_dir_all(&base).unwrap();
+        text.lines().map(str::to_owned).collect()
+    }
+
+    // 이것을 실패시키는 것: 환경 항목 누락 줄(`log::event`를 직접 부르는 줄)을 지우거나 다른 자리로 옮기는 것, 그 줄의
+    // 문구나 개수를 바꾸는 것, 앞뒤 줄의 순서를 바꾸는 것. 이 줄은 `report` 클로저를 거치지 않아 위 시험이 못 본다.
+    #[test]
+    fn the_dropped_entries_line_stands_between_the_fallback_and_the_publish_failure() {
+        let done = command_grant::Report {
+            repo_fallback: true,
+            publish_failed: true,
+            dropped: bingsu_core::command::plan::Dropped {
+                malformed: 2,
+                duplicate: 1,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            logged(&done, "dropped"),
+            [
+                "command round: no collected repository root; the shell's folder stands for it",
+                "command environment: 2 malformed entries and 1 duplicated names left out",
+                "command round: results not published; the store was busy or refused",
+                "command round finished",
+            ]
+        );
+    }
+
+    // 이것을 실패시키는 것: 아무 일도 없는 라운드에 줄을 더 내는 것(무조건 나오는 줄이 생기면 여기서 잡힌다),
+    // 끝 줄을 빼는 것, 개수가 0인 누락 줄을 내는 것.
+    #[test]
+    fn a_round_that_found_nothing_says_only_that_it_finished() {
+        assert_eq!(
+            logged(&command_grant::Report::default(), "plain"),
+            ["command round finished"]
+        );
+    }
 }
