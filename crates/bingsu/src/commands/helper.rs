@@ -351,7 +351,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
 
 /// What a command round's report says in the log, in the order the round
 /// found it. Strings that are not `'static` (the dropped-entries count) go
-/// to `log::event` directly, as in `run`.
+/// to `log::event` directly, not through `report`.
 fn report_command_round(
     done: &command_grant::Report,
     report: &dyn Fn(&mut SystemGroups, LogLevel, &'static str),
@@ -439,8 +439,13 @@ fn report_command_round(
     }
     report(groups, LogLevel::DebugLog, "command round finished");
 }
-/// Runs the collection reclaim after the round, if a collection or a command
-/// round published, and logs what it says.
+
+/// Runs the collection reclaim after the round and logs what it says. `runtime`
+/// is set when the collection attempt cloned the runtime folder, whether or
+/// not anything was published (a failed pin check, a deferral, a blocked
+/// breaker and a failed spawn all leave it set), or when a command round
+/// published or tried to publish. Narrowing that would let command-only
+/// layouts fill the reclaim budget again.
 fn reclaim_collection(
     runtime: Option<std::fs::File>,
     clock: &mut impl ClockSource,
