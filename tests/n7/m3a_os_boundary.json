@@ -480,7 +480,7 @@
     ],
     "patches": [
       {
-        "file": "tests/shell/test_prompt_env_paths.py",
+        "file": "tests/shell/trace_support.py",
         "before": "and path == \"/proc/self\"",
         "after": "and False"
       }
@@ -515,7 +515,7 @@
     ],
     "patches": [
       {
-        "file": "tests/shell/test_prompt_env_paths.py",
+        "file": "tests/shell/trace_support.py",
         "before": "and path == \"/proc/self\"",
         "after": "and True"
       }
@@ -550,7 +550,7 @@
     ],
     "patches": [
       {
-        "file": "tests/shell/test_prompt_env_paths.py",
+        "file": "tests/shell/trace_support.py",
         "before": "and descriptor_child(call, path) and args_of(call)[3] == \"11\"",
         "after": "and args_of(call)[3] == \"11\""
       }
@@ -585,7 +585,7 @@
     ],
     "patches": [
       {
-        "file": "tests/shell/test_prompt_env_paths.py",
+        "file": "tests/shell/trace_support.py",
         "before": "and args_of(call)[3] == \"11\"",
         "after": "and True"
       }
@@ -620,7 +620,7 @@
     ],
     "patches": [
       {
-        "file": "tests/shell/test_prompt_env_paths.py",
+        "file": "tests/shell/trace_support.py",
         "before": "held.get(fd) == (expected, True)",
         "after": "True"
       }
@@ -655,7 +655,7 @@
     ],
     "patches": [
       {
-        "file": "tests/shell/test_prompt_env_paths.py",
+        "file": "tests/shell/trace_support.py",
         "before": "and fd in fs_observed",
         "after": "and True"
       }

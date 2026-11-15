@@ -11,7 +11,7 @@ from conftest import ROOT, Install, real_bin, trusted_env, short_dir
 from shell_support import cargo_test_binaries
 from pty_session import Session, visible
 from test_prompt_deadline import is_static
-import test_prompt_env_paths as budget
+import trace_support as budget
 
 
 @pytest.fixture(scope="module")
