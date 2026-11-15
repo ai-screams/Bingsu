@@ -113,7 +113,7 @@ pub(crate) fn collect_with_deadlines(
     let wants_git = request.binding.mask & (1 << git::SEGMENT) != 0;
     let wants_dir = request.binding.mask & (1 << 1) != 0;
     let meter = RefCell::new(meter);
-    let (selected, mut snapshot) = within_stage(&meter, sink, deadlines.a_ms, |sink| {
+    let (selected, snapshot) = within_stage(&meter, sink, deadlines.a_ms, |sink| {
         let mut meter = meter.borrow_mut();
         let selected = discover::select(request, access, &mut meter)?;
         let (result, device) = match &selected {
@@ -210,132 +210,161 @@ pub(crate) fn collect_with_deadlines(
             completion
         }
         discover::Selection::Repository(mut roots, discovery) => {
-            // The shell's folder sits `level` folders below the root (0 when
-            // the folder path is not the logical one: discovery then looks
-            // at the folder itself only).
-            let level = discovery.path_binding().1.unwrap_or(0);
-            drop(discovery);
-            meter.borrow_mut().event("discovery_consumed");
-            roots
-                .restrict(&mut meter.borrow_mut())
-                .map_err(CollectError::Read)?;
-            let parts: Vec<&[u8]> = request
-                .binding
-                .cwd
-                .split(|b| *b == b'/')
-                .filter(|p| !p.is_empty())
-                .collect();
-            let below = &parts[parts.len().saturating_sub(level)..];
-            let worktree = std::rc::Rc::clone(&roots.worktree);
-            languages(
-                request,
-                &worktree,
-                below,
-                &roots.access,
-                &meter,
-                sink,
-                deadlines,
-            )?;
-            drop(worktree);
+            enter_repository(request, &mut roots, discovery, &meter, sink, deadlines)?;
             if !wants_git {
                 return completion;
             }
-            // PathFacts and ancestor release precede read restriction. B preflight
-            // cannot consume the first A's budget or delay its immediate write.
-            let mut repo = None;
-            let mut objects_allowed = false;
-            let b = within_stage(&meter, sink, deadlines.b_ms, |sink| {
-                let access = preflight::preflight(&roots, &mut meter.borrow_mut())?;
-                if access != preflight::GitAccess::Objects {
-                    return Ok(());
-                }
-                objects_allowed = true;
-                // A packed-only repository proves unborn only after preflight.
-                // Carry the correction in the next cumulative snapshot.
-                if roots.unborn.get() {
-                    let branch = field_index("branch");
-                    if snapshot.fields[branch] != bingsu_core::field::Field::ABSENT {
-                        snapshot.fields[branch] = bingsu_core::field::Field::ABSENT;
-                        meter.borrow().check().map_err(CollectError::Read)?;
-                        sink.update(Update {
-                            segment: git::SEGMENT,
-                            value: Some(snapshot.clone()),
-                            facts: None,
-                        })
-                        .map_err(CollectError::Sink)?;
-                    }
-                }
-                meter.borrow_mut().event("repository_init");
-                repo = GuardedRepository::from_roots(&roots, &meter).ok();
-                meter.borrow_mut().event("stage_b");
-                // Unknown global rules yield a completed partial B value. They
-                // do not stop C/D or make this stage's execution unfinished.
-                let result = repo.as_ref().map_or(StageResult::Hidden, |repo| {
-                    stage_b::stage_b(
-                        repo,
-                        &request.global_excludes,
-                        request.global_excludes_known,
-                    )
-                });
-                publish(
-                    &meter,
-                    sink,
-                    &mut snapshot,
-                    b"B",
-                    &["staged", "modified", "untracked", "conflicted", "filtered"],
-                    result,
-                )
-            });
-            if let Err(error) = b {
-                // A failed safety preflight never grants access to later work.
-                if !objects_allowed || !matches!(error, CollectError::Read(ReadError::Deadline)) {
-                    return Err(error);
-                }
-                completion = completion.and(Err(error));
-            }
-            if !objects_allowed {
-                return completion;
-            }
-            for (stage, millis, fields) in [
-                (b"C", deadlines.c_ms, &["ahead", "behind"][..]),
-                (b"D", deadlines.d_ms, &["stash"][..]),
-            ] {
-                meter.borrow().check().map_err(CollectError::Read)?;
-                let result = within_stage(&meter, sink, millis, |sink| {
-                    meter
-                        .borrow_mut()
-                        .event(if stage == b"C" { "stage_c" } else { "stage_d" });
-                    let result = if stage == b"C" {
-                        // A B-local constructor timeout must not cache failure
-                        // across the stage boundary or prevent independent D.
-                        if repo.is_none() {
-                            repo = GuardedRepository::from_roots(&roots, &meter).ok();
-                        }
-                        repo.as_ref().map_or(StageResult::Hidden, stage_c::stage_c)
-                    } else {
-                        stage_d::stage_d(&roots, roots.ref_snapshot(), &meter)
-                    };
-                    publish(&meter, sink, &mut snapshot, stage, fields, result)
-                });
-                match result {
-                    Err(error @ CollectError::Read(ReadError::Deadline)) => {
-                        completion = completion.and(Err(error));
-                    }
-                    other => other?,
-                }
-            }
-            completion
+            object_stages(
+                request, &roots, &meter, sink, deadlines, snapshot, completion,
+            )
         }
     }
 }
 
-/// Loan the same meter to a stage without keeping a RefCell borrow across its
-/// adapters. Catch unwinding at this boundary and restore the request deadline,
-/// and report panic to the caller. Counters survive only if the active Meter is
-/// returned to this slot: preflight moves it into its own RefCell without a drop
-/// guard, so an unwind there drops it. This boundary then restores the deadline
-/// on the placeholder, but cannot restore the lost counters.
-/// Abort/OOM and blocked calls are exclusively the supervisor's responsibility.
+/// A repository round after stage A and the path facts: give up discovery,
+/// restrict reads to the repository's roots, and detect languages for the
+/// shell's folder.
+fn enter_repository(
+    request: &bingsu_core::collection::wire::Request,
+    roots: &mut discover::RepoRoots,
+    discovery: crate::safe_read::Discovery,
+    meter: &RefCell<crate::meter::Meter>,
+    sink: &mut dyn UpdateSink,
+    deadlines: StageDeadlines,
+) -> Result<(), CollectError> {
+    // The shell's folder sits `level` folders below the root (0 when
+    // the folder path is not the logical one: discovery then looks
+    // at the folder itself only).
+    let level = discovery.path_binding().1.unwrap_or(0);
+    drop(discovery);
+    meter.borrow_mut().event("discovery_consumed");
+    roots
+        .restrict(&mut meter.borrow_mut())
+        .map_err(CollectError::Read)?;
+    let parts: Vec<&[u8]> = request
+        .binding
+        .cwd
+        .split(|b| *b == b'/')
+        .filter(|p| !p.is_empty())
+        .collect();
+    let below = &parts[parts.len().saturating_sub(level)..];
+    let worktree = std::rc::Rc::clone(&roots.worktree);
+    languages(
+        request,
+        &worktree,
+        below,
+        &roots.access,
+        meter,
+        sink,
+        deadlines,
+    )?;
+    drop(worktree);
+    Ok(())
+}
+
+/// The object stages of a repository round: preflight and B, then C and D.
+/// Only a preflight that grants object access lets them run, and a deadline
+/// in B leaves C and D their own allowances.
+fn object_stages(
+    request: &bingsu_core::collection::wire::Request,
+    roots: &discover::RepoRoots,
+    meter: &RefCell<crate::meter::Meter>,
+    sink: &mut dyn UpdateSink,
+    deadlines: StageDeadlines,
+    mut snapshot: bingsu_core::field::Value,
+    mut completion: Result<(), CollectError>,
+) -> Result<(), CollectError> {
+    use bingsu_core::collection::{
+        git::{self, StageResult},
+        wire::Update,
+    };
+    // PathFacts and ancestor release precede read restriction. B preflight
+    // cannot consume the first A's budget or delay its immediate write.
+    let mut repo = None;
+    let mut objects_allowed = false;
+    let b = within_stage(meter, sink, deadlines.b_ms, |sink| {
+        let access = preflight::preflight(roots, &mut meter.borrow_mut())?;
+        if access != preflight::GitAccess::Objects {
+            return Ok(());
+        }
+        objects_allowed = true;
+        // A packed-only repository proves unborn only after preflight.
+        // Carry the correction in the next cumulative snapshot.
+        if roots.unborn.get() {
+            let branch = field_index("branch");
+            if snapshot.fields[branch] != bingsu_core::field::Field::ABSENT {
+                snapshot.fields[branch] = bingsu_core::field::Field::ABSENT;
+                meter.borrow().check().map_err(CollectError::Read)?;
+                sink.update(Update {
+                    segment: git::SEGMENT,
+                    value: Some(snapshot.clone()),
+                    facts: None,
+                })
+                .map_err(CollectError::Sink)?;
+            }
+        }
+        meter.borrow_mut().event("repository_init");
+        repo = GuardedRepository::from_roots(roots, meter).ok();
+        meter.borrow_mut().event("stage_b");
+        // Unknown global rules yield a completed partial B value. They
+        // do not stop C/D or make this stage's execution unfinished.
+        let result = repo.as_ref().map_or(StageResult::Hidden, |repo| {
+            stage_b::stage_b(
+                repo,
+                &request.global_excludes,
+                request.global_excludes_known,
+            )
+        });
+        publish(
+            meter,
+            sink,
+            &mut snapshot,
+            b"B",
+            &["staged", "modified", "untracked", "conflicted", "filtered"],
+            result,
+        )
+    });
+    if let Err(error) = b {
+        // A failed safety preflight never grants access to later work.
+        if !objects_allowed || !matches!(error, CollectError::Read(ReadError::Deadline)) {
+            return Err(error);
+        }
+        completion = completion.and(Err(error));
+    }
+    if !objects_allowed {
+        return completion;
+    }
+    for (stage, millis, fields) in [
+        (b"C", deadlines.c_ms, &["ahead", "behind"][..]),
+        (b"D", deadlines.d_ms, &["stash"][..]),
+    ] {
+        meter.borrow().check().map_err(CollectError::Read)?;
+        let result = within_stage(meter, sink, millis, |sink| {
+            meter
+                .borrow_mut()
+                .event(if stage == b"C" { "stage_c" } else { "stage_d" });
+            let result = if stage == b"C" {
+                // A B-local constructor timeout must not cache failure
+                // across the stage boundary or prevent independent D.
+                if repo.is_none() {
+                    repo = GuardedRepository::from_roots(roots, meter).ok();
+                }
+                repo.as_ref().map_or(StageResult::Hidden, stage_c::stage_c)
+            } else {
+                stage_d::stage_d(roots, roots.ref_snapshot(), meter)
+            };
+            publish(meter, sink, &mut snapshot, stage, fields, result)
+        });
+        match result {
+            Err(error @ CollectError::Read(ReadError::Deadline)) => {
+                completion = completion.and(Err(error));
+            }
+            other => other?,
+        }
+    }
+    completion
+}
+
 /// The language stage (D1), in a round that asks for languages: results go
 /// out as each is known. Only the sink's own error fails the round; a file
 /// that cannot be read, a bound or the stage's time leaves languages
@@ -416,6 +445,13 @@ fn languages(
     }
 }
 
+/// Loan the same meter to a stage without keeping a RefCell borrow across its
+/// adapters. Catch unwinding at this boundary and restore the request deadline,
+/// and report panic to the caller. Counters survive only if the active Meter is
+/// returned to this slot: preflight moves it into its own RefCell without a drop
+/// guard, so an unwind there drops it. This boundary then restores the deadline
+/// on the placeholder, but cannot restore the lost counters.
+/// Abort/OOM and blocked calls are exclusively the supervisor's responsibility.
 fn within_stage<T>(
     meter: &RefCell<crate::meter::Meter>,
     sink: &mut dyn UpdateSink,
