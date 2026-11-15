@@ -951,4 +951,75 @@ mod tests {
         drop(resolved);
         std::fs::remove_dir_all(base).unwrap();
     }
+
+    // 이것을 실패시키는 것: 거부를 쥔 뒤의 두 번째 링크 지점에서 판정을 건너뛰는 것(a 질문 4 -> 3).
+    #[test]
+    fn a_second_link_is_still_judged_once_a_refusal_is_held() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let base = tree("second");
+        std::fs::create_dir(base.join("a/b/c")).unwrap();
+        std::fs::set_permissions(base.join("a/b/c"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        symlink("c", base.join("a/b/M")).unwrap();
+        std::fs::write(base.join("a/b/c/f"), b"x").unwrap();
+        std::fs::set_permissions(base.join("a/b/c/f"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let mut oracle = Asked(vec![], Group::HasOthers);
+        let resolved =
+            Resolved::open(&base.join("a/L/M/f"), sys::current_uid(), &mut oracle).unwrap();
+        assert!(
+            matches!(resolved.refusal, Some(Refusal::Last)),
+            "{:?}",
+            resolved.refusal
+        );
+        let a = ino(&base.join("a"));
+        assert_eq!(
+            oracle.0.iter().filter(|&&i| i == a).count(),
+            4,
+            "{:?}",
+            oracle.0
+        );
+        drop(resolved);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 마지막 이름 판정에서 조상을 가리키는 거부를 그 조상이 아닌 곳(이름)으로 기록하는 것.
+    #[test]
+    fn an_ancestor_refusal_at_the_last_name_blocks_at_that_ancestor() {
+        let base = tree("ancestor");
+        let mut oracle = Asked(vec![], Group::HasOthers);
+        let resolved =
+            Resolved::open(&base.join("a/b/f"), sys::current_uid(), &mut oracle).unwrap();
+        assert!(
+            matches!(resolved.refusal, Some(Refusal::Ancestor { .. })),
+            "{:?}",
+            resolved.refusal
+        );
+        assert_eq!(
+            resolved.blocked_path.as_deref(),
+            Some(base.join("a").as_path())
+        );
+        drop(resolved);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 판정 불가(`Undecided`) 거부를 그 노드가 아닌 곳(마지막 이름)으로 기록하는 것.
+    #[test]
+    fn an_undecided_refusal_at_the_last_name_blocks_at_the_node_it_names() {
+        let base = tree("undecided");
+        let mut oracle = Asked(vec![], Group::Unknown);
+        let resolved =
+            Resolved::open(&base.join("a/b/f"), sys::current_uid(), &mut oracle).unwrap();
+        assert!(
+            matches!(resolved.refusal, Some(Refusal::Undecided { .. })),
+            "{:?}",
+            resolved.refusal
+        );
+        assert_eq!(
+            resolved.blocked_path.as_deref(),
+            Some(base.join("a").as_path())
+        );
+        drop(resolved);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }
