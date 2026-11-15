@@ -1525,8 +1525,9 @@ fn only_the_exact_first_inner_cfg_test_exempts_a_file() {
         "#![cfg(all(test))]",
         "#![cfg_attr(test, allow(dead_code))]",
     ] {
-        let (ok, stderr) = run(&format!("{head}\n{PROBE}"));
-        assert!(!ok, "{head} must not exempt the file: {stderr}");
+        // The address finding itself, not just any rejection: other checks (the cfg
+        // count) reject these inputs on their own and would hide a lost finding.
+        fails_with(&format!("{head}\n{PROBE}"), "as_ptr exposes an address");
     }
     // not the first attribute, or not inner
     fails_with(&format!("//! doc\n#![cfg(test)]\n{PROBE}"), "as_ptr");

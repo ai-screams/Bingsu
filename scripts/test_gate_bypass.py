@@ -92,15 +92,19 @@ class BypassGates(unittest.TestCase):
     # (조건 변형, 문서 뒤, 모듈 안, 항목 뒤, crate root)의 파일 전체를 시험 코드로 면제하는 것.
     def test_only_a_leading_cfg_test_exempts_a_file(self):
         for fixture, name, reason in [
-                ("any_test.rs", "zz.rs", "cfg other than #[cfg(test)]"),
-                ("not_test.rs", "zz.rs", "cfg other than #[cfg(test)]"),
+                ("any_test.rs", "zz.rs", "as_ptr exposes an address"),
+                ("not_test.rs", "zz.rs", "as_ptr exposes an address"),
                 ("cfg_attr.rs", "zz.rs", "as_ptr exposes an address"),
                 ("after_doc.rs", "zz.rs", "as_ptr exposes an address"),
                 ("in_module.rs", "zz.rs", "as_ptr exposes an address"),
                 ("after_item.rs", "zz.rs", "unparsable"),
                 ("crate_root.rs", "lib.rs", "as_ptr exposes an address")]:
             with self.subTest(fixture=fixture):
-                self.assert_rejected(self.run_core_file(fixture, name), reason)
+                out = self.run_core_file(fixture, name)
+                self.assert_rejected(out, reason)
+                if reason.startswith("as_ptr"):
+                    # the finding is the fixture's own, not one of the copied files'
+                    self.assertRegex(out.stderr, rf"crates/bingsu-core/src/{name}:\d+: {reason}")
 
     # 이것을 실패시키는 것: 면제 자체를 지우는 것(정상 형태가 위반으로 잡힘). 위 시험의 거부가 면제 부재 때문이
     # 아니라 fixture의 다른 결함 때문에 나는 것을 막는 대조군이다.
