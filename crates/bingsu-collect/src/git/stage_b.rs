@@ -59,6 +59,12 @@ pub(crate) fn status(repo: &GuardedRepository<'_>, global_excludes: &[u8]) -> St
         Err(_) => return StatusCounts::default(),
     };
     let mut counts = super::status_tracked::index_status(repo, &index);
-    untracked::worktree_status(repo, &index, &mut counts, global_excludes);
+    // The tree comparison reads objects (packs); the walk reads none. Give the
+    // walk its own latch so a Limit there (pack bytes in a repository whose
+    // packs exceed the budget) only leaves staged unknown.
+    let walk = repo.io.independent();
+    untracked::worktree_status(repo, &walk, &index, &mut counts, global_excludes);
+    // 이것을 실패시키는 것: 걷기의 Limit을 B 포트에 되돌리지 않는 것(saturated_untracked_revalidates_edges_and_preserves_unknown).
+    repo.io.join(walk);
     counts
 }

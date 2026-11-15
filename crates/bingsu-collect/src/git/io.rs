@@ -147,6 +147,27 @@ impl<'a> RepoIo<'a> {
     /// independent C/D work. All counters, live allocations and the absolute
     /// request deadline stay in the SAME meter; exhausted shared axes still fail.
     pub(crate) fn next_stage(&self) -> Self {
+        self.fresh_latch()
+    }
+
+    /// An independent part of one stage (B's worktree walk beside its tree
+    /// comparison) gets its own Limit/Deadline latch over the SAME meter, so a
+    /// Limit in one part (pack bytes, which only the comparison reads) does
+    /// not stop the other. Every counter, live allocation and the stage and
+    /// request deadlines are still shared: total work stays bounded as before.
+    pub(crate) fn independent(&self) -> Self {
+        self.fresh_latch()
+    }
+
+    /// Carry an independent part's latch back once the part has ended: what
+    /// stopped the walk still stops anything later in the same stage.
+    pub(crate) fn join(&self, part: Self) {
+        if let Some(error) = part.stopped.get() {
+            self.stopped.set(Some(error));
+        }
+    }
+
+    fn fresh_latch(&self) -> Self {
         Self::new(
             RepoRoots {
                 worktree: self.roots.worktree,

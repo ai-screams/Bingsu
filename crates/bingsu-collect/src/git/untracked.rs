@@ -41,22 +41,27 @@ pub(crate) fn untracked_status(
         .account(|m| super::io::index::validate(index, m))
         .is_ok()
     {
-        worktree_status_validated(repo, index, &mut counts, global_excludes);
+        worktree_status_validated(repo, &repo.io, index, &mut counts, global_excludes);
     }
     counts.untracked
 }
 
+/// The walk reads the worktree, the index and pattern files, never an object,
+/// so B gives it `io`, a latch of its own (`RepoIo::independent`): a Limit the
+/// tree comparison hit leaves the walk's counts.
 pub(crate) fn worktree_status(
     repo: &GuardedRepository<'_>,
+    io: &RepoIo<'_>,
     index: &super::io::index::ExpandedIndex,
     counts: &mut StatusCounts,
     global_excludes: &[u8],
 ) {
-    worktree_status_validated(repo, index, counts, global_excludes);
+    worktree_status_validated(repo, io, index, counts, global_excludes);
 }
 
 fn worktree_status_validated(
     repo: &GuardedRepository<'_>,
+    io: &RepoIo<'_>,
     index: &State,
     counts: &mut StatusCounts,
     global_excludes: &[u8],
@@ -64,52 +69,51 @@ fn worktree_status_validated(
     // Counts are provisional until all held directory edges are revalidated.
     let result = (|| {
         let policies = Policies::from_config(&repo.config)?;
-        let mut walk = Walk::new(&repo.io, index, policies)?;
-        walk.patterns.add_global(&repo.io, global_excludes)?;
-        repo.io
-            .with_worktree_stats(|| {
-                walk.patterns.add(
-                    &repo.io,
-                    RepoPath::new(RootId::CommonDir, b"info/exclude"),
-                    PatternKind::Ignore,
-                )?;
-                walk.patterns.add(
-                    &repo.io,
-                    RepoPath::new(RootId::CommonDir, b"info/attributes"),
-                    PatternKind::Attributes,
-                )?;
-                if let Err(error) = walk.directory(b"", false, None) {
-                    return if error == ReadError::Limit && walk.untracked != 0 {
-                        Ok((
-                            Field::known(FieldValue::Count {
-                                n: walk.untracked,
-                                saturated: true,
-                            }),
-                            false,
-                        ))
-                    } else {
-                        Err(error)
-                    };
-                }
-                walk.compare_unseen()?;
-                Ok((
-                    Field::known(FieldValue::Count {
-                        n: walk.untracked,
-                        saturated: walk.capped,
-                    }),
-                    true,
-                ))
-            })
-            .map(|(n, complete)| {
-                (
-                    n,
-                    complete,
-                    walk.modified,
-                    walk.filtered,
-                    walk.modified_error,
-                )
-            })
-            .inspect_err(|_| counts.filtered |= walk.filtered)
+        let mut walk = Walk::new(io, index, policies)?;
+        walk.patterns.add_global(io, global_excludes)?;
+        io.with_worktree_stats(|| {
+            walk.patterns.add(
+                io,
+                RepoPath::new(RootId::CommonDir, b"info/exclude"),
+                PatternKind::Ignore,
+            )?;
+            walk.patterns.add(
+                io,
+                RepoPath::new(RootId::CommonDir, b"info/attributes"),
+                PatternKind::Attributes,
+            )?;
+            if let Err(error) = walk.directory(b"", false, None) {
+                return if error == ReadError::Limit && walk.untracked != 0 {
+                    Ok((
+                        Field::known(FieldValue::Count {
+                            n: walk.untracked,
+                            saturated: true,
+                        }),
+                        false,
+                    ))
+                } else {
+                    Err(error)
+                };
+            }
+            walk.compare_unseen()?;
+            Ok((
+                Field::known(FieldValue::Count {
+                    n: walk.untracked,
+                    saturated: walk.capped,
+                }),
+                true,
+            ))
+        })
+        .map(|(n, complete)| {
+            (
+                n,
+                complete,
+                walk.modified,
+                walk.filtered,
+                walk.modified_error,
+            )
+        })
+        .inspect_err(|_| counts.filtered |= walk.filtered)
     })();
     if let Ok((untracked, complete, modified, filtered, error)) = result {
         counts.untracked = untracked;
