@@ -59,6 +59,11 @@ pub(crate) fn status(repo: &GuardedRepository<'_>, global_excludes: &[u8]) -> St
         Err(_) => return StatusCounts::default(),
     };
     let mut counts = super::status_tracked::index_status(repo, &index);
-    untracked::worktree_status(repo, &index, &mut counts, global_excludes);
+    // The tree comparison reads objects (packs); the walk reads none. Give the
+    // walk its own latch so a Limit there (pack bytes in a repository whose
+    // packs exceed the budget) only leaves staged unknown.
+    repo.io.with_independent(|walk| {
+        untracked::worktree_status(repo, walk, &index, &mut counts, global_excludes)
+    });
     counts
 }
