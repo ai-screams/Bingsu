@@ -1445,7 +1445,8 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 세션 잠금 전에 회수하는 것, 회수를 환경 확인 뒤로 미루는 것(환경 프레임이 없어도 회수해야
-    // 함), neutral 검사를 spawn 뒤로 옮기는 것, 채널을 만들기 전에 spawn하는 것, `Publish`의 컨텍스트 복제를
+    // 함), neutral 검사를 spawn 뒤로 옮기는 것, 채널 둘 가운데 하나라도 neutral 검사 앞에서 만드는 것(거부된 회차가
+    // descriptor를 더 쓰고 실패 때 `Failed`를 보고함), 채널을 만들기 전에 spawn하는 것, `Publish`의 컨텍스트 복제를
     // spawn 앞으로 옮기는 것.
     #[test]
     fn a_round_that_spawns_keeps_its_steps_in_order() {
@@ -1461,6 +1462,7 @@ mod tests {
                 "NoEnvironment",
                 "neutral(i.runtime",
                 "probes_allowed = false",
+                "command_process::channel()",
                 "command_process::channel()",
                 "spawn_supervisor(",
                 "i.context.try_clone()",
