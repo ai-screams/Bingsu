@@ -4,7 +4,6 @@ binary (with every process and thread it starts) must touch nothing under
 the repository."""
 import os
 import platform
-import ast
 import hashlib
 import json
 import re
@@ -23,7 +22,7 @@ from shell_support import ROOT, SHELL_CMD, Install, minimal_record, real_bin, sh
 from pty_session import Session
 
 sys.path.insert(0, str(ROOT / "tools/fsbudget"))
-from fsbudget.strace_parse import EXIT_EVENT, parse as parse_trace, scan
+from fsbudget.strace_parse import EXIT_EVENT, parse as parse_trace
 from trace_support import (
     CALL,
     COLLECT_ATTEMPTS,
@@ -42,25 +41,22 @@ from trace_support import (
     SYSTEM_PATHS,
     TARGET_LINKS_MAX,
     TEMPLATES,
-    _ROWS,
+    ADAPTER_ROWS,
     admission_deferred,
     allowed,
     args_of,
     assert_collection_trace,
-    assert_prompt_trace_budget,
     bash_prompt_script,
     call_paths,
     check_front_capture,
     check_helper_capture,
     child_strace_argv,
     collect_ready,
-    collector_exit,
     command_ready,
     deadline_shape,
     entry_of,
     folder_outside_repository,
     front_attempt_plan,
-    front_deadline_window,
     helper_processes,
     helper_stage_evidence,
     init_collector_exe,
@@ -427,7 +423,7 @@ def test_prompt_binary_names_only_allowed_system_paths_and_pinned_roots(tmp_path
     run_allowlist(lambda attempt: allowlist_capture(tmp_path / f"attempt-{attempt}", case))
 
 
-TABLE_SYSCALLS = {r[0] for r in _ROWS if r[0] != "-"}
+TABLE_SYSCALLS = {r[0] for r in ADAPTER_ROWS if r[0] != "-"}
 
 
 # 이것을 실패시키는 것: 필터 뒤에 표에 없는 호출이 필요한 것(이 환경의 할당자·unwind가 부르는 호출을 표에서 빠뜨림),

@@ -10,7 +10,6 @@ import os
 import platform
 import re
 import shlex
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -66,10 +65,10 @@ SYSCALL = re.compile(r"^\d+\s+(\w+)\(")
 TABLE = os.path.join(os.path.dirname(__file__), "..", "..", "crates", "bingsu", "prompt-syscalls.tsv")
 
 
-_ROWS = [r.split("\t") for r in open(TABLE).read().splitlines() if r and not r.startswith("#")][1:]
+ADAPTER_ROWS = [r.split("\t") for r in open(TABLE).read().splitlines() if r and not r.startswith("#")][1:]
 
 
-ADAPTER_CALLS = {r[0] for r in _ROWS if r[0] != "-" and r[1] != "-"}
+ADAPTER_CALLS = {r[0] for r in ADAPTER_ROWS if r[0] != "-" and r[1] != "-"}
 
 
 QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
@@ -180,7 +179,7 @@ socket connect
 }
 
 
-ROOT_CALLS = {r[0] for r in _ROWS if r[0] != "-"} | set("""
+ROOT_CALLS = {r[0] for r in ADAPTER_ROWS if r[0] != "-"} | set("""
 execve clone clone3 vfork arch_prctl set_tid_address getrlimit prlimit64
 read readv pread64 close fcntl poll ppoll ioctl pipe2 open openat openat2
 access faccessat faccessat2 fstat newfstatat stat statx readlink readlinkat
@@ -641,7 +640,7 @@ def prompt_root_io(front, boundary, exe, pinned, root, cwd=None):
     fs_observed = set()
     _, files = prompt_sources(pinned)
     files |= prompt_collection_sources(pinned, cwd)[1]
-    table = {r[0] for r in _ROWS if r[0] != "-"}
+    table = {r[0] for r in ADAPTER_ROWS if r[0] != "-"}
     for c in front:
         args = args_of(c)
         paths = call_paths(c)
@@ -1865,6 +1864,8 @@ def check_helper_capture(stage, lines, exe, collector, plan, *, evidence=None):
 COLLECT_ATTEMPTS = 40
 
 
+# A fixture in a module that is not a test file: `test_prompt_env_paths.py` imports it by name, which is how
+# pytest finds it for the live helper-stage test; `test_prompt_trace_budget.py` calls `.__wrapped__` directly.
 @pytest.fixture
 def helper_stage_evidence(tmp_path_factory):
     # A dedicated upload root, separate from all other pytest fixtures.
