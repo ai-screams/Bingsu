@@ -424,7 +424,9 @@ impl Patterns {
         input_bytes: usize,
         meter: &mut Meter,
     ) -> Result<(), ReadError> {
-        let (parsed, mut scratch) = attribute_line_weights(bytes, meter)?;
+        // Bound first, so it drops last: the reservation outlives the weights
+        // it pays for, as when both were locals here.
+        let (mut scratch, parsed) = attribute_line_weights(bytes, meter)?;
         let info = source == Path::new("info/attributes");
         // The shared name table holds the names already there plus at most
         // this file's distinct names; it grows from what earlier files
@@ -695,13 +697,14 @@ impl Patterns {
     }
 }
 
-/// Check every attribute line once and weigh the patterns gix unquotes:
-/// the weight per line (0 for an unquoted one), and the reservation that pays
-/// for those weights, which add_attributes also charges its name sort to.
+/// Check every attribute line once and weigh the patterns gix unquotes: the
+/// reservation that pays for the weights (add_attributes also charges its name
+/// sort to it), and one weight per line, 0 for an unquoted pattern. A file
+/// without any quote gets no weights at all.
 fn attribute_line_weights(
     bytes: &[u8],
     meter: &mut Meter,
-) -> Result<(Vec<u16>, crate::meter::PathAllocation), ReadError> {
+) -> Result<(crate::meter::PathAllocation, Vec<u16>), ReadError> {
     // The lower parser is deliberately lenient; do not silently drop
     // malformed policy. Custom macros are deferred, explicitly Partial,
     // to avoid unbounded recursive expansion from hostile definitions.
@@ -748,7 +751,7 @@ fn attribute_line_weights(
             *slot = weight(&pattern.text) as u16;
         }
     }
-    Ok((parsed, scratch))
+    Ok((scratch, parsed))
 }
 
 pub(crate) fn parser_reservation(bytes: usize, words: usize) -> Result<usize, ReadError> {
