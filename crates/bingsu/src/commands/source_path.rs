@@ -150,6 +150,202 @@ fn directory_stamp_matches(now: &Stamp, before: &Stamp) -> bool {
         == (before.dev, before.ino, before.uid, before.gid, before.mode)
 }
 
+/// The first refusal of a walk and the place it blocks at.
+#[derive(Default)]
+struct Blocked {
+    refusal: Option<Refusal>,
+    path: Option<PathBuf>,
+}
+
+/// One resolution in progress. Each name is checked, then opened, then its
+/// stamp is compared with the one taken before opening; the stages below keep
+/// that order for links, the last name and folders on the way.
+struct Walk<'a> {
+    me: u32,
+    directory: bool,
+    groups: &'a mut dyn GroupOracle,
+    meter: Meter<'a>,
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    checks: Vec<Check>,
+    stack: Vec<usize>,
+    canonical: PathBuf,
+    todo: VecDeque<Step>,
+    links: usize,
+    blocked: Blocked,
+}
+
+impl Walk<'_> {
+    /// Keeps the first refusal only. The caller computes `verdict`, and so
+    /// decides whether the group oracle is asked once a refusal is held: it
+    /// keeps state, so that count is part of what the walk does.
+    /// A rule that names a node blocks there; any other blocks at the node
+    /// `default_at` of the stack, or at `last` when that is past the stack.
+    fn refuse(&mut self, verdict: Result<(), Refusal>, default_at: usize, last: Option<&OsStr>) {
+        if self.blocked.refusal.is_none()
+            && let Err(r) = verdict
+        {
+            let at = match r {
+                Refusal::Undecided { at }
+                | Refusal::Ancestor { at }
+                | Refusal::StickyNext { at } => at,
+                _ => default_at,
+            };
+            self.blocked.path = Some(match last {
+                Some(name) if at == self.stack.len() => self.canonical.join(name),
+                _ => self.nodes[self.stack[at]].path.clone(),
+            });
+            self.blocked.refusal = Some(r);
+        }
+    }
+
+    fn folder_target(&mut self) {
+        let verdict =
+            folder_target_verdict(&chain_facts(&self.nodes, &self.stack), self.me, self.groups);
+        self.refuse(verdict, self.stack.len() - 1, None);
+        self.checks.push(Check {
+            stack: self.stack.clone(),
+            root_ancestor: false,
+        });
+    }
+
+    /// A symlink: its parent chain and owner are judged, its text is read
+    /// between two stamps, and the target's steps go in front of the rest.
+    fn follow_link(&mut self, parent: usize, name: OsString, before: Stamp) -> io::Result<()> {
+        self.links += 1;
+        if self.links > LINKS_MAX {
+            return Err(io::Error::other("too many symlinks"));
+        }
+        let folder = self
+            .todo
+            .iter()
+            .any(|s| matches!(s, Step::Name(_) | Step::Parent));
+        let root_ancestor = before.uid == 0 && self.me != 0 && folder;
+        let check = Check {
+            stack: self.stack.clone(),
+            root_ancestor,
+        };
+        let verdict = check.verdict(&chain_facts(&self.nodes, &self.stack), self.me, self.groups);
+        self.refuse(verdict, self.stack.len() - 1, None);
+        self.checks.push(check);
+        if !root_ancestor && !link_owner_is_mine(before.uid, self.me) {
+            self.blocked.refusal = self.blocked.refusal.take().or(Some(Refusal::Last));
+        }
+        io_meter::charge(&mut self.meter, HelperAxis::L, 1)?;
+        let dir = self.nodes[parent].file.as_fd();
+        let target = sys::read_link_at(dir, &name)?;
+        if sys::at_stamp(dir, &name)? != before {
+            return Err(io::Error::other("link changed"));
+        }
+        self.edges.push(Edge {
+            parent,
+            name,
+            stamp: before,
+            link: Some(Link {
+                target: target.clone(),
+                root_ancestor,
+            }),
+        });
+        let mut expansion = steps(&target);
+        // A system prefix's target remains an ancestor in
+        // the continued walk, including sticky-next duties.
+        if folder && !root_ancestor {
+            expansion.push_back(Step::FolderTarget);
+        }
+        expansion.append(&mut self.todo);
+        self.todo = expansion;
+        Ok(())
+    }
+
+    /// The last name: it must be the kind asked for, is opened without
+    /// following a link, and must still carry the stamp taken before.
+    fn open_last(mut self, parent: usize, name: OsString, before: Stamp) -> io::Result<Resolved> {
+        let dir = self.nodes[parent].file.as_fd();
+        let kind = if self.directory { 0o040000 } else { 0o100000 };
+        if before.mode & 0o170000 != kind {
+            return Err(io::Error::other(if self.directory {
+                "not a directory"
+            } else {
+                "not a regular file"
+            }));
+        }
+        if !self.directory {
+            io_meter::charge_file(&mut self.meter, &self.canonical.join(&name))?;
+        }
+        io_meter::charge(&mut self.meter, HelperAxis::P, 1)?;
+        let file = if self.directory {
+            sys::open_dir_at_search_nofollow(Some(dir), &name)?
+        } else {
+            sys::open_file_at_nofollow(dir, &name)?
+        };
+        let stamp = sys::file_stamp(&file)?;
+        if stamp != before {
+            return Err(io::Error::other("file changed while opening"));
+        }
+        let facts = sys::fd_facts_metered(file.as_fd(), &mut self.meter)?;
+        let mut all = chain_facts(&self.nodes, &self.stack);
+        all.push(facts);
+        // Unlike the two checks above, this one is not asked once a refusal is
+        // held: the oracle is only consulted for a verdict that can be kept.
+        if self.blocked.refusal.is_none() {
+            let verdict = walk_verdict(&all, self.me, Last::Mine, Some(true), self.groups);
+            self.refuse(verdict, self.stack.len(), Some(&name));
+        }
+        self.checks.push(Check {
+            stack: self.stack,
+            root_ancestor: false,
+        });
+        self.canonical.push(&name);
+        self.edges.push(Edge {
+            parent,
+            name,
+            stamp: before,
+            link: None,
+        });
+        Ok(Resolved {
+            nodes: self.nodes,
+            edges: self.edges,
+            checks: self.checks,
+            file,
+            stamp,
+            facts,
+            canonical: self.canonical,
+            refusal: self.blocked.refusal,
+            blocked_path: self.blocked.path,
+        })
+    }
+
+    /// A folder on the way: opened without following a link, and it must
+    /// still carry the identity taken before.
+    fn descend_folder(&mut self, parent: usize, name: OsString, before: Stamp) -> io::Result<()> {
+        if self.nodes.len() + 1 >= PATH_FDS_MAX {
+            return Err(io::Error::from_raw_os_error(libc::EMFILE));
+        }
+        let dir = self.nodes[parent].file.as_fd();
+        io_meter::charge(&mut self.meter, HelperAxis::P, 1)?;
+        let file = sys::open_dir_at_search_nofollow(Some(dir), &name)?;
+        let stamp = sys::file_stamp(&file)?;
+        if !directory_stamp_matches(&stamp, &before) {
+            return Err(io::Error::other("folder changed while opening"));
+        }
+        self.edges.push(Edge {
+            parent,
+            name: name.clone(),
+            stamp: before,
+            link: None,
+        });
+        self.stack.push(self.nodes.len());
+        self.nodes.push(Node {
+            facts: sys::fd_facts_metered(file.as_fd(), &mut self.meter)?,
+            stamp,
+            file,
+            path: self.canonical.join(&name),
+        });
+        self.canonical.push(name);
+        Ok(())
+    }
+}
+
 impl Resolved {
     /// Read-only export of the observations this resolver actually retained.
     pub fn evidence_export(&self) -> io::Result<Vec<u8>> {
@@ -228,199 +424,54 @@ impl Resolved {
         }
         io_meter::latch(&meter)?;
         let root = sys::open_dir_at_search_nofollow(None, OsStr::new("/"))?;
-        let mut nodes = vec![Node {
+        let nodes = vec![Node {
             facts: sys::fd_facts_metered(root.as_fd(), &mut meter)?,
             stamp: sys::file_stamp(&root)?,
             file: root,
             path: PathBuf::from("/"),
         }];
-        let mut edges = Vec::new();
-        let mut checks = Vec::new();
-        let mut stack = vec![0];
-        let mut canonical = PathBuf::from("/");
-        let mut todo = steps(path);
-        let mut links = 0;
-        let mut refusal = None;
-        let mut blocked_path = None;
-        while let Some(step) = todo.pop_front() {
+        let mut walk = Walk {
+            me,
+            directory,
+            groups,
+            meter,
+            nodes,
+            edges: Vec::new(),
+            checks: Vec::new(),
+            stack: vec![0],
+            canonical: PathBuf::from("/"),
+            todo: steps(path),
+            links: 0,
+            blocked: Blocked::default(),
+        };
+        while let Some(step) = walk.todo.pop_front() {
             match step {
                 Step::Root => {
-                    stack.truncate(1);
-                    canonical = PathBuf::from("/");
+                    walk.stack.truncate(1);
+                    walk.canonical = PathBuf::from("/");
                 }
                 Step::Parent => {
-                    if stack.len() > 1 {
-                        stack.pop();
-                        canonical.pop();
+                    if walk.stack.len() > 1 {
+                        walk.stack.pop();
+                        walk.canonical.pop();
                     }
                 }
-                Step::FolderTarget => {
-                    let verdict = folder_target_verdict(&chain_facts(&nodes, &stack), me, groups);
-                    if refusal.is_none()
-                        && let Err(r) = verdict
-                    {
-                        let at = match r {
-                            Refusal::Undecided { at }
-                            | Refusal::Ancestor { at }
-                            | Refusal::StickyNext { at } => at,
-                            _ => stack.len() - 1,
-                        };
-                        blocked_path = Some(nodes[stack[at]].path.clone());
-                        refusal = Some(r);
-                    }
-                    checks.push(Check {
-                        stack: stack.clone(),
-                        root_ancestor: false,
-                    });
-                }
+                Step::FolderTarget => walk.folder_target(),
                 Step::Name(name) => {
-                    let parent = *stack.last().expect("root");
-                    let dir = nodes[parent].file.as_fd();
-                    let before = sys::at_stamp(dir, &name)?;
+                    let parent = *walk.stack.last().expect("root");
+                    let before = sys::at_stamp(walk.nodes[parent].file.as_fd(), &name)?;
                     if before.mode & 0o170000 == 0o120000 {
-                        links += 1;
-                        if links > LINKS_MAX {
-                            return Err(io::Error::other("too many symlinks"));
-                        }
-                        let folder = todo
-                            .iter()
-                            .any(|s| matches!(s, Step::Name(_) | Step::Parent));
-                        let root_ancestor = before.uid == 0 && me != 0 && folder;
-                        let check = Check {
-                            stack: stack.clone(),
-                            root_ancestor,
-                        };
-                        let verdict = check.verdict(&chain_facts(&nodes, &stack), me, groups);
-                        if refusal.is_none()
-                            && let Err(r) = verdict
-                        {
-                            let at = match r {
-                                Refusal::Undecided { at }
-                                | Refusal::Ancestor { at }
-                                | Refusal::StickyNext { at } => at,
-                                _ => stack.len() - 1,
-                            };
-                            blocked_path = Some(nodes[stack[at]].path.clone());
-                            refusal = Some(r);
-                        }
-                        checks.push(check);
-                        if !root_ancestor && !link_owner_is_mine(before.uid, me) {
-                            refusal = refusal.or(Some(Refusal::Last));
-                        }
-                        io_meter::charge(&mut meter, HelperAxis::L, 1)?;
-                        let target = sys::read_link_at(dir, &name)?;
-                        if sys::at_stamp(dir, &name)? != before {
-                            return Err(io::Error::other("link changed"));
-                        }
-                        edges.push(Edge {
-                            parent,
-                            name,
-                            stamp: before,
-                            link: Some(Link {
-                                target: target.clone(),
-                                root_ancestor,
-                            }),
-                        });
-                        let mut expansion = steps(&target);
-                        // A system prefix's target remains an ancestor in
-                        // the continued walk, including sticky-next duties.
-                        if folder && !root_ancestor {
-                            expansion.push_back(Step::FolderTarget);
-                        }
-                        expansion.append(&mut todo);
-                        todo = expansion;
+                        walk.follow_link(parent, name, before)?;
                         continue;
                     }
-                    let final_file = !todo
+                    let final_file = !walk
+                        .todo
                         .iter()
                         .any(|s| matches!(s, Step::Name(_) | Step::Parent | Step::FolderTarget));
                     if final_file {
-                        let kind = if directory { 0o040000 } else { 0o100000 };
-                        if before.mode & 0o170000 != kind {
-                            return Err(io::Error::other(if directory {
-                                "not a directory"
-                            } else {
-                                "not a regular file"
-                            }));
-                        }
-                        if !directory {
-                            io_meter::charge_file(&mut meter, &canonical.join(&name))?;
-                        }
-                        io_meter::charge(&mut meter, HelperAxis::P, 1)?;
-                        let file = if directory {
-                            sys::open_dir_at_search_nofollow(Some(dir), &name)?
-                        } else {
-                            sys::open_file_at_nofollow(dir, &name)?
-                        };
-                        let stamp = sys::file_stamp(&file)?;
-                        if stamp != before {
-                            return Err(io::Error::other("file changed while opening"));
-                        }
-                        let facts = sys::fd_facts_metered(file.as_fd(), &mut meter)?;
-                        let mut all = chain_facts(&nodes, &stack);
-                        all.push(facts);
-                        if refusal.is_none()
-                            && let Err(r) = walk_verdict(&all, me, Last::Mine, Some(true), groups)
-                        {
-                            let at = match r {
-                                Refusal::Undecided { at }
-                                | Refusal::Ancestor { at }
-                                | Refusal::StickyNext { at } => at,
-                                _ => stack.len(),
-                            };
-                            blocked_path = Some(if at == stack.len() {
-                                canonical.join(&name)
-                            } else {
-                                nodes[stack[at]].path.clone()
-                            });
-                            refusal = Some(r);
-                        }
-                        checks.push(Check {
-                            stack,
-                            root_ancestor: false,
-                        });
-                        canonical.push(&name);
-                        edges.push(Edge {
-                            parent,
-                            name,
-                            stamp: before,
-                            link: None,
-                        });
-                        return Ok(Self {
-                            nodes,
-                            edges,
-                            checks,
-                            file,
-                            stamp,
-                            facts,
-                            canonical,
-                            refusal,
-                            blocked_path,
-                        });
+                        return walk.open_last(parent, name, before);
                     }
-                    if nodes.len() + 1 >= PATH_FDS_MAX {
-                        return Err(io::Error::from_raw_os_error(libc::EMFILE));
-                    }
-                    io_meter::charge(&mut meter, HelperAxis::P, 1)?;
-                    let file = sys::open_dir_at_search_nofollow(Some(dir), &name)?;
-                    let stamp = sys::file_stamp(&file)?;
-                    if !directory_stamp_matches(&stamp, &before) {
-                        return Err(io::Error::other("folder changed while opening"));
-                    }
-                    edges.push(Edge {
-                        parent,
-                        name: name.clone(),
-                        stamp: before,
-                        link: None,
-                    });
-                    stack.push(nodes.len());
-                    nodes.push(Node {
-                        facts: sys::fd_facts_metered(file.as_fd(), &mut meter)?,
-                        stamp,
-                        file,
-                        path: canonical.join(&name),
-                    });
-                    canonical.push(name);
+                    walk.descend_folder(parent, name, before)?;
                 }
             }
         }
@@ -812,6 +863,88 @@ mod tests {
                 .unwrap()
                 .raw_os_error(),
             Some(libc::EMFILE)
+        );
+        drop(resolved);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // The walk's refusal bookkeeping on a real tree under a private temporary
+    // folder: `T/a` is group-writable and holds the link `L -> b` and the
+    // folder `b`, which holds `f`.
+    struct Asked(Vec<u64>, Group);
+    impl GroupOracle for Asked {
+        fn group_write(&mut self, at: &Facts) -> Group {
+            self.0.push(at.ino);
+            self.1
+        }
+    }
+
+    fn tree(tag: &str) -> PathBuf {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("walk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("a/b")).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(base.join("a"), std::fs::Permissions::from_mode(0o775)).unwrap();
+        std::fs::set_permissions(base.join("a/b"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("b", base.join("a/L")).unwrap();
+        std::fs::write(base.join("a/b/f"), b"x").unwrap();
+        std::fs::set_permissions(base.join("a/b/f"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        base
+    }
+
+    fn ino(path: &Path) -> u64 {
+        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
+    }
+
+    // 이것을 실패시키는 것: 링크 지점의 판정이 이미 거부를 쥔 뒤에도 마지막 파일의 판정을 위해 oracle을 다시 묻는 것
+    // (`a`를 두 번 물음), 첫 거부를 마지막 거부로 덮는 것, 거부 위치를 그 노드가 아닌 곳으로 두는 것.
+    #[test]
+    fn a_held_refusal_is_not_asked_again_at_the_last_name_and_blocks_where_it_began() {
+        let base = tree("held");
+        let mut oracle = Asked(vec![], Group::HasOthers);
+        let me = sys::current_uid();
+        let resolved = Resolved::open(&base.join("a/L/f"), me, &mut oracle).unwrap();
+        assert!(
+            matches!(resolved.refusal, Some(Refusal::Last)),
+            "{:?}",
+            resolved.refusal
+        );
+        assert_eq!(
+            resolved.blocked_path.as_deref(),
+            Some(base.join("a").as_path())
+        );
+        let a = ino(&base.join("a"));
+        // The link's own verdict asks about `a` twice, as before the walk was
+        // split into stages; the last name's verdict adds nothing once held.
+        assert_eq!(
+            oracle.0.iter().filter(|&&i| i == a).count(),
+            2,
+            "{:?}",
+            oracle.0
+        );
+        drop(resolved);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 마지막 이름의 거부 위치를 스택 끝 노드로 두는 것(마지막 이름이 아니라 그 폴더가 막힘으로
+    // 보고됨), 마지막 파일의 쓰기 권한 거부를 기록하지 않는 것.
+    #[test]
+    fn a_refusal_at_the_last_name_blocks_at_that_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tree("last");
+        std::fs::set_permissions(base.join("a/b/f"), std::fs::Permissions::from_mode(0o666))
+            .unwrap();
+        let mut oracle = Asked(vec![], Group::OnlyRootAndUser);
+        let resolved =
+            Resolved::open(&base.join("a/b/f"), sys::current_uid(), &mut oracle).unwrap();
+        assert!(resolved.refusal.is_some());
+        assert_eq!(
+            resolved.blocked_path.as_deref(),
+            Some(base.join("a/b/f").as_path())
         );
         drop(resolved);
         std::fs::remove_dir_all(base).unwrap();
