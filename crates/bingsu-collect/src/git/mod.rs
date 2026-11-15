@@ -278,7 +278,8 @@ fn object_stages(
         git::{self, StageResult},
         wire::Update,
     };
-    // PathFacts and ancestor release precede read restriction. B preflight
+    // The caller sent A and the path facts and restricted reads before this
+    // (PathFacts and ancestor release precede read restriction). B preflight
     // cannot consume the first A's budget or delay its immediate write.
     let mut repo = None;
     let mut objects_allowed = false;
