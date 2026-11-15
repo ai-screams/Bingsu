@@ -780,7 +780,7 @@ fn untracked_limits_are_charged_before_io() {
 // no object, still counts modified and untracked exactly. The reverse case
 // (a walk failure keeps staged) is the test below.
 // 이것을 실패시키는 것: 작업 트리 걷기를 비교와 같은 Limit 잠금 아래 두는 것(pack 한도에 modified·untracked까지 ?),
-// 걷기가 받은 포트 대신 B의 포트를 쓰는 것.
+// 걷기가 받은 포트 대신 B의 포트를 쓰는 것, 걷기가 끝난 뒤 B 포트의 Limit을 지우는 것.
 #[test]
 fn a_pack_limit_in_the_tree_comparison_keeps_the_walk_counts() {
     let f = init();
@@ -798,6 +798,10 @@ fn a_pack_limit_in_the_tree_comparison_keeps_the_walk_counts() {
         let got = stage_b::status(repo, &[]);
         assert_eq!((got.staged, got.conflicted), (Field::PENDING, count(0)));
         assert_eq!((got.modified, got.untracked), (count(1), count(1)));
+        // The walk's success must not clear the comparison's stop on B's port.
+        let before = m.borrow().counts;
+        assert_eq!(repo.io.worktree_metadata(b"file.txt").err(), Some(E::Limit));
+        assert_eq!(m.borrow().counts, before);
     });
 }
 

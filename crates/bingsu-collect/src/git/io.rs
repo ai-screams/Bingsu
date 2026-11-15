@@ -150,18 +150,24 @@ impl<'a> RepoIo<'a> {
         self.fresh_latch()
     }
 
-    /// An independent part of one stage (B's worktree walk beside its tree
-    /// comparison) gets its own Limit/Deadline latch over the SAME meter, so a
-    /// Limit in one part (pack bytes, which only the comparison reads) does
-    /// not stop the other. Every counter, live allocation and the stage and
-    /// request deadlines are still shared: total work stays bounded as before.
-    pub(crate) fn independent(&self) -> Self {
-        self.fresh_latch()
+    /// Run an independent part of one stage (B's worktree walk beside its
+    /// tree comparison) on a Limit/Deadline latch of its own over the SAME
+    /// meter, so a Limit in one part (pack bytes, which only the comparison
+    /// reads) does not stop the other. Every counter, live allocation and the
+    /// stage and request deadlines stay shared: total work stays bounded as
+    /// before. The part's latch is carried back when it returns, so what
+    /// stopped the part still stops anything later in the same stage.
+    pub(crate) fn with_independent<T>(&self, part: impl FnOnce(&Self) -> T) -> T {
+        let child = self.fresh_latch();
+        let result = part(&child);
+        self.join(&child);
+        result
     }
 
-    /// Carry an independent part's latch back once the part has ended: what
-    /// stopped the walk still stops anything later in the same stage.
-    pub(crate) fn join(&self, part: Self) {
+    // Only add the part's stop; never clear one this port already holds.
+    // 이것을 실패시키는 것: 자식 상태로 덮어 B 포트의 Limit을 지우는 것(a_pack_limit_in_the_tree_comparison_keeps_the_walk_counts),
+    // 자식의 Limit을 되돌리지 않는 것(saturated_untracked_revalidates_edges_and_preserves_unknown).
+    fn join(&self, part: &Self) {
         if let Some(error) = part.stopped.get() {
             self.stopped.set(Some(error));
         }

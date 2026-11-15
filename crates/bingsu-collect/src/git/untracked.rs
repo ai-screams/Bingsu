@@ -47,8 +47,8 @@ pub(crate) fn untracked_status(
 }
 
 /// The walk reads the worktree, the index and pattern files, never an object,
-/// so B gives it `io`, a latch of its own (`RepoIo::independent`): a Limit the
-/// tree comparison hit leaves the walk's counts.
+/// so B gives it `io`, a latch of its own (`RepoIo::with_independent`): a
+/// Limit the tree comparison hit leaves the walk's counts.
 pub(crate) fn worktree_status(
     repo: &GuardedRepository<'_>,
     io: &RepoIo<'_>,
