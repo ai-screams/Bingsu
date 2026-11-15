@@ -794,7 +794,7 @@ Why
   A band chosen for a width range takes its lines from `[layout]` unless it has its own template; a template replaces the lines. The built-in theme has such a band, `narrow`, for widths under 60.
 
 How to fix
-  Turn the band off in your own config file (a theme cannot turn a band off):
+  Turn the band off in your own config file (a theme cannot set `layout.when.narrow.enabled`):
   [layout.when.narrow]
   enabled = false
   Those widths then go to the next band that fits them, or to your `[layout]` lines when none does.

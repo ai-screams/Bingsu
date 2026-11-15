@@ -399,7 +399,7 @@ pub const HELP: &[Help] = &[
         c::BAND_TEMPLATE_REPLACES_LINES,
         "At some widths a layout band draws its own template, so layout lines you wrote are not used there.",
         "A band chosen for a width range takes its lines from `[layout]` unless it has its own template; a template replaces the lines. The built-in theme has such a band, `narrow`, for widths under 60.",
-        "Turn the band off in your own config file (a theme cannot turn a band off):\n[layout.when.narrow]\nenabled = false\nThose widths then go to the next band that fits them, or to your `[layout]` lines when none does.\nOr give the band a template of your own, for example:\n[layout.when.narrow.style]\ntemplate = \"{dir} {git}{@nl}{char}\"\nThen run `bingsu config check` to see the widths again.",
+        "Turn the band off in your own config file (a theme cannot set `layout.when.narrow.enabled`):\n[layout.when.narrow]\nenabled = false\nThose widths then go to the next band that fits them, or to your `[layout]` lines when none does.\nOr give the band a template of your own, for example:\n[layout.when.narrow.style]\ntemplate = \"{dir} {git}{@nl}{char}\"\nThen run `bingsu config check` to see the widths again.",
     ),
 ];
 

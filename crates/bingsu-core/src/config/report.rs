@@ -193,7 +193,7 @@ pub fn from_loaded(
             // order are shown even when another key is wrong.
             let widths = match &compiled {
                 Some(c) => c.widths.clone(),
-                None => bands_of(&full, &trusted.root)
+                None => bands_of(&full, &crate::config::compile::off_bands(&trusted.root))
                     .map(|b| b.widths)
                     .unwrap_or_default(),
             };
