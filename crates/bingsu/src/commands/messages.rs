@@ -217,7 +217,7 @@ const EN: [(MsgId, &str); 36] = [
     ),
     (
         MsgId::NoticeTrustExpired,
-        "bingsu: settings were not checked recently, so command segments are hidden until the next check. If this stays, run: bingsu reload",
+        "bingsu: settings were not checked recently, so segments that run commands are hidden until the next check. If this stays, run: bingsu reload",
     ),
     (
         MsgId::NoticeConfigLastGood,
@@ -376,7 +376,7 @@ mod tests {
         ),
         (
             MsgId::NoticeTrustExpired,
-            "bingsu: settings were not checked recently, so command segments are hidden until the next check. If this stays, run: bingsu reload",
+            "bingsu: settings were not checked recently, so segments that run commands are hidden until the next check. If this stays, run: bingsu reload",
         ),
         (
             MsgId::NoticeConfigLastGood,
