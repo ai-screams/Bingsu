@@ -1446,8 +1446,8 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
     check_counts(c)?;
     check_band_names(c)?;
     let mut ranks = [u16::MAX; crate::bands::MAX_BANDS];
-    check_band_ranks(c, &mut ranks)?;
-    check_band_precedence(c, &ranks)?;
+    let ranks = check_band_ranks(c, &mut ranks)?;
+    check_band_precedence(c, ranks)?;
     check_custom_segments(c)?;
     // Text segments never take a mask bit.
     const _: () = assert!(crate::field::BUILTIN.len() < 32);
@@ -1463,7 +1463,7 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
     check_exec_units(c)?;
     check_widths(c)
 }
-/// The table sizes the later steps index by.
+/// The table sizes the band steps, and the code after `check`, index by.
 fn check_counts(c: &Parts<'_>) -> Result<(), Error> {
     if c.bands.len() > crate::bands::MAX_BANDS
         || c.variants != c.bands.len() + 1
@@ -1489,11 +1489,14 @@ fn check_band_names(c: &Parts<'_>) -> Result<(), Error> {
     }
     Ok(())
 }
-/// `band_order` is a permutation of the bands; fills each band's rank.
-fn check_band_ranks(
+/// `band_order` is a permutation of the bands; fills each band's rank and
+/// returns the filled ranks for the precedence step (swapping the two calls
+/// in `check` does not compile).
+/// `check_counts` must have passed: this indexes a `MAX_BANDS` array by band.
+fn check_band_ranks<'r>(
     c: &Parts<'_>,
-    ranks: &mut [u16; crate::bands::MAX_BANDS],
-) -> Result<(), Error> {
+    ranks: &'r mut [u16; crate::bands::MAX_BANDS],
+) -> Result<&'r [u16; crate::bands::MAX_BANDS], Error> {
     // Validate the supplied order without allocating a graph or recompiling it.
     if c.band_order.len() != c.bands.len() {
         return Err(Error::Shape);
@@ -1504,10 +1507,11 @@ fn check_band_ranks(
         }
         ranks[i] = rank as u16;
     }
-    Ok(())
+    Ok(ranks)
 }
 /// Each band's column range, then `ranks` against the precedence
-/// `bands::before` gives.
+/// `bands::before` gives. `check_counts` must have passed: this indexes
+/// `MAX_BANDS` arrays by band.
 fn check_band_precedence(
     c: &Parts<'_>,
     ranks: &[u16; crate::bands::MAX_BANDS],
