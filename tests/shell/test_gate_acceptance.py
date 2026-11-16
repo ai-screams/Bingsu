@@ -1388,15 +1388,109 @@ CGROUP_CELLS = ("          - cell: plain\n            opts: \"\"\n"
                 "          - cell: priv\n            opts: --privileged --cgroupns=private\n")
 
 
-def cgroup_cell_tests():
-    """Every Rust test that runs only in the cgroup cells, as its libtest path."""
-    found = set()
-    for path in (ROOT / "crates/bingsu/src/commands").glob("*.rs"):
-        text = path.read_text().replace("\r\n", "\n")
+CELL_ROOT = "crates/bingsu/src/commands"
+
+
+def cell_files():
+    """Every Rust source under CELL_ROOT, at any depth: the path and its text."""
+    return {str(p.relative_to(ROOT)): p.read_text().replace("\r\n", "\n")
+            for p in sorted((ROOT / CELL_ROOT).rglob("*.rs"))}
+
+
+def blank_rust_literals(text):
+    """`text` with its comments and string and char literals turned into
+    spaces (newlines kept), so braces and `mod` in them are not code."""
+    out, i, n = list(text), 0, len(text)
+
+    def blank(start, end):
+        for k in range(start, end):
+            if out[k] != "\n":
+                out[k] = " "
+    while i < n:
+        word = i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
+        raw = re.match(r'b?r(#*)"', text[i:]) if word else None
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+        elif text.startswith("/*", i):
+            depth, end = 1, i + 2
+            while end < n and depth:
+                depth += 1 if text.startswith("/*", end) else -1 if text.startswith("*/", end) else 0
+                end += 2 if text.startswith(("/*", "*/"), end) else 1
+        elif raw:
+            end = text.index('"' + raw[1], i + len(raw[0])) + 1 + len(raw[1])
+        elif text[i] == '"' or (word and text.startswith('b"', i)):
+            end = i + (2 if text[i] == "b" else 1)
+            while text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            end += 1
+        elif char := re.match(r"b?'(?:\\[^']+|[^\\'])'", text[i:]) if text[i] in "'b" else None:
+            end = i + len(char[0])
+        else:
+            i += 1
+            continue
+        blank(i, end)
+        i = end
+    return "".join(out)
+
+
+def enclosing_modules(code, offset):
+    """The names of the inline `mod name {` blocks of literal-free `code`
+    that hold `offset`, outermost first."""
+    names = []
+    for match in re.finditer(r"(?<![\w])mod\s+(\w+)\s*\{", code):
+        depth, end = 0, match.end() - 1
+        while True:
+            depth += {"{": 1, "}": -1}.get(code[end], 0)
+            if depth == 0:
+                break
+            end += 1
+        if match.start() < offset < end:
+            names.append(match[1])
+    return names
+
+
+def cgroup_cell_tests(files=None):
+    """Every Rust test that runs only in the cgroup cells: its libtest path and
+    the file that holds it. The module path comes from the file's place under
+    crates/bingsu/src (`commands/a.rs` is `commands::a`, `commands/a/b.rs` is
+    `commands::a::b`, `mod.rs` is its folder) and then the inline modules
+    around the test."""
+    found = {}
+    for path, text in (cell_files() if files is None else files).items():
+        parts = path.removeprefix("crates/bingsu/src/").removesuffix(".rs").split("/")
+        if parts[-1] == "mod":
+            parts.pop()
+        code = blank_rust_literals(text)
         for match in re.finditer(re.escape(CGROUP_CELL_REASON) + r"\n\s*fn (\w+)\(", text):
-            inner = [m[1] for m in re.finditer(r"(?m)^(?:pub\(crate\) )?mod (\w+) \{", text[:match.start()])]
-            found.add(f"commands::{path.stem}::{inner[-1]}::{match[1]}")
+            name = "::".join(parts + enclosing_modules(code, match.start()) + [match[1]])
+            assert name not in found, ("cell test named twice", name)
+            found[name] = path
     return found
+
+
+# The cell tests follow their files at any depth and the inline modules that hold them, wherever the module
+# path comes from. 이것을 실패시키는 것: 하위 폴더 파일을 빠뜨리는 것(rglob을 glob으로), 모듈 경로를 파일 이름만으로
+# 정하는 것, 둘러싼 모듈 대신 마지막으로 연 모듈을 쓰는 것, 문자열 안의 괄호를 코드로 세는 것.
+def test_cell_tests_follow_files_and_their_modules():
+    import os
+    mark = CGROUP_CELL_REASON
+    files = {
+        f"{CELL_ROOT}/a.rs": (
+            'const OPEN: &str = "{";\nfn product() {}\n#[cfg(test)]\nmod tests {\n    const CLOSE: &str = "}";\n'
+            "    // mod hidden { a comment, not a module\n    mod helpers {\n        fn h() {}\n    }\n"
+            f"    #[test]\n    {mark}\n    fn test_in_a() {{}}\n}}\n"),
+        f"{CELL_ROOT}/b/tests.rs": f"mod helpers {{\n    pub fn h() {{}}\n}}\n#[test]\n{mark}\nfn test_in_b() {{}}\n",
+        f"{CELL_ROOT}/c/mod.rs": f"#[cfg(test)]\nmod cell {{\n    #[test]\n    {mark}\n    fn test_in_c() {{}}\n}}\n",
+    }
+    assert cgroup_cell_tests(files) == {
+        "commands::a::tests::test_in_a": f"{CELL_ROOT}/a.rs",
+        "commands::b::tests::test_in_b": f"{CELL_ROOT}/b/tests.rs",
+        "commands::c::cell::test_in_c": f"{CELL_ROOT}/c/mod.rs",
+    }
+    walked = {os.path.relpath(os.path.join(d, f), ROOT) for d, _, names in os.walk(ROOT / CELL_ROOT)
+              for f in names if f.endswith(".rs")}
+    assert set(cell_files()) == walked and any(p.count("/") > 4 for p in walked), "subfolders scanned"
 
 
 def assert_command_cgroup_cells(text):
@@ -1412,7 +1506,7 @@ def assert_command_cgroup_cells(text):
     assert "${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in run
     selected = set(run.split(" --test-threads=1 ")[1].split(" | tee ")[0].split())
     passed = set(re.findall(r"grep -Fx 'test (\S+) \.\.\. ok' ", step))
-    want = cgroup_cell_tests() | CLONE3_CELL_TESTS
+    want = set(cgroup_cell_tests()) | CLONE3_CELL_TESTS
     assert selected == passed == want, sorted((selected | passed | want) - (selected & passed & want))
     step = block.split("      - name: Command cgroup tests in the cell\n")[1].split("\n      - ")[0]
     assert "${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in step
@@ -1783,13 +1877,15 @@ def cell_bypass(shell, damage):
 # 실패시키는 것: 다른 이유로 ignored인 시험(timing 등)을 cell 증거로 받는 것.
 def test_cell_rows_need_the_cell_ignore():
     table = (ROOT / TABLE).read_text()
-    path = "crates/bingsu/src/commands/command_supervisor.rs"
-    source = (ROOT / path).read_text()
-    mark = '#[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]\n    fn test_nested_cgroup_removed_postorder'
-    assert source.count(mark) == 1
-    swapped = source.replace(mark, '#[ignore = "timing: elsewhere"]\n    fn test_nested_cgroup_removed_postorder')
     row = [line for line in table.splitlines(True) if line.startswith("GATE-CMD-REAP.2-nested\t")]
     assert len(row) == 1
+    # The file and the test come from the row, wherever the test lives and however it is indented.
+    test = next(csv.DictReader(io.StringIO(table.splitlines(True)[0] + row[0]), delimiter="\t"))["test"]
+    path, fn = test.split("::", 1)[0], test.rsplit("::", 1)[-1]
+    source = (ROOT / path).read_text()
+    mark = re.escape(CGROUP_CELL_REASON) + r"(?=\n\s*fn " + re.escape(fn) + r"\()"
+    assert len(re.findall(mark, source)) == 1
+    swapped = re.sub(mark, '#[ignore = "timing: elsewhere"]', source)
     one = table.splitlines(True)[0] + row[0]
     assert_acceptance_table(one, workflows(), required_ids=frozenset(), required_gates=frozenset(GATE_IDS))
     with pytest.raises(AssertionError):
