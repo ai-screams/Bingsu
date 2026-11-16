@@ -910,11 +910,29 @@ def rust_attributes(source, item):
     """Return the attribute lists of each `item` declaration in source.
 
     Reads the entire contiguous outer attribute group, irrespective of
-    #[test]/#[ignore]/#[cfg] order, including multiline cfgs.
+    #[test]/#[ignore]/#[cfg] order, including multiline cfgs. rustc takes
+    whitespace or a newline between `#`, `!` and `[` (`# [ignore]`), and an
+    inner attribute right before the item (`#![cfg(..)]` opening the module
+    that holds it) applies to the item too, so both are read.
     """
-    groups = re.findall(r"((?:^[ \t]*#\[[^\]]*\](?:\s|//[^\n]*(?:\n|\Z)|/\*[\s\S]*?\*/)*)*)" + item,
+    start = r"#\s*!?\s*\["
+    groups = re.findall(r"((?:^[ \t]*" + start + r"[^\]]*\](?:\s|//[^\n]*(?:\n|\Z)|/\*[\s\S]*?\*/)*)*)" + item,
                         source, re.M)
-    return [re.findall(r"#\[([^\]]*)\]", group) for group in groups]
+    return [re.findall(start + r"([^\]]*)\]", group) for group in groups]
+
+
+# rustc takes whitespace or a newline between `#`, `!` and `[`, and an inner attribute at the start of a module
+# applies to the test right after it. 이것을 실패시키는 것: 속성 묶음이나 속성 내용을 `#[`로만 찾는 것, `#`와 `[` 사이의
+# 줄바꿈을 받지 않는 것, inner 속성(`#!`)을 건너뛰는 것(그 앞의 `ignore`나 `cfg(any())`가 보이지 않아 꺼진 시험을 받음).
+@pytest.mark.parametrize("source, want", [
+    ("# [ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("#\n[ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("#[test]\n#  [cfg(any())]\nfn f() {}\n", ["test", "cfg(any())"]),
+    ("mod tests {\n    #![cfg(any())]\n    #[test]\n    fn f() {}\n}\n", ["cfg(any())", "test"]),
+    ("mod tests {\n    # ! [cfg(any())]\n    #[test]\n    fn f() {}\n}\n", ["cfg(any())", "test"]),
+], ids=["space", "newline", "space-after-test", "inner", "inner-spaced"])
+def test_rust_attributes_read_every_spelling_rustc_takes(source, want):
+    assert rust_attributes(source, r"fn\s+f\s*\(") == [want]
 
 
 def lint_only_cfg_attr(attr):
