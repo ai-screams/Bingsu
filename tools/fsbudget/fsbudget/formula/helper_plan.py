@@ -1,8 +1,9 @@
-"""The helper plan (axes of one round) and the checks and counters its steps share."""
+"""The helper plan (axes of one round), its validation, and the read-count helpers its steps share."""
 from dataclasses import dataclass
+from .primitives import _LIBC
 from .common import ceil_div
 from .synthetic import HelperAxes
-from .tables import BUILTIN_BIN_LINKS_MAX, BUILTIN_PATH_FOLDERS_MAX, BUILTIN_SHIM_HOMES_MAX, BUILTIN_STAGES, BUILTIN_WALK_NAMES_MAX, COMMAND_STAGES, HelperStage, MAX_RW_COUNT, MUSL_PRIMITIVES, PRIMITIVES, STARTUP_PRIMITIVES
+from .tables import BUILTIN_BIN_LINKS_MAX, BUILTIN_PATH_FOLDERS_MAX, BUILTIN_SHIM_HOMES_MAX, BUILTIN_STAGES, BUILTIN_WALK_NAMES_MAX, COMMAND_STAGES, HelperStage, MAX_RW_COUNT, STARTUP_PRIMITIVES
 
 
 @dataclass
@@ -113,27 +114,6 @@ def read_to_end_calls(n: int) -> int:
         if got == want and want >= limit:
             limit *= 2
         length += got
-
-
-_LIBC = {"gnu": {}, "musl": MUSL_PRIMITIVES}
-
-
-_primitives = PRIMITIVES
-
-
-def _use_primitives(table: dict) -> None:
-    """Select the table `_add` counts with. The formulas that need a libc or
-    platform table set it for one call and put `PRIMITIVES` back after; the
-    table lives here, so `_add` and its selector are one module's variable."""
-    global _primitives
-    _primitives = table
-
-
-def _add(total: dict, name: str, times: int = 1) -> None:
-    if times < 0:
-        raise ValueError(name)
-    for kind, n in _primitives.get(name, PRIMITIVES[name]).items():
-        total[kind] = total.get(kind, 0) + n * times
 
 
 def _check_plan(p: HelperPlan) -> None:

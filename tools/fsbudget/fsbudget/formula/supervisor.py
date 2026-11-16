@@ -1,6 +1,5 @@
 """The collector supervisor formula."""
-from .plan import _LIBC, _add, _use_primitives
-from .tables import PRIMITIVES, STARTUP_PRIMITIVES
+from .primitives import _add, _primitives_for
 
 
 # One round spawns at most this many: config units (plan::CONFIG_MAX) and
@@ -23,8 +22,7 @@ def supervisor_expected(spawns: int, *, atomic: bool, arch: str, libc: str, idle
     # stage asks for it (`idle`); a unit round never spawns none.
     if idle != (spawns == 0) or not 0 <= spawns <= SUPERVISOR_SPAWNS_MAX:
         raise ValueError("supervisor spawns: 1 to 12 a round, 0 only idle")
-    _use_primitives({**PRIMITIVES, **_LIBC[libc], **STARTUP_PRIMITIVES[arch, libc]})
-    try:
+    with _primitives_for(libc, arch):
         e: dict[str, int] = {}
         _add(e, "supervisor_idle" if idle else "supervisor_start")
         _add(e, "stack_guard")
@@ -32,5 +30,3 @@ def supervisor_expected(spawns: int, *, atomic: bool, arch: str, libc: str, idle
         _add(e, "supervisor_spawn", spawns)
         _add(e, "supervisor_unit_cgroup" if atomic else "supervisor_own_group", spawns)
         return dict(sorted(e.items()))
-    finally:
-        _use_primitives(PRIMITIVES)
