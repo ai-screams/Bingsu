@@ -1431,7 +1431,12 @@ mod tests {
         let all = include_str!("command_grant.rs").replace("\r\n", "\n");
         let from = all.find(start).unwrap_or_else(|| panic!("no {start}"));
         let end = all[from..].find("\n}\n").unwrap() + from;
-        all[from..end].to_owned()
+        // A step name in a `//` comment must not stand in for the step itself.
+        all[from..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn in_order(text: &str, steps: &[&str]) {
@@ -1447,7 +1452,10 @@ mod tests {
     // 이것을 실패시키는 것: 세션 잠금 전에 회수하는 것, 회수를 환경 확인 뒤로 미루는 것(환경 프레임이 없어도 회수해야
     // 함), neutral 검사를 spawn 뒤로 옮기는 것, 채널 둘 가운데 하나라도 neutral 검사 앞에서 만드는 것(거부된 회차가
     // descriptor를 더 쓰고 실패 때 `Failed`를 보고함), 채널을 만들기 전에 spawn하는 것, `Publish`의 컨텍스트 복제를
-    // spawn 앞으로 옮기는 것.
+    // spawn 앞으로 옮기는 것, macOS의 `nofollow_any` 탐침(`NoNofollowAny`)이나 `Scripts::new`의 dup을 제자리에서 옮기는 것
+    // (`Scripts::new`는 세션 잠금을 쥔 쪽만 만든다), 순서 단계의 이름을 줄 전체가 `//`인 주석에 남기고 코드는 옮기는 것(줄 끝 주석은 걸러지지 않음).
+    // 고정하지 않는 것: 마지막 `binding.ok_or(Skip::NoSession)`의 자리(`pwd`가 없으면 앞에서 이미 `NoSession`이라 우선순위만
+    // 바뀐다).
     #[test]
     fn a_round_that_spawns_keeps_its_steps_in_order() {
         let text = source_of("\nfn spawn_round(");
@@ -1455,11 +1463,13 @@ mod tests {
             &text,
             &[
                 "NoRelay",
+                "NoNofollowAny",
                 "NoSession",
                 "root_id(i)",
                 "close_only_lock(",
                 "session_reclaim(i, session, root)",
                 "NoEnvironment",
+                "Scripts::new(",
                 "neutral(i.runtime",
                 "probes_allowed = false",
                 "command_process::channel()",
@@ -1472,7 +1482,8 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 일 없는 회차에서 컨텍스트를 복제하는 것(helper의 descriptor 호출이 늘어남), 복제를
-    // `reapplied`가 비었는지 보기 전에 하는 것, 잠금 없이 회수하는 것, 회수를 복제 뒤로 옮기는 것.
+    // `reapplied`가 비었는지 보기 전에 하는 것, `reapplied` 조건을 부정하는 것, 잠금을 받자마자 놓고(`let _ =`)
+    // 회수하는 것, `close_only_lock` 호출을 없애는 것, 회수를 복제 뒤로 옮기는 것.
     #[test]
     fn a_round_with_nothing_to_spawn_clones_the_context_only_for_entries_to_publish() {
         let idle = source_of("\nfn idle_round(");
@@ -1480,16 +1491,17 @@ mod tests {
             &idle,
             &[
                 "root_id(i)",
-                "close_only_lock(",
+                "let Ok(_lock) = close_only_lock(",
                 "session_reclaim(i, session, root)",
-                "reapplied.is_empty()",
+                "!reapplied.is_empty()",
                 "i.context.try_clone()",
                 "Skip::Reapplied",
                 "Skip::NoUnits",
             ],
         );
         assert_eq!(idle.matches("try_clone").count(), 1);
-        // The cache plan reads and clones nothing, and `prepare` only chooses.
+        // The cache plan makes no context clone of its own (the dup inside `read_commands` is counted by the
+        // fsbudget formula), and `prepare` only chooses.
         assert!(!source_of("\nfn plan_cache<").contains("try_clone"));
         let prepare = source_of("\npub(crate) fn prepare(");
         assert!(!prepare.contains("try_clone"));
