@@ -14,19 +14,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tools/core-cfg-check/tests/fixtures/bypass"
 CHECKER = ROOT / "target/debug/core-cfg-check"
 
-# The finding that names what each fixture changed (the same table as
-# tools/core-cfg-check/tests/cli.rs PROMPT_MAIN_REJECTIONS).
-PROMPT_MAIN_REJECTIONS = {
-    "allocator.rs": "expected the 9 items of the pinned shape, found 10",
-    "cli_entry.rs": "item 8 differs from the pinned shape",
-    "commands.rs": "expected the 9 items of the pinned shape, found 10",
-    "constructor.rs": "item 7 differs from the pinned shape",
-    "inner_attr.rs": "inner attributes must be exactly #![deny(unsafe_code)]",
-    "no_sandbox.rs": "expected the 9 items of the pinned shape, found 8",
-    "retarget.rs": "item 4 differs from the pinned shape",
-    "trailing.rs": "expected the 9 items of the pinned shape, found 10",
-    "windows_runs.rs": "item 9 differs from the pinned shape",
-}
+
+# What `--prompt-main` prints for each bypass fixture (the table
+# tools/core-cfg-check/tests/cli.rs checks the checker with).
+def prompt_main_expected():
+    rows = (FIXTURES / "prompt-main.tsv").read_text().replace("\r\n", "\n").splitlines()[1:]
+    expected = {}
+    for row in rows:
+        name, line, finding = row.split("\t")
+        expected.setdefault(name, []).append(f":{line}: {finding}")
+    return expected
 
 
 class BypassGates(unittest.TestCase):
@@ -154,18 +151,20 @@ class BypassGates(unittest.TestCase):
 
 
     # 이것을 실패시키는 것: bingsu-prompt main 모양 고정을 지우거나 항목·속성·경로·본문 하나를 덜 보는 것,
-    # gate가 `--prompt-main` 검사를 다른 검사로 보내 픽스처가 다른 이유("unreadable" 등)로 거부되는 것,
-    # 픽스처를 더하고 이유표에 넣지 않는 것.
+    # gate가 `--prompt-main` 검사를 다른 검사로 보내 픽스처가 다른 이유(": unreadable" 등)로 거부되는 것,
+    # 픽스처를 더하고 표(prompt-main.tsv)에 넣지 않는 것.
     def test_prompt_main_after_hash_renewal(self):
+        expected = prompt_main_expected()
         fixtures = sorted((FIXTURES / "prompt-main").iterdir())
-        self.assertEqual([f.name for f in fixtures], sorted(PROMPT_MAIN_REJECTIONS))
+        self.assertEqual([f.name for f in fixtures], sorted(expected))
         for fixture in fixtures:
             with self.subTest(fixture=fixture.name):
                 self.replace_tcb("crates/bingsu-prompt/src/main.rs", f"prompt-main/{fixture.name}")
                 output = self.run_gate("check_cli_prompt_forbid.py")
                 self.assert_rejected(output, "core-cfg-check --prompt-main")
-                self.assertIn(PROMPT_MAIN_REJECTIONS[fixture.name], output.stderr)
-                self.assertNotIn("unreadable", output.stderr)
+                for finding in expected[fixture.name]:
+                    self.assertIn(finding, output.stderr)
+                self.assertNotIn(": unreadable", output.stderr)
 
 if __name__ == "__main__":
     unittest.main()

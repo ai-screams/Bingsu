@@ -1581,39 +1581,34 @@ fn a_test_target_is_not_a_test_only_module_file() {
     );
 }
 
-/// Each bypass fixture of the dedicated prompt binary's entry, with the
-/// finding that names what it changed.
-const PROMPT_MAIN_REJECTIONS: [(&str, &str); 9] = [
-    (
-        "allocator.rs",
-        "expected the 9 items of the pinned shape, found 10",
-    ),
-    ("cli_entry.rs", "item 8 differs from the pinned shape"),
-    (
-        "commands.rs",
-        "expected the 9 items of the pinned shape, found 10",
-    ),
-    ("constructor.rs", "item 7 differs from the pinned shape"),
-    (
-        "inner_attr.rs",
-        "inner attributes must be exactly #![deny(unsafe_code)]",
-    ),
-    (
-        "no_sandbox.rs",
-        "expected the 9 items of the pinned shape, found 8",
-    ),
-    ("retarget.rs", "item 4 differs from the pinned shape"),
-    (
-        "trailing.rs",
-        "expected the 9 items of the pinned shape, found 10",
-    ),
-    ("windows_runs.rs", "item 9 differs from the pinned shape"),
-];
+/// What `--prompt-main` prints for each bypass fixture, one `line: finding`
+/// per row of fixtures/bypass/prompt-main.tsv (written by hand from what each
+/// fixture changes; scripts/test_gate_bypass.py reads the same file).
+fn prompt_main_expected(root: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let table = std::fs::read_to_string(root.join("tests/fixtures/bypass/prompt-main.tsv"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for row in table.lines().skip(1) {
+        let [name, line, finding] = row.split('\t').collect::<Vec<_>>()[..] else {
+            panic!("bad row {row:?}");
+        };
+        let finding = format!("{line}: {finding}");
+        match out.last_mut() {
+            Some((last, findings)) if last == name => findings.push(finding),
+            _ => out.push((name.to_owned(), vec![finding])),
+        }
+    }
+    out
+}
 
-// The real entry passes with nothing on stderr, and each fixture fails for
-// its own reason, never because the file could not be read.
+// The real entry passes with nothing on stderr; each fixture prints exactly
+// its findings; a documented entry passes, and an entry that changes only a
+// `cfg`, or changes a documented item, names that item.
 // 이것을 실패시키는 것: `--prompt-main` 분기를 빼거나 다른 검사로 보내는 것(실제 파일이 거부됨), 모양 비교에서
-// 속성·항목 수·항목 하나를 덜 보는 것(그 픽스처의 이유가 사라짐), 픽스처를 더하고 이유표에 넣지 않는 것.
+// 속성·항목 수·항목 하나를 덜 보거나 첫 차이에서 멈추는 것(그 픽스처의 목록이 달라짐), `cfg`만 다른 항목을 같다고
+// 보는 것, 문서 주석이 있는 항목을 비교하지 않는 것, 성공에도 stderr를 쓰거나 다른 이유("unreadable")를 더 쓰는 것,
+// 픽스처를 더하고 표에 넣지 않는 것.
 #[test]
 fn prompt_main_takes_the_real_entry_and_names_each_rejection() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1623,25 +1618,82 @@ fn prompt_main_takes_the_real_entry_and_names_each_rejection() {
             .arg(path)
             .output()
             .unwrap();
-        (
-            output.status.success(),
-            String::from_utf8(output.stderr).unwrap(),
-        )
+        let prefix = format!("{}:", path.display());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let findings: Vec<String> = stderr
+            .lines()
+            .map(|l| l.strip_prefix(&prefix).unwrap_or(l).to_owned())
+            .collect();
+        (output.status.success(), stderr, findings)
     };
-    let (ok, err) = run(&root.join("../../crates/bingsu-prompt/src/main.rs"));
+    let entry = root.join("../../crates/bingsu-prompt/src/main.rs");
+    let (ok, err, _) = run(&entry);
     assert!(ok && err.is_empty(), "{err}");
+
     let dir = root.join("tests/fixtures/bypass/prompt-main");
+    let expected = prompt_main_expected(root);
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
-    let listed: Vec<&str> = PROMPT_MAIN_REJECTIONS.iter().map(|(n, _)| *n).collect();
+    let listed: Vec<&str> = expected.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, listed);
-    for (name, reason) in PROMPT_MAIN_REJECTIONS {
-        let (ok, err) = run(&dir.join(name));
+    for (name, want) in &expected {
+        let (ok, err, findings) = run(&dir.join(name));
         assert!(!ok, "{name}");
-        assert!(err.contains(reason), "{name}: {err}");
-        assert!(!err.contains("unreadable"), "{name}: {err}");
+        assert_eq!(&findings, want, "{name}: {err}");
     }
+
+    // Variants of the real entry; their line numbers follow the file, so only
+    // the findings' text is compared.
+    let real = std::fs::read_to_string(&entry)
+        .unwrap()
+        .replace("\r\n", "\n");
+    let variant = |edits: &[(&str, &str)]| {
+        let mut text = real.clone();
+        for (from, to) in edits {
+            assert_eq!(text.matches(from).count(), 1, "{from}");
+            text = text.replacen(from, to, 1);
+        }
+        fixture(&text)
+    };
+    let reasons = |findings: Vec<String>| -> Vec<String> {
+        findings
+            .iter()
+            .map(|f| f.split_once(": ").map_or(f.clone(), |(_, r)| r.to_owned()))
+            .collect()
+    };
+    let unix_main = "#[cfg(unix)]\nfn main() {\n";
+    let documented = variant(&[
+        ("#[used]\n", "/// The role marker.\n#[used]\n"),
+        (unix_main, &format!("/// The Unix entry.\n{unix_main}")),
+    ]);
+    let (ok, err, _) = run(&documented);
+    assert!(ok && err.is_empty(), "documented entry: {err}");
+    let cfg_only = variant(&[(
+        "#[cfg(all(unix, not(target_os = \"linux\")))]\nmod sandbox {",
+        "#[cfg(unix)]\nmod sandbox {",
+    )]);
+    let (ok, err, findings) = run(&cfg_only);
+    assert!(!ok, "cfg only");
+    assert_eq!(
+        reasons(findings),
+        ["item 6 differs from the pinned shape"],
+        "{err}"
+    );
+    let documented_change = variant(&[
+        (unix_main, &format!("/// The Unix entry.\n{unix_main}")),
+        (
+            "    prompt::dedicated(sandbox::enter)\n}",
+            "    let _ = prompt::dedicated(sandbox::enter);\n}",
+        ),
+    ]);
+    let (ok, err, findings) = run(&documented_change);
+    assert!(!ok, "documented change");
+    assert_eq!(
+        reasons(findings),
+        ["item 8 differs from the pinned shape"],
+        "{err}"
+    );
 }

@@ -39,3 +39,5 @@
 | `wt/crates/bingsu-core/src/test_file/after_item.rs` | Test-only file | `#![cfg(test)]` after an item; the file's `as_ptr` call must still be found. | Reject the file as production code. |
 | `wt/crates/bingsu-core/src/test_file/crate_root.rs` | Test-only file | `#![cfg(test)]` on a crate root (`lib.rs`); the file's `as_ptr` call must still be found. | Reject the file as production code. |
 | `wt/crates/bingsu-core/src/test_file/exempt.rs` | Test-only file | `#![cfg(test)]` as the first attribute after a plain `//` comment. | Accept: no finding for the file. |
+
+`prompt-main.tsv` lists, for each `prompt-main/` fixture, every finding `--prompt-main` prints for it (line and text), written from what the fixture changes. `tests/cli.rs` checks the checker against it and `scripts/test_gate_bypass.py` checks the gate output after the hash pins are renewed.
