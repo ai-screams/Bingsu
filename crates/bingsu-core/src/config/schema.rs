@@ -351,16 +351,9 @@ fn node(k: &KeyDef, which: Which, depth: usize, out: &mut String) {
     node_at(k, k.path, which, depth, &Patterns::new(), out);
 }
 
-fn node_at(
-    k: &KeyDef,
-    path: &str,
-    which: Which,
-    depth: usize,
-    patterns: &Patterns,
-    out: &mut String,
-) {
-    out.push_str("{\n");
-    let mut fields: Vec<(&str, String)> = Vec::new();
+/// The fields of a key that holds a value (everything but a table), in the
+/// order the schema lists them.
+fn scalar_fields(k: &KeyDef, patterns: &Patterns, fields: &mut Vec<(&'static str, String)>) {
     let mut v = String::new();
     match k.ty {
         Ty::Bool => fields.push(("type", String::from("\"boolean\""))),
@@ -422,82 +415,109 @@ fn node_at(
                 alloc::format!("{{ \"enum\": {} }}", core::mem::take(&mut v)),
             ));
         }
-        Ty::Table => {
-            fields.push(("type", String::from("\"object\"")));
-            let mut children = keys_under(path, which);
-            let builtin = path
-                .strip_prefix("segment.")
-                .is_some_and(|id| crate::field::segment(id).is_some());
-            if builtin {
-                children.retain(|c| {
-                    c.kinds.is_empty()
-                        && (!c.path.starts_with("segment.*.") || c.path.ends_with(".enabled"))
-                });
+        Ty::Table => unreachable!("a table goes through table_fields"),
+    }
+}
+
+/// The fields of a table: its children as `properties`, the segment id
+/// rules, the per-kind exclusions of `segment.*`, and the wildcard child as
+/// `additionalProperties`.
+fn table_fields(
+    path: &str,
+    which: Which,
+    depth: usize,
+    patterns: &Patterns,
+    fields: &mut Vec<(&'static str, String)>,
+) {
+    fields.push(("type", String::from("\"object\"")));
+    let mut children = keys_under(path, which);
+    let builtin = path
+        .strip_prefix("segment.")
+        .is_some_and(|id| crate::field::segment(id).is_some());
+    if builtin {
+        children.retain(|c| {
+            c.kinds.is_empty()
+                && (!c.path.starts_with("segment.*.") || c.path.ends_with(".enabled"))
+        });
+    }
+    let mut named: Vec<(&KeyDef, String)> = children
+        .iter()
+        .filter(|c| !c.path.ends_with(".*"))
+        .map(|c| (*c, String::from(c.path)))
+        .collect();
+    if path == "segment" {
+        let star = children
+            .iter()
+            .find(|c| c.path.ends_with(".*"))
+            .expect("segment wildcard");
+        for d in crate::field::BUILTIN {
+            let p = alloc::format!("segment.{}", d.id);
+            if !named.iter().any(|(_, path)| path == &p) {
+                named.push((star, p));
             }
-            let mut named: Vec<(&KeyDef, String)> = children
-                .iter()
-                .filter(|c| !c.path.ends_with(".*"))
-                .map(|c| (*c, String::from(c.path)))
-                .collect();
-            if path == "segment" {
-                let star = children
-                    .iter()
-                    .find(|c| c.path.ends_with(".*"))
-                    .expect("segment wildcard");
-                for d in crate::field::BUILTIN {
-                    let p = alloc::format!("segment.{}", d.id);
-                    if !named.iter().any(|(_, path)| path == &p) {
-                        named.push((star, p));
-                    }
-                }
-                let mut names = String::from(
-                    "{ \"type\": \"string\", \"x-bingsu-type\": \"segment-id\", \"pattern\": ",
-                );
-                esc(&patterns.segment, &mut names);
-                names.push_str(" }");
-                fields.push(("propertyNames", names));
-            }
-            if !named.is_empty() {
-                let mut props = String::from("{\n");
-                for (i, (c, child_path)) in named.iter().enumerate() {
-                    pad(depth + 2, &mut props);
-                    esc(child_path.rsplit('.').next().unwrap_or(""), &mut props);
-                    props.push_str(": ");
-                    node_at(c, child_path, which, depth + 2, patterns, &mut props);
-                    props.push_str(if i + 1 < named.len() { ",\n" } else { "\n" });
-                }
-                pad(depth + 1, &mut props);
-                props.push('}');
-                fields.push(("properties", props));
-            }
-            if path == "segment.*" && which == Which::Config {
-                let mut conditions = Vec::new();
-                for kind in KINDS {
-                    let forbidden: Vec<_> = children
-                        .iter()
-                        .filter(|c| !c.kinds.is_empty() && !c.kinds.contains(&kind))
-                        .map(|c| {
-                            let mut prop = String::new();
-                            esc(c.path.rsplit('.').next().unwrap_or(""), &mut prop);
-                            alloc::format!("{prop}: false")
-                        })
-                        .collect();
-                    let mut value = String::new();
-                    esc(kind, &mut value);
-                    conditions.push(alloc::format!("{{ \"if\": {{ \"required\": [\"kind\"], \"properties\": {{ \"kind\": {{ \"const\": {value} }} }} }}, \"then\": {{ \"properties\": {{ {} }} }} }}", forbidden.join(", ")));
-                }
-                fields.push(("allOf", alloc::format!("[{}]", conditions.join(", "))));
-            }
-            let extra = match children.iter().find(|c| c.path.ends_with(".*")) {
-                Some(star) => {
-                    let mut s = String::new();
-                    node_at(star, star.path, which, depth + 1, patterns, &mut s);
-                    s
-                }
-                None => String::from("false"),
-            };
-            fields.push(("additionalProperties", extra));
         }
+        let mut names = String::from(
+            "{ \"type\": \"string\", \"x-bingsu-type\": \"segment-id\", \"pattern\": ",
+        );
+        esc(&patterns.segment, &mut names);
+        names.push_str(" }");
+        fields.push(("propertyNames", names));
+    }
+    if !named.is_empty() {
+        let mut props = String::from("{\n");
+        for (i, (c, child_path)) in named.iter().enumerate() {
+            pad(depth + 2, &mut props);
+            esc(child_path.rsplit('.').next().unwrap_or(""), &mut props);
+            props.push_str(": ");
+            node_at(c, child_path, which, depth + 2, patterns, &mut props);
+            props.push_str(if i + 1 < named.len() { ",\n" } else { "\n" });
+        }
+        pad(depth + 1, &mut props);
+        props.push('}');
+        fields.push(("properties", props));
+    }
+    if path == "segment.*" && which == Which::Config {
+        let mut conditions = Vec::new();
+        for kind in KINDS {
+            let forbidden: Vec<_> = children
+                .iter()
+                .filter(|c| !c.kinds.is_empty() && !c.kinds.contains(&kind))
+                .map(|c| {
+                    let mut prop = String::new();
+                    esc(c.path.rsplit('.').next().unwrap_or(""), &mut prop);
+                    alloc::format!("{prop}: false")
+                })
+                .collect();
+            let mut value = String::new();
+            esc(kind, &mut value);
+            conditions.push(alloc::format!("{{ \"if\": {{ \"required\": [\"kind\"], \"properties\": {{ \"kind\": {{ \"const\": {value} }} }} }}, \"then\": {{ \"properties\": {{ {} }} }} }}", forbidden.join(", ")));
+        }
+        fields.push(("allOf", alloc::format!("[{}]", conditions.join(", "))));
+    }
+    let extra = match children.iter().find(|c| c.path.ends_with(".*")) {
+        Some(star) => {
+            let mut s = String::new();
+            node_at(star, star.path, which, depth + 1, patterns, &mut s);
+            s
+        }
+        None => String::from("false"),
+    };
+    fields.push(("additionalProperties", extra));
+}
+
+fn node_at(
+    k: &KeyDef,
+    path: &str,
+    which: Which,
+    depth: usize,
+    patterns: &Patterns,
+    out: &mut String,
+) {
+    out.push_str("{\n");
+    let mut fields: Vec<(&str, String)> = Vec::new();
+    match k.ty {
+        Ty::Table => table_fields(path, which, depth, patterns, &mut fields),
+        _ => scalar_fields(k, patterns, &mut fields),
     }
     let corpus_type = match k.ty {
         Ty::Text => Some("text"),
