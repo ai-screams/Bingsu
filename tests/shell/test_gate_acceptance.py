@@ -772,12 +772,13 @@ def test_lib_row_is_accepted_with_its_exact_ci_assertion():
 
 
 # 이것을 실패시키는 것: lib 행을 --test 실행·주석 단언으로 받거나, 표의 모듈 경로·bin target을 믿거나,
-# #[path]·꺼진 cfg·없는 inline 모듈을 지나치는 것.
+# #[path]·꺼진 cfg·없는 inline 모듈을 지나치는 것, 없는 inline 모듈 행이 다른 이유로만 거부되는 것.
 @pytest.mark.parametrize("damage", ["test-target", "no-grep", "module-path", "bin-target",
                                     "path-module", "disabled-module", "inline-module"])
 def test_lib_row_rejects_mutations(damage):
     table, texts, read = lib_case(damage)
-    with pytest.raises(AssertionError):
+    # The missing inline module must be what refuses the row, not a mismatch elsewhere.
+    with pytest.raises(AssertionError, match="inline module" if damage == "inline-module" else None):
         assert_acceptance_table(table, texts, required_ids=frozenset({"GATE-ZOMBIES.1"}),
                                 required_gates=frozenset(M3D_GATE_IDS), read=read)
 
