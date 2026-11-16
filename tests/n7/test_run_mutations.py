@@ -1,4 +1,5 @@
 """Self-tests for the mutation harness; no cargo or source mutations needed."""
+import ast
 import json
 import os
 import re
@@ -82,26 +83,42 @@ def rust_target_root(command, root):
     return None
 
 
-def rust_path_declared(source, mod_rs, segments, depth=0):
-    """Whether the module path `segments[:-1]`, read from `source` the way rustc
-    finds module files (`mod a;` is `a.rs` or `a/mod.rs` beside a mod-rs file,
-    inside the folder named after any other file; `mod a { … }` stays in the
-    file), reaches a file that declares `fn segments[-1]`. rustfmt indents an
-    inline module's items four spaces more, so `depth` inline modules deep an
-    item starts after exactly 4 × depth spaces."""
-    text = source.read_text(errors="replace")
+def rust_path_declared(text, folder, segments, depth=0):
+    """Whether the module path `segments[:-1]`, read from a module's `text` the
+    way rustc finds module files, reaches a module that declares
+    `fn segments[-1]`. `folder` holds the module's child files: `mod a;` is
+    `folder/a.rs` (whose children are in `folder/a/`) or `folder/a/mod.rs`, and
+    an inline `mod a { … }` keeps its children in `folder/a/`. rustfmt indents
+    an inline module's items four spaces more and closes it at its own
+    indentation, so `depth` inline modules deep an item starts after exactly
+    4 × depth spaces, and the module's body ends at the first `}` there."""
     first, rest = segments[0], segments[1:]
     at = rf"(?m)^ {{{4 * depth}}}{VISIBILITY}"
     if not rest:
         return re.search(rf"{at}(?:async\s+)?fn\s+{re.escape(first)}\s*\(", text) is not None
     if re.search(rf"{at}mod\s+{re.escape(first)}\s*;", text):
-        folder = source.parent if mod_rs else source.parent / source.stem
         for child in (folder / f"{first}.rs", folder / first / "mod.rs"):
-            if child.is_file() and rust_path_declared(child, child.name == "mod.rs", rest):
+            if child.is_file() and rust_path_declared(child.read_text(errors="replace"), folder / first, rest):
                 return True
-    if re.search(rf"{at}mod\s+{re.escape(first)}\s*\{{", text):
-        return rust_path_declared(source, mod_rs, rest, depth + 1)
+    for opened in re.finditer(rf"{at}mod\s+{re.escape(first)}\s*\{{", text):
+        closed = re.compile(rf"(?m)^ {{{4 * depth}}}\}}").search(text, opened.end())
+        body = text[opened.end():closed.start() if closed else len(text)]
+        if rust_path_declared(body, folder / first, rest, depth + 1):
+            return True
     return False
+
+
+def python_test_declared(source, names):
+    """Whether `names` (any classes, then the function) are nested in that order
+    at the top of the pytest file `source`."""
+    body = ast.parse(source.read_text(errors="replace")).body
+    *classes, name = names
+    for cls in classes:
+        found = [node for node in body if isinstance(node, ast.ClassDef) and node.name == cls]
+        if not found:
+            return False
+        body = found[0].body
+    return any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name for node in body)
 
 
 def anchor_declared(case, root):
@@ -110,15 +127,11 @@ def anchor_declared(case, root):
     anchor = case["anchor"].split("[")[0]
     if case["kind"] == "rust":
         target = rust_target_root(case.get("command", []), root)
-        return target is not None and target.is_file() and rust_path_declared(target, True, anchor.split("::"))
+        return target is not None and target.is_file() and \
+            rust_path_declared(target.read_text(errors="replace"), target.parent, anchor.split("::"))
     path, *names = anchor.split("::")
     source = root / path
-    if not names or not source.is_file():
-        return False
-    text = source.read_text(errors="replace")
-    *classes, name = names
-    return all(re.search(rf"(?m)^[ \t]*class\s+{re.escape(c)}\b", text) for c in classes) and \
-        re.search(rf"(?m)^[ \t]*(?:async\s+)?def\s+{re.escape(name)}\s*\(", text) is not None
+    return bool(names) and source.is_file() and python_test_declared(source, names)
 
 
 def manifest_problems(manifest, root):
@@ -176,16 +189,19 @@ def test_manifest_check_names_each_stale_entry(tmp_path):
 # The anchor is the whole name the runner selects with --exact and looks for in
 # "test <anchor> ... ok"; a stale module on its path selects no test.
 # 이것을 실패시키는 것: anchor의 마지막 이름만 보는 것(경로 한 단계가 틀린 anchor가 통과), inline
-# `mod … {`의 들여쓰기 깊이를 보지 않는 것(inline 단계 하나를 빠뜨린 anchor가 통과), `mod a;`를
-# mod-rs가 아닌 파일 옆에서 찾는 것, `a/mod.rs`를 찾지 않는 것, `sh -c`·`--test`의 target을 읽지
-# 않는 것, pytest anchor의 파일이나 class를 보지 않는 것.
+# `mod … {`의 들여쓰기 깊이를 보지 않는 것(inline 단계 하나를 빠뜨린 anchor가 통과), inline 모듈의
+# 몸통 밖까지 찾는 것(이웃 inline 모듈의 시험을 받음), `mod a;`를 mod-rs가 아닌 파일 옆에서 찾거나
+# inline 모듈 안의 `mod a;`를 그 모듈 폴더 밖에서 찾는 것, `a/mod.rs`를 찾지 않는 것, `sh -c`·
+# `--test`의 target을 읽지 않는 것, pytest anchor의 파일이나 class 안을 보지 않는 것.
 def test_manifest_check_follows_the_whole_anchor_path(tmp_path):
     crate = tmp_path / "crates/a"
     for folder in ("src/m", "src/d", "tests"):
         (crate / folder).mkdir(parents=True)
-    (crate / "src/lib.rs").write_text("mod d;\nmod m;\n")
+    (crate / "src/w").mkdir()
+    (crate / "src/lib.rs").write_text("mod d;\nmod m;\nmod w {\n    mod s;\n}\n")
     (crate / "src/m.rs").write_text("fn real() {}\n#[cfg(test)]\nmod t;\n")
-    (crate / "src/m/t.rs").write_text("mod cases {\n    #[test]\n    fn deep() {}\n}\n")
+    (crate / "src/m/t.rs").write_text("mod cases {\n    #[test]\n    fn deep() {}\n}\nmod other {\n    fn sib() {}\n}\n")
+    (crate / "src/w/s.rs").write_text("fn held() {}\n")
     (crate / "src/d/mod.rs").write_text("pub fn dir() {}\n")
     (crate / "tests/api.rs").write_text("#[test]\nfn top() {}\n")
     (tmp_path / "tests").mkdir()
@@ -198,13 +214,17 @@ def test_manifest_check_follows_the_whole_anchor_path(tmp_path):
                                  tmp_path)
 
     for anchor, kind, command in [("m::real", "rust", lib), ("m::t::cases::deep", "rust", lib),
-                                  ("d::dir", "rust", lib), ("top", "rust", api),
+                                  ("d::dir", "rust", lib), ("top", "rust", api), ("w::s::held", "rust", lib),
+                                  ("m::t::other::sib", "rust", lib),
                                   ("tests/test_x.py::TestK::test_y", "python", []),
                                   ("tests/test_x.py::test_z[1]", "python", [])]:
         assert problems(anchor, kind, command) == [], anchor
     for anchor, kind, command in [("n::real", "rust", lib), ("m::t::deep", "rust", lib),
                                   ("m::cases::deep", "rust", lib), ("t::cases::deep", "rust", lib),
+                                  ("m::t::cases::sib", "rust", lib), ("s::held", "rust", lib),
                                   ("top", "rust", lib), ("m::real", "rust", ["cargo", "test", "--lib"]),
                                   ("tests/test_w.py::test_z", "python", []),
-                                  ("tests/test_x.py::TestJ::test_y", "python", [])]:
+                                  ("tests/test_x.py::TestJ::test_y", "python", []),
+                                  ("tests/test_x.py::test_y", "python", []),
+                                  ("tests/test_x.py::TestK::test_z", "python", [])]:
         assert problems(anchor, kind, command) == [f"x: no test {anchor}"], anchor
