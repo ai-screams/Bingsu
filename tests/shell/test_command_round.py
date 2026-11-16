@@ -1158,7 +1158,7 @@ def test_command_row_takes_a_cell_mark_only_from_the_cell_files():
     from test_gate_acceptance import cgroup_cell_tests
     cells = cgroup_cell_tests()
     base = "test_nested_cgroup_removed_postorder"
-    name, real_path = "commands::command_supervisor::tests::" + base, "crates/bingsu/src/commands/command_supervisor.rs"
+    name, real_path = "commands::command_supervisor::tests::" + base, "crates/bingsu/src/commands/command_supervisor/tests.rs"
     real = lambda p: (ROOT / p).read_text().replace("\r\n", "\n")
     assert name in cells
     assert_command_row({"id": "CMD-X", "stage": "C3", "platform": "Linux", "test": f"{real_path}::{name}"}, real, cells)
