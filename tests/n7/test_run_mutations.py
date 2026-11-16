@@ -91,7 +91,9 @@ def rust_path_declared(text, folder, segments, depth=0):
     an inline `mod a { … }` keeps its children in `folder/a/`. rustfmt indents
     an inline module's items four spaces more and closes it at its own
     indentation, so `depth` inline modules deep an item starts after exactly
-    4 × depth spaces, and the module's body ends at the first `}` there."""
+    4 × depth spaces, and the module's body ends at the first line that is
+    just `}` there. A string literal line that is just `}` at that indentation
+    ends the body early, which can only reject an anchor, never accept one."""
     first, rest = segments[0], segments[1:]
     at = rf"(?m)^ {{{4 * depth}}}{VISIBILITY}"
     if not rest:
@@ -101,7 +103,7 @@ def rust_path_declared(text, folder, segments, depth=0):
             if child.is_file() and rust_path_declared(child.read_text(errors="replace"), folder / first, rest):
                 return True
     for opened in re.finditer(rf"{at}mod\s+{re.escape(first)}\s*\{{", text):
-        closed = re.compile(rf"(?m)^ {{{4 * depth}}}\}}").search(text, opened.end())
+        closed = re.compile(rf"(?m)^ {{{4 * depth}}}\}}$").search(text, opened.end())
         body = text[opened.end():closed.start() if closed else len(text)]
         if rust_path_declared(body, folder / first, rest, depth + 1):
             return True
@@ -200,7 +202,8 @@ def test_manifest_check_follows_the_whole_anchor_path(tmp_path):
     (crate / "src/w").mkdir()
     (crate / "src/lib.rs").write_text("mod d;\nmod m;\nmod w {\n    mod s;\n}\n")
     (crate / "src/m.rs").write_text("fn real() {}\n#[cfg(test)]\nmod t;\n")
-    (crate / "src/m/t.rs").write_text("mod cases {\n    #[test]\n    fn deep() {}\n}\nmod other {\n    fn sib() {}\n}\n")
+    (crate / "src/m/t.rs").write_text("mod cases {\n    #[test]\n    fn deep() {}\n    const RAW: &str = r#\"\n}x\n\"#;\n"
+                                      "    fn after() {}\n}\nmod other {\n    fn sib() {}\n}\n")
     (crate / "src/w/s.rs").write_text("fn held() {}\n")
     (crate / "src/d/mod.rs").write_text("pub fn dir() {}\n")
     (crate / "tests/api.rs").write_text("#[test]\nfn top() {}\n")
@@ -215,7 +218,7 @@ def test_manifest_check_follows_the_whole_anchor_path(tmp_path):
 
     for anchor, kind, command in [("m::real", "rust", lib), ("m::t::cases::deep", "rust", lib),
                                   ("d::dir", "rust", lib), ("top", "rust", api), ("w::s::held", "rust", lib),
-                                  ("m::t::other::sib", "rust", lib),
+                                  ("m::t::other::sib", "rust", lib), ("m::t::cases::after", "rust", lib),
                                   ("tests/test_x.py::TestK::test_y", "python", []),
                                   ("tests/test_x.py::test_z[1]", "python", [])]:
         assert problems(anchor, kind, command) == [], anchor
