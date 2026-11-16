@@ -245,9 +245,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// Which rules a file gets: core's library files all of them, its test
-/// and bench targets all but the library-only ones, the prompt adapter all
-/// but the library-only, address and crate-root ones.
+/// Which rules a file gets: core's library files all of them (a test-only
+/// library file is test code throughout, so it skips the address rule and
+/// every check that looks only at production code), its test and bench
+/// targets all but the library-only and crate-root ones, the prompt adapter
+/// all but the library-only, address and crate-root ones.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Library,

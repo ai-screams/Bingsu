@@ -1,7 +1,8 @@
-//! What counts as test code: an item marked `#[cfg(test)]`, at any depth,
-//! and a library child module file whose first inner attribute is
-//! `#![cfg(test)]`. The default mode, `--rules` and function_items.rs share
-//! this judgement.
+//! What counts as test code: an item marked `#[cfg(test)]`, at any depth
+//! (TestSpans, which the default mode and `--rules` each build), and a
+//! library child module file whose first inner attribute is `#![cfg(test)]`
+//! (is_test_file, in the default mode only; function_items.rs reads the
+//! default mode's spans, so it sees that file too as test code).
 
 use proc_macro2::Span;
 use syn::visit::Visit;
