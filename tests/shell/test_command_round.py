@@ -1109,35 +1109,64 @@ def cargo_target(path):
     return "lib" if (ROOT / f"crates/{crate}/src/lib.rs").exists() else f"bin:{crate}"
 
 
+# The cgroup cell job runs and asserts the cell tests of these files only (cgroup_cell_tests).
+CELL_FILE = r"crates/bingsu/src/commands/\w+\.rs"
+
+
+def assert_command_row(row, read, cells):
+    """A row of tests/command-acceptance.tsv names a test that runs on its platform."""
+    import re
+    from test_collector_security import CELL_IGNORE, row_platforms, rust_libtest_module, rust_test_attributes
+    if row["stage"] not in ("C2", "C3", "C4"):
+        assert (row["platform"], row["test"]) == ("-", "-"), row["id"]
+        return
+    path, name = row["test"].split("::", 1)
+    source = read(path)
+    if path.endswith(".py"):
+        assert len(re.findall(rf"^def {re.escape(name)}\(", source, re.M)) == 1, (row["id"], path, name)
+        return
+    platforms = row_platforms(row)
+    base = name.rsplit("::", 1)[-1]
+    attributes = rust_test_attributes(row, source, path, base, platforms)
+    target = cargo_target(path)
+    module = rust_libtest_module(row, source, path, name, target, read, platforms)
+    ignored = [a.strip() for a in attributes if re.match(r"\s*ignore\b", a)]
+    cell = (ignored == [CELL_IGNORE] and target == "bin:bingsu" and re.fullmatch(CELL_FILE, path) is not None
+            and module + base in cells)
+    assert not ignored or cell, (row["id"], "ignored test", ignored)
+
+
 # tests/command-acceptance.tsv의 행마다 그 플랫폼에서 실제로 도는 시험이 있다(넘긴 행은 "-"와 넘긴 Task). Rust 행은
 # gate 표처럼 `파일::모듈경로::이름`이고 같은 정적 검사를 받는다: `#[test]` 선언 하나, fn·파일 모듈·inline 모듈의 cfg가
 # 행의 플랫폼에서 성립, `#[ignore]`는 cgroup 셀 job이 돌리고 단언하는 셀 시험의 표시만. 이것을 실패시키는 것: 표의
 # 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것, 시험에 `#[ignore]`를 붙이는 것, 셀 밖 시험에 셀
 # 표시를 붙이는 것, 시험이나 그 모듈의 cfg를 행의 플랫폼에서 꺼지게 바꾸는 것.
 def test_command_table_names_real_tests():
-    import csv, re
+    import csv
     from conftest import ROOT
-    from test_collector_security import CELL_IGNORE, row_platforms, rust_libtest_module, rust_test_attributes
     from test_gate_acceptance import cgroup_cell_tests
     rows = list(csv.DictReader((ROOT / "tests/command-acceptance.tsv").read_text().splitlines(), delimiter="\t"))
     assert rows and len({r["id"] for r in rows}) == len(rows)
     cells = cgroup_cell_tests()
-    read = lambda p: (ROOT / p).read_text()
     for row in rows:
-        if row["stage"] not in ("C2", "C3", "C4"):
-            assert (row["platform"], row["test"]) == ("-", "-"), row["id"]
-            continue
-        path, name = row["test"].split("::", 1)
-        source = read(path)
-        if path.endswith(".py"):
-            assert len(re.findall(rf"^def {re.escape(name)}\(", source, re.M)) == 1, (row["id"], path, name)
-            continue
-        platforms = row_platforms(row)
-        base = name.rsplit("::", 1)[-1]
-        attributes = rust_test_attributes(row, source, path, base, platforms)
-        module = rust_libtest_module(row, source, path, name, cargo_target(path), read, platforms)
-        ignored = [a.strip() for a in attributes if re.match(r"\s*ignore\b", a)]
-        assert not ignored or (ignored == [CELL_IGNORE] and module + base in cells), (row["id"], "ignored test", ignored)
+        assert_command_row(row, lambda p: (ROOT / p).read_text(), cells)
+
+
+# 셀 표시는 셀 job이 실제로 돌리는 파일의 시험에서만 받는다. 다른 target의 시험이 모듈을 겹쳐 같은 libtest 경로를
+# 가져도 셀 job은 그것을 돌리지 않는다. 이것을 실패시키는 것: 셀 시험 판정에서 target이나 파일 조건을 빼는 것.
+def test_command_row_takes_a_cell_mark_only_from_the_cell_files():
+    from conftest import ROOT
+    from test_gate_acceptance import cgroup_cell_tests
+    cells = cgroup_cell_tests()
+    name = "commands::command_supervisor::tests::test_nested_cgroup_removed_postorder"
+    assert name in cells
+    path = "crates/bingsu/tests/review_cell.rs"
+    source = ("mod commands {\nmod command_supervisor {\nmod tests {\n    #[test]\n"
+              '    #[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]\n'
+              "    fn test_nested_cgroup_removed_postorder() {}\n}\n}\n}\n")
+    row = {"id": "CMD-X", "stage": "C3", "platform": "Linux", "test": f"{path}::{name}"}
+    with pytest.raises(AssertionError, match="ignored test"):
+        assert_command_row(row, lambda p: source if p == path else (ROOT / p).read_text(), cells)
 
 
 # 단위가 없는 회차는 감독을 띄우지 않는다. 감독은 세션 잠금을 얻은 뒤에만 생성되므로 잠금 파일과 중립 폴더가

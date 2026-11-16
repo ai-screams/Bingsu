@@ -931,6 +931,9 @@ def lint_only_cfg_attr(attr):
             quoted = not (c == '"' and body[i - 1] != "\\")
         elif c == '"':
             quoted = True
+        elif body[i:i + 2] in ("//", "/*"):
+            # A comment can hide a separator from this count: refuse it.
+            return False
         elif c in "([":
             depth += 1
         elif c in ")]":
@@ -939,6 +942,8 @@ def lint_only_cfg_attr(attr):
             parts.append(body[start:i])
             start = i + 1
     parts.append(body[start:])
+    if len(parts) == 3 and not parts[2].strip():
+        parts.pop()  # one trailing comma
     lint = r'\s*(?:allow|expect)\s*\(\s*[\w:]+(?:\s*,\s*[\w:]+)*(?:\s*,\s*reason\s*=\s*"[^"\\]*")?\s*,?\s*\)\s*'
     return len(parts) == 2 and re.fullmatch(lint, parts[1]) is not None
 
@@ -952,8 +957,8 @@ def assert_cfgs_hold(row, attributes, platforms):
             assert all(rust_cfg_holds(cfg[1], platform) for platform in platforms), (row["id"], "disabled cfg", attr)
 
 
-# 이것을 실패시키는 것: lint 전용 cfg_attr(조건 아래의 allow·expect)를 거부하는 것(오탐), cfg_attr 안의 ignore·cfg·path나
-# 두 번째 속성을 받는 것(시험이나 모듈이 그 플랫폼에서 꺼질 수 있음).
+# 이것을 실패시키는 것: lint 전용 cfg_attr(조건 아래의 allow·expect, 끝의 쉼표 하나 포함)를 거부하는 것(오탐), cfg_attr
+# 안의 ignore·cfg·path나 두 번째 속성을 받는 것, 주석으로 구분자를 가린 cfg_attr를 받는 것(시험이 그 플랫폼에서 꺼질 수 있음).
 @pytest.mark.parametrize("attr, ok", [
     ('cfg_attr(\n    not(test),\n    allow(dead_code, reason = "the helper calls it from the next change")\n)', True),
     ('cfg_attr(test, expect(clippy::unwrap_used))', True),
@@ -961,7 +966,9 @@ def assert_cfgs_hold(row, attributes, platforms):
     ('cfg_attr(test, cfg(target_os = "macos"))', False),
     ('cfg_attr(test, path = "other.rs")', False),
     ('cfg_attr(test, allow(dead_code), ignore)', False),
-], ids=["allow", "expect", "ignore", "cfg", "path", "second"])
+    ('cfg_attr(test, allow(dead_code),)', True),
+    ('cfg_attr(test /* ( */, ignore /* ) */, allow(dead_code))', False),
+], ids=["allow", "expect", "ignore", "cfg", "path", "second", "trailing-comma", "comment"])
 def test_cfgs_hold_take_only_a_lint_level_under_cfg_attr(attr, ok):
     row = {"id": "X"}
     if ok:
