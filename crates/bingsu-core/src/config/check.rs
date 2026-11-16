@@ -13,9 +13,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// What `parse_duration_ms` accepts, as a JSON Schema pattern: 0–3600000
-/// ms or 0–3600 s, no leading zeros. The shared corpus test keeps the two
-/// equal.
+pub use super::values::{DURATION_PATTERN, parse_duration_ms};
+
 /// `Ty::EnvName`: what `env_name` accepts, for the JSON Schema.
 pub const ENV_NAME_PATTERN: &str = "^[A-Za-z_][A-Za-z0-9_]{0,63}$(?![\\s\\S])";
 
@@ -26,27 +25,6 @@ pub fn env_name(s: &str) -> bool {
     (1..=64).contains(&b.len())
         && (b[0].is_ascii_alphabetic() || b[0] == b'_')
         && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
-}
-
-pub const DURATION_PATTERN: &str = "^((0|[1-9][0-9]{0,5}|[1-2][0-9]{6}|3[0-5][0-9]{5}|3600000)ms|(0|[1-9][0-9]{0,2}|[1-2][0-9]{3}|3[0-5][0-9]{2}|3600)s)$(?![\\s\\S])";
-
-/// `"200ms"` or `"2s"` in milliseconds, up to one hour. No leading zeros,
-/// so the JSON Schema can say the same with `DURATION_PATTERN`.
-pub fn parse_duration_ms(s: &str) -> Option<u64> {
-    let (digits, mul) = if let Some(d) = s.strip_suffix("ms") {
-        (d, 1)
-    } else {
-        (s.strip_suffix('s')?, 1000)
-    };
-    if digits.is_empty()
-        || digits.len() > 7
-        || !digits.bytes().all(|b| b.is_ascii_digit())
-        || (digits.len() > 1 && digits.starts_with('0'))
-    {
-        return None;
-    }
-    let ms = digits.parse::<u64>().ok()? * mul;
-    (ms <= 3_600_000).then_some(ms)
 }
 
 fn place(n: &MNode) -> Place {
@@ -473,7 +451,7 @@ fn declared(root: &MTable, out: &mut Vec<Diagnostic>) {
     }
     for n in templates {
         if let MValue::Scalar(Value::Str(text)) = &n.value {
-            for id in crate::config::compile::template_ids(text) {
+            for id in crate::config::layouts::template_ids(text) {
                 if id.starts_with("custom/") && !has(&id) {
                     out.push(Diagnostic::new(codes::CUSTOM_UNDECLARED, place(n)).arg("id", id));
                 }

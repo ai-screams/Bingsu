@@ -1,8 +1,12 @@
 #![cfg(test)]
 use super::*;
 use crate::color::sgr::ColorDepth;
+use crate::config::exec_units::layout_verdict;
+use crate::config::keys;
+use crate::config::merge::KeyClass;
 use crate::config::report::tests::{codes_of, read};
 use crate::default_theme::DefaultTheme;
+use crate::diag::{Place, SourceId};
 use crate::field::{Field, FieldValue, Value as FValue, segment};
 use crate::layout::{Inputs, Options};
 use crate::recorder::NoopRecorder;
@@ -1243,10 +1247,7 @@ fn unit_ref(band: Option<u16>) -> Vec<LayoutRef> {
 #[test]
 fn test_unknown_band_index_never_runs() {
     let set: BTreeSet<Option<u16>> = [None, Some(0), Some(1), Some(2)].into();
-    let all = Reach {
-        approved: set.clone(),
-        shown: set,
-    };
+    let all = Reach::new(set.clone(), set);
     // Two bands: indexes 0 and 1 exist, 2 does not (even though a width "chooses" it here).
     let verdict = |a, s| layout_verdict(&unit_ref(a), &unit_ref(s), 2, &all);
     assert_eq!(verdict(Some(1), None), None);
