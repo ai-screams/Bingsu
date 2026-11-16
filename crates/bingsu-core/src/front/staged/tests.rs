@@ -1772,4 +1772,52 @@ mod cases {
         h.run(&args(), Mode::Dark);
         assert!(!reads_commands(&h));
     }
+
+    // 이것을 실패시키는 것: 언어 버전과 사용자 텍스트가 같은 방식으로 잘리지 않는 것(칸 수 무시, 제어 문자 통과), 값에
+    // 필드가 하나가 아닌 것.
+    #[test]
+    fn a_text_value_is_cut_to_its_cells_and_holds_one_field() {
+        use crate::front::text_value;
+        use crate::width::WidthProfile;
+        let v = text_value(b"abcdef", 3, WidthProfile::DEFAULT);
+        assert_eq!(v.text(), "ab…");
+        assert_eq!(v.fields.len(), 1);
+        assert_eq!(text_value(b"", 3, WidthProfile::DEFAULT).text(), "");
+        // Control bytes go through the same cleaning the field gives.
+        let raw = b"a\x1b[31mb";
+        let want = match crate::field::Field::text(raw, 8, WidthProfile::DEFAULT).value {
+            crate::field::FieldValue::Text(c) => String::from(c.as_str()),
+            _ => unreachable!(),
+        };
+        assert!(!want.contains('\x1b'));
+        assert_eq!(text_value(raw, 8, WidthProfile::DEFAULT).text(), want);
+    }
+
+    // 이것을 실패시키는 것: 컴파일한 화면이 있는데 기본 테마의 옵션·임계값을 쓰는 것(그 반대도), 컴파일한 화면이 있을 때
+    // 기본 테마를 앞세우는 것, 둘 다 없을 때 None이 아닌 것, 폭을 옵션에 싣지 않는 것.
+    #[test]
+    fn the_theme_comes_from_the_compiled_screen_else_the_default() {
+        use crate::config::compile::CompiledConfig;
+        use crate::default_theme::DefaultTheme;
+        use crate::front::select_theme;
+        let s = snapshot("icons='ascii'\n[segment.duration]\nmin='1ms'\n");
+        let d = DefaultTheme::new(Mode::Dark).unwrap();
+        let c = select_theme(Some(&s.config), Some(&d), 77, Mode::Dark).unwrap();
+        assert_eq!(c.options.width, 77);
+        assert_eq!(c.options.icons, s.config.icons);
+        assert_ne!(c.options.icons, crate::default_theme::ICONS);
+        assert_eq!(c.duration_min, s.config.duration_min_ms);
+        assert_eq!(c.duration_min, 1);
+        assert_ne!(c.duration_min, crate::shell_values::DURATION_MIN_MS);
+        assert!(c.shared.is_some());
+        assert_eq!(c.setup.len(), s.config.setup.len());
+        let f = select_theme::<CompiledConfig>(None, Some(&d), 55, Mode::Dark).unwrap();
+        assert_eq!(f.options.width, 55);
+        assert_eq!(f.options.icons, crate::default_theme::ICONS);
+        assert!(!f.options.use_last_column);
+        assert_eq!(f.duration_min, crate::shell_values::DURATION_MIN_MS);
+        assert!(f.shared.is_none());
+        assert_eq!(f.setup.len(), d.setup().len());
+        assert!(select_theme::<CompiledConfig>(None, None, 80, Mode::Dark).is_none());
+    }
 }
