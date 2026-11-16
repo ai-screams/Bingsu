@@ -2668,20 +2668,41 @@ fn idx_v4(paths: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-// A strip of 250 is written [0x80, 0x7a]: the one added per continuation
-// byte is what makes it 250 rather than 122.
-// 이것을 실패시키는 것: v4_strip에서 이어지는 바이트마다 1을 더하지 않는 것(두 번째 경로를 128바이트
-// 길게 세어 IndexBytes가 경로 바이트 합보다 커진다).
+// Strips of 250 and 16,600 are written [0x80, 0x7a] and [0x80, 0x80, 0x58]:
+// the one added at every continuation byte is what reads them back. Adding
+// none reads 122 and 88; adding it at the first continuation byte only reads
+// the three-byte strip as 16,472.
+// 이것을 실패시키는 것: v4_strip에서 이어지는 바이트마다 1을 더하지 않는 것, 또는 첫 이어지는
+// 바이트에만 더하는 것(3바이트 경우가 두 번째 경로를 128바이트 길게 세어 IndexBytes가 경로 바이트
+// 합보다 커진다).
 #[test]
 fn v4_strip_counts_one_per_continuation_byte() {
-    let long = [b"d/".as_slice(), &[b'x'; 248]].concat();
-    let mut bytes = idx_v4(&[&long, b"e"]);
-    let mut m = meter();
-    let state = safe_index::parse(&mut bytes, &mut m).unwrap();
-    let paths: usize = state.entries().iter().map(|e| e.path(&state).len()).sum();
-    assert_eq!(state.entries()[1].path(&state), b"e".as_slice());
-    assert_eq!(paths, 251);
-    assert_eq!(m.budget.used(Axis::IndexBytes), paths as u64);
+    for (strip, written) in [
+        (250usize, [0x80u8, 0x7a].as_slice()),
+        (16_600, &[0x80, 0x80, 0x58]),
+    ] {
+        let long = [b"d/".as_slice(), &vec![b'x'; strip - 2]].concat();
+        let mut bytes = idx_v4(&[&long, b"e"]);
+        let second = [written, b"e\0"].concat();
+        assert!(
+            bytes.windows(second.len()).any(|w| w == second),
+            "strip {strip} is written {written:02x?}"
+        );
+        let mut m = meter();
+        let state = safe_index::parse(&mut bytes, &mut m).unwrap();
+        let paths: usize = state.entries().iter().map(|e| e.path(&state).len()).sum();
+        assert_eq!(
+            state.entries()[1].path(&state),
+            b"e".as_slice(),
+            "strip {strip}"
+        );
+        assert_eq!(paths, strip + 1, "strip {strip}");
+        assert_eq!(
+            m.budget.used(Axis::IndexBytes),
+            paths as u64,
+            "strip {strip}"
+        );
+    }
 }
 
 // A cache tree for an index of `count` entries at the root, valid for both
