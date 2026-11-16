@@ -201,44 +201,26 @@ fn render_selected_inner<L: LayoutView, R: crate::recorder::Recorder>(
     recorder: &mut R,
     out: &mut Vec<u8>,
 ) {
-    let default;
-    let setup;
-    let mut custom: &[_] = &[];
-    let (theme, setup, options, duration_min) = if let Some(c) = compiled {
-        // The variant is selected here at the envelope's width; the theme
-        // carries only it, so both views lay out the same lines.
-        let shared = c.shared();
-        custom = shared.custom;
-        setup = shared.segment_setup();
-        (
-            shared.theme(c.lines_at(parsed.width), mode),
-            setup.as_slice(),
-            Options {
-                width: parsed.width,
-                profile: shared.profile,
-                icons: shared.icons,
-                use_last_column: shared.use_last_column,
-            },
-            shared.duration_min_ms,
-        )
+    // The default theme is built only when nothing was compiled; if it cannot
+    // be, the prompt is the minimal record.
+    let default = if compiled.is_none() {
+        DefaultTheme::new(mode).ok()
     } else {
-        let Ok(d) = DefaultTheme::new(mode) else {
-            write_minimal_b1(Status::ERROR_INTERNAL, out);
-            return;
-        };
-        default = d;
-        (
-            default.theme(),
-            default.setup(),
-            Options {
-                width: parsed.width,
-                profile: WidthProfile::DEFAULT,
-                icons: crate::default_theme::ICONS,
-                use_last_column: false,
-            },
-            shell_values::DURATION_MIN_MS,
-        )
+        None
     };
+    let Some(chosen) = select_theme(compiled, default.as_ref(), parsed.width, mode) else {
+        write_minimal_b1(Status::ERROR_INTERNAL, out);
+        return;
+    };
+    let Chosen {
+        theme,
+        setup,
+        options,
+        duration_min,
+        shared,
+    } = chosen;
+    let setup = setup.as_ref();
+    let custom: &[_] = shared.map_or(&[], |s| s.custom);
     let mut collected = shell_values::collect_with_duration_min(parsed, duration_min);
     let mask = compiled.map_or(0, |c| catalog.worker_mask(c, parsed.width, false));
     if mask != 0 {
@@ -276,12 +258,7 @@ fn render_selected_inner<L: LayoutView, R: crate::recorder::Recorder>(
         else {
             continue;
         };
-        let f = crate::field::Field::text(version.as_bytes(), max_cells, options.profile);
-        let shown = match &f.value {
-            crate::field::FieldValue::Text(c) => c.as_str().as_bytes().to_vec(),
-            _ => Vec::new(),
-        };
-        *slot = Some(crate::field::Value::new(&shown, alloc::vec![f]));
+        *slot = Some(text_value(version.as_bytes(), max_cells, options.profile));
     }
     // User text segments follow the built-ins: their declaration and value
     // are made here, from the snapshot alone. With none (the usual case)
@@ -311,18 +288,11 @@ fn render_selected_inner<L: LayoutView, R: crate::recorder::Recorder>(
                 collected.facts.push(None);
                 continue;
             };
-            let f = crate::field::Field::text(
+            collected.values.push(Some(text_value(
                 text.as_bytes(),
                 crate::field::CUSTOM_TEXT_CELLS,
                 options.profile,
-            );
-            let shown = match &f.value {
-                crate::field::FieldValue::Text(c) => c.as_str().as_bytes().to_vec(),
-                _ => Vec::new(),
-            };
-            collected
-                .values
-                .push(Some(crate::field::Value::new(&shown, alloc::vec![f])));
+            )));
             collected.facts.push(None);
         }
     }
@@ -358,6 +328,71 @@ fn render_selected_inner<L: LayoutView, R: crate::recorder::Recorder>(
         &mut NoopRecorder,
     );
     encode_or_internal(&to_b1_fields(&rendered, &vi), status, out);
+}
+
+/// What `select_theme` hands the render: the theme and its setup, the layout
+/// options, the duration threshold, and (when a screen was compiled) the
+/// shared data the custom segments come from.
+struct Chosen<'a> {
+    theme: crate::render::Theme<'a>,
+    setup: alloc::borrow::Cow<'a, [crate::layout::SegmentSetup<'a>]>,
+    options: Options,
+    duration_min: u64,
+    shared: Option<crate::layout_view::Shared<'a>>,
+}
+
+/// The theme for this prompt: the compiled screen's variant at the envelope's
+/// width, else the default theme. `None` only when there is neither (the
+/// default theme could not be built). The caller builds `default` only when
+/// `compiled` is `None`; when both are present the compiled screen wins. Pure.
+fn select_theme<'a, L: LayoutView>(
+    compiled: Option<&'a L>,
+    default: Option<&'a DefaultTheme>,
+    width: u16,
+    mode: Mode,
+) -> Option<Chosen<'a>> {
+    if let Some(c) = compiled {
+        // The variant is selected here at the envelope's width; the theme
+        // carries only it, so both views lay out the same lines.
+        let shared = c.shared();
+        Some(Chosen {
+            theme: shared.theme(c.lines_at(width), mode),
+            setup: alloc::borrow::Cow::Owned(shared.segment_setup()),
+            options: Options {
+                width,
+                profile: shared.profile,
+                icons: shared.icons,
+                use_last_column: shared.use_last_column,
+            },
+            duration_min: shared.duration_min_ms,
+            shared: Some(shared),
+        })
+    } else {
+        let default = default?;
+        Some(Chosen {
+            theme: default.theme(),
+            setup: alloc::borrow::Cow::Borrowed(default.setup()),
+            options: Options {
+                width,
+                profile: WidthProfile::DEFAULT,
+                icons: crate::default_theme::ICONS,
+                use_last_column: false,
+            },
+            duration_min: shell_values::DURATION_MIN_MS,
+            shared: None,
+        })
+    }
+}
+
+/// A text value cut to `max_cells` cells: the field and the bytes it shows.
+/// A built-in language's version and a user text segment are made the same way.
+fn text_value(text: &[u8], max_cells: u16, profile: WidthProfile) -> crate::field::Value {
+    let f = crate::field::Field::text(text, max_cells, profile);
+    let shown = match &f.value {
+        crate::field::FieldValue::Text(c) => c.as_str().as_bytes().to_vec(),
+        _ => Vec::new(),
+    };
+    crate::field::Value::new(&shown, alloc::vec![f])
 }
 
 /// The legacy adapter plan, which carries only a parsed envelope. The snapshot
