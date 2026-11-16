@@ -92,8 +92,10 @@ def rust_path_declared(text, folder, segments, depth=0):
     an inline module's items four spaces more and closes it at its own
     indentation, so `depth` inline modules deep an item starts after exactly
     4 × depth spaces, and the module's body ends at the first line that is
-    just `}` there. A string literal line that is just `}` at that indentation
-    ends the body early, which can only reject an anchor, never accept one."""
+    just `}` there. A module written on one line (`mod a {}`) has no such line
+    and is not entered, and a string literal line that is just `}` at that
+    indentation ends the body early: both can only reject an anchor, never
+    accept one."""
     first, rest = segments[0], segments[1:]
     at = rf"(?m)^ {{{4 * depth}}}{VISIBILITY}"
     if not rest:
@@ -102,7 +104,7 @@ def rust_path_declared(text, folder, segments, depth=0):
         for child in (folder / f"{first}.rs", folder / first / "mod.rs"):
             if child.is_file() and rust_path_declared(child.read_text(errors="replace"), folder / first, rest):
                 return True
-    for opened in re.finditer(rf"{at}mod\s+{re.escape(first)}\s*\{{", text):
+    for opened in re.finditer(rf"{at}mod\s+{re.escape(first)}\s*\{{[ \t]*$", text):
         closed = re.compile(rf"(?m)^ {{{4 * depth}}}\}}$").search(text, opened.end())
         body = text[opened.end():closed.start() if closed else len(text)]
         if rust_path_declared(body, folder / first, rest, depth + 1):
@@ -125,7 +127,9 @@ def python_test_declared(source, names):
 
 def anchor_declared(case, root):
     """Whether the whole anchor names a test the case's command can select: a
-    Rust module path from its cargo target's root, a pytest file and function."""
+    Rust module path from its cargo target's root, a pytest file and function.
+    A static early filter: it sees only that the name is declared; whether it
+    is a test and whether it ran is what the runner checks last."""
     anchor = case["anchor"].split("[")[0]
     if case["kind"] == "rust":
         target = rust_target_root(case.get("command", []), root)
@@ -192,7 +196,8 @@ def test_manifest_check_names_each_stale_entry(tmp_path):
 # "test <anchor> ... ok"; a stale module on its path selects no test.
 # 이것을 실패시키는 것: anchor의 마지막 이름만 보는 것(경로 한 단계가 틀린 anchor가 통과), inline
 # `mod … {`의 들여쓰기 깊이를 보지 않는 것(inline 단계 하나를 빠뜨린 anchor가 통과), inline 모듈의
-# 몸통 밖까지 찾는 것(이웃 inline 모듈의 시험을 받음), `mod a;`를 mod-rs가 아닌 파일 옆에서 찾거나
+# 몸통 밖까지 찾는 것(이웃 inline 모듈의 시험을 받음), 한 줄 모듈(`mod a {}`)에 들어가 뒤 이웃 모듈의
+# `}`까지 읽는 것, `mod a;`를 mod-rs가 아닌 파일 옆에서 찾거나
 # inline 모듈 안의 `mod a;`를 그 모듈 폴더 밖에서 찾는 것, `a/mod.rs`를 찾지 않는 것, `sh -c`·
 # `--test`의 target을 읽지 않는 것, pytest anchor의 파일이나 class 안을 보지 않는 것.
 def test_manifest_check_follows_the_whole_anchor_path(tmp_path):
@@ -200,10 +205,11 @@ def test_manifest_check_follows_the_whole_anchor_path(tmp_path):
     for folder in ("src/m", "src/d", "tests"):
         (crate / folder).mkdir(parents=True)
     (crate / "src/w").mkdir()
-    (crate / "src/lib.rs").write_text("mod d;\nmod m;\nmod w {\n    mod s;\n}\n")
+    (crate / "src/lib.rs").write_text("mod d;\nmod m;\nmod w {\n    mod s;\n}\nmod e {}\nmod f {\n    fn sib() {}\n}\n")
     (crate / "src/m.rs").write_text("fn real() {}\n#[cfg(test)]\nmod t;\n")
     (crate / "src/m/t.rs").write_text("mod cases {\n    #[test]\n    fn deep() {}\n    const RAW: &str = r#\"\n}x\n\"#;\n"
-                                      "    fn after() {}\n}\nmod other {\n    fn sib() {}\n}\n")
+                                      "    fn after() {}\n}\nmod other {\n    fn sib() {}\n}\n"
+                                      "mod cut {\n    const RAW: &str = r#\"\n}\n\"#;\n    fn late() {}\n}\n")
     (crate / "src/w/s.rs").write_text("fn held() {}\n")
     (crate / "src/d/mod.rs").write_text("pub fn dir() {}\n")
     (crate / "tests/api.rs").write_text("#[test]\nfn top() {}\n")
@@ -219,12 +225,15 @@ def test_manifest_check_follows_the_whole_anchor_path(tmp_path):
     for anchor, kind, command in [("m::real", "rust", lib), ("m::t::cases::deep", "rust", lib),
                                   ("d::dir", "rust", lib), ("top", "rust", api), ("w::s::held", "rust", lib),
                                   ("m::t::other::sib", "rust", lib), ("m::t::cases::after", "rust", lib),
+                                  ("f::sib", "rust", lib),
                                   ("tests/test_x.py::TestK::test_y", "python", []),
                                   ("tests/test_x.py::test_z[1]", "python", [])]:
         assert problems(anchor, kind, command) == [], anchor
     for anchor, kind, command in [("n::real", "rust", lib), ("m::t::deep", "rust", lib),
                                   ("m::cases::deep", "rust", lib), ("t::cases::deep", "rust", lib),
-                                  ("m::t::cases::sib", "rust", lib), ("s::held", "rust", lib),
+                                  ("m::t::cases::sib", "rust", lib), ("s::held", "rust", lib), ("e::sib", "rust", lib),
+                                  # The documented limit: a string line that is just `}` ends `cut` early.
+                                  ("m::t::cut::late", "rust", lib),
                                   ("top", "rust", lib), ("m::real", "rust", ["cargo", "test", "--lib"]),
                                   ("tests/test_w.py::test_z", "python", []),
                                   ("tests/test_x.py::TestJ::test_y", "python", []),
