@@ -345,21 +345,14 @@ fn run(
     b.check(clock)?;
     let replace = matches!(action, Action::Replace { .. });
     let id = if replace {
-        let report = report.as_ref().ok_or(StoreError::Unsafe)?;
-        let metadata = export.metadata(report)?;
-        let id = Identity {
-            boot: b.start.boot,
-            epoch: seq.epoch,
+        let (id, bytes) = new_snapshot(
+            report.as_ref(),
+            &export,
+            &b.start,
+            seq.epoch,
             context,
             generation,
-            source: snapshot::source_crc(snapshot::decode_metadata(&metadata)?),
-        };
-        let new = Snapshot {
-            id,
-            config: report.snapshot.clone().ok_or(StoreError::Unsafe)?,
-            metadata,
-        };
-        let bytes = new.encode(b.start.kind, b.start.resume)?;
+        )?;
         b.check(clock)?;
         store.stage(Slot::Snapshot, &bytes)?;
         b.check(clock)?;
@@ -407,20 +400,13 @@ fn run(
     } else {
         None
     };
-    let display = if replace && old.is_none() {
-        // A cold prompt had no compiled screen. Publish first; its next prompt
-        // can select collection from that snapshot without waiting for us.
-        None
-    } else if replace {
-        report
-            .as_ref()
-            .and_then(|r| r.snapshot.as_ref())
-            .map(|c| (c, id))
-    } else {
-        old.as_ref()
-            .or(fallback.as_ref())
-            .map(|s| (&s.config, s.id))
-    };
+    let display = choose_display(
+        replace,
+        old.as_ref(),
+        fallback.as_ref(),
+        report.as_ref(),
+        id,
+    );
     broker(&root, display, b.check(clock)?, &marker)?;
     b.check(clock)?;
     // Contention now is Incomplete: a sequence reservation may already exist.
@@ -474,6 +460,52 @@ fn run(
         Action::Invalidate { .. } => RefreshResult::Invalid,
         Action::Keep => RefreshResult::Incomplete,
     })
+}
+/// The identity and encoded bytes of the snapshot this round publishes. Pure:
+/// the same checks and order the inline code had, before the staging writes.
+fn new_snapshot(
+    report: Option<&report::ConfigReport>,
+    export: &super::evidence::EvidenceExport,
+    start: &Clock,
+    epoch: [u8; 16],
+    context: [u8; 4],
+    generation: u64,
+) -> Result<(Identity, Vec<u8>), StoreError> {
+    let report = report.ok_or(StoreError::Unsafe)?;
+    let metadata = export.metadata(report)?;
+    let id = Identity {
+        boot: start.boot,
+        epoch,
+        context,
+        generation,
+        source: snapshot::source_crc(snapshot::decode_metadata(&metadata)?),
+    };
+    let new = Snapshot {
+        id,
+        config: report.snapshot.clone().ok_or(StoreError::Unsafe)?,
+        metadata,
+    };
+    let bytes = new.encode(start.kind, start.resume)?;
+    Ok((id, bytes))
+}
+/// The screen the collector works from: the new one when this round replaces
+/// the snapshot, else the one already published (or last-good). Pure.
+fn choose_display<'a>(
+    replace: bool,
+    old: Option<&'a Snapshot>,
+    fallback: Option<&'a Snapshot>,
+    report: Option<&'a report::ConfigReport>,
+    id: Identity,
+) -> Option<(&'a bingsu_core::config::compile::CompiledConfig, Identity)> {
+    if replace && old.is_none() {
+        // A cold prompt had no compiled screen. Publish first; its next prompt
+        // can select collection from that snapshot without waiting for us.
+        None
+    } else if replace {
+        report.and_then(|r| r.snapshot.as_ref()).map(|c| (c, id))
+    } else {
+        old.or(fallback).map(|s| (&s.config, s.id))
+    }
 }
 fn install(
     store: &LockedStore<'_>,
