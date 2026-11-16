@@ -78,6 +78,7 @@ class Terminal:
         self.row, self.col = 4, 1
         self.log = b""
         self.seen = []  # the questions asked, in order
+        self.cpr_at = None  # monotonic time the last cursor question was seen
         self.line_after = None
         self.pending = ""
         pid, fd = pty.fork()
@@ -98,6 +99,7 @@ class Terminal:
             self.pending = self.pending[len(t):]
             if t == "\x1b[6n":
                 self.seen.append("cpr")
+                self.cpr_at = time.monotonic()
                 if self.cancel_on == "sigterm":
                     pid = int(re.search(rb"BPID=(\d+)", self.log).group(1))
                     os.kill(pid, signal.SIGTERM)
@@ -229,18 +231,35 @@ def test_a_light_terminal_warns_when_auto_and_asks_nothing_otherwise(home):
     assert "osc11" not in t.seen, t.seen
 
 
-# 이것을 실패시키는 것: 응답이 없을 때 시간 제한 없이 기다리는 것, 침묵을 불일치 경고나 오류로 매기는 것, 침묵 뒤에도
-# 계속 묻는 것, 침묵 뒤 터미널 모드를 복구하지 않는 것.
+# 이것을 실패시키는 것: 응답 없이 무한 대기하는 것(run의 제한), 커서 질문을 아예 하지 않는 것(질문 유무),
+# 첫 침묵 뒤 CPR을 다시 묻는 것(횟수), 첫 CPR부터 종료까지 두 질의의 마감과 여유를 넘기는 것(경과 시간),
+# 상수 변경으로 시간 검사가 느슨해지는 것(소스 핀), 침묵을 경고나 오류로 매기는 것(unknown 상태와 종료 코드),
+# 터미널 모드를 복구하지 않는 것(stty 비교).
 def test_a_silent_terminal_gives_unknown_within_the_deadlines(home):
+    deadlines_ms = {"REPLY_TIMEOUT": 200, "LATE_REPLY_DRAIN": 50}
+    source = (Path(__file__).resolve().parents[2] / "crates/bingsu/src/commands/tty.rs").read_text()
+    for name, milliseconds in deadlines_ms.items():
+        assert (f"pub const {name}: Duration = Duration::from_millis({milliseconds});"
+                in source.splitlines()), f"{name} changed; review the silent-terminal time bound"
+    # Two unanswered queries take 2 * (200 + 50) ms. Allow another 2 s for
+    # loaded-runner scheduling, reporting, stty, EOF and waitpid; shell/binary
+    # startup and earlier doctor checks are outside this window. The 2.5 s
+    # bound still rejects a 5 s reply wait independently of the source pin.
+    margin = 2.0
+    limit = 2 * sum(deadlines_ms.values()) / 1000 + margin
     put_config(home, 'colors.mode = "auto"\n')
     t = Terminal(script_for(home, "--terminal --format json"), env_for(home), answer=False)
-    started = time.monotonic()
-    doc, code, before, after = result(t.run())
-    assert time.monotonic() - started < 4.0
-    assert code == 0 and before == after, t.log
+    text = t.run()
+    ended = time.monotonic()
+    assert "cpr" in t.seen, ("no cursor question", t.seen)
+    assert t.seen.count("cpr") == 1, "no question after the first silence"
+    elapsed = ended - t.cpr_at
+    assert elapsed < limit, (elapsed, limit, t.log)
+    doc, code, before, after = result(text)
+    assert code == 0, t.log
+    assert before == after, (before, after)
     assert row(doc, "terminal-width")["status"] == "unknown"
     assert row(doc, "terminal-background")["status"] == "unknown"
-    assert t.seen.count("cpr") == 1, "no question after the first silence"
 
 
 # 이것을 실패시키는 것: 입력 줄에 반쯤 써 둔 글자 위에 시험 글자를 쓰는 것(1열이 아닐 때 줄바꿈 없이 시작).
