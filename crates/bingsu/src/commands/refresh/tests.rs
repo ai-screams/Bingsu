@@ -3036,3 +3036,108 @@ mod axes {
         assert_eq!(snapshot_and_sequence(&f), before);
     }
 }
+
+mod pure_steps {
+    //! The two pure steps `run` takes: the snapshot to publish and the screen to work from.
+    use super::*;
+    use bingsu_core::config::report::ConfigReport;
+
+    fn published_snapshot(tag: &str) -> Snapshot {
+        let f = Fx::new(tag);
+        f.put(COMMAND);
+        published(f.run());
+        f.snap()
+    }
+    fn report_of(s: &Snapshot) -> ConfigReport {
+        ConfigReport {
+            files: vec![],
+            order: vec![],
+            diagnostics: vec![],
+            widths: vec![],
+            snapshot: Some(s.config.clone()),
+        }
+    }
+    fn with_generation(s: &Snapshot, generation: u64) -> Snapshot {
+        let mut id = s.id;
+        id.generation = generation;
+        Snapshot {
+            id,
+            config: s.config.clone(),
+            metadata: s.metadata.clone(),
+        }
+    }
+    fn export() -> crate::commands::evidence::EvidenceExport {
+        crate::commands::evidence::EvidenceExport {
+            comparison: b"cmp".to_vec(),
+            ..Default::default()
+        }
+    }
+
+    // 이것을 실패시키는 것: 새 식별자에 부팅·세대·문맥·epoch 가운데 하나라도 다른 값을 넣는 것, 원본 sources 해시를 메타데이터가
+    // 아닌 것으로 계산하는 것, 부호화한 바이트가 돌려준 식별자나 설정과 다른 것.
+    #[test]
+    fn the_new_snapshot_carries_the_round_identity_and_its_own_metadata() {
+        let old = published_snapshot("pure-new");
+        let report = report_of(&old);
+        let start = clock();
+        let (epoch, context) = ([7; 16], [9; 4]);
+        let (id, bytes) =
+            new_snapshot(Some(&report), &export(), &start, epoch, context, 5).unwrap();
+        assert_eq!(
+            (id.boot, id.epoch, id.context, id.generation),
+            (start.boot, epoch, context, 5)
+        );
+        let got = Snapshot::decode(&bytes).unwrap();
+        assert_eq!(got.id, id);
+        assert_eq!(got.config, old.config);
+        assert_eq!(
+            id.source,
+            snapshot::source_crc(snapshot::decode_metadata(&got.metadata).unwrap())
+        );
+    }
+
+    // 이것을 실패시키는 것: 보고서가 없거나 컴파일한 화면이 없는데 게시할 스냅숏을 만드는 것.
+    #[test]
+    fn a_missing_report_or_screen_builds_no_snapshot() {
+        let mut report = report_of(&published_snapshot("pure-none"));
+        let start = clock();
+        let call =
+            |r: Option<&ConfigReport>| new_snapshot(r, &export(), &start, [0; 16], [0; 4], 1);
+        assert!(matches!(call(None), Err(StoreError::Unsafe)));
+        report.snapshot = None;
+        assert!(matches!(call(Some(&report)), Err(StoreError::Unsafe)));
+    }
+
+    // 이것을 실패시키는 것: 새 화면을 처음 게시하는 회차(낡은 스냅숏 없음)에서 화면을 고르는 것, 바꾸는 회차에서 보고서의 화면 대신 낡은
+    // 스냅숏의 화면(값이 같아도 다른 객체)이나 다른 식별자를 고르는 것, 바꾸지 않는 회차에서 마지막 정상본을 현재 것보다 앞세우는 것.
+    #[test]
+    fn the_display_is_the_new_screen_only_when_replacing_over_an_old_one() {
+        let old = published_snapshot("pure-display");
+        let fallback = with_generation(&old, 9);
+        let report = report_of(&old);
+        let mut id = old.id;
+        id.generation = 4;
+        // A cold prompt (nothing published yet) publishes first and names no screen.
+        assert_eq!(
+            choose_display(true, None, Some(&fallback), Some(&report), id),
+            None
+        );
+        // Replacing: the new screen under the new identity. The report's own screen, not a value-equal
+        // copy of the old one: compare addresses.
+        let got = choose_display(true, Some(&old), Some(&fallback), Some(&report), id).unwrap();
+        assert!(std::ptr::eq(got.0, report.snapshot.as_ref().unwrap()));
+        assert_eq!(got.1, id);
+        // Keeping: the published snapshot wins over last-good; last-good only stands in for a missing one.
+        assert_eq!(
+            choose_display(false, Some(&old), Some(&fallback), Some(&report), id)
+                .map(|(_, i)| i.generation),
+            Some(old.id.generation)
+        );
+        assert_eq!(
+            choose_display(false, None, Some(&fallback), Some(&report), id)
+                .map(|(_, i)| i.generation),
+            Some(9)
+        );
+        assert_eq!(choose_display(false, None, None, Some(&report), id), None);
+    }
+}
