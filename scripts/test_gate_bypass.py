@@ -150,9 +150,10 @@ class BypassGates(unittest.TestCase):
                              "core-cfg-check --adapter")
 
 
-    # 이것을 실패시키는 것: bingsu-prompt main 모양 고정을 지우거나 항목·속성·경로·본문 하나를 덜 보는 것,
-    # gate가 `--prompt-main` 검사를 다른 검사로 보내 픽스처가 다른 이유(": unreadable" 등)로 거부되는 것,
-    # 픽스처를 더하고 표(prompt-main.tsv)에 넣지 않는 것.
+    # 이것을 실패시키는 것: bingsu-prompt main 모양 고정을 지우거나, 픽스처가 바꾼 inner attribute·항목 수·항목을
+    # 덜 보는 것(항목 하나하나와 그 부분의 비교는 tools/core-cfg-check/tests/cli.rs가 맡는다), gate가 `--prompt-main`
+    # 검사를 다른 검사로 보내 픽스처가 다른 이유(": unreadable" 등)로 거부되는 것, 픽스처를 더하고 표(prompt-main.tsv)에
+    # 넣지 않는 것.
     def test_prompt_main_after_hash_renewal(self):
         expected = prompt_main_expected()
         fixtures = sorted((FIXTURES / "prompt-main").iterdir())
