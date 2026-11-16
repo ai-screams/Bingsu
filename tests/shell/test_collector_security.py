@@ -909,8 +909,9 @@ SEC_REQUIRED_IDS = frozenset({"SEC-FSIZE", "SEC-WRITE", "SEC-FORK", "SEC-LANDLOC
 
 # Where rustc starts an attribute: `#`, an optional `!` (inner) and `[`, with any whitespace between.
 RUST_ATTRIBUTE_START = r"#\s*!?\s*\["
-RUST_IDENT = re.compile(r"[^\W\d]\w*")
 RUST_RAW_QUOTE = re.compile(r'(#*)"')
+# Rust's whitespace (Pattern_White_Space); Python's `\s` lacks U+200E and U+200F, so the scanner turns those into spaces.
+RUST_SPACE = "\t\n\x0b\x0c\r \x85\u200e\u200f\u2028\u2029"
 # The rest of a char literal after its opening quote: one char or one escape, then the closing quote.
 RUST_CHAR_REST = re.compile(r"(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,8}\}|[nrt\\0'\"])|[^\\'\n\r\t])'")
 
@@ -919,11 +920,13 @@ RUST_CHAR_REST = re.compile(r"(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,8}\}|[nr
 def blank_rust(text, literals=False):
     """`text` with its comments turned into spaces (newlines kept), and with
     `literals` its string and char literals too. It reads tokens as rustc
-    does: block comments nest; identifiers are read whole, raw ones
-    (`r#name`) too, and `b`, `c`, `r`, `br`, `cr` start a literal only as a
-    whole identifier right before the quote; a char literal is one char or
-    one escape (`'\\''`); a lifetime (`'a`) is not a char. A literal it
-    cannot read raises, so a checker using it fails closed."""
+    does, so that no `//` or `/*` inside a literal is taken for a comment:
+    block comments nest; a byte order mark and a first-line shebang are not
+    code; the marks U+200E and U+200F are whitespace; identifiers (Unicode XID, raw `r#name` too), numbers and literal
+    suffixes (`0r`, `"x"r`) are read whole, and `b`, `c`, `r`, `br`, `cr`
+    start a literal only as a whole identifier right before the quote; a char
+    literal is one char or one escape (`'\\''`); a lifetime (`'a`, `'r#a`) is
+    not a char. A literal it cannot read raises, so a checker fails closed."""
     out, i, n = list(text), 0, len(text)
 
     def blank(start, end):
@@ -931,51 +934,96 @@ def blank_rust(text, literals=False):
             if out[k] != "\n":
                 out[k] = " "
 
+    def comment_end(at):
+        if text.startswith("//", at):
+            end = text.find("\n", at)
+            return n if end < 0 else end
+        if text.startswith("/*", at):
+            depth, end = 1, at + 2
+            while end < n and depth:
+                depth += 1 if text.startswith("/*", end) else -1 if text.startswith("*/", end) else 0
+                end += 2 if text.startswith(("/*", "*/"), end) else 1
+            return end
+        return None
+
+    def continues(at):
+        return at < n and (text[at] == "_" or ("_" + text[at]).isidentifier())
+
+    def ident_end(at):
+        if at >= n or not (text[at] == "_" or text[at].isidentifier()):
+            return None
+        at += 1
+        while continues(at):
+            at += 1
+        return at
+
+    def suffixed(end):
+        # A literal's suffix is part of it: `"x"r"y"` is `"x"r` and then a plain `"y"`.
+        return ident_end(end) or end
+
     def string_end(quote):
         end = quote + 1
         while text[end] != '"':
             end += 2 if text[end] == "\\" else 1
-        return end + 1
+        return suffixed(end + 1)
 
     def char_end(quote):
         rest = RUST_CHAR_REST.match(text, quote + 1)
         assert rest, ("unreadable char literal", text[quote:quote + 12])
-        return rest.end()
-    while i < n:
-        comment = text.startswith(("//", "/*"), i)
-        if text.startswith("//", i):
+        return suffixed(rest.end())
+    for k, char in enumerate(text):
+        if char in "\u200e\u200f":
+            out[k] = " "  # whitespace to rustc, not to Python's `\s`
+    if text.startswith("\ufeff"):
+        out[0], i = " ", 1  # rustc drops a byte order mark
+    if text.startswith("#!", i):
+        after = i + 2
+        while after < n and (text[after] in RUST_SPACE or comment_end(after) is not None):
+            after = comment_end(after) or after + 1
+        if not text.startswith("[", after):
+            # A shebang line, not an inner attribute: rustc skips it like a comment.
             end = text.find("\n", i)
             end = n if end < 0 else end
-        elif text.startswith("/*", i):
-            depth, end = 1, i + 2
-            while end < n and depth:
-                depth += 1 if text.startswith("/*", end) else -1 if text.startswith("*/", end) else 0
-                end += 2 if text.startswith(("/*", "*/"), end) else 1
-        elif ident := RUST_IDENT.match(text, i):
-            word, end = ident[0], ident.end()
+            blank(i, end)
+            i = end
+    while i < n:
+        if (end := comment_end(i)) is not None:
+            blank(i, end)
+            i = end
+            continue
+        if text[i] in "0123456789":
+            i += 1
+            while continues(i):
+                i += 1  # a number with its suffix: `0r"x"` is `0r` and then a plain string
+            continue
+        if (end := ident_end(i)) is not None:
+            word = text[i:end]
             if word in ("r", "br", "cr") and (raw := RUST_RAW_QUOTE.match(text, end)):
-                end = text.index('"' + raw[1], raw.end()) + 1 + len(raw[1])
+                end = suffixed(text.index('"' + raw[1], raw.end()) + 1 + len(raw[1]))
             elif word in ("b", "c") and text.startswith('"', end):
                 end = string_end(end)
             elif word == "b" and text.startswith("'", end):
                 end = char_end(end)
             else:
-                if word == "r" and text.startswith("#", end) and (name := RUST_IDENT.match(text, end + 1)):
-                    end = name.end()  # a raw identifier: `r#br"x"` is `br` and then a plain string
+                if word == "r" and text.startswith("#", end) and (name := ident_end(end + 1)):
+                    end = name  # a raw identifier: `r#br"x"` is `br` and then a plain string
                 i = end
                 continue
         elif text[i] == '"':
             end = string_end(i)
         elif text[i] == "'":
-            label = RUST_IDENT.match(text, i + 1)
-            if label and not text.startswith("'", label.end()):
-                i = label.end()  # a lifetime or label
+            if text.startswith("r#", i + 1) and (name := ident_end(i + 3)):
+                i = name  # a raw lifetime
+                continue
+            label = ident_end(i + 1)
+            if label and not text.startswith("'", label):
+                i = label  # a lifetime or label
                 continue
             end = char_end(i)
         else:
             i += 1
             continue
-        if comment or literals:
+        if literals:
             blank(i, end)
         i = end
     return "".join(out)
@@ -1007,7 +1055,8 @@ def module_inner_attributes(source, start=0):
 # rustc takes whitespace, a newline or a comment between `#`, `!` and `[`, a comment or code before an attribute on its
 # line, and an inner attribute at the start of a module applies to the test right after it. 이것을 실패시키는 것: 속성
 # 묶음이나 속성 내용을 `#[`로만 찾는 것, `#`와 `[` 사이의 줄바꿈을 받지 않는 것, inner 속성(`#!`)을 건너뛰는 것, 주석을
-# 지우지 않고 읽는 것, 속성을 줄 첫머리에서만 찾는 것(그 앞의 `ignore`나 `cfg(any())`가 보이지 않아 꺼진 시험을 받음).
+# 지우지 않고 읽는 것, 속성을 줄 첫머리에서만 찾는 것, Rust 공백인 U+200E를 공백으로 보지 않는 것(그 앞의 `ignore`나
+# `cfg(any())`가 보이지 않아 꺼진 시험을 받음).
 @pytest.mark.parametrize("source, want", [
     ("# [ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
     ("#\n[ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
@@ -1019,8 +1068,9 @@ def module_inner_attributes(source, start=0):
     ("#[ignore] /* /* */ */\n#[test]\nfn f() {}\n", ["ignore", "test"]),
     ("const _: () = (); #[ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
     ("# [ignore] // c\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("#[ignore]\u200e\n#[test]\nfn f() {}\n", ["ignore", "test"]),
 ], ids=["space", "newline", "space-after-test", "inner", "inner-spaced", "comment-between", "comment-before",
-        "nested-comment", "code-before", "line-comment"])
+        "nested-comment", "code-before", "line-comment", "mark-between"])
 def test_rust_attributes_read_every_spelling_rustc_takes(source, want):
     assert rust_attributes(source, r"fn\s+f\s*\(") == [want]
 
@@ -1129,7 +1179,9 @@ def test_module_path_refuses_a_raw_path_attribute():
 # 보고 뒤의 진짜 `#[ignore]`까지 지운다. 이것을 실패시키는 것: 중첩 블록 주석을 첫 `*/`에서 끝내는 것(뒤의 `z */`가 코드로
 # 남음), 문자열·raw 문자열·byte·c 문자열·char 안의 `/*`·`//`를 주석으로 보는 것, 문자열의 `\"` escape나 char의 `\'` escape를
 # 모르는 것, raw identifier(`r#br`) 뒤의 문자열을 raw 문자열로 보는 것, lifetime·label을 char로 보는 것, literals에서
-# 문자열을 남기는 것, 읽지 못하는 char를 조용히 넘기는 것.
+# 문자열을 남기는 것, 읽지 못하는 char를 조용히 넘기는 것, 숫자·리터럴의 접미어(`0r`, `"x"r`)를 접두어로 다시 읽는 것,
+# raw lifetime(`'r#r`)을 끝까지 읽지 않는 것, 결합 문자가 든 식별자를 끊는 것, BOM·shebang 줄을 코드로 읽는 것, 주석이나
+# Rust 공백(U+200E) 뒤에 `[`가 오는 `#!`를 shebang으로 보는 것.
 @pytest.mark.parametrize("text, literals, tokens", [
     ("a /* x /* y */ z */ b", False, ["a", "b"]),
     ('s = "/* // */"; t', False, None),
@@ -1144,8 +1196,17 @@ def test_module_path_refuses_a_raw_path_attribute():
     ('s = "x \\" /* y"; /* c */ z', False, ["s", "=", '"x', '\\"', "/*", 'y";', "z"]),
     ("'outer: loop { break 'outer; } /* c */ x", False, ["'outer:", "loop", "{", "break", "'outer;", "}", "x"]),
     ("c = '\\q'; /* c */ x", False, "raises"),
+    ('m!(0r"a\\"/*") /* c */ x', False, ['m!(0r"a\\"/*")', "x"]),
+    ('m!("x"r"a\\"/*") /* c */ x', False, ['m!("x"r"a\\"/*")', "x"]),
+    ('m!(\'a\'r"a\\"/*") /* c */ x', False, ['m!(\'a\'r"a\\"/*")', "x"]),
+    ('m!(\'r#r"a\\"/*") /* c */ x', False, ['m!(\'r#r"a\\"/*")', "x"]),
+    ('m!(r#a\u0301r"a\\"/*") /* c */ x', False, ['m!(r#a\u0301r"a\\"/*")', "x"]),
+    ('\ufeff#!/usr/bin/env x "\n#![cfg(any())]', False, ["#![cfg(any())]"]),
+    ("#!/*c*/[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+    ("#!\u200e[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
 ], ids=["nested", "string", "raw", "byte-raw", "byte", "char-quote", "lifetime", "literals", "char-escaped-quote",
-        "raw-identifier", "string-escaped-quote", "label", "unreadable-char"])
+        "raw-identifier", "string-escaped-quote", "label", "unreadable-char", "number-suffix", "string-suffix",
+        "char-suffix", "raw-lifetime", "combining-identifier", "bom-shebang", "inner-not-shebang", "inner-after-mark"])
 def test_blank_rust_reads_comments_as_rustc_does(text, literals, tokens):
     if tokens == "raises":
         with pytest.raises(AssertionError, match="unreadable char literal"):
@@ -1160,16 +1221,19 @@ def test_blank_rust_reads_comments_as_rustc_does(text, literals, tokens):
 # an inline `mod name {`. 이것을 실패시키는 것: 그 가운데 한 곳의 `#![cfg(any())]`를 보지 않는 것(crate 뿌리, 중간 모듈
 # 파일, 행의 파일, test target 뿌리, test target이 포함한 파일, inline 모듈), inline 모듈을 문자열 안의 `mod inner {`에서
 # 찾는 것(진짜 모듈의 첫머리를 읽지 않음).
-@pytest.mark.parametrize("path, target, edited, name", [
-    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/main.rs", None),
-    ("crates/bingsu/src/commands/command_supervisor.rs", "bin:bingsu", "crates/bingsu/src/commands/mod.rs", None),
-    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/relay/tests.rs", None),
-    ("crates/bingsu/tests/collection_store.rs", "test:collection_store", "crates/bingsu/tests/collection_store.rs", None),
-    ("crates/bingsu/tests/support/x.rs", "test:collection_store", "crates/bingsu/tests/support/x.rs", None),
-    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", None, "relay::tests::inner::f"),
-    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", '#[doc = "mod inner {"]', "relay::tests::inner::f"),
-], ids=["crate-root", "module-file", "row-file", "test-root", "test-include", "inline", "inline-named-in-a-string"])
-def test_module_inner_cfgs_must_hold(path, target, edited, name):
+@pytest.mark.parametrize("path, target, edited, name, head", [
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/main.rs", None, ""),
+    ("crates/bingsu/src/commands/command_supervisor.rs", "bin:bingsu", "crates/bingsu/src/commands/mod.rs", None, ""),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/relay/tests.rs", None, ""),
+    ("crates/bingsu/tests/collection_store.rs", "test:collection_store", "crates/bingsu/tests/collection_store.rs", None, ""),
+    ("crates/bingsu/tests/support/x.rs", "test:collection_store", "crates/bingsu/tests/support/x.rs", None, ""),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", None, "relay::tests::inner::f", ""),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", '#[doc = "mod inner {"]', "relay::tests::inner::f", ""),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/relay/tests.rs", None, "\ufeff"),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/relay/tests.rs", None, '#!/usr/bin/env x "\n'),
+], ids=["crate-root", "module-file", "row-file", "test-root", "test-include", "inline", "inline-named-in-a-string",
+        "row-file-bom", "row-file-shebang"])
+def test_module_inner_cfgs_must_hold(path, target, edited, name, head):
     real = lambda p: (ROOT / p).read_text().replace("\r\n", "\n")
     files = {}
     if path.endswith("support/x.rs"):
@@ -1179,7 +1243,7 @@ def test_module_inner_cfgs_must_hold(path, target, edited, name):
     row = {"id": "X"}
     if name is None:
         rust_module_path(row, path, target, read, {"linux"})
-        files[edited] = "#![cfg(any())]\n" + read(edited)
+        files[edited] = head + "#![cfg(any())]\n" + read(edited)
         with pytest.raises(AssertionError, match="disabled cfg"):
             rust_module_path(row, path, target, read, {"linux"})
     else:
