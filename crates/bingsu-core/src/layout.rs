@@ -1185,44 +1185,6 @@ fn clean(items: &mut Vec<Item>) {
     items.truncate(w);
 }
 
-/// Style of cleaned item `i`. Separators take the colors of the blocks
-/// next to them (design brief interlock rule): a left side separator `▶`
-/// has the block before as text color and the block after as background, a
-/// right side `◀` the reverse; a head takes the block after, a tail the
-/// block before, on the default background; `flat` is a space on the
-/// neighboring block's background.
-fn item_style(items: &[Item], i: usize, right_side: bool) -> Style {
-    let it = items[i];
-    let Kind::Sep(kind, shape) = it.kind else {
-        return it.style;
-    };
-    let block_at = |j: Option<usize>| match j.and_then(|j| items.get(j)) {
-        Some(Item {
-            kind: Kind::Content,
-            block: Some(b),
-            ..
-        }) => Some(*b),
-        _ => None,
-    };
-    let (prev, next) = (block_at(i.checked_sub(1)), block_at(Some(i + 1)));
-    let (fg, bg) = match kind {
-        SepKind::Head => (next, None),
-        SepKind::Tail => (prev, None),
-        SepKind::Sep if right_side => (next, prev),
-        SepKind::Sep => (prev, next),
-    };
-    let (fg, bg) = if shape == Shape::Flat {
-        (None, next.or(prev))
-    } else {
-        (fg, bg)
-    };
-    Style {
-        fg: fg.unwrap_or_default(),
-        bg: bg.unwrap_or_default(),
-        attrs: 0,
-    }
-}
-
 fn short_of<'a>(pieces: impl Iterator<Item = (&'a str, bool)> + Clone) -> Short {
     let mut text = String::with_capacity(pieces.clone().map(|x| x.0.len()).sum());
     let mut ends = Vec::with_capacity(pieces.clone().count());
@@ -1325,7 +1287,6 @@ pub fn layout_line_into<R: Recorder>(
     out: &mut LaidLine,
 ) {
     let target = target(o);
-    let p = o.profile;
     if o.width <= 1 && R::ENABLED {
         record_tiny(n, line, inp, r);
     }
@@ -1367,165 +1328,14 @@ pub fn layout_line_into<R: Recorder>(
         }
     }
     let mut fit = lay.check(&mut b);
-    'steps: {
-        if lay.fits(&fit) {
-            break 'steps;
-        }
-        if R::ENABLED {
-            r.step(n, Step::ShortenNames);
-        }
-        // Step 1: left before right (the path before right-side information), each to "its width - overflow". A
-        // segment on both sides is shortened again from its original text
-        // with the same methods, which gives the same result.
-        for right in [false, true] {
-            for i in 0..lay.entries.len() {
-                let e = lay.entries[i];
-                let su = lay.setup(e.seg);
-                // `!e.text` is a performance-only shortcut that no output
-                // or record can show: a segment referenced only by fields
-                // has no text built, so shortening it gives an empty result
-                // that validation drops. A segment drawn on both sides is
-                // shortened once, from its left entry.
-                let left_done =
-                    right && lay.slots[e.seg].entry[0].is_some_and(|l| lay.entries[l].text);
-                if e.right != right
-                    || !e.text
-                    || left_done
-                    || su.methods.is_empty()
-                    || !lay.visible(e.seg, right)
-                {
-                    continue;
-                }
-                let over = fit.cells.saturating_sub(target);
-                let budget = lay.slots[e.seg].m.width.saturating_sub(over);
-                if let Some(pieces) = lay.shorten_capped(e.seg, su.methods, budget, n, r) {
-                    let short = short_of(pieces.iter().map(|x| (x.text.as_str(), x.shortened)));
-                    lay.put_short(e.seg, short, &mut b.join);
-                }
-                fit = lay.check(&mut b);
-                if lay.fits(&fit) {
-                    break 'steps;
-                }
-            }
-        }
-        // Step 2: optional right references, lowest priority (then
-        // rightmost) first.
-        if R::ENABLED {
-            r.step(n, Step::HideRightByPriority);
-        }
-        for (_, _, s) in by_priority(&lay, true) {
-            if lay.visible(s, true) {
-                lay.slots[s].hidden[1] = true;
-                if R::ENABLED {
-                    r.hidden(n, s, HideReason::Priority);
-                }
-                fit = lay.check(&mut b);
-                if lay.fits(&fit) {
-                    break 'steps;
-                }
-            }
-        }
-        // Step 3: the whole right side, `required` included (`required` only stops the hiding by choice).
-        if R::ENABLED {
-            r.step(n, Step::HideRight);
-        }
-        for i in 0..lay.entries.len() {
-            let e = lay.entries[i];
-            if e.right {
-                if R::ENABLED && lay.visible(e.seg, true) {
-                    r.hidden(n, e.seg, HideReason::RightHidden);
-                }
-                lay.slots[e.seg].hidden[1] = true;
-            }
-        }
-        fit = lay.check(&mut b);
-        if lay.fits(&fit) {
-            break 'steps;
-        }
-        // Step 4: cut left texts by the overflow, widest first (leftmost on
-        // a tie), down to the ellipsis. A one-cell text (the `char` glyph)
-        // cannot get narrower, so it is only ever marked exhausted; so is
-        // any text when the line is over `LINE_BYTES_MAX` but not too wide.
-        if R::ENABLED {
-            r.step(n, Step::TruncateLeft);
-        }
-        loop {
-            let pick = lay
-                .entries
-                .iter()
-                .filter(|e| !e.right && lay.visible(e.seg, false) && !lay.slots[e.seg].exhausted)
-                .max_by_key(|e| (lay.slots[e.seg].m.width, Reverse(e.pos)));
-            let Some(&e) = pick else { break };
-            let s = e.seg;
-            let w = lay.slots[s].m.width;
-            let keep = if matches!(inp.facts.get(s), Some(Some(_))) {
-                Keep::End
-            } else {
-                Keep::Start
-            };
-            let cut = w.saturating_sub(fit.cells.saturating_sub(target)).max(1);
-            let short = if let Some(prefix) = lay.readonly_prefix(s) {
-                // The marker is decoration, never a path component or a
-                // partially truncated token. Reserve it even in step four.
-                let mut pieces = lay.pieces(s);
-                let first = pieces.first_mut().expect("visible path piece");
-                first.0 = first.0.strip_prefix(&prefix).expect("readonly prefix");
-                let path = truncate(
-                    &pieces,
-                    cut.saturating_sub(str_width(&prefix, p)).max(1),
-                    keep,
-                    p,
-                );
-                let mut short = Short {
-                    text: prefix.clone(),
-                    ends: alloc::vec![(prefix.len(), false)],
-                };
-                short.text.push_str(&path.text);
-                short.ends.extend(
-                    path.ends
-                        .into_iter()
-                        .map(|(end, dim)| (end + prefix.len(), dim)),
-                );
-                short
-            } else {
-                truncate(&lay.pieces(s), cut, keep, p)
-            };
-            if str_width(&short.text, p) >= w {
-                lay.slots[s].exhausted = true;
-                continue;
-            }
-            lay.put_short(s, short, &mut b.join);
-            fit = lay.check(&mut b);
-            if lay.fits(&fit) {
-                break 'steps;
-            }
-        }
-        // Step 5: optional left references, lowest priority (then
-        // rightmost) first.
-        if R::ENABLED {
-            r.step(n, Step::HideLeftOptional);
-        }
-        for (_, _, s) in by_priority(&lay, false) {
-            if lay.visible(s, false) {
-                lay.slots[s].hidden[0] = true;
-                if R::ENABLED {
-                    r.hidden(n, s, HideReason::LeftOptional);
-                }
-                fit = lay.check(&mut b);
-                if lay.fits(&fit) {
-                    break 'steps;
-                }
-            }
-        }
-        // Step 6: plain text, no backgrounds, heads, tails or non-flat separators.
-        if R::ENABLED {
-            r.step(n, Step::DropDecoration);
-        }
-        lay.plain = true;
-        fit = lay.check(&mut b);
-        if lay.fits(&fit) {
-            break 'steps;
-        }
+    let fitted = lay.fits(&fit)
+        || shorten_names(&mut lay, &mut b, &mut fit, n, target, r)
+        || hide_right_by_priority(&mut lay, &mut b, &mut fit, n, r)
+        || hide_right(&mut lay, &mut b, &mut fit, n, r)
+        || truncate_left(&mut lay, &mut b, &mut fit, n, target, r)
+        || hide_left_optional(&mut lay, &mut b, &mut fit, n, r)
+        || drop_decoration(&mut lay, &mut b, &mut fit, n, r);
+    if !fitted {
         // Step 7.
         if R::ENABLED {
             r.step(n, Step::Minimal);
@@ -1576,6 +1386,228 @@ pub fn layout_line_into<R: Recorder>(
         let mut sink = Sink::new(&mut out.right, nr);
         lay.runs(&b.right, true, Some(&mut sink));
         sink.finish();
+    }
+}
+
+/// Step 1. Each step returns whether the line now fits.
+fn shorten_names<R: Recorder>(
+    lay: &mut Lay<'_, '_>,
+    b: &mut Bufs,
+    fit: &mut Fit,
+    n: usize,
+    target: u32,
+    r: &mut R,
+) -> bool {
+    if R::ENABLED {
+        r.step(n, Step::ShortenNames);
+    }
+    // Step 1: left before right (the path before right-side information), each to "its width - overflow". A
+    // segment on both sides is shortened again from its original text
+    // with the same methods, which gives the same result.
+    for right in [false, true] {
+        for i in 0..lay.entries.len() {
+            let e = lay.entries[i];
+            let su = lay.setup(e.seg);
+            // `!e.text` is a performance-only shortcut that no output
+            // or record can show: a segment referenced only by fields
+            // has no text built, so shortening it gives an empty result
+            // that validation drops. A segment drawn on both sides is
+            // shortened once, from its left entry.
+            let left_done = right && lay.slots[e.seg].entry[0].is_some_and(|l| lay.entries[l].text);
+            if e.right != right
+                || !e.text
+                || left_done
+                || su.methods.is_empty()
+                || !lay.visible(e.seg, right)
+            {
+                continue;
+            }
+            let over = fit.cells.saturating_sub(target);
+            let budget = lay.slots[e.seg].m.width.saturating_sub(over);
+            if let Some(pieces) = lay.shorten_capped(e.seg, su.methods, budget, n, r) {
+                let short = short_of(pieces.iter().map(|x| (x.text.as_str(), x.shortened)));
+                lay.put_short(e.seg, short, &mut b.join);
+            }
+            *fit = lay.check(b);
+            if lay.fits(fit) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Step 2.
+fn hide_right_by_priority<R: Recorder>(
+    lay: &mut Lay<'_, '_>,
+    b: &mut Bufs,
+    fit: &mut Fit,
+    n: usize,
+    r: &mut R,
+) -> bool {
+    // Step 2: optional right references, lowest priority (then
+    // rightmost) first.
+    if R::ENABLED {
+        r.step(n, Step::HideRightByPriority);
+    }
+    for (_, _, s) in by_priority(lay, true) {
+        if lay.visible(s, true) {
+            lay.slots[s].hidden[1] = true;
+            if R::ENABLED {
+                r.hidden(n, s, HideReason::Priority);
+            }
+            *fit = lay.check(b);
+            if lay.fits(fit) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Step 3.
+fn hide_right<R: Recorder>(
+    lay: &mut Lay<'_, '_>,
+    b: &mut Bufs,
+    fit: &mut Fit,
+    n: usize,
+    r: &mut R,
+) -> bool {
+    // Step 3: the whole right side, `required` included (`required` only stops the hiding by choice).
+    if R::ENABLED {
+        r.step(n, Step::HideRight);
+    }
+    for i in 0..lay.entries.len() {
+        let e = lay.entries[i];
+        if e.right {
+            if R::ENABLED && lay.visible(e.seg, true) {
+                r.hidden(n, e.seg, HideReason::RightHidden);
+            }
+            lay.slots[e.seg].hidden[1] = true;
+        }
+    }
+    *fit = lay.check(b);
+    lay.fits(fit)
+}
+
+/// Step 4.
+fn truncate_left<R: Recorder>(
+    lay: &mut Lay<'_, '_>,
+    b: &mut Bufs,
+    fit: &mut Fit,
+    n: usize,
+    target: u32,
+    r: &mut R,
+) -> bool {
+    // Step 4: cut left texts by the overflow, widest first (leftmost on
+    // a tie), down to the ellipsis. A one-cell text (the `char` glyph)
+    // cannot get narrower, so it is only ever marked exhausted; so is
+    // any text when the line is over `LINE_BYTES_MAX` but not too wide.
+    if R::ENABLED {
+        r.step(n, Step::TruncateLeft);
+    }
+    loop {
+        let pick = lay
+            .entries
+            .iter()
+            .filter(|e| !e.right && lay.visible(e.seg, false) && !lay.slots[e.seg].exhausted)
+            .max_by_key(|e| (lay.slots[e.seg].m.width, Reverse(e.pos)));
+        let Some(&e) = pick else { break };
+        let s = e.seg;
+        let w = lay.slots[s].m.width;
+        let keep = if matches!(lay.inp.facts.get(s), Some(Some(_))) {
+            Keep::End
+        } else {
+            Keep::Start
+        };
+        let cut = w.saturating_sub(fit.cells.saturating_sub(target)).max(1);
+        let short = truncated_text(lay, s, cut, keep);
+        if str_width(&short.text, lay.o.profile) >= w {
+            lay.slots[s].exhausted = true;
+            continue;
+        }
+        lay.put_short(s, short, &mut b.join);
+        *fit = lay.check(b);
+        if lay.fits(fit) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Step 5.
+fn hide_left_optional<R: Recorder>(
+    lay: &mut Lay<'_, '_>,
+    b: &mut Bufs,
+    fit: &mut Fit,
+    n: usize,
+    r: &mut R,
+) -> bool {
+    // Step 5: optional left references, lowest priority (then
+    // rightmost) first.
+    if R::ENABLED {
+        r.step(n, Step::HideLeftOptional);
+    }
+    for (_, _, s) in by_priority(lay, false) {
+        if lay.visible(s, false) {
+            lay.slots[s].hidden[0] = true;
+            if R::ENABLED {
+                r.hidden(n, s, HideReason::LeftOptional);
+            }
+            *fit = lay.check(b);
+            if lay.fits(fit) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Step 6.
+fn drop_decoration<R: Recorder>(
+    lay: &mut Lay<'_, '_>,
+    b: &mut Bufs,
+    fit: &mut Fit,
+    n: usize,
+    r: &mut R,
+) -> bool {
+    // Step 6: plain text, no backgrounds, heads, tails or non-flat separators.
+    if R::ENABLED {
+        r.step(n, Step::DropDecoration);
+    }
+    lay.plain = true;
+    *fit = lay.check(b);
+    lay.fits(fit)
+}
+
+/// Step 4's cut of one text. A read-only prefix (the marker) is decoration,
+/// never a path component or a partially truncated token: it is reserved even
+/// at step four and only the path after it is cut.
+fn truncated_text(lay: &Lay<'_, '_>, s: usize, cut: u32, keep: Keep) -> Short {
+    let p = lay.o.profile;
+    if let Some(prefix) = lay.readonly_prefix(s) {
+        let mut pieces = lay.pieces(s);
+        let first = pieces.first_mut().expect("visible path piece");
+        first.0 = first.0.strip_prefix(&prefix).expect("readonly prefix");
+        let path = truncate(
+            &pieces,
+            cut.saturating_sub(str_width(&prefix, p)).max(1),
+            keep,
+            p,
+        );
+        let mut short = Short {
+            text: prefix.clone(),
+            ends: alloc::vec![(prefix.len(), false)],
+        };
+        short.text.push_str(&path.text);
+        short.ends.extend(
+            path.ends
+                .into_iter()
+                .map(|(end, dim)| (end + prefix.len(), dim)),
+        );
+        short
+    } else {
+        truncate(&lay.pieces(s), cut, keep, p)
     }
 }
 
