@@ -3,7 +3,8 @@
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use crate::{Finding, TestSpans, is_ident, is_punct, line_of, unraw};
+use crate::test_scope::TestSpans;
+use crate::{Finding, is_ident, is_punct, line_of, unraw};
 
 pub(super) fn check(source: &str, table: &str) -> Vec<Finding> {
     let mut out = Vec::new();
