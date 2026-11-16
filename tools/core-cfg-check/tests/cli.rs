@@ -1580,3 +1580,173 @@ fn a_test_target_is_not_a_test_only_module_file() {
         "{stderr}"
     );
 }
+
+/// What `--prompt-main` prints for each bypass fixture, one `line: finding`
+/// per row of fixtures/bypass/prompt-main.tsv. The rows are the checker's
+/// output, checked against each fixture's difference from the pinned shape;
+/// a fixture that adds or removes an item shifts the items after it, so those
+/// are reported too. scripts/test_gate_bypass.py reads the same file.
+fn prompt_main_expected(root: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let table = std::fs::read_to_string(root.join("tests/fixtures/bypass/prompt-main.tsv"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for row in table.lines().skip(1) {
+        let [name, line, finding] = row.split('\t').collect::<Vec<_>>()[..] else {
+            panic!("bad row {row:?}");
+        };
+        let finding = format!("{line}: {finding}");
+        match out.last_mut() {
+            Some((last, findings)) if last == name => findings.push(finding),
+            _ => out.push((name.to_owned(), vec![finding])),
+        }
+    }
+    out
+}
+
+// The real entry passes with nothing on stderr; each fixture prints exactly
+// its findings; a documented entry passes; one change to any item of the
+// real entry names that item alone, also when the change is only a `cfg`, an
+// inline module's content, a static's value, a signature or a documented
+// item's body; a file the parser cannot read is refused.
+// 이것을 실패시키는 것: `--prompt-main` 분기를 빼거나 다른 검사로 보내는 것(실제 파일이 거부됨), 모양 비교에서
+// inner attribute·항목 수를 덜 보거나, 항목 1–9 가운데 하나나 항목의 한 부분(경로, cfg, inline mod 내용,
+// static 값, fn 서명, 문서 주석이 있는 항목의 본문)을 덜 보거나, 첫 차이에서 멈추는 것, 해석 실패를 통과로 바꾸는 것,
+// 성공에도 stderr를 쓰거나 다른 이유("unreadable")를 더 쓰는 것, 픽스처를 더하고 표에 넣지 않는 것.
+#[test]
+fn prompt_main_takes_the_real_entry_and_names_each_rejection() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let run = |path: &std::path::Path| {
+        let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+            .arg("--prompt-main")
+            .arg(path)
+            .output()
+            .unwrap();
+        let prefix = format!("{}:", path.display());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let findings: Vec<String> = stderr
+            .lines()
+            .map(|l| l.strip_prefix(&prefix).unwrap_or(l).to_owned())
+            .collect();
+        (output.status.success(), stderr, findings)
+    };
+    let entry = root.join("../../crates/bingsu-prompt/src/main.rs");
+    let (ok, err, _) = run(&entry);
+    assert!(ok && err.is_empty(), "{err}");
+
+    let dir = root.join("tests/fixtures/bypass/prompt-main");
+    let expected = prompt_main_expected(root);
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    let listed: Vec<&str> = expected.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, listed);
+    for (name, want) in &expected {
+        let (ok, err, findings) = run(&dir.join(name));
+        assert!(!ok, "{name}");
+        assert_eq!(&findings, want, "{name}: {err}");
+    }
+
+    // Variants of the real entry; their line numbers follow the file, so only
+    // the findings' text is compared.
+    let real = std::fs::read_to_string(&entry)
+        .unwrap()
+        .replace("\r\n", "\n");
+    let variant = |edits: &[(&str, &str)]| {
+        let mut text = real.clone();
+        for (from, to) in edits {
+            assert_eq!(text.matches(from).count(), 1, "{from}");
+            text = text.replacen(from, to, 1);
+        }
+        fixture(&text)
+    };
+    let reasons = |findings: Vec<String>| -> Vec<String> {
+        findings
+            .iter()
+            .map(|f| f.split_once(": ").map_or(f.clone(), |(_, r)| r.to_owned()))
+            .collect()
+    };
+    let unix_main = "#[cfg(unix)]\nfn main() {\n";
+    let documented = variant(&[
+        ("#[used]\n", "/// The role marker.\n#[used]\n"),
+        (unix_main, &format!("/// The Unix entry.\n{unix_main}")),
+    ]);
+    let (ok, err, _) = run(&documented);
+    assert!(ok && err.is_empty(), "documented entry: {err}");
+    let cfg_only = variant(&[(
+        "#[cfg(all(unix, not(target_os = \"linux\")))]\nmod sandbox {",
+        "#[cfg(unix)]\nmod sandbox {",
+    )]);
+    let (ok, err, findings) = run(&cfg_only);
+    assert!(!ok, "cfg only");
+    assert_eq!(
+        reasons(findings),
+        ["item 6 differs from the pinned shape"],
+        "{err}"
+    );
+    let documented_change = variant(&[
+        (unix_main, &format!("/// The Unix entry.\n{unix_main}")),
+        (
+            "    prompt::dedicated(sandbox::enter)\n}",
+            "    let _ = prompt::dedicated(sandbox::enter);\n}",
+        ),
+    ]);
+    let (ok, err, findings) = run(&documented_change);
+    assert!(!ok, "documented change");
+    assert_eq!(
+        reasons(findings),
+        ["item 8 differs from the pinned shape"],
+        "{err}"
+    );
+    // One change per item, named alone: each item's comparison is held here,
+    // not only through the rows the fixtures happen to produce.
+    let path = |file: &str| format!("#[path = \"../../bingsu/src/{file}\"]");
+    for (from, to, item) in [
+        (path("prompt.rs"), "#[path = \"../../bingsu-bench/src/lib.rs\"]".to_owned(), 1),
+        (path("prompt_io.rs"), path("commands/mod.rs"), 2),
+        (
+            format!("#[cfg(unix)]\n#[allow(dead_code, unsafe_code)]\n{}", path("prompt_read.rs")),
+            format!("#[cfg(any())]\n#[allow(dead_code, unsafe_code)]\n{}", path("prompt_read.rs")),
+            3,
+        ),
+        (path("prompt_spawn.rs"), path("relay.rs"), 4),
+        (path("sandbox.rs"), path("sandbox_off.rs"), 5),
+        (
+            "mod sandbox {\n    pub fn enter()".to_owned(),
+            "mod sandbox {\n    #[global_allocator]\n    static A: std::alloc::System = std::alloc::System;\n    pub fn enter()".to_owned(),
+            6,
+        ),
+        (
+            "role_tag(bingsu_identity::PROMPT_ROLE)".to_owned(),
+            "role_tag(bingsu_identity::CLI_ROLE)".to_owned(),
+            7,
+        ),
+        (unix_main.to_owned(), "#[cfg(unix)]\nextern \"C\" fn main() {\n".to_owned(), 8),
+        (
+            "#[cfg(not(unix))]\nfn main()".to_owned(),
+            "#[cfg(not(unix))]\nextern \"C\" fn main()".to_owned(),
+            9,
+        ),
+    ] {
+        let (ok, err, findings) = run(&variant(&[(&from, &to)]));
+        assert!(!ok, "item {item}");
+        assert_eq!(
+            reasons(findings),
+            [format!("item {item} differs from the pinned shape")],
+            "{err}"
+        );
+    }
+    // A file the parser cannot read is refused, never passed unchecked.
+    let (ok, err, findings) = run(&variant(&[(
+        "fn main() -> std::process::ExitCode {",
+        "fn main( -> std::process::ExitCode {",
+    )]));
+    assert!(!ok, "unparsable");
+    let reasons = reasons(findings);
+    assert!(
+        reasons.len() == 1 && reasons[0].starts_with("unparsable: "),
+        "{err}"
+    );
+}

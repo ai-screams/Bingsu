@@ -1,0 +1,22 @@
+fixture	line	finding
+allocator.rs	0	expected the 9 items of the pinned shape, found 10
+allocator.rs	37	item 7 differs from the pinned shape
+allocator.rs	39	item 8 differs from the pinned shape
+allocator.rs	42	item 9 differs from the pinned shape
+cli_entry.rs	40	item 8 differs from the pinned shape
+commands.rs	0	expected the 9 items of the pinned shape, found 10
+commands.rs	24	item 5 differs from the pinned shape
+commands.rs	28	item 6 differs from the pinned shape
+commands.rs	32	item 7 differs from the pinned shape
+commands.rs	41	item 8 differs from the pinned shape
+commands.rs	44	item 9 differs from the pinned shape
+constructor.rs	37	item 7 differs from the pinned shape
+inner_attr.rs	1	inner attributes must be exactly #![deny(unsafe_code)]
+no_sandbox.rs	0	expected the 9 items of the pinned shape, found 8
+no_sandbox.rs	24	item 5 differs from the pinned shape
+no_sandbox.rs	33	item 6 differs from the pinned shape
+no_sandbox.rs	36	item 7 differs from the pinned shape
+no_sandbox.rs	42	item 8 differs from the pinned shape
+retarget.rs	20	item 4 differs from the pinned shape
+trailing.rs	0	expected the 9 items of the pinned shape, found 10
+windows_runs.rs	46	item 9 differs from the pinned shape

@@ -15,6 +15,17 @@ FIXTURES = ROOT / "tools/core-cfg-check/tests/fixtures/bypass"
 CHECKER = ROOT / "target/debug/core-cfg-check"
 
 
+# What `--prompt-main` prints for each bypass fixture (the table
+# tools/core-cfg-check/tests/cli.rs checks the checker with).
+def prompt_main_expected():
+    rows = (FIXTURES / "prompt-main.tsv").read_text().replace("\r\n", "\n").splitlines()[1:]
+    expected = {}
+    for row in rows:
+        name, line, finding = row.split("\t")
+        expected.setdefault(name, []).append(f":{line}: {finding}")
+    return expected
+
+
 class BypassGates(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=ROOT / "target")
@@ -139,13 +150,22 @@ class BypassGates(unittest.TestCase):
                              "core-cfg-check --adapter")
 
 
-    # 이것을 실패시키는 것: bingsu-prompt main 모양 고정을 지우거나 항목·속성·경로·본문 하나를 덜 보는 것.
+    # 이것을 실패시키는 것: bingsu-prompt main 모양 고정을 지우거나, 픽스처가 바꾼 inner attribute·항목 수·항목을
+    # 덜 보는 것(항목 하나하나와 그 부분의 비교는 tools/core-cfg-check/tests/cli.rs가 맡는다), gate가 `--prompt-main`
+    # 검사를 다른 검사로 보내 픽스처가 다른 이유(": unreadable" 등)로 거부되는 것, 픽스처를 더하고 표(prompt-main.tsv)에
+    # 넣지 않는 것.
     def test_prompt_main_after_hash_renewal(self):
-        for fixture in sorted((FIXTURES / "prompt-main").iterdir()):
+        expected = prompt_main_expected()
+        fixtures = sorted((FIXTURES / "prompt-main").iterdir())
+        self.assertEqual([f.name for f in fixtures], sorted(expected))
+        for fixture in fixtures:
             with self.subTest(fixture=fixture.name):
                 self.replace_tcb("crates/bingsu-prompt/src/main.rs", f"prompt-main/{fixture.name}")
-                self.assert_rejected(self.run_gate("check_cli_prompt_forbid.py"),
-                                     "core-cfg-check --prompt-main")
+                output = self.run_gate("check_cli_prompt_forbid.py")
+                self.assert_rejected(output, "core-cfg-check --prompt-main")
+                for finding in expected[fixture.name]:
+                    self.assertIn(finding, output.stderr)
+                self.assertNotIn(": unreadable", output.stderr)
 
 if __name__ == "__main__":
     unittest.main()

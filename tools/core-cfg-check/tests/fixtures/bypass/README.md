@@ -39,3 +39,7 @@
 | `wt/crates/bingsu-core/src/test_file/after_item.rs` | Test-only file | `#![cfg(test)]` after an item; the file's `as_ptr` call must still be found. | Reject the file as production code. |
 | `wt/crates/bingsu-core/src/test_file/crate_root.rs` | Test-only file | `#![cfg(test)]` on a crate root (`lib.rs`); the file's `as_ptr` call must still be found. | Reject the file as production code. |
 | `wt/crates/bingsu-core/src/test_file/exempt.rs` | Test-only file | `#![cfg(test)]` as the first attribute after a plain `//` comment. | Accept: no finding for the file. |
+
+`prompt-main.tsv` lists, for each `prompt-main/` fixture, every finding `--prompt-main` prints for it (line and text). The rows are the checker's output, checked against each fixture's difference from the pinned shape; a fixture that adds or removes an item shifts the items after it, so those are reported too. `tests/cli.rs` checks the checker against it and `scripts/test_gate_bypass.py` checks the gate output after the hash pins are renewed.
+
+When `SHAPE` in `src/prompt_main.rs` changes: change `crates/bingsu-prompt/src/main.rs` with it, rebuild each `prompt-main/` fixture from the new entry with its one change, run `core-cfg-check --prompt-main` on each fixture, check every finding against the fixture's difference, then write the rows into `prompt-main.tsv`.
