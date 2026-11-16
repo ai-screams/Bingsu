@@ -208,13 +208,14 @@ fn doctor_source() -> String {
 }
 
 // A file added to `doctor/` but not to `DOCTOR_CHILDREN` would stay outside every source check below.
-// 이것을 실패시키는 것: `doctor/`에 파일을 더하고 목록에 안 넣는 것, 목록에서 한 파일을 빼는 것.
+// 이것을 실패시키는 것: `doctor/`에 `.rs` 파일을 더하고 목록에 안 넣는 것, 목록에서 한 파일을 빼는 것(`.rs`가 아닌 파일은 세지 않는다).
 #[test]
 fn every_doctor_file_is_checked() {
     let mut on_disk: Vec<String> =
         std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands/doctor"))
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.ends_with(".rs"))
             .collect();
     on_disk.sort();
     let listed: Vec<&str> = DOCTOR_CHILDREN.iter().map(|(name, _)| *name).collect();

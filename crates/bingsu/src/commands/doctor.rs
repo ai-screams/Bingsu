@@ -57,11 +57,7 @@ mod render;
 mod system;
 mod terminal_rows;
 
-use breaker::run_breaker;
-use install::{run_build_identity, run_executable, run_path_bingsu, run_roots_pin};
 use render::{exit_of, render, render_json};
-use system::{run_seccomp, run_settings};
-use terminal_rows::{EXIT_CANCELLED, mode_word, run_terminal_background, run_terminal_width};
 
 const USAGE: &str = "usage: bingsu doctor [--format json|text] [--terminal] [--evidence-stdin]";
 
@@ -85,6 +81,13 @@ impl Status {
             Self::Unknown => "unknown",
             Self::Skipped => "skipped",
         }
+    }
+}
+
+fn mode_word(m: Mode) -> &'static str {
+    match m {
+        Mode::Dark => "dark",
+        Mode::Light => "light",
     }
 }
 
@@ -169,22 +172,22 @@ pub(super) const ITEMS: &[Item] = &[
     Item {
         id: "executable",
         title: "executable",
-        run: run_executable,
+        run: install::run_executable,
     },
     Item {
         id: "path-bingsu",
         title: "bingsu on PATH",
-        run: run_path_bingsu,
+        run: install::run_path_bingsu,
     },
     Item {
         id: "roots-pin",
         title: "pinned folders",
-        run: run_roots_pin,
+        run: install::run_roots_pin,
     },
     Item {
         id: "build-identity",
         title: "one build",
-        run: run_build_identity,
+        run: install::run_build_identity,
     },
     Item {
         id: "shell",
@@ -209,27 +212,27 @@ pub(super) const ITEMS: &[Item] = &[
     Item {
         id: "breaker",
         title: "breaker",
-        run: run_breaker,
+        run: breaker::run_breaker,
     },
     Item {
         id: "seccomp",
         title: "seccomp",
-        run: run_seccomp,
+        run: system::run_seccomp,
     },
     Item {
         id: "settings",
         title: "settings",
-        run: run_settings,
+        run: system::run_settings,
     },
     Item {
         id: "terminal-width",
         title: "terminal width",
-        run: run_terminal_width,
+        run: terminal_rows::run_terminal_width,
     },
     Item {
         id: "terminal-background",
         title: "background",
-        run: run_terminal_background,
+        run: terminal_rows::run_terminal_background,
     },
 ];
 
@@ -301,6 +304,9 @@ fn read_evidence() -> Given {
         Err(_) => Given::Bad("it could not be read"),
     }
 }
+
+/// Exit code of a run ended by Ctrl-C (128 + SIGINT).
+const EXIT_CANCELLED: u8 = 130;
 
 pub fn run(args: &[OsString]) -> ExitCode {
     let Some(opts) = parse(args) else {

@@ -5,9 +5,6 @@ use super::*;
 
 // ---- terminal -------------------------------------------------------------------
 
-/// Exit code of a run ended by Ctrl-C (128 + SIGINT).
-pub(super) const EXIT_CANCELLED: u8 = 130;
-
 fn terminal_settings(c: &Ctx) -> Option<TerminalSettings> {
     *c.terminal.settings.get_or_init(|| {
         let i = inspect_config(&c.user, &c.env).ok()?;
@@ -180,13 +177,6 @@ pub(super) fn judge_width(outcome: &WidthOutcome, profile: WidthProfile, tmux: b
     };
     f.details = details;
     f
-}
-
-pub(super) fn mode_word(m: Mode) -> &'static str {
-    match m {
-        Mode::Dark => "dark",
-        Mode::Light => "light",
-    }
 }
 
 pub(super) fn judge_background(
