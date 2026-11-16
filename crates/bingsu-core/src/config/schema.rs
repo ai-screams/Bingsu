@@ -351,10 +351,36 @@ fn node(k: &KeyDef, which: Which, depth: usize, out: &mut String) {
     node_at(k, k.path, which, depth, &Patterns::new(), out);
 }
 
-/// The fields of a key that holds a value (everything but a table), in the
-/// order the schema lists them.
-fn scalar_fields(k: &KeyDef, patterns: &Patterns, fields: &mut Vec<(&'static str, String)>) {
-    let mut v = String::new();
+/// The `(name, JSON text)` fields of one schema node, in the order they are written.
+type Fields = Vec<(&'static str, String)>;
+
+/// `s` as a JSON string literal.
+fn escaped(s: &str) -> String {
+    let mut out = String::new();
+    esc(s, &mut out);
+    out
+}
+
+/// `list` as a JSON array of string literals.
+fn strings_text(list: &[&str]) -> String {
+    let mut out = String::new();
+    strings(list, &mut out);
+    out
+}
+
+fn string_type() -> (&'static str, String) {
+    ("type", String::from("\"string\""))
+}
+
+fn array_type() -> (&'static str, String) {
+    ("type", String::from("\"array\""))
+}
+
+/// The fields of a key that holds a value: a scalar, a string, or a list (everything
+/// but a table), in the order the schema lists them, ending with the `x-bingsu-type`
+/// of the types the corpus files pin. `k.path` is the key's identity: `requires` is the
+/// one string key with a pattern of its own.
+fn value_fields(k: &KeyDef, patterns: &Patterns, fields: &mut Fields) {
     match k.ty {
         Ty::Bool => fields.push(("type", String::from("\"boolean\""))),
         Ty::Int { min, max } => {
@@ -367,38 +393,35 @@ fn scalar_fields(k: &KeyDef, patterns: &Patterns, fields: &mut Vec<(&'static str
             fields.push(("minimum", alloc::format!("{min}")));
             fields.push(("maximum", alloc::format!("{max}")));
         }
-        Ty::Str | Ty::Text | Ty::Color => {
-            let pattern = match k.ty {
-                Ty::Text => Some(patterns.text.as_str()),
-                Ty::Color => Some(patterns.color.as_str()),
-                _ => None,
-            };
-            if let Some(pattern) = pattern {
-                esc(pattern, &mut v);
-                fields.push(("pattern", core::mem::take(&mut v)));
-            }
-            fields.push(("type", String::from("\"string\"")));
+        Ty::Str => {
+            fields.push(string_type());
             if k.path == "requires" {
-                esc(REQUIRES_PATTERN, &mut v);
-                fields.push(("pattern", core::mem::take(&mut v)));
+                fields.push(("pattern", escaped(REQUIRES_PATTERN)));
             }
+        }
+        Ty::Text => {
+            fields.push(("pattern", escaped(&patterns.text)));
+            fields.push(string_type());
+            fields.push(("x-bingsu-type", String::from("\"text\"")));
+        }
+        Ty::Color => {
+            fields.push(("pattern", escaped(&patterns.color)));
+            fields.push(string_type());
+            fields.push(("x-bingsu-type", String::from("\"color\"")));
         }
         Ty::EnvName => {
-            fields.push(("type", String::from("\"string\"")));
-            esc(ENV_NAME_PATTERN, &mut v);
-            fields.push(("pattern", core::mem::take(&mut v)));
+            fields.push(string_type());
+            fields.push(("pattern", escaped(ENV_NAME_PATTERN)));
+            fields.push(("x-bingsu-type", String::from("\"env-name\"")));
         }
         Ty::Duration => {
-            fields.push(("type", String::from("\"string\"")));
-            esc(DURATION_PATTERN, &mut v);
-            fields.push(("pattern", core::mem::take(&mut v)));
+            fields.push(string_type());
+            fields.push(("pattern", escaped(DURATION_PATTERN)));
+            fields.push(("x-bingsu-type", String::from("\"duration\"")));
         }
-        Ty::Enum(list) => {
-            strings(list, &mut v);
-            fields.push(("enum", core::mem::take(&mut v)));
-        }
+        Ty::Enum(list) => fields.push(("enum", strings_text(list))),
         Ty::Strings | Ty::Segments => {
-            fields.push(("type", String::from("\"array\"")));
+            fields.push(array_type());
             let mut items = String::from("{ \"type\": \"string\"");
             if k.ty == Ty::Segments {
                 items.push_str(", \"x-bingsu-type\": \"segment-id\", \"pattern\": ");
@@ -408,27 +431,61 @@ fn scalar_fields(k: &KeyDef, patterns: &Patterns, fields: &mut Vec<(&'static str
             fields.push(("items", items));
         }
         Ty::EnumList(list) => {
-            fields.push(("type", String::from("\"array\"")));
-            strings(list, &mut v);
+            fields.push(array_type());
             fields.push((
                 "items",
-                alloc::format!("{{ \"enum\": {} }}", core::mem::take(&mut v)),
+                alloc::format!("{{ \"enum\": {} }}", strings_text(list)),
             ));
         }
         Ty::Table => unreachable!("a table goes through table_fields"),
     }
 }
 
-/// The fields of a table: its children as `properties`, the segment id
-/// rules, the per-kind exclusions of `segment.*`, and the wildcard child as
-/// `additionalProperties`.
-fn table_fields(
-    path: &str,
+/// The `segment.*` rule that a key of another kind is not allowed: one
+/// `if kind is X then these keys are false` condition per kind, as `allOf`.
+fn kind_exclusions(children: &[&KeyDef]) -> String {
+    let mut conditions = Vec::new();
+    for kind in KINDS {
+        let forbidden: Vec<_> = children
+            .iter()
+            .filter(|c| !c.kinds.is_empty() && !c.kinds.contains(&kind))
+            .map(|c| {
+                alloc::format!(
+                    "{}: false",
+                    escaped(c.path.rsplit('.').next().unwrap_or(""))
+                )
+            })
+            .collect();
+        let value = escaped(kind);
+        conditions.push(alloc::format!("{{ \"if\": {{ \"required\": [\"kind\"], \"properties\": {{ \"kind\": {{ \"const\": {value} }} }} }}, \"then\": {{ \"properties\": {{ {} }} }} }}", forbidden.join(", ")));
+    }
+    alloc::format!("[{}]", conditions.join(", "))
+}
+
+/// The `properties` object of a table: each named child as a node, one level deeper.
+fn properties_text(
+    named: &[(&KeyDef, String)],
     which: Which,
     depth: usize,
     patterns: &Patterns,
-    fields: &mut Vec<(&'static str, String)>,
-) {
+) -> String {
+    let mut props = String::from("{\n");
+    for (i, (c, child_path)) in named.iter().enumerate() {
+        pad(depth + 2, &mut props);
+        esc(child_path.rsplit('.').next().unwrap_or(""), &mut props);
+        props.push_str(": ");
+        node_at(c, child_path, which, depth + 2, patterns, &mut props);
+        props.push_str(if i + 1 < named.len() { ",\n" } else { "\n" });
+    }
+    pad(depth + 1, &mut props);
+    props.push('}');
+    props
+}
+
+/// The fields of a table: its children as `properties`, the segment id
+/// rules, the per-kind exclusions of `segment.*`, and the wildcard child as
+/// `additionalProperties`.
+fn table_fields(path: &str, which: Which, depth: usize, patterns: &Patterns, fields: &mut Fields) {
     fields.push(("type", String::from("\"object\"")));
     let mut children = keys_under(path, which);
     let builtin = path
@@ -464,35 +521,13 @@ fn table_fields(
         fields.push(("propertyNames", names));
     }
     if !named.is_empty() {
-        let mut props = String::from("{\n");
-        for (i, (c, child_path)) in named.iter().enumerate() {
-            pad(depth + 2, &mut props);
-            esc(child_path.rsplit('.').next().unwrap_or(""), &mut props);
-            props.push_str(": ");
-            node_at(c, child_path, which, depth + 2, patterns, &mut props);
-            props.push_str(if i + 1 < named.len() { ",\n" } else { "\n" });
-        }
-        pad(depth + 1, &mut props);
-        props.push('}');
-        fields.push(("properties", props));
+        fields.push((
+            "properties",
+            properties_text(&named, which, depth, patterns),
+        ));
     }
     if path == "segment.*" && which == Which::Config {
-        let mut conditions = Vec::new();
-        for kind in KINDS {
-            let forbidden: Vec<_> = children
-                .iter()
-                .filter(|c| !c.kinds.is_empty() && !c.kinds.contains(&kind))
-                .map(|c| {
-                    let mut prop = String::new();
-                    esc(c.path.rsplit('.').next().unwrap_or(""), &mut prop);
-                    alloc::format!("{prop}: false")
-                })
-                .collect();
-            let mut value = String::new();
-            esc(kind, &mut value);
-            conditions.push(alloc::format!("{{ \"if\": {{ \"required\": [\"kind\"], \"properties\": {{ \"kind\": {{ \"const\": {value} }} }} }}, \"then\": {{ \"properties\": {{ {} }} }} }}", forbidden.join(", ")));
-        }
-        fields.push(("allOf", alloc::format!("[{}]", conditions.join(", "))));
+        fields.push(("allOf", kind_exclusions(&children)));
     }
     let extra = match children.iter().find(|c| c.path.ends_with(".*")) {
         Some(star) => {
@@ -514,20 +549,10 @@ fn node_at(
     out: &mut String,
 ) {
     out.push_str("{\n");
-    let mut fields: Vec<(&str, String)> = Vec::new();
+    let mut fields = Fields::new();
     match k.ty {
         Ty::Table => table_fields(path, which, depth, patterns, &mut fields),
-        _ => scalar_fields(k, patterns, &mut fields),
-    }
-    let corpus_type = match k.ty {
-        Ty::Text => Some("text"),
-        Ty::Color => Some("color"),
-        Ty::Duration => Some("duration"),
-        Ty::EnvName => Some("env-name"),
-        _ => None,
-    };
-    if let Some(name) = corpus_type {
-        fields.push(("x-bingsu-type", alloc::format!("\"{name}\"")));
+        _ => value_fields(k, patterns, &mut fields),
     }
     if let Some(d) = k.default {
         fields.push(("default", String::from(d)));
@@ -535,12 +560,8 @@ fn node_at(
     if let Some(e) = k.example.or(k.default) {
         fields.push(("examples", alloc::format!("[{e}]")));
     }
-    let mut d = String::new();
-    esc(k.en, &mut d);
-    fields.push(("description", d));
-    let mut d = String::new();
-    esc(k.ko, &mut d);
-    fields.push(("x-bingsu-description-ko", d));
+    fields.push(("description", escaped(k.en)));
+    fields.push(("x-bingsu-description-ko", escaped(k.ko)));
     fields.push(("x-bingsu-level", alloc::format!("\"{}\"", level(k.level))));
     if k.class == KeyClass::Exec {
         fields.push(("x-bingsu-exec", String::from("true")));
