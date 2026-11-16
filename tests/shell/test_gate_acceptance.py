@@ -714,12 +714,12 @@ def test_supplementary_row_keeps_its_pair_pending(closed):
 # A lib row has no real counterpart yet: a synthetic row and CI step check the
 # lib branch against the real bingsu-core sources.
 LIB_TEST = ("crates/bingsu-core/src/front/staged/tests.rs::"
-            "front::staged::tests::cases::collection_address_is_computed_only_after_advancing_past_the_root")
+            "front::staged::tests::collection_address_is_computed_only_after_advancing_past_the_root")
 LIB_STEP = (
     "      - run: |\n"
     "          set -o pipefail\n"
     "          cargo test -j 2 -p bingsu-core --lib | tee \"$RUNNER_TEMP/core-lib.txt\"\n"
-    "          grep -F 'test front::staged::tests::cases::collection_address_is_computed_only_after_advancing_past_the_root"
+    "          grep -F 'test front::staged::tests::collection_address_is_computed_only_after_advancing_past_the_root"
     " ... ok' \"$RUNNER_TEMP/core-lib.txt\"\n")
 LIB_ANCHOR = "      - name: Collector policy evaluator and table correspondence\n"
 
@@ -736,7 +736,7 @@ def lib_case(damage):
     elif damage == "no-grep":
         step = step.replace("grep -F", "# grep -F")
     elif damage == "module-path":
-        table = table.replace("::front::staged::tests::cases::", "::back::staged::tests::cases::")
+        table = table.replace("::front::staged::tests::", "::back::staged::tests::")
     elif damage == "bin-target":
         table = table.replace("\tlib\t", "\tbin:bingsu-core\t")
     elif damage == "path-module":
@@ -746,8 +746,8 @@ def lib_case(damage):
         path = "crates/bingsu-core/src/front/staged.rs"
         sources[path] = (ROOT / path).read_text().replace("#[cfg(test)]\nmod tests;", '#[cfg(test)]\n#[cfg(target_os = "macos")]\nmod tests;')
     elif damage == "inline-module":
-        path = "crates/bingsu-core/src/front/staged/tests.rs"
-        sources[path] = (ROOT / path).read_text().replace("mod cases {", "mod kases {")
+        table = table.replace("::front::staged::tests::", "::front::staged::tests::kases::")
+        step = step.replace("staged::tests::collection_address", "staged::tests::kases::collection_address")
     texts["ci.yml"] = texts["ci.yml"].replace(LIB_ANCHOR, step + LIB_ANCHOR)
     for path, text in sources.items():
         assert text != (ROOT / path).read_text(), damage
