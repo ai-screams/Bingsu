@@ -1328,11 +1328,13 @@ pub fn layout_line_into<R: Recorder>(
         }
     }
     let mut fit = lay.check(&mut b);
+    // Steps 1 to 6 each return whether the line now fits; the first that does
+    // ends the chain.
     let fitted = lay.fits(&fit)
-        || shorten_names(&mut lay, &mut b, &mut fit, n, target, r)
+        || shorten_names(&mut lay, &mut b, &mut fit, n, r)
         || hide_right_by_priority(&mut lay, &mut b, &mut fit, n, r)
         || hide_right(&mut lay, &mut b, &mut fit, n, r)
-        || truncate_left(&mut lay, &mut b, &mut fit, n, target, r)
+        || truncate_left(&mut lay, &mut b, &mut fit, n, r)
         || hide_left_optional(&mut lay, &mut b, &mut fit, n, r)
         || drop_decoration(&mut lay, &mut b, &mut fit, n, r);
     if !fitted {
@@ -1389,21 +1391,19 @@ pub fn layout_line_into<R: Recorder>(
     }
 }
 
-/// Step 1. Each step returns whether the line now fits.
+/// Step 1: left before right (the path before right-side information), each to "its width - overflow". A
+/// segment on both sides is shortened again from its original text
+/// with the same methods, which gives the same result.
 fn shorten_names<R: Recorder>(
     lay: &mut Lay<'_, '_>,
     b: &mut Bufs,
     fit: &mut Fit,
     n: usize,
-    target: u32,
     r: &mut R,
 ) -> bool {
     if R::ENABLED {
         r.step(n, Step::ShortenNames);
     }
-    // Step 1: left before right (the path before right-side information), each to "its width - overflow". A
-    // segment on both sides is shortened again from its original text
-    // with the same methods, which gives the same result.
     for right in [false, true] {
         for i in 0..lay.entries.len() {
             let e = lay.entries[i];
@@ -1422,7 +1422,7 @@ fn shorten_names<R: Recorder>(
             {
                 continue;
             }
-            let over = fit.cells.saturating_sub(target);
+            let over = fit.cells.saturating_sub(lay.target);
             let budget = lay.slots[e.seg].m.width.saturating_sub(over);
             if let Some(pieces) = lay.shorten_capped(e.seg, su.methods, budget, n, r) {
                 let short = short_of(pieces.iter().map(|x| (x.text.as_str(), x.shortened)));
@@ -1437,7 +1437,8 @@ fn shorten_names<R: Recorder>(
     false
 }
 
-/// Step 2.
+/// Step 2: optional right references, lowest priority (then
+/// rightmost) first.
 fn hide_right_by_priority<R: Recorder>(
     lay: &mut Lay<'_, '_>,
     b: &mut Bufs,
@@ -1445,8 +1446,6 @@ fn hide_right_by_priority<R: Recorder>(
     n: usize,
     r: &mut R,
 ) -> bool {
-    // Step 2: optional right references, lowest priority (then
-    // rightmost) first.
     if R::ENABLED {
         r.step(n, Step::HideRightByPriority);
     }
@@ -1465,7 +1464,7 @@ fn hide_right_by_priority<R: Recorder>(
     false
 }
 
-/// Step 3.
+/// Step 3: the whole right side, `required` included (`required` only stops the hiding by choice).
 fn hide_right<R: Recorder>(
     lay: &mut Lay<'_, '_>,
     b: &mut Bufs,
@@ -1473,7 +1472,6 @@ fn hide_right<R: Recorder>(
     n: usize,
     r: &mut R,
 ) -> bool {
-    // Step 3: the whole right side, `required` included (`required` only stops the hiding by choice).
     if R::ENABLED {
         r.step(n, Step::HideRight);
     }
@@ -1490,19 +1488,17 @@ fn hide_right<R: Recorder>(
     lay.fits(fit)
 }
 
-/// Step 4.
+/// Step 4: cut left texts by the overflow, widest first (leftmost on
+/// a tie), down to the ellipsis. A one-cell text (the `char` glyph)
+/// cannot get narrower, so it is only ever marked exhausted; so is
+/// any text when the line is over `LINE_BYTES_MAX` but not too wide.
 fn truncate_left<R: Recorder>(
     lay: &mut Lay<'_, '_>,
     b: &mut Bufs,
     fit: &mut Fit,
     n: usize,
-    target: u32,
     r: &mut R,
 ) -> bool {
-    // Step 4: cut left texts by the overflow, widest first (leftmost on
-    // a tie), down to the ellipsis. A one-cell text (the `char` glyph)
-    // cannot get narrower, so it is only ever marked exhausted; so is
-    // any text when the line is over `LINE_BYTES_MAX` but not too wide.
     if R::ENABLED {
         r.step(n, Step::TruncateLeft);
     }
@@ -1520,7 +1516,9 @@ fn truncate_left<R: Recorder>(
         } else {
             Keep::Start
         };
-        let cut = w.saturating_sub(fit.cells.saturating_sub(target)).max(1);
+        let cut = w
+            .saturating_sub(fit.cells.saturating_sub(lay.target))
+            .max(1);
         let short = truncated_text(lay, s, cut, keep);
         if str_width(&short.text, lay.o.profile) >= w {
             lay.slots[s].exhausted = true;
@@ -1535,7 +1533,8 @@ fn truncate_left<R: Recorder>(
     false
 }
 
-/// Step 5.
+/// Step 5: optional left references, lowest priority (then
+/// rightmost) first.
 fn hide_left_optional<R: Recorder>(
     lay: &mut Lay<'_, '_>,
     b: &mut Bufs,
@@ -1543,8 +1542,6 @@ fn hide_left_optional<R: Recorder>(
     n: usize,
     r: &mut R,
 ) -> bool {
-    // Step 5: optional left references, lowest priority (then
-    // rightmost) first.
     if R::ENABLED {
         r.step(n, Step::HideLeftOptional);
     }
@@ -1563,7 +1560,7 @@ fn hide_left_optional<R: Recorder>(
     false
 }
 
-/// Step 6.
+/// Step 6: plain text, no backgrounds, heads, tails or non-flat separators.
 fn drop_decoration<R: Recorder>(
     lay: &mut Lay<'_, '_>,
     b: &mut Bufs,
@@ -1571,7 +1568,6 @@ fn drop_decoration<R: Recorder>(
     n: usize,
     r: &mut R,
 ) -> bool {
-    // Step 6: plain text, no backgrounds, heads, tails or non-flat separators.
     if R::ENABLED {
         r.step(n, Step::DropDecoration);
     }
