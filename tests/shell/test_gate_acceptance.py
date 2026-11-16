@@ -1408,7 +1408,7 @@ def blank_rust_literals(text):
                 out[k] = " "
     while i < n:
         word = i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
-        raw = re.match(r'b?r(#*)"', text[i:]) if word else None
+        raw = re.match(r'[bc]?r(#*)"', text[i:]) if word else None
         if text.startswith("//", i):
             end = text.find("\n", i)
             end = n if end < 0 else end
@@ -1419,8 +1419,8 @@ def blank_rust_literals(text):
                 end += 2 if text.startswith(("/*", "*/"), end) else 1
         elif raw:
             end = text.index('"' + raw[1], i + len(raw[0])) + 1 + len(raw[1])
-        elif text[i] == '"' or (word and text.startswith('b"', i)):
-            end = i + (2 if text[i] == "b" else 1)
+        elif text[i] == '"' or (word and text.startswith(('b"', 'c"'), i)):
+            end = i + (1 if text[i] == '"' else 2)
             while text[end] != '"':
                 end += 2 if text[end] == "\\" else 1
             end += 1
@@ -1462,8 +1462,13 @@ def cgroup_cell_tests(files=None):
         if parts[-1] == "mod":
             parts.pop()
         code = blank_rust_literals(text)
-        for match in re.finditer(re.escape(CGROUP_CELL_REASON) + r"\n\s*fn (\w+)\(", text):
-            name = "::".join(parts + enclosing_modules(code, match.start()) + [match[1]])
+        for at in (m.start() for m in re.finditer(re.escape(CGROUP_CELL_REASON), text)):
+            if code[at] != "#":
+                continue  # inside a comment or a string: no attribute
+            # A mark with another attribute after it would go uncollected: refuse that order.
+            match = re.compile(re.escape(CGROUP_CELL_REASON) + r"\n\s*fn (\w+)\(").match(text, at)
+            assert match, ("a cell mark must come right before its fn", path, text.count("\n", 0, at) + 1)
+            name = "::".join(parts + enclosing_modules(code, at) + [match[1]])
             assert name not in found, ("cell test named twice", name)
             found[name] = path
     return found
@@ -1471,7 +1476,8 @@ def cgroup_cell_tests(files=None):
 
 # The cell tests follow their files at any depth and the inline modules that hold them, wherever the module
 # path comes from. 이것을 실패시키는 것: 하위 폴더 파일을 빠뜨리는 것(rglob을 glob으로), 모듈 경로를 파일 이름만으로
-# 정하는 것, 둘러싼 모듈 대신 마지막으로 연 모듈을 쓰는 것, 문자열 안의 괄호를 코드로 세는 것.
+# 정하는 것, 둘러싼 모듈 대신 마지막으로 연 모듈을 쓰는 것, 문자열(raw C 문자열 포함) 안의 괄호를 코드로 세는 것,
+# 주석·문자열 안의 표시를 시험으로 세는 것, fn 앞에 다른 속성이 끼어 표시가 조용히 빠지게 두는 것.
 def test_cell_tests_follow_files_and_their_modules():
     import os
     mark = CGROUP_CELL_REASON
@@ -1482,12 +1488,19 @@ def test_cell_tests_follow_files_and_their_modules():
             f"    #[test]\n    {mark}\n    fn test_in_a() {{}}\n}}\n"),
         f"{CELL_ROOT}/b/tests.rs": f"mod helpers {{\n    pub fn h() {{}}\n}}\n#[test]\n{mark}\nfn test_in_b() {{}}\n",
         f"{CELL_ROOT}/c/mod.rs": f"#[cfg(test)]\nmod cell {{\n    #[test]\n    {mark}\n    fn test_in_c() {{}}\n}}\n",
+        f"{CELL_ROOT}/d.rs": (f'mod tests {{\n    const C: &core::ffi::CStr = cr#"" }} ""#;\n    // {mark}\n    // fn commented() {{}}\n'
+                              f'    const S: &str = r#"{mark}\nfn quoted()"#;\n    #[test]\n    {mark}\n    fn test_in_d() {{}}\n}}\n'),
     }
     assert cgroup_cell_tests(files) == {
         "commands::a::tests::test_in_a": f"{CELL_ROOT}/a.rs",
         "commands::b::tests::test_in_b": f"{CELL_ROOT}/b/tests.rs",
         "commands::c::cell::test_in_c": f"{CELL_ROOT}/c/mod.rs",
+        "commands::d::tests::test_in_d": f"{CELL_ROOT}/d.rs",
     }
+    # A mark followed by another attribute would hide its test from the cell job.
+    late = {f"{CELL_ROOT}/e.rs": f'#[test]\n{mark}\n#[cfg(target_os = "linux")]\nfn test_in_e() {{}}\n'}
+    with pytest.raises(AssertionError, match="right before its fn"):
+        cgroup_cell_tests(late)
     walked = {os.path.relpath(os.path.join(d, f), ROOT) for d, _, names in os.walk(ROOT / CELL_ROOT)
               for f in names if f.endswith(".rs")}
     assert set(cell_files()) == walked and any(p.count("/") > 4 for p in walked), "subfolders scanned"
