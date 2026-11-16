@@ -1580,3 +1580,68 @@ fn a_test_target_is_not_a_test_only_module_file() {
         "{stderr}"
     );
 }
+
+/// Each bypass fixture of the dedicated prompt binary's entry, with the
+/// finding that names what it changed.
+const PROMPT_MAIN_REJECTIONS: [(&str, &str); 9] = [
+    (
+        "allocator.rs",
+        "expected the 9 items of the pinned shape, found 10",
+    ),
+    ("cli_entry.rs", "item 8 differs from the pinned shape"),
+    (
+        "commands.rs",
+        "expected the 9 items of the pinned shape, found 10",
+    ),
+    ("constructor.rs", "item 7 differs from the pinned shape"),
+    (
+        "inner_attr.rs",
+        "inner attributes must be exactly #![deny(unsafe_code)]",
+    ),
+    (
+        "no_sandbox.rs",
+        "expected the 9 items of the pinned shape, found 8",
+    ),
+    ("retarget.rs", "item 4 differs from the pinned shape"),
+    (
+        "trailing.rs",
+        "expected the 9 items of the pinned shape, found 10",
+    ),
+    ("windows_runs.rs", "item 9 differs from the pinned shape"),
+];
+
+// The real entry passes with nothing on stderr, and each fixture fails for
+// its own reason, never because the file could not be read.
+// 이것을 실패시키는 것: `--prompt-main` 분기를 빼거나 다른 검사로 보내는 것(실제 파일이 거부됨), 모양 비교에서
+// 속성·항목 수·항목 하나를 덜 보는 것(그 픽스처의 이유가 사라짐), 픽스처를 더하고 이유표에 넣지 않는 것.
+#[test]
+fn prompt_main_takes_the_real_entry_and_names_each_rejection() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let run = |path: &std::path::Path| {
+        let output = Command::new(env!("CARGO_BIN_EXE_core-cfg-check"))
+            .arg("--prompt-main")
+            .arg(path)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let (ok, err) = run(&root.join("../../crates/bingsu-prompt/src/main.rs"));
+    assert!(ok && err.is_empty(), "{err}");
+    let dir = root.join("tests/fixtures/bypass/prompt-main");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    let listed: Vec<&str> = PROMPT_MAIN_REJECTIONS.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names, listed);
+    for (name, reason) in PROMPT_MAIN_REJECTIONS {
+        let (ok, err) = run(&dir.join(name));
+        assert!(!ok, "{name}");
+        assert!(err.contains(reason), "{name}: {err}");
+        assert!(!err.contains("unreadable"), "{name}: {err}");
+    }
+}
