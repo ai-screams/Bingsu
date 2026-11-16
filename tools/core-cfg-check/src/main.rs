@@ -2,12 +2,13 @@
 //!
 //! Usage: `core-cfg-check FILE.rs... [--test-targets FILE.rs...] [--tcb FILE.rs...]`
 //! (scripts/check_core_cfg.py collects the files and passes them here; the
-//! files after `--test-targets`, core's tests/ and benches/, skip only the
-//! format-source rule; the files after `--tcb`, the prompt adapter,
-//! get the rules that hold for every file but not the library-only ones,
-//! the address rule and the crate-root rule: the adapter hands buffers to
-//! write(2), takes a function pointer and reads its arguments through
-//! `std::env`). purity.rs lists the rules.
+//! files after `--test-targets`, core's tests/ and benches/, skip the
+//! library-only rules (production globs, function items, Debug and Hash,
+//! strings from outside the source) and the crate-root rule; the files after
+//! `--tcb`, the prompt adapter, get the rules that hold for every file but
+//! not the library-only ones, the address rule and the crate-root rule: the
+//! adapter hands buffers to write(2), takes a function pointer and reads its
+//! arguments through `std::env`). purity.rs lists the rules.
 //!
 //! Code behind `cfg` can drop out of the lint run, and `#[path]` or
 //! `include!` can pull code in from outside the checked file set. A text or

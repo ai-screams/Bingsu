@@ -1,6 +1,7 @@
 //! The address rules, outside `#[cfg(test)]` items: raw and function pointer
 //! types, casts of the file's functions, ADDRESS_APIS, `core::ptr` and `{:p}`,
-//! on the syntax tree and on the tokens of macro bodies.
+//! on the syntax tree and on the tokens of macro bodies. `check` skips them
+//! for the prompt adapter (`--tcb`) and for a test-only library file.
 
 use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
