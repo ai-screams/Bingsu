@@ -70,6 +70,10 @@ pub struct Meter {
     pub hook: Option<Hook>,
     #[cfg(test)]
     pub expire_on_event: Option<&'static str>,
+    /// After this many more passing checks every check reports Deadline: a
+    /// deterministic deadline inside a loop that emits no event.
+    #[cfg(test)]
+    pub checks_left: Cell<Option<u64>>,
     #[cfg(test)]
     pub mount_fault: Option<i32>,
     #[cfg(test)]
@@ -266,6 +270,8 @@ impl Meter {
             #[cfg(test)]
             expire_on_event: None,
             #[cfg(test)]
+            checks_left: Cell::new(None),
+            #[cfg(test)]
             mount_fault: None,
             #[cfg(test)]
             worktree_device: None,
@@ -275,6 +281,13 @@ impl Meter {
     }
 
     pub fn check(&self) -> Result<(), ReadError> {
+        #[cfg(test)]
+        if let Some(left) = self.checks_left.get() {
+            if left == 0 {
+                return Err(ReadError::Deadline);
+            }
+            self.checks_left.set(Some(left - 1));
+        }
         if Instant::now() >= self.deadline {
             Err(ReadError::Deadline)
         } else {
@@ -314,6 +327,8 @@ impl Meter {
             hook: None,
             #[cfg(test)]
             expire_on_event: None,
+            #[cfg(test)]
+            checks_left: Cell::new(None),
             #[cfg(test)]
             mount_fault: None,
             #[cfg(test)]
