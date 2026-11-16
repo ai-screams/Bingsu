@@ -1,5 +1,7 @@
-//! The session's lock name, the runtime root's identity, the neutral folder and the
-//! cgroup reclaim: what a round needs from the runtime root before it spawns.
+//! The session's lock name and tag (`session_tag`, which names the macOS script
+//! copies), the runtime root's identity, the neutral folder, the cgroup reclaim
+//! and the macOS `nofollow_any` probe: what a round needs from the runtime root
+//! before it spawns.
 use super::*;
 
 /// The first 16 bytes of sha256(session), hex: names the session's script
