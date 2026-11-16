@@ -691,6 +691,13 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     Every attempt is checked before retrying, including exit 75. At least one
     of at most COLLECT_ATTEMPTS fresh collect fixtures must actually rename a response.
     """
+    check_live_helper_stage(stage, helper_stage_evidence)
+
+
+def check_live_helper_stage(stage, evidence_root):
+    """Run one helper stage under strace and judge every attempt. The test and the
+    portable replay in test_prompt_trace_budget.py both call this; the replay
+    swaps the fixture, binary lookup and strace for stored captures."""
     assert shutil.which("strace"), "the helper stage gate must execute strace"
     libc = require_release_helper(real_bin())
     import json
@@ -699,7 +706,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
     # artifacts for the controller; each invocation needs its own basetemp.
     collecting = stage == "collect" or stage.startswith("builtin_")
     for attempt in range(1, (COLLECT_ATTEMPTS if collecting else 1) + 1):
-        artifacts = helper_stage_evidence / stage / f"attempt-{attempt}"
+        artifacts = evidence_root / stage / f"attempt-{attempt}"
         artifacts.mkdir(parents=True)
         trace = artifacts / "trace.strace"
         evidence = {"stage": stage, "attempt": attempt, "collector_exit": None,
@@ -727,7 +734,7 @@ def test_live_helper_calls_match_stage_formula(stage, helper_stage_evidence):
             if fixture is not None:
                 wait_helpers(fixture.base)
                 remove_fixture(fixture)
-    pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {helper_stage_evidence / stage}")
+    pytest.fail(f"collect: zero publishes across all {COLLECT_ATTEMPTS} checked attempts; evidence: {evidence_root / stage}")
 
 
 # The helper's E_n cap, pinned independently from the product source.
@@ -899,6 +906,10 @@ def test_live_helper_stops_config_io_past_an_axis_cap(axis, tmp_path):
 
 # 이것을 실패시키는 것: 제품 READ_CHUNK를 바꾸고 fixture 메타데이터는 그대로 두는 것.
 def test_front_chunk_matches_product_constant():
+    check_front_chunk_matches_product()
+
+
+def check_front_chunk_matches_product():
     source = (ROOT / 'crates/bingsu-core/src/snapshot.rs').read_text().replace('\r\n', '\n')
     match = re.search(r'pub const READ_CHUNK: usize = (\d+) \* (\d+);', source)
     assert match and int(match[1]) * int(match[2]) == FRONT_CHUNK
