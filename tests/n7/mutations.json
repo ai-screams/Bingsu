@@ -810,6 +810,32 @@
     ]
   },
   {
+    "id": "N-208",
+    "kind": "rust",
+    "anchor": "snapshot_codec::tests::band_boundary::maximum_band_forest",
+    "command": [
+      "cargo",
+      "test",
+      "-j",
+      "2",
+      "-p",
+      "bingsu-core",
+      "--lib",
+      "--",
+      "snapshot_codec::tests::band_boundary::maximum_band_forest",
+      "--exact",
+      "--test-threads=1"
+    ],
+    "patches": [
+      {
+        "file": "crates/bingsu-core/src/snapshot_codec.rs",
+        "before": "    check_counts(c)?;\n    check_band_names(c)?;\n    let mut ranks = [u16::MAX; crate::bands::MAX_BANDS];\n    let ranks = check_band_ranks(c, &mut ranks)?;\n    check_band_precedence(c, ranks)?;\n",
+        "after": "    check_band_names(c)?;\n    let mut ranks = [u16::MAX; crate::bands::MAX_BANDS];\n    let ranks = check_band_ranks(c, &mut ranks)?;\n    check_band_precedence(c, ranks)?;\n    check_counts(c)?;\n",
+        "count": 1
+      }
+    ]
+  },
+  {
     "id": "N-033",
     "kind": "rust",
     "anchor": "front::staged::tests::cases::file_facts_gate_every_read",

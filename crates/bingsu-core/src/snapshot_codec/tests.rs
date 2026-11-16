@@ -1349,7 +1349,8 @@ mod cases {
 #[cfg(test)]
 mod band_boundary {
     use super::super::*;
-    // 이것을 실패시키는 것: 4096 상한·포함 숲의 자식 우선순위·분리된 부모 pop을 잘못 검사하는 것.
+    // 이것을 실패시키는 것: 4096 상한·포함 숲의 자식 우선순위·분리된 부모 pop을 잘못 검사하는 것,
+    // `check_counts`를 band 단계 뒤로 옮기는 것(4097번째 band에서 순위 배열 인덱스 panic).
     #[test]
     fn maximum_band_forest() {
         let mut c = crate::config::report::tests::read("", &[])
