@@ -3190,6 +3190,7 @@ def front_axis_control():
 def test_front_axis_capture_counter(monkeypatch, arch, mutation):
     lines, pinned, store, attempts = front_axis_control()
     # Path confinement has its own live/portable suite; isolate the new counter.
+    # The fake goes on the global of the module that calls the name (trace_captures), not where it is defined.
     monkeypatch.setattr(trace_captures, 'prompt_root_io', lambda *args: None)
     if mutation == 'extra-open':
         lines.insert(1, '1 openat(AT_FDCWD, "/run", O_RDONLY) = 99</run>')
@@ -3222,6 +3223,7 @@ def test_front_axis_capture_counter(monkeypatch, arch, mutation):
 ])
 def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     lines, pinned, store, attempts = front_axis_control()
+    # The fake goes on the global of the module that calls the name (trace_captures), not where it is defined.
     monkeypatch.setattr(trace_captures, 'prompt_root_io', lambda *args: None)
     if libc == 'gnu':
         startup = []

@@ -1,12 +1,10 @@
 """Judging one capture: helper stage captures, front captures and the deadline
 and marker attempts, on top of the call vocabulary of `trace_support.py`."""
 import re
-import sys
 
 import pytest
-from shell_support import ROOT
 
-sys.path.insert(0, str(ROOT / "tools/fsbudget"))
+import shell_support  # noqa: F401  (puts tools/fsbudget on sys.path)
 from fsbudget.strace_parse import EXIT_EVENT, parse as parse_trace
 
 from trace_support import OPENS, RESPONSE_HEADERS, ROOT_CALLS, args_of, assert_prompt_trace_budget, call_paths, content_paths, is_root, prompt_collection_sources, prompt_cwd, prompt_root_io, prompt_sources, successful_spawns, tree

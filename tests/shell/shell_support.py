@@ -4,9 +4,15 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# The fsbudget package (strace parsing and the call formulas) lives under tools/; every module that
+# imports it gets the path here once, so no import depends on which test module was loaded first.
+if str(ROOT / "tools/fsbudget") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools/fsbudget"))
 FAKE = ROOT / "tests/shell/fake_bingsu.sh"
 SHELL_CMD = {"zsh": ["zsh", "-f"], "bash": ["bash", "--noprofile", "--norc"], "fish": ["fish", "--no-config"]}
 

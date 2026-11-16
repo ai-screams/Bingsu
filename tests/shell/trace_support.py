@@ -9,12 +9,10 @@ import ast
 import hashlib
 import os
 import re
-import sys
 
 import pytest
-from shell_support import ROOT
 
-sys.path.insert(0, str(ROOT / "tools/fsbudget"))
+import shell_support  # noqa: F401  (puts tools/fsbudget on sys.path)
 from fsbudget.strace_parse import EXIT_EVENT, parse as parse_trace, scan
 
 
