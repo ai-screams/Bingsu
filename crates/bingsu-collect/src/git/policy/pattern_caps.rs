@@ -1,7 +1,7 @@
 //! Line costs and heap estimates for ignore and attribute pattern files:
 //! what one pattern line may cost to match, checked against the caps in
 //! policy.rs, and the bytes a file's parsed attribute parts and names keep.
-//! No I/O happens here; `Patterns::add_buffer` charges what these compute.
+//! No I/O happens here; `Patterns` charges what these compute.
 use super::{AttributePart, CLASS_BYTES, GLOBSTAR_RUNS, PatternKind, STAR_RUNS};
 use crate::{meter::Meter, safe_read::ReadError};
 
@@ -271,7 +271,7 @@ pub(super) fn name_table_bytes(names: usize, name_bytes: usize) -> Option<usize>
 /// glued word still pays parser_reservation's 512 B, more than the name costs
 /// (its 23 + len B key and its share of the table); the thinnest measured
 /// margin, one file of glued lines, was 52,178 B.
-/// `words` bounds their count: add_buffer counted words at ASCII whitespace,
+/// `words` bounds their count: scan_caps counted words at ASCII whitespace,
 /// which splits at least where blanks do, and gix already rejected names
 /// with other whitespace. The sort scratch is charged to `scratch`.
 pub(super) fn attribute_names(
@@ -320,4 +320,39 @@ pub(super) fn attribute_names(
     names.sort_unstable();
     names.dedup();
     Ok((names.len(), names.iter().map(|n| n.len()).sum()))
+}
+
+/// Count one file's pattern lines and their words, and refuse the file
+/// (Limit) when it holds a NUL, more than 2,048 words, or a line past the
+/// star-run or class caps.
+pub(super) fn scan_caps(bytes: &[u8], kind: PatternKind) -> Result<(usize, usize), ReadError> {
+    let (mut lines, mut words) = (0usize, 0usize);
+    let mut wild = false;
+    for line in bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        lines += 1;
+        // Comments count toward neither cap: both gix parsers skip them
+        // before building anything, so they cost only the byte scan, and
+        // that time and memory stay bounded by the file's byte cap (256
+        // KiB), which parser_reservation charges at 8 bytes per byte.
+        // 이것을 실패시키는 것: 주석 줄도 단어로 세는 것(1,205줄 형태 시험과
+        // comments-past-word-cap seed가 Limit이 된다).
+        if is_comment(line, kind) {
+            continue;
+        }
+        words += line
+            .split(u8::is_ascii_whitespace)
+            .filter(|w| !w.is_empty())
+            .count();
+        let (runs, globstars) = star_runs(line);
+        // 이것을 실패시키는 것: 두 비교 중 하나를 지우거나 `>`를 `>=`로 바꾸는 것
+        // (cap/cap+1 seed와 policy 시험의 고정 판정이 바뀐다).
+        wild |= runs > STAR_RUNS || globstars > GLOBSTAR_RUNS;
+        // 이것을 실패시키는 것: 이 비교를 지우거나 `>=`로 바꾸는 것(class-bytes
+        // 24/25 seed의 판정이 바뀐다).
+        wild |= class_bytes(line) > CLASS_BYTES;
+    }
+    if bytes.contains(&0) || words > 2048 || wild {
+        return Err(ReadError::Limit);
+    }
+    Ok((lines, words))
 }
