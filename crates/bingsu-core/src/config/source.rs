@@ -30,7 +30,7 @@
 //! catalog, whether applied, dropped or failed, so a diagnostic's place can
 //! always be shown.
 use crate::config::tree::{self, Span, SyntaxErrorKind, Table, Value};
-use crate::diag::{Diagnostic, Place, SourceId};
+use crate::diag::{DiagCode, Diagnostic, Place, SourceId};
 use crate::diag_codes as codes;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -991,16 +991,7 @@ fn shape_leaf(w: &mut Walk<'_>, i: usize, full: &mut Vec<usize>, warnings: &mut 
                 w.used.files += 1;
                 w.used.bytes += w.nodes[i].found.opened.bytes.len();
             }
-            let mut warn = Diagnostic::new(
-                codes::SHAPE_FILE_DROPPED,
-                Place::Source {
-                    id,
-                    span: Span::default(),
-                },
-            )
-            .arg("reason", alloc::format!("{}", d.code));
-            warn.via = w.nodes[i].found.via.clone();
-            warnings.push(warn);
+            warnings.push(dropped(id, &w.nodes[i].found.via, d.code));
             warnings.push(d);
         }
     }
@@ -1016,16 +1007,7 @@ fn classify(nodes: &mut [Node], warnings: &mut Vec<Diagnostic>) -> Vec<Diagnosti
         }
         if n.found.trust == Trust::ShapeOnly {
             n.found.status = Status::Dropped;
-            let mut warn = Diagnostic::new(
-                codes::SHAPE_FILE_DROPPED,
-                Place::Source {
-                    id: n.found.id,
-                    span: Span::default(),
-                },
-            )
-            .arg("reason", alloc::format!("{}", n.problems[0].code));
-            warn.via = n.found.via.clone();
-            warnings.push(warn);
+            warnings.push(dropped(n.found.id, &n.found.via, n.problems[0].code));
             warnings.append(&mut n.problems);
         } else {
             n.found.status = Status::Failed;
@@ -1033,6 +1015,21 @@ fn classify(nodes: &mut [Node], warnings: &mut Vec<Diagnostic>) -> Vec<Diagnosti
         }
     }
     errors
+}
+
+/// The W406 warning for shape-only file `id`, left out because of a problem
+/// with code `reason`; `via` is the `extends` chain that brought it in.
+fn dropped(id: SourceId, via: &[SourceId], reason: DiagCode) -> Diagnostic {
+    let mut warn = Diagnostic::new(
+        codes::SHAPE_FILE_DROPPED,
+        Place::Source {
+            id,
+            span: Span::default(),
+        },
+    )
+    .arg("reason", alloc::format!("{}", reason));
+    warn.via = via.to_vec();
+    warn
 }
 
 #[cfg(test)]
