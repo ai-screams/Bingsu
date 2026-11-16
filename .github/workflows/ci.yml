@@ -228,6 +228,7 @@ jobs:
           grep -F 'test slow_drip_does_not_extend_spawn_deadline ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test immediate_ready_is_not_read_or_decoded_before_confinement ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test verified_screen_spawns_once_before_helper_tsync ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
+          grep -F 'test a_partial_frame_past_the_stream_cap_ends_the_exchange ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test publication_checks_same_fd_bytes_and_identity ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test helper_close_never_unlocks_live_worker ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
           grep -F 'test hash_collision_never_reuses_or_overwrites_other_cwd ... ok' "$RUNNER_TEMP/lifecycle-native.txt"
