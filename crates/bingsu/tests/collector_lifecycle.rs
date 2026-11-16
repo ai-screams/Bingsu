@@ -713,10 +713,12 @@ fn a_partial_frame_past_the_stream_cap_ends_the_exchange() {
         ("stream-over", cap + 1, EndReason::Protocol),
         ("stream-at", cap, EndReason::Deadline),
     ] {
+        // A loaded host can reach the deadline before the peer's bytes all
+        // arrive, in either mode; only that run goes again.
         let (report, _, _) = retry_overrun(
             OVERRUN_TRIES,
             || run_peer_timed(mode, true, GENEROUS),
-            |(report, _, _)| starved(report.reason, reason),
+            |(report, _, _)| cut_short(report.reason, report.bytes as usize, bytes),
         );
         assert_eq!(report.bytes as usize, bytes, "{mode}: {report:?}");
         assert_eq!(report.frames, 4, "{mode}: {report:?}");
@@ -1142,8 +1144,14 @@ fn cut_before_complete(completed: bool, got: EndReason) -> bool {
     !completed && got == EndReason::Deadline
 }
 
+/// A run that reached its deadline before the worker's `expected` bytes all
+/// arrived; a deadline after them is the test's verdict.
+fn cut_short(got: EndReason, bytes: usize, expected: usize) -> bool {
+    got == EndReason::Deadline && bytes < expected
+}
+
 // 이것을 실패시키는 것: Deadline이 아닌 끝을 재시도하는 것, 기대한 Deadline을 재시도하는 것,
-// Complete를 받은 뒤의 Deadline을 재시도하는 것.
+// Complete를 받은 뒤의 Deadline을 재시도하는 것, 바이트를 다 받은 뒤의 Deadline을 재시도하는 것.
 #[test]
 fn only_a_deadline_the_test_did_not_expect_runs_again() {
     use EndReason::*;
@@ -1155,6 +1163,9 @@ fn only_a_deadline_the_test_did_not_expect_runs_again() {
     assert!(cut_before_complete(false, Deadline));
     assert!(!cut_before_complete(true, Deadline));
     assert!(!cut_before_complete(false, Protocol));
+    assert!(cut_short(Deadline, 9, 10));
+    assert!(!cut_short(Deadline, 10, 10));
+    assert!(!cut_short(Protocol, 9, 10));
 }
 
 fn passed(out: &std::process::Output) {
