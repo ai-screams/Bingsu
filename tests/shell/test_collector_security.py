@@ -921,19 +921,21 @@ def lint_only_cfg_attr(attr):
     """Whether `attr` is `cfg_attr(<predicate>, allow(...))` or the same with
     `expect`: a lint level under a condition, which can neither remove an item
     nor turn a test off. Anything else inside a cfg_attr (cfg, ignore, path,
-    test or a second attribute) is not."""
+    test or a second attribute) is not.
+
+    Every character must pass one of two allow lists: the predicate must be a
+    cfg predicate rust_cfg_holds reads, the attribute must match the lint
+    pattern. Text the split below could misread (an escape, a raw string, a
+    char literal, a comment) passes neither, so it is refused, never read."""
     found = re.fullmatch(r"\s*cfg_attr\s*\((.*)\)\s*", attr, re.S)
     if not found:
         return False
     body, parts, depth, start, quoted = found[1], [], 0, 0, False
     for i, c in enumerate(body):
-        if quoted:
-            quoted = not (c == '"' and body[i - 1] != "\\")
-        elif c == '"':
-            quoted = True
-        elif body[i:i + 2] in ("//", "/*"):
-            # A comment can hide a separator from this count: refuse it.
-            return False
+        if c == '"':
+            quoted = not quoted
+        elif quoted:
+            continue
         elif c in "([":
             depth += 1
         elif c in ")]":
@@ -945,11 +947,22 @@ def lint_only_cfg_attr(attr):
     if len(parts) == 3 and not parts[2].strip():
         parts.pop()  # one trailing comma
     lint = r'\s*(?:allow|expect)\s*\(\s*[\w:]+(?:\s*,\s*[\w:]+)*(?:\s*,\s*reason\s*=\s*"[^"\\]*")?\s*,?\s*\)\s*'
-    return len(parts) == 2 and re.fullmatch(lint, parts[1]) is not None
+    if len(parts) != 2 or re.fullmatch(lint, parts[1]) is None:
+        return False
+    # The predicate must read as a cfg predicate this file knows, on both
+    # platforms; any failure (an unknown key, a stray token) refuses it.
+    try:
+        for platform in ("linux", "macos"):
+            rust_cfg_holds(parts[0], platform)
+    except Exception:
+        return False
+    return True
 
 
 def assert_cfgs_hold(row, attributes, platforms):
     for attr in attributes:
+        # rustc reads a raw name as the attribute itself (`r#ignore` ignores, `r#path` moves a module).
+        assert not re.match(r"\s*r#", attr), (row["id"], "raw attribute name", attr)
         # A lint level under cfg_attr keeps the item; any other cfg_attr could hide it.
         assert not re.match(r"\s*cfg_attr\b", attr) or lint_only_cfg_attr(attr), (row["id"], "conditional attributes")
         cfg = re.fullmatch(r"\s*cfg\s*\((.*)\)\s*", attr, re.S)
@@ -957,18 +970,28 @@ def assert_cfgs_hold(row, attributes, platforms):
             assert all(rust_cfg_holds(cfg[1], platform) for platform in platforms), (row["id"], "disabled cfg", attr)
 
 
-# 이것을 실패시키는 것: lint 전용 cfg_attr(조건 아래의 allow·expect, 끝의 쉼표 하나 포함)를 거부하는 것(오탐), cfg_attr
-# 안의 ignore·cfg·path나 두 번째 속성을 받는 것, 주석으로 구분자를 가린 cfg_attr를 받는 것(시험이 그 플랫폼에서 꺼질 수 있음).
+# 이것을 실패시키는 것: lint 전용 cfg_attr(조건 아래의 allow·expect, 끝의 쉼표 하나, 이유 문자열 안의 괄호와 쉼표 포함)를
+# 거부하는 것(오탐), cfg_attr 안의 ignore·cfg·path나 두 번째 속성을 받는 것, 조건을 읽지 않고 받는 것(escape·raw 문자열·
+# 주석이 구분자를 가려 ignore나 cfg를 숨김), `r#` 이름의 속성을 받는 것(시험이 그 플랫폼에서 꺼질 수 있음).
 @pytest.mark.parametrize("attr, ok", [
     ('cfg_attr(\n    not(test),\n    allow(dead_code, reason = "the helper calls it from the next change")\n)', True),
     ('cfg_attr(test, expect(clippy::unwrap_used))', True),
+    ('cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "a) Linux, b) macOS"))', True),
     ('cfg_attr(not(test), ignore)', False),
     ('cfg_attr(test, cfg(target_os = "macos"))', False),
     ('cfg_attr(test, path = "other.rs")', False),
     ('cfg_attr(test, allow(dead_code), ignore)', False),
     ('cfg_attr(test, allow(dead_code),)', True),
     ('cfg_attr(test /* ( */, ignore /* ) */, allow(dead_code))', False),
-], ids=["allow", "expect", "ignore", "cfg", "path", "second", "trailing-comma", "comment"])
+    ('cfg_attr(not(feature = "\\\\"), ignore, doc = ")\\"", allow(dead_code))', False),
+    ('cfg_attr(not(feature = r#"x"y"#), ignore, doc = r#")""#, allow(dead_code))', False),
+    ('cfg_attr(not(feature = "\\\\"), cfg(target_os = "macos"), doc = ")\\"", allow(dead_code))', False),
+    ('cfg_attr(feature = "x", allow(dead_code))', False),
+    ('r#ignore', False),
+    ('r#cfg(target_os = "macos")', False),
+    ('r#cfg_attr(test, ignore)', False),
+], ids=["allow", "expect", "reason-punctuation", "ignore", "cfg", "path", "second", "trailing-comma", "comment",
+        "escape", "raw-string", "escape-cfg", "unknown-predicate", "raw-ignore", "raw-cfg", "raw-cfg-attr"])
 def test_cfgs_hold_take_only_a_lint_level_under_cfg_attr(attr, ok):
     row = {"id": "X"}
     if ok:
@@ -976,6 +999,19 @@ def test_cfgs_hold_take_only_a_lint_level_under_cfg_attr(attr, ok):
     else:
         with pytest.raises(AssertionError):
             assert_cfgs_hold(row, [attr], {"linux", "macos"})
+
+
+# rustc reads `#[r#path = ..]` on a module declaration as #[path]: the module then comes from another file.
+# 이것을 실패시키는 것: 모듈 선언의 `r#path`를 받는 것(assert_cfgs_hold의 `r#` 거부를 지우는 것).
+def test_module_path_refuses_a_raw_path_attribute():
+    relay, tests = "crates/bingsu/src/relay.rs", "crates/bingsu/src/relay/tests.rs"
+    real = lambda p: (ROOT / p).read_text().replace("\r\n", "\n")
+    declaration = '#[cfg(all(test, target_os = "linux"))]\nmod tests;'
+    assert real(relay).count(declaration) == 1
+    assert rust_module_path({"id": "X"}, tests, "bin:bingsu", real, {"linux"}) == ["relay", "tests"]
+    moved = real(relay).replace(declaration, declaration.replace("\n", '\n#[r#path = "tests.rs"]\n'))
+    with pytest.raises(AssertionError, match="raw attribute name"):
+        rust_module_path({"id": "X"}, tests, "bin:bingsu", lambda p: moved if p == relay else real(p), {"linux"})
 
 
 def rust_test_attributes(row, source, path, base, platforms):
