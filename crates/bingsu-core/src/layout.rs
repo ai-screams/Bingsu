@@ -25,7 +25,7 @@
 //! under 1 MB (test `the_largest_inputs_stay_small`).
 use crate::bands::{Band, select};
 use crate::color::palette::token_index;
-use crate::color::sgr::{Color, DIM, Style};
+use crate::color::sgr::{Color, Style};
 use crate::field::{FieldValue, SegmentDecl, Value};
 use crate::icons::{self, IconSet};
 use crate::recorder::{HideReason, Recorder, Step};
@@ -36,7 +36,12 @@ use crate::width::{WidthProfile, ellipsis, fit_prefix, fit_suffix, str_width};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
-use unicode_segmentation::UnicodeSegmentation;
+mod emit;
+mod measure;
+
+use emit::{Sink, clear_line, one_run};
+pub use measure::runs_width;
+use measure::{PairMemo, TextM, head_len, join_delta, scratch, tail_at, text_m};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum When {
@@ -133,132 +138,6 @@ pub struct LaidLine {
     pub right: Vec<Run>,
     /// Step 7 reached: an upper line is then dropped.
     pub minimal: bool,
-}
-
-/// Cells of `runs` printed one after another, measured on the joined text
-/// as a terminal reads it.
-pub fn runs_width(runs: &[Run], p: WidthProfile) -> u32 {
-    match runs {
-        [] => 0,
-        [r] => str_width(&r.text, p),
-        _ => {
-            let joined: String = runs.iter().map(|r| r.text.as_str()).collect();
-            str_width(&joined, p)
-        }
-    }
-}
-
-/// Byte length of the first grapheme of `s`.
-fn head_len(s: &str) -> usize {
-    s.graphemes(true).next().map_or(0, |s| s.len())
-}
-
-/// Byte offset where the last grapheme of `s` starts.
-fn tail_at(s: &str) -> usize {
-    s.grapheme_indices(true).next_back().map_or(0, |(i, _)| i)
-}
-
-/// `buf` cleared and at least `n` bytes long, allocated anew (never grown)
-/// when it is shorter.
-fn scratch(buf: &mut String, n: usize) {
-    buf.clear();
-    if buf.capacity() < n {
-        *buf = String::with_capacity(n);
-    }
-}
-
-/// Do `x` then `y` make one grapheme on their own?
-fn pair_joins(x: char, y: char) -> bool {
-    let mut buf = [0u8; 8];
-    let n = x.encode_utf8(&mut buf).len();
-    let m = y.encode_utf8(&mut buf[n..]).len();
-    core::str::from_utf8(&buf[..n + m]).is_ok_and(|s| s.graphemes(true).nth(1).is_none())
-}
-
-/// Can a grapheme ending in `a` join one starting with `b`? When false,
-/// any `t` ending in `a` and `h` starting with `b` measure w(t) + w(h).
-/// Below U+0300 no code point joins anything (CR and LF never reach a
-/// line). Otherwise the pair decides, except for two rules that look
-/// further back, an emoji ZWJ sequence (GB11) and an Indic conjunct (GB9c):
-/// both need an `a` that extends any base (a ZWJ, a linker, another mark),
-/// as `A` then `a` tells. A "may" that does not join only costs a
-/// measurement. A search over every code point on either side of the
-/// border found no width change where this says no (report E3, round 1).
-fn may_join(a: char, b: char) -> bool {
-    if u32::from(a) < 0x300 && u32::from(b) < 0x300 {
-        return false;
-    }
-    if pair_joins(a, b) {
-        return true;
-    }
-    pair_joins('A', a)
-}
-
-/// Cells gained (or lost) where `t`, the last grapheme drawn, meets `h`, the
-/// first one after it: w(t + h) − w(t) − w(h); zero when they stay two
-/// graphemes.
-fn join_delta(t: &str, h: &str, buf: &mut String, p: WidthProfile) -> i64 {
-    let (Some(a), Some(b)) = (t.chars().next_back(), h.chars().next()) else {
-        return 0;
-    };
-    if !may_join(a, b) {
-        return 0;
-    }
-    measure_join(t, h, buf, p)
-}
-
-fn measure_join(t: &str, h: &str, buf: &mut String, p: WidthProfile) -> i64 {
-    scratch(buf, t.len() + h.len());
-    buf.push_str(t);
-    buf.push_str(h);
-    let (wj, wt, wh) = (str_width(buf, p), str_width(t, p), str_width(h, p));
-    i64::from(wj) - i64::from(wt) - i64::from(wh)
-}
-
-/// `may_join` for the few code point pairs a line repeats at its borders
-/// (a separator glyph and a padding space), remembered per line.
-struct PairMemo([(char, char, bool); 32]);
-
-impl PairMemo {
-    fn may_join(&mut self, a: char, b: char) -> bool {
-        // Multiplicative hashing: a pair and its reverse (space then glyph,
-        // glyph then space) land in different slots.
-        let h = (u32::from(a).wrapping_mul(0x9E37_79B9) ^ u32::from(b)).wrapping_mul(0x85EB_CA6B);
-        let slot = &mut self.0[(h >> 27) as usize];
-        if slot.0 != a || slot.1 != b {
-            *slot = (a, b, may_join(a, b));
-        }
-        slot.2
-    }
-}
-
-/// Adds a signed join delta to a width (never below 0).
-fn add(w: u32, d: i64) -> u32 {
-    u32::try_from((i64::from(w) + d).max(0)).unwrap_or(u32::MAX)
-}
-
-/// A segment's text measured alone and padded for a block.
-#[derive(Clone, Copy, Default)]
-struct TextM {
-    width: u32,
-    /// Width of `" " + text + " "`.
-    padded: u32,
-    /// First grapheme's length and last grapheme's start.
-    head: usize,
-    tail: usize,
-}
-
-fn text_m(t: &str, buf: &mut String, p: WidthProfile) -> TextM {
-    let width = str_width(t, p);
-    let (head, tail) = (head_len(t), tail_at(t));
-    let dh = join_delta(" ", &t[..head], buf, p);
-    let dt = join_delta(&t[tail..], " ", buf, p);
-    TextM {
-        width,
-        padded: add(width.saturating_add(2), dh + dt),
-        head,
-        tail,
-    }
 }
 
 fn tok(name: &str) -> u16 {
@@ -1162,104 +1041,6 @@ impl<'l, 'i> Lay<'l, 'i> {
     fn fits(&self, f: &Fit) -> bool {
         f.cells <= self.target && f.bytes <= LINE_BYTES_MAX
     }
-
-    /// Number of pieces item `it` is drawn in.
-    fn parts(&self, it: &Item) -> usize {
-        match it.src {
-            Src::Seg(s, _) => self.slots[s].short.as_ref().map_or(1, |sh| sh.ends.len()),
-            _ => 1,
-        }
-    }
-
-    /// Piece `j` of item `items[i]`: style and text as (before, text, after).
-    fn part(&self, items: &[Item], i: usize, j: usize, right_side: bool) -> (Style, [&str; 3]) {
-        let it = &items[i];
-        match it.src {
-            Src::Seg(s, padded) => {
-                let t = self.seg_text(s);
-                let (start, end, sh) = match &self.slots[s].short {
-                    Some(short) => {
-                        let start = j.checked_sub(1).map_or(0, |p| short.ends[p].0);
-                        (start, short.ends[j].0, short.ends[j].1)
-                    }
-                    None => (0, t.len(), false),
-                };
-                let last = j + 1 == self.parts(it);
-                let style = if sh {
-                    Style {
-                        attrs: it.style.attrs | DIM,
-                        ..it.style
-                    }
-                } else {
-                    it.style
-                };
-                let pad = |on| if padded && on { " " } else { "" };
-                (style, [pad(j == 0), &t[start..end], pad(last)])
-            }
-            _ => (item_style(items, i, right_side), ["", self.text(it), ""]),
-        }
-    }
-
-    /// The first non-empty piece at or after piece `j` of item `i`.
-    fn next_part(
-        &self,
-        items: &[Item],
-        mut i: usize,
-        mut j: usize,
-        right_side: bool,
-    ) -> Option<(usize, usize)> {
-        while i < items.len() {
-            if j >= self.parts(&items[i]) {
-                (i, j) = (i + 1, 0);
-                continue;
-            }
-            if self
-                .part(items, i, j, right_side)
-                .1
-                .iter()
-                .any(|x| !x.is_empty())
-            {
-                return Some((i, j));
-            }
-            j += 1;
-        }
-        None
-    }
-
-    /// Writes the runs of cleaned items to `out` (or only counts them when
-    /// `out` is None): neighbors of one style merge, and each run's String
-    /// is opened at its exact size. Returns the run count.
-    fn runs(&self, items: &[Item], right_side: bool, mut out: Option<&mut Sink<'_>>) -> usize {
-        let mut n = 0;
-        let mut at = self.next_part(items, 0, 0, right_side);
-        while let Some((i, j)) = at {
-            let style = self.part(items, i, j, right_side).0;
-            // The run ends at the first piece of another style.
-            let (mut len, mut end) = (0usize, Some((i, j)));
-            while let Some((a, c)) = end {
-                let (st, t) = self.part(items, a, c, right_side);
-                if st != style {
-                    break;
-                }
-                len += t.iter().map(|x| x.len()).sum::<usize>();
-                end = self.next_part(items, a, c + 1, right_side);
-            }
-            if let Some(sink) = out.as_deref_mut() {
-                let text = sink.start(style, len);
-                let mut q = Some((i, j));
-                while q != end {
-                    let Some((a, c)) = q else { break };
-                    for x in self.part(items, a, c, right_side).1 {
-                        text.push_str(x);
-                    }
-                    q = self.next_part(items, a, c + 1, right_side);
-                }
-            }
-            n += 1;
-            at = end;
-        }
-        n
-    }
 }
 
 /// Is method `m` on `src` sure to give a result over `SEG_PIECES_MAX`
@@ -1516,58 +1297,6 @@ fn truncate(src: &[(&str, bool)], cut: u32, keep: Keep, p: WidthProfile) -> Shor
         }
     };
     short_of(pieces)
-}
-
-/// Output runs written in place: an existing run's String is reused when
-/// it has room and otherwise allocated at its exact size, so writing never
-/// grows a String or a Vec.
-struct Sink<'a> {
-    runs: &'a mut Vec<Run>,
-    n: usize,
-}
-
-impl<'a> Sink<'a> {
-    fn new(runs: &'a mut Vec<Run>, count: usize) -> Self {
-        if runs.capacity() < count {
-            *runs = Vec::with_capacity(count);
-        }
-        runs.truncate(count);
-        Self { runs, n: 0 }
-    }
-
-    fn start(&mut self, style: Style, bytes: usize) -> &mut String {
-        if self.n < self.runs.len() {
-            let r = &mut self.runs[self.n];
-            r.style = style;
-            r.text.clear();
-            if r.text.capacity() < bytes {
-                r.text = String::with_capacity(bytes);
-            }
-        } else {
-            self.runs.push(Run {
-                text: String::with_capacity(bytes),
-                style,
-            });
-        }
-        self.n += 1;
-        &mut self.runs[self.n - 1].text
-    }
-
-    fn finish(self) {
-        self.runs.truncate(self.n);
-    }
-}
-
-fn one_run(runs: &mut Vec<Run>, text: &str, style: Style) {
-    let mut sink = Sink::new(runs, 1);
-    sink.start(style, text.len()).push_str(text);
-    sink.finish();
-}
-
-fn clear_line(out: &mut LaidLine, minimal: bool) {
-    out.left.clear();
-    out.right.clear();
-    out.minimal = minimal;
 }
 
 /// Lays out line `n`. `upper` lines get the fill and lose step 7's output.

@@ -1,5 +1,6 @@
 #![cfg(test)]
 use super::*;
+use crate::color::sgr::DIM;
 use crate::field::{BUILTIN, Field, FieldValue, segment};
 use crate::recorder::{DecisionLog, HideReason, NoopRecorder, Step};
 use crate::shorten::Anchor;
