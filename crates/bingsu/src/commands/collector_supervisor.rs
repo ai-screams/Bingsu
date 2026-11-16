@@ -16,6 +16,7 @@ use bingsu_core::{
 use std::{
     fs::File,
     io::{self, Read, Write},
+    ops::ControlFlow,
     os::fd::AsRawFd,
     sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
@@ -408,273 +409,362 @@ impl CollectorJob {
         // The supervisor thread must exist before TSYNC, but cannot touch the
         // hostile pipe until both limits and the synchronized filter are live.
         // Waiting consumes the original spawn-to-Ready budget.
-        let mut deadline = deadlines(self.started_ns, self.helper_ns).0;
+        let deadline = deadlines(self.started_ns, self.helper_ns).0;
         #[cfg(test)]
-        if let Some((ready, _)) = self.fixture_allowances {
-            deadline = self.started_ns.saturating_add(ready).min(self.life_ns);
+        let deadline = self.fixture_allowances.map_or(deadline, |(ready, _)| {
+            self.started_ns.saturating_add(ready).min(self.life_ns)
+        });
+        if let ControlFlow::Break(reason) = wait_confined(barrier, deadline) {
+            return reason;
         }
-        let mut permission = barrier.state.lock().unwrap_or_else(|e| e.into_inner());
-        while *permission == Permission::Pending {
-            let Ok(now) = now_ns() else {
-                return EndReason::Resource;
-            };
-            let remaining = deadline.saturating_sub(now);
-            if remaining == 0 {
-                return EndReason::Deadline;
-            }
-            permission = barrier
-                .changed
-                .wait_timeout(permission, Duration::from_nanos(remaining))
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-        }
-        if *permission != Permission::Confined {
-            return EndReason::Resource;
-        }
-        drop(permission);
-        let mut buffer = Box::new([0u8; wire::FRAME_MAX]);
-        let mut have = 0;
-        let mut want = wire::HEADER;
-        let mut outgoing = Vec::new();
-        let mut sent = 0;
-        let mut ready = false;
-        let mut complete = false;
-        // macOS reports a full pipe smaller than 16 KiB as writable (XNU
-        // counts at least 16 KiB of room for POLLOUT) while every write finds
-        // none: a pipe stays that small when the kernel is short of pipe
-        // memory. After a poll said the request pipe had room and the write
-        // still took nothing, the loop sleeps instead of polling, from 50 us
-        // doubling to 1 ms, until a write takes bytes again: no spin to the
-        // deadline, and a 512-byte pipe still takes a large request in time
-        // (the collector reads it as it comes). `room_said` is the word of the
-        // last poll, and a response read loops back without polling, so on a
-        // pipe whose POLLOUT is exact a stall could still start after such a
-        // read. It does not in a working exchange (the collector answers only
-        // after the whole request), and it would end at the next write that
-        // takes bytes, each sleep at most 1 ms and never past the deadline.
-        let mut stall = Duration::ZERO;
-        let mut room_said = false;
-        // Whether a write took bytes since the last stall sleep (tests only).
-        #[cfg(test)]
-        let mut took_bytes = false;
-        loop {
-            let Ok(now) = now_ns() else {
-                return EndReason::Resource;
-            };
-            if now >= deadline {
-                return EndReason::Deadline;
-            }
-            if *barrier.state.lock().unwrap_or_else(|e| e.into_inner()) == Permission::Cancelled {
-                return EndReason::Resource;
-            }
-            if sent < outgoing.len() {
-                match self.output.write(&outgoing[sent..]) {
-                    Ok(0) => return EndReason::WorkerExit,
-                    Ok(n) => {
-                        sent += n;
-                        stall = Duration::ZERO;
-                        #[cfg(test)]
-                        {
-                            took_bytes = true;
-                        }
-                        if sent == outgoing.len() {
-                            if transcript.request_sent().is_err() {
-                                return EndReason::Protocol;
-                            }
-                            report.lifecycle.request_sent = now_ns().ok();
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        stall = grow_stall(stall, room_said);
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => return EndReason::WorkerExit,
-                }
-                if now_ns().map_or(true, |now| now >= deadline) {
-                    return EndReason::Deadline;
-                }
-            }
+        Exchange {
+            job: self,
+            transcript,
+            report,
+            barrier,
+            deadline,
+            buffer: Box::new([0u8; wire::FRAME_MAX]),
+            have: 0,
+            want: wire::HEADER,
+            outgoing: Vec::new(),
+            sent: 0,
+            ready: false,
+            complete: false,
+            stall: Duration::ZERO,
+            room_said: false,
             #[cfg(test)]
-            if *barrier.state.lock().unwrap_or_else(|e| e.into_inner()) == Permission::Pending {
-                report.unconfined_reads += 1;
+            took_bytes: false,
+        }
+        .run()
+    }
+}
+
+/// Wait until the worker is confined, within the spawn-to-Ready `deadline`.
+fn wait_confined(barrier: &Barrier, deadline: u64) -> ControlFlow<EndReason> {
+    let mut permission = barrier.state.lock().unwrap_or_else(|e| e.into_inner());
+    while *permission == Permission::Pending {
+        let Ok(now) = now_ns() else {
+            return ControlFlow::Break(EndReason::Resource);
+        };
+        let remaining = deadline.saturating_sub(now);
+        if remaining == 0 {
+            return ControlFlow::Break(EndReason::Deadline);
+        }
+        permission = barrier
+            .changed
+            .wait_timeout(permission, Duration::from_nanos(remaining))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    if *permission != Permission::Confined {
+        return ControlFlow::Break(EndReason::Resource);
+    }
+    ControlFlow::Continue(())
+}
+
+/// One request exchange with a confined worker: the frame being read, the
+/// request being written, and the deadline, which is the Ready bound until
+/// Ready and the request's end after it.
+struct Exchange<'a> {
+    job: &'a mut CollectorJob,
+    transcript: &'a mut Transcript,
+    report: &'a mut SupervisionReport,
+    barrier: &'a Barrier,
+    deadline: u64,
+    buffer: Box<[u8; wire::FRAME_MAX]>,
+    have: usize,
+    want: usize,
+    outgoing: Vec<u8>,
+    sent: usize,
+    ready: bool,
+    complete: bool,
+    // macOS reports a full pipe smaller than 16 KiB as writable (XNU
+    // counts at least 16 KiB of room for POLLOUT) while every write finds
+    // none: a pipe stays that small when the kernel is short of pipe
+    // memory. After a poll said the request pipe had room and the write
+    // still took nothing, the loop sleeps instead of polling, from 50 us
+    // doubling to 1 ms, until a write takes bytes again: no spin to the
+    // deadline, and a 512-byte pipe still takes a large request in time
+    // (the collector reads it as it comes). `room_said` is the word of the
+    // last poll, and a response read loops back without polling, so on a
+    // pipe whose POLLOUT is exact a stall could still start after such a
+    // read. It does not in a working exchange (the collector answers only
+    // after the whole request), and it would end at the next write that
+    // takes bytes, each sleep at most 1 ms and never past the deadline.
+    stall: Duration,
+    room_said: bool,
+    // Whether a write took bytes since the last stall sleep (tests only).
+    #[cfg(test)]
+    took_bytes: bool,
+}
+
+/// What the loop does after a read: read again at once, or wait for the pipes.
+enum Next {
+    Read,
+    Wait,
+}
+
+impl Exchange<'_> {
+    fn run(mut self) -> EndReason {
+        loop {
+            if let ControlFlow::Break(reason) = self.step() {
+                return reason;
             }
-            match self.input.read(&mut buffer[have..want]) {
-                Ok(0) => {
-                    if complete {
-                        return if transcript.accept_bytes(&buffer[..have]).is_ok() {
-                            EndReason::Complete
-                        } else {
-                            EndReason::Protocol
-                        };
-                    }
-                    // A timeout status cannot excuse malformed/truncated frames
-                    // or EOF before the complete request. Wait only at a clean
-                    // frame boundary, within the original absolute deadline.
-                    if have != 0 || !ready || sent != outgoing.len() {
-                        return EndReason::Protocol;
-                    }
-                    loop {
-                        match self.child.reap() {
-                            Ok(true) => {
-                                return if self.child.exit_code() == Some(wire::DEADLINE_EXIT_CODE) {
-                                    EndReason::Deadline
-                                } else {
-                                    EndReason::Protocol
-                                };
-                            }
-                            Ok(false) => {}
-                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                            Err(_) => return EndReason::Protocol,
-                        }
-                        if now_ns().map_or(true, |now| now >= deadline) {
-                            return EndReason::Deadline;
-                        }
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                }
-                Ok(n) => {
-                    report.bytes += n as u32;
-                    if report.bytes as usize > wire::STREAM_MAX {
-                        return EndReason::Protocol;
-                    }
-                    if complete {
-                        return EndReason::Protocol;
-                    }
-                    have += n;
-                    if now_ns().map_or(true, |now| now >= deadline) {
-                        return EndReason::Deadline;
-                    }
-                    if have == wire::HEADER {
-                        let Ok(length) = wire::frame_len(&buffer[..have]) else {
-                            return EndReason::Protocol;
-                        };
-                        want = length;
-                    }
-                    if have == want {
-                        #[cfg(test)]
-                        if *barrier.state.lock().unwrap_or_else(|e| e.into_inner())
-                            == Permission::Pending
-                        {
-                            report.unconfined_decodes += 1;
-                        }
-                        let Ok(frame) = wire::decode_frame(&buffer[..have]) else {
-                            return EndReason::Protocol;
-                        };
-                        report.frames += 1;
-                        // The codec is transactional, not latched: the adapter
-                        // must return at its FIRST rejection.
-                        if transcript.accept(frame).is_err() {
-                            return EndReason::Protocol;
-                        }
-                        // Success is only the codec-validated transition after
-                        // A evidence, never receipt of an arbitrary frame.
-                        if frame.kind == Kind::Progress {
-                            report.progress =
-                                wire::Progress::decode(frame.payload).expect("validated Progress");
-                        }
-                        complete = frame.kind == Kind::Complete;
-                        if complete {
-                            report.lifecycle.completed = now_ns().ok();
-                        }
-                        if !ready {
-                            ready = true;
-                            let Ok(start) = now_ns() else {
-                                return EndReason::Resource;
-                            };
-                            #[cfg(test)]
-                            {
-                                self.ready_ns = Some(start);
-                            }
-                            report.lifecycle.ready = Some(start);
-                            report.lifecycle.landlock_abi = Some(u32::from_le_bytes(
-                                frame.payload[12..16].try_into().unwrap(),
-                            ));
-                            report.lifecycle.as_baseline = Some(u64::from_le_bytes(
-                                frame.payload[16..24].try_into().unwrap(),
-                            ));
-                            let budget =
-                                request_budget(self.life_ns, start, self.request.budget_ms);
-                            if budget == 0 {
-                                return EndReason::Deadline;
-                            }
-                            self.request.budget_ms = budget;
-                            deadline = start
-                                .saturating_add(u64::from(budget) * 1_000_000)
-                                .min(self.life_ns);
-                            #[cfg(test)]
-                            if let Some((_, request)) = self.fixture_allowances {
-                                deadline = start.saturating_add(request).min(self.life_ns);
-                            }
-                            // The watchdog starts with Ready's tighter bound;
-                            // after Ready its bound becomes the request end.
-                            if self.registration.begin_request(deadline).is_err() {
-                                return EndReason::Protocol;
-                            }
-                            report.lifecycle.request_deadline = Some(deadline);
-                            let Ok(bytes) = request_bytes(&self.request, &mut buffer) else {
-                                return EndReason::Protocol;
-                            };
-                            outgoing = bytes;
-                        }
-                        have = 0;
-                        want = if complete { 1 } else { wire::HEADER };
-                    }
-                    continue;
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(_) => return EndReason::WorkerExit,
-            }
-            let Ok(now) = now_ns() else {
-                return EndReason::Resource;
-            };
-            if now >= deadline {
-                return EndReason::Deadline;
-            }
-            if !stall.is_zero() && sent < outgoing.len() {
+        }
+    }
+
+    fn step(&mut self) -> ControlFlow<EndReason> {
+        self.live()?;
+        self.write()?;
+        if let Next::Read = self.read()? {
+            return ControlFlow::Continue(());
+        }
+        self.wait()
+    }
+
+    fn live(&self) -> ControlFlow<EndReason> {
+        let Ok(now) = now_ns() else {
+            return ControlFlow::Break(EndReason::Resource);
+        };
+        if now >= self.deadline {
+            return ControlFlow::Break(EndReason::Deadline);
+        }
+        if *self.barrier.state.lock().unwrap_or_else(|e| e.into_inner()) == Permission::Cancelled {
+            return ControlFlow::Break(EndReason::Resource);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn write(&mut self) -> ControlFlow<EndReason> {
+        if self.sent >= self.outgoing.len() {
+            return ControlFlow::Continue(());
+        }
+        match self.job.output.write(&self.outgoing[self.sent..]) {
+            Ok(0) => return ControlFlow::Break(EndReason::WorkerExit),
+            Ok(n) => {
+                self.sent += n;
+                self.stall = Duration::ZERO;
                 #[cfg(test)]
                 {
-                    report.waits += 1;
-                    report.stalls += 1;
-                    if std::mem::take(&mut took_bytes) && stall > STALL_FIRST {
-                        report.stalls_not_restarted += 1;
-                    }
+                    self.took_bytes = true;
                 }
-                std::thread::sleep(stall_sleep(stall, now, deadline));
-                continue;
+                if self.sent == self.outgoing.len() {
+                    if self.transcript.request_sent().is_err() {
+                        return ControlFlow::Break(EndReason::Protocol);
+                    }
+                    self.report.lifecycle.request_sent = now_ns().ok();
+                }
             }
-            let mut fds = [
-                libc::pollfd {
-                    fd: self.input.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: if sent < outgoing.len() {
-                        self.output.as_raw_fd()
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.stall = grow_stall(self.stall, self.room_said);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return ControlFlow::Break(EndReason::WorkerExit),
+        }
+        if now_ns().map_or(true, |now| now >= self.deadline) {
+            return ControlFlow::Break(EndReason::Deadline);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn read(&mut self) -> ControlFlow<EndReason, Next> {
+        #[cfg(test)]
+        if *self.barrier.state.lock().unwrap_or_else(|e| e.into_inner()) == Permission::Pending {
+            self.report.unconfined_reads += 1;
+        }
+        match self.job.input.read(&mut self.buffer[self.have..self.want]) {
+            Ok(0) => ControlFlow::Break(self.at_eof()),
+            Ok(n) => {
+                self.report.bytes += n as u32;
+                if self.report.bytes as usize > wire::STREAM_MAX {
+                    return ControlFlow::Break(EndReason::Protocol);
+                }
+                if self.complete {
+                    return ControlFlow::Break(EndReason::Protocol);
+                }
+                self.have += n;
+                if now_ns().map_or(true, |now| now >= self.deadline) {
+                    return ControlFlow::Break(EndReason::Deadline);
+                }
+                if self.have == wire::HEADER {
+                    let Ok(length) = wire::frame_len(&self.buffer[..self.have]) else {
+                        return ControlFlow::Break(EndReason::Protocol);
+                    };
+                    self.want = length;
+                }
+                if self.have == self.want {
+                    self.frame()?;
+                }
+                ControlFlow::Continue(Next::Read)
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => ControlFlow::Continue(Next::Read),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => ControlFlow::Continue(Next::Wait),
+            Err(_) => ControlFlow::Break(EndReason::WorkerExit),
+        }
+    }
+
+    fn at_eof(&mut self) -> EndReason {
+        if self.complete {
+            return if self
+                .transcript
+                .accept_bytes(&self.buffer[..self.have])
+                .is_ok()
+            {
+                EndReason::Complete
+            } else {
+                EndReason::Protocol
+            };
+        }
+        // A timeout status cannot excuse malformed/truncated frames
+        // or EOF before the complete request. Wait only at a clean
+        // frame boundary, within the original absolute deadline.
+        if self.have != 0 || !self.ready || self.sent != self.outgoing.len() {
+            return EndReason::Protocol;
+        }
+        loop {
+            match self.job.child.reap() {
+                Ok(true) => {
+                    return if self.job.child.exit_code() == Some(wire::DEADLINE_EXIT_CODE) {
+                        EndReason::Deadline
                     } else {
-                        -1
-                    },
-                    events: libc::POLLOUT,
-                    revents: 0,
-                },
-            ];
-            let timeout = (deadline.saturating_sub(now).div_ceil(1_000_000)).min(2) as i32;
-            // SAFETY: two initialized pollfd records and bounded nonnegative timeout.
-            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+                        EndReason::Protocol
+                    };
+                }
+                Ok(false) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return EndReason::Protocol,
+            }
+            if now_ns().map_or(true, |now| now >= self.deadline) {
+                return EndReason::Deadline;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn frame(&mut self) -> ControlFlow<EndReason> {
+        #[cfg(test)]
+        if *self.barrier.state.lock().unwrap_or_else(|e| e.into_inner()) == Permission::Pending {
+            self.report.unconfined_decodes += 1;
+        }
+        let Ok(frame) = wire::decode_frame(&self.buffer[..self.have]) else {
+            return ControlFlow::Break(EndReason::Protocol);
+        };
+        self.report.frames += 1;
+        // The codec is transactional, not latched: the adapter
+        // must return at its FIRST rejection.
+        if self.transcript.accept(frame).is_err() {
+            return ControlFlow::Break(EndReason::Protocol);
+        }
+        // Success is only the codec-validated transition after
+        // A evidence, never receipt of an arbitrary frame.
+        if frame.kind == Kind::Progress {
+            self.report.progress =
+                wire::Progress::decode(frame.payload).expect("validated Progress");
+        }
+        self.complete = frame.kind == Kind::Complete;
+        if self.complete {
+            self.report.lifecycle.completed = now_ns().ok();
+        }
+        if !self.ready {
+            self.ready = true;
+            let Ok(start) = now_ns() else {
+                return ControlFlow::Break(EndReason::Resource);
+            };
             #[cfg(test)]
             {
-                report.waits += 1;
+                self.job.ready_ns = Some(start);
             }
-            room_said = said_room(rc, &fds[1]);
-            if rc < 0 {
-                if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-                    return EndReason::Resource;
-                }
-                #[cfg(test)]
-                POLL_INTERRUPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+            self.report.lifecycle.ready = Some(start);
+            self.report.lifecycle.landlock_abi = Some(u32::from_le_bytes(
+                frame.payload[12..16].try_into().unwrap(),
+            ));
+            self.report.lifecycle.as_baseline = Some(u64::from_le_bytes(
+                frame.payload[16..24].try_into().unwrap(),
+            ));
+            self.begin_request(start)?;
         }
+        self.have = 0;
+        self.want = if self.complete { 1 } else { wire::HEADER };
+        ControlFlow::Continue(())
+    }
+
+    fn begin_request(&mut self, start: u64) -> ControlFlow<EndReason> {
+        let budget = request_budget(self.job.life_ns, start, self.job.request.budget_ms);
+        if budget == 0 {
+            return ControlFlow::Break(EndReason::Deadline);
+        }
+        self.job.request.budget_ms = budget;
+        self.deadline = start
+            .saturating_add(u64::from(budget) * 1_000_000)
+            .min(self.job.life_ns);
+        #[cfg(test)]
+        if let Some((_, request)) = self.job.fixture_allowances {
+            self.deadline = start.saturating_add(request).min(self.job.life_ns);
+        }
+        // The watchdog starts with Ready's tighter bound;
+        // after Ready its bound becomes the request end.
+        if self.job.registration.begin_request(self.deadline).is_err() {
+            return ControlFlow::Break(EndReason::Protocol);
+        }
+        self.report.lifecycle.request_deadline = Some(self.deadline);
+        let Ok(bytes) = request_bytes(&self.job.request, &mut self.buffer) else {
+            return ControlFlow::Break(EndReason::Protocol);
+        };
+        self.outgoing = bytes;
+        ControlFlow::Continue(())
+    }
+
+    fn wait(&mut self) -> ControlFlow<EndReason> {
+        let Ok(now) = now_ns() else {
+            return ControlFlow::Break(EndReason::Resource);
+        };
+        if now >= self.deadline {
+            return ControlFlow::Break(EndReason::Deadline);
+        }
+        if !self.stall.is_zero() && self.sent < self.outgoing.len() {
+            #[cfg(test)]
+            {
+                self.report.waits += 1;
+                self.report.stalls += 1;
+                if std::mem::take(&mut self.took_bytes) && self.stall > STALL_FIRST {
+                    self.report.stalls_not_restarted += 1;
+                }
+            }
+            std::thread::sleep(stall_sleep(self.stall, now, self.deadline));
+            return ControlFlow::Continue(());
+        }
+        let mut fds = [
+            libc::pollfd {
+                fd: self.job.input.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: if self.sent < self.outgoing.len() {
+                    self.job.output.as_raw_fd()
+                } else {
+                    -1
+                },
+                events: libc::POLLOUT,
+                revents: 0,
+            },
+        ];
+        let timeout = (self.deadline.saturating_sub(now).div_ceil(1_000_000)).min(2) as i32;
+        // SAFETY: two initialized pollfd records and bounded nonnegative timeout.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+        #[cfg(test)]
+        {
+            self.report.waits += 1;
+        }
+        self.room_said = said_room(rc, &fds[1]);
+        if rc < 0 {
+            if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                return ControlFlow::Break(EndReason::Resource);
+            }
+            #[cfg(test)]
+            POLL_INTERRUPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        ControlFlow::Continue(())
     }
 }
 
