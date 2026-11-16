@@ -1,6 +1,6 @@
 //! User segments and the units they run: which `custom/…` segments a layout
 //! draws, their kind-specific forms (text, command, env, language), and the
-//! execution units with the policy and the reason one does not run, and the
+//! execution units with the policy and the reason one does not run, plus the
 //! unit types themselves. A new segment kind is compiled here and needs its
 //! keys in `keys.rs`; a kind that runs something (an execution unit) also
 //! needs its line in `explain.rs`.
