@@ -47,7 +47,7 @@ use bingsu_core::{
         selection::Catalog,
         wire::{Binding, BuildId, EndReason, M3B_REQUEST_ID},
     },
-    field::SegmentDecl,
+    field::{FieldDecl, FieldType, SegmentDecl},
     snapshot,
 };
 use commands::{
@@ -75,6 +75,23 @@ const SEGMENTS: [SegmentDecl; 32] = [const {
 }; 32];
 const CATALOG: Catalog<'static> = Catalog {
     segments: &SEGMENTS,
+    workers: 1 << 31,
+};
+/// The same catalog with sixteen long text fields on the worker segment, so
+/// one Update can fill a whole frame (the `stream-` peer modes).
+const WIDE_FIELDS: [FieldDecl; 16] = [const {
+    FieldDecl {
+        name: "wide",
+        ty: FieldType::Text { max_cells: 4096 },
+    }
+}; 16];
+const WIDE_SEGMENTS: [SegmentDecl; 32] = {
+    let mut segments = SEGMENTS;
+    segments[31].fields = &WIDE_FIELDS;
+    segments
+};
+const WIDE: Catalog<'static> = Catalog {
+    segments: &WIDE_SEGMENTS,
     workers: 1 << 31,
 };
 
@@ -198,6 +215,24 @@ int main(int argc, char **argv) {
         if(h[10]==4) break;
     }
     if((!strcmp(mode,"large") || !strcmp(mode,"late-large")) && body<=65536) return 38;
+    if(!strncmp(mode,"stream-",7)) {
+        /* Three full-frame Updates of the wide segment 31 (sixteen text
+           fields), then a header and part of a fourth: the stream stops one
+           byte past STREAM_MAX (stream-over) or on it (stream-at). */
+        unsigned char *p=b;
+        *p++=31; *p++=0; *p++=1; memset(p,0,4); p+=4; *p++=16; *p++=0;
+        for(int i=0;i<16;i++) {
+            uint32_t n=i<15?4096:3878;
+            *p++=i; *p++=0; *p++=0; *p++=0; memcpy(p,&n,4); p+=4; memset(p,'a',n); p+=n;
+        }
+        *p++=0;
+        uint32_t len=(uint32_t)(p-b);
+        if(len!=65536-80) return 39;
+        for(int i=0;i<3;i++) frame(5,b,len);
+        size_t sent=80+24+3*65536, end=262144+!strcmp(mode,"stream-over");
+        header(5,len); put(h,80); put(b,end-sent-80);
+        for(;;) pause();
+    }
     if(!strncmp(mode,"git-",4)) {
         unsigned char progress[10]={1,1,9};
         if(!strcmp(mode,"git-deadline-before-a") || !strcmp(mode,"git-deadline-after-a")) {
@@ -413,6 +448,9 @@ fn lock(tag: &str) -> File {
     file
 }
 fn request(large: bool) -> collection::wire::Request {
+    request_in(&CATALOG, large)
+}
+fn request_in(catalog: &Catalog<'static>, large: bool) -> collection::wire::Request {
     let now = commands::collector_supervisor::fixture_clock().unwrap();
     let config = if large {
         let mut path = vec![b'c'; 65_536];
@@ -438,9 +476,9 @@ fn request(large: bool) -> collection::wire::Request {
         config,
         state,
         cwd: b"/repo".to_vec(),
-        mask: CATALOG.workers,
+        mask: catalog.workers,
     };
-    collection::request(&CATALOG, binding, M3B_REQUEST_ID, 50)
+    collection::request(catalog, binding, M3B_REQUEST_ID, 50)
         .unwrap()
         .unwrap()
 }
@@ -475,13 +513,20 @@ fn run_peer_timed(
     let watchdog = helper_limits::start(Instant::now()).unwrap();
     let held_lock = lock(mode);
     let lock_started = Instant::now();
+    // 이것을 실패시키는 것: stream- 모드에도 좁은 CATALOG를 주는 것(넓은 Update가 첫 frame에서 거부되어
+    // 스트림 상한 시험의 바이트 수가 어긋난다).
+    let catalog = if mode.starts_with("stream-") {
+        &WIDE
+    } else {
+        &CATALOG
+    };
     let job = CollectorJob::fixture_timed(
         exe.as_os_str(),
         OsStr::new(mode),
-        request(mode == "large" || mode == "late-large"),
+        request_in(catalog, mode == "large" || mode == "late-large"),
         held_lock,
         &watchdog,
-        &SEGMENTS,
+        catalog.segments,
         allowances,
     )
     .unwrap();
@@ -648,6 +693,34 @@ fn partial_survives_only_after_validated_updates() {
             assert_eq!(value.reason, reason);
             assert_eq!(value.updates[0].value.as_ref().unwrap().text(), "ok");
         }
+    }
+}
+
+// The transcript already counts accepted frames against STREAM_MAX, so the
+// supervisor's own count of pipe bytes decides only a partial frame read after
+// more than STREAM_MAX - FRAME_MAX accepted bytes. Ready (80 + 24) and three
+// full-frame Updates (3 × 65,536) are 196,712; a header and part of a fourth
+// frame then bring the stream one byte past the cap, or exactly to it. Past
+// the cap the exchange ends at once; on it, it waits for the frame's rest
+// until the request deadline.
+// 이것을 실패시키는 것: read에서 STREAM_MAX 검사를 빼는 것(상한을 1바이트 넘긴 경우가 마감까지 기다려
+// Deadline), `>`를 `>=`로 바꾸는 것(상한에 딱 맞는 경우가 Protocol).
+#[test]
+fn a_partial_frame_past_the_stream_cap_ends_the_exchange() {
+    let _inherited_fds = commands::sys::test_inherited_fd_lock();
+    let cap = collection::wire::STREAM_MAX;
+    for (mode, bytes, reason) in [
+        ("stream-over", cap + 1, EndReason::Protocol),
+        ("stream-at", cap, EndReason::Deadline),
+    ] {
+        let (report, _, _) = retry_overrun(
+            OVERRUN_TRIES,
+            || run_peer_timed(mode, true, GENEROUS),
+            |(report, _, _)| starved(report.reason, reason),
+        );
+        assert_eq!(report.bytes as usize, bytes, "{mode}: {report:?}");
+        assert_eq!(report.frames, 4, "{mode}: {report:?}");
+        assert_eq!(report.reason, reason, "{mode}: {report:?}");
     }
 }
 
