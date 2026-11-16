@@ -1,10 +1,11 @@
 """Helper formulas by stage: command, stage, collect and the shared stage builder."""
 from dataclasses import replace
-from .collect import _breaker_finish_and_gc, _collect_prefix, _collect_tail, _publish
-from .command import _command_gc, _command_prefix
-from .plan import HelperPlan, _LIBC, _add, _check_plan, _use_primitives, read_to_end_calls
-from .steps import _chain_recheck, _context, _ensure_root, _install, _loader_revalidate, _open_chain, _recover, _resolved_open, _resolved_recheck, _selection_lock, _stage, _store_read, _verify_lock
-from .tables import COMMAND_STAGES, PRIMITIVES, STARTUP_PRIMITIVES
+from .primitives import _add, _primitives_for
+from .helper_collect import _breaker_finish_and_gc, _collect_prefix, _collect_tail, _publish
+from .helper_command import _command_gc, _command_prefix
+from .helper_plan import HelperPlan, _check_plan, read_to_end_calls
+from .helper_steps import _chain_recheck, _context, _ensure_root, _install, _loader_revalidate, _open_chain, _recover, _resolved_open, _resolved_recheck, _selection_lock, _stage, _store_read, _verify_lock
+from .tables import COMMAND_STAGES
 
 
 def helper_command_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:
@@ -13,15 +14,12 @@ def helper_command_expected(plan: HelperPlan) -> dict[str, dict[str, int]]:
     _check_plan(plan)
     if "command_miss" not in plan.stages:
         raise ValueError("command_miss plan required")
-    _use_primitives({**PRIMITIVES, **_LIBC[plan.libc], **STARTUP_PRIMITIVES[plan.arch, plan.libc]})
-    try:
+    with _primitives_for(plan.libc, plan.arch):
         prefix = _helper_stage_expected(replace(plan, stages=("unchanged",)))
         _command_prefix(prefix, plan, "command_miss")
         gc: dict[str, int] = {}
         _command_gc(gc, plan)
         return {"prefix": dict(sorted(prefix.items())), "gc": dict(sorted(gc.items()))}
-    finally:
-        _use_primitives(PRIMITIVES)
 
 
 def helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
@@ -32,11 +30,8 @@ def helper_stage_expected(plan: HelperPlan) -> dict[str, int]:
     For collect this is the complete prefix + tail sum; live checks use
     helper_collect_expected to apply exact/le separately."""
     _check_plan(plan)
-    _use_primitives({**PRIMITIVES, **_LIBC[plan.libc], **STARTUP_PRIMITIVES[plan.arch, plan.libc]})
-    try:
+    with _primitives_for(plan.libc, plan.arch):
         return _helper_stage_expected(plan)
-    finally:
-        _use_primitives(PRIMITIVES)
 
 
 def helper_collect_expected(plan: HelperPlan, *, deadline: bool = False) -> dict[str, dict[str, int]]:
@@ -56,8 +51,7 @@ def helper_collect_expected(plan: HelperPlan, *, deadline: bool = False) -> dict
     _check_plan(plan)
     if "collect" not in plan.stages:
         raise ValueError("collect plan required")
-    _use_primitives({**PRIMITIVES, **_LIBC[plan.libc], **STARTUP_PRIMITIVES[plan.arch, plan.libc]})
-    try:
+    with _primitives_for(plan.libc, plan.arch):
         prefix = _helper_stage_expected(replace(plan, stages=("unchanged",)))
         _collect_prefix(prefix, plan)
         supervisor: dict[str, int] = {}
@@ -67,8 +61,6 @@ def helper_collect_expected(plan: HelperPlan, *, deadline: bool = False) -> dict
         finish_gc: dict[str, int] = {}
         _breaker_finish_and_gc(finish_gc, plan)
         return {"prefix": prefix, "supervisor": supervisor, "finish_gc": finish_gc}
-    finally:
-        _use_primitives(PRIMITIVES)
 
 
 def _helper_stage_expected(plan: HelperPlan) -> dict[str, int]:

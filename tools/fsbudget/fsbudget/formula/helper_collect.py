@@ -1,6 +1,8 @@
 """The collect stage of a helper round: publication, breaker finish, GC, session sweep."""
-from .plan import HelperPlan, _add, verify_build_reads
-from .steps import _breaker_read, _breaker_save, _catalog_commit, _chain_recheck, _close_only_lock, _metered_stage, _open_chain, _read_checked, _read_response, _registration_open, _reserve_walk, _staged_verify, _store_verify, _ticket_verify
+from .common import ceil_div
+from .primitives import _add
+from .helper_plan import HelperPlan, verify_build_reads
+from .helper_steps import _breaker_read, _breaker_save, _catalog_commit, _chain_recheck, _close_only_lock, _metered_stage, _open_chain, _read_checked, _read_response, _registration_open, _reserve_walk, _staged_verify, _store_verify, _ticket_verify
 
 
 def _collect_prefix(e: dict, p: HelperPlan) -> None:
@@ -190,4 +192,4 @@ RECLAIM_MAX = 4
 PROCS_MAX, PREAD_CHUNK, PID_LINE_MAX = 65_536, 4096, 8
 
 
-PROCS_PREADS = -(-PROCS_MAX // (PREAD_CHUNK - PID_LINE_MAX + 1)) + 1
+PROCS_PREADS = ceil_div(PROCS_MAX, PREAD_CHUNK - PID_LINE_MAX + 1) + 1

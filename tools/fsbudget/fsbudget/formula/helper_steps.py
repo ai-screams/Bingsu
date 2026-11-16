@@ -1,6 +1,7 @@
-"""Building blocks of a helper round: path walk, lock, staging, catalog, breaker."""
+"""Building blocks of a helper round (path walk, lock, staging, catalog, breaker) that the stage modules compose."""
+from .primitives import _add
 from .common import ceil_div
-from .plan import HelperPlan, _add
+from .helper_plan import HelperPlan
 
 
 def _resolved_open(e: dict, names: int, *, links: int = 0, missing: bool = False) -> None:
