@@ -1100,22 +1100,96 @@ def test_supervised_rounds_counts_rounds_that_ran_the_units():
         supervised_rounds(session)
 
 
-# tests/command-acceptance.tsv의 행마다 실제 시험이 있다(넘긴 행은 "-"와 넘긴 Task). 이것을 실패시키는
-# 것: 표의 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것.
-def test_command_table_names_real_tests():
-    import csv, re
+def cargo_target(path):
+    """The cargo target that builds the Rust test file `path`."""
     from conftest import ROOT
+    crate, kind = path.split("/")[1:3]
+    if kind == "tests":
+        return "test:" + path.split("/")[3].removesuffix(".rs")
+    return "lib" if (ROOT / f"crates/{crate}/src/lib.rs").exists() else f"bin:{crate}"
+
+
+# The cgroup cell job runs and asserts the cell tests of these files only (cgroup_cell_tests), on Linux.
+CELL_FILE = r"crates/bingsu/src/commands/\w+\.rs"
+
+
+def assert_command_row(row, read, cells):
+    """A row of tests/command-acceptance.tsv names a test that runs on its platform."""
+    import re
+    from test_collector_security import CELL_IGNORE, row_platforms, rust_libtest_module, rust_test_attributes
+    if row["stage"] not in ("C2", "C3", "C4"):
+        assert (row["platform"], row["test"]) == ("-", "-"), row["id"]
+        return
+    path, name = row["test"].split("::", 1)
+    source = read(path)
+    if path.endswith(".py"):
+        assert len(re.findall(rf"^def {re.escape(name)}\(", source, re.M)) == 1, (row["id"], path, name)
+        return
+    platforms = row_platforms(row)
+    base = name.rsplit("::", 1)[-1]
+    attributes = rust_test_attributes(row, source, path, base, platforms)
+    target = cargo_target(path)
+    module = rust_libtest_module(row, source, path, name, target, read, platforms)
+    ignored = [a.strip() for a in attributes if re.match(r"\s*ignore\b", a)]
+    cell = (ignored == [CELL_IGNORE] and platforms == {"linux"} and re.fullmatch(CELL_FILE, path) is not None
+            and module + base in cells)
+    assert not ignored or cell, (row["id"], "ignored test", ignored)
+
+
+# tests/command-acceptance.tsv의 행마다 그 플랫폼에서 실제로 도는 시험이 있다(넘긴 행은 "-"와 넘긴 Task). Rust 행은
+# gate 표처럼 `파일::모듈경로::이름`이고 같은 정적 검사를 받는다: `#[test]` 선언 하나, fn·파일 모듈·inline 모듈의 cfg가
+# 행의 플랫폼에서 성립, `#[ignore]`는 cgroup 셀 job이 돌리고 단언하는 셀 시험의 표시만. 이것을 실패시키는 것: 표의
+# 시험 이름 오타, 지운 시험을 가리키는 행, 넘긴 행에 시험을 적는 것, 시험에 `#[ignore]`를 붙이는 것, 셀 밖 시험에 셀
+# 표시를 붙이는 것, 시험이나 그 모듈의 cfg를 행의 플랫폼에서 꺼지게 바꾸는 것.
+def test_command_table_names_real_tests():
+    import csv
+    from conftest import ROOT
+    from test_gate_acceptance import cgroup_cell_tests
     rows = list(csv.DictReader((ROOT / "tests/command-acceptance.tsv").read_text().splitlines(), delimiter="\t"))
     assert rows and len({r["id"] for r in rows}) == len(rows)
+    cells = cgroup_cell_tests()
     for row in rows:
-        if row["stage"] not in ("C2", "C3", "C4"):
-            assert (row["platform"], row["test"]) == ("-", "-"), row["id"]
-            continue
-        path, name = row["test"].split("::")
-        source = (ROOT / path).read_text()
-        pattern = (rf"^def {re.escape(name)}\(" if path.endswith(".py")
-                   else rf"^\s*fn {re.escape(name)}\(\)")
-        assert len(re.findall(pattern, source, re.M)) == 1, (row["id"], path, name)
+        assert_command_row(row, lambda p: (ROOT / p).read_text(), cells)
+
+
+# 셀 표시는 셀 job이 실제로 돌리고 단언하는 시험에서만 받는다: 셀 job이 모으는 파일에 있고, 그 job이 모은 이름이며,
+# 행이 Linux 행일 때다(셀 job은 Linux에서만 돈다). 다른 target이나 crate 뿌리의 시험이 모듈을 겹쳐 같은 libtest 경로를
+# 가져도 셀 job은 그것을 돌리지 않는다. 입력마다 한 조건만 어긴다. 이것을 실패시키는 것: 셀 판정에서 파일 조건
+# (other-target, crate-root), 모은 이름 조건(uncollected), 행 플랫폼 조건(unix-row)을 빼는 것.
+def test_command_row_takes_a_cell_mark_only_from_the_cell_files():
+    import re
+    from conftest import ROOT
+    from test_collector_security import CELL_IGNORE
+    from test_gate_acceptance import cgroup_cell_tests
+    cells = cgroup_cell_tests()
+    base = "test_nested_cgroup_removed_postorder"
+    name, real_path = "commands::command_supervisor::tests::" + base, "crates/bingsu/src/commands/command_supervisor.rs"
+    real = lambda p: (ROOT / p).read_text().replace("\r\n", "\n")
+    assert name in cells
+    assert_command_row({"id": "CMD-X", "stage": "C3", "platform": "Linux", "test": f"{real_path}::{name}"}, real, cells)
+    marked = f"#[test]\n#[{CELL_IGNORE}]\nfn {{}}() {{{{}}}}\n"
+    nested = "mod commands {\nmod command_supervisor {\nmod tests {\n" + marked.format(base) + "}\n}\n}\n"
+    unix_source, count = re.subn(r'#\[cfg\(target_os = "linux"\)\]\s*(#\[test\]\s*#\[' + re.escape(CELL_IGNORE)
+                                 + r"\]\s*fn " + base + r"\()", r"\1", real(real_path))
+    assert count == 1
+    cases = {
+        "other-target": ("Linux", "crates/bingsu/tests/review_cell.rs", name, nested),
+        "crate-root": ("Linux", "crates/bingsu/src/main.rs", name, nested),
+        "uncollected": ("Linux", "crates/bingsu/src/commands/command_match.rs",
+                        "commands::command_match::tests::test_uncollected",
+                        "#[cfg(test)]\nmod tests {\n" + marked.format("test_uncollected") + "}\n"),
+        "unix-row": ("Unix", real_path, name, unix_source),
+    }
+    accepted = []
+    for case, (platform, path, test, source) in cases.items():
+        row = {"id": case, "stage": "C3", "platform": platform, "test": f"{path}::{test}"}
+        try:
+            assert_command_row(row, lambda p, path=path, source=source: source if p == path else real(p), cells)
+        except AssertionError as error:
+            assert "ignored test" in str(error), (case, error)
+        else:
+            accepted.append(case)
+    assert not accepted, accepted
 
 
 # 단위가 없는 회차는 감독을 띄우지 않는다. 감독은 세션 잠금을 얻은 뒤에만 생성되므로 잠금 파일과 중립 폴더가

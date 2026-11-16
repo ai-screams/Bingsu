@@ -1,4 +1,5 @@
 """Compiler-free M3b integration. Prepare all fixtures in the native host job."""
+import functools
 import importlib.util
 import json
 import os
@@ -906,23 +907,427 @@ ACCEPTANCE_PYTHONS = {
 SEC_REQUIRED_IDS = frozenset({"SEC-FSIZE", "SEC-WRITE", "SEC-FORK", "SEC-LANDLOCK", "SEC-PIDFD", "SEC-NOWAIT"})
 
 
+# Where rustc starts an attribute: `#`, an optional `!` (inner) and `[`, with any whitespace between.
+RUST_ATTRIBUTE_START = r"#\s*!?\s*\["
+RUST_RAW_QUOTE = re.compile(r'(#*)"')
+# Rust's whitespace (Pattern_White_Space); Python's `\s` lacks U+200E and U+200F, so the scanner turns those into spaces.
+RUST_SPACE = "\t\n\x0b\x0c\r \x85\u200e\u200f\u2028\u2029"
+# The rest of a char literal after its opening quote: one char or one escape, then the closing quote.
+RUST_CHAR_REST = re.compile(r"(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,8}\}|[nrt\\0'\"])|[^\\'\n\r\t])'")
+
+
+@functools.cache
+def blank_rust(text, literals=False):
+    """`text` with its comments turned into spaces (newlines kept), and with
+    `literals` its string and char literals too. It reads tokens as rustc
+    does, so that no `//` or `/*` inside a literal is taken for a comment:
+    block comments nest; a byte order mark and a first-line shebang are not
+    code; the marks U+200E and U+200F are whitespace; identifiers (Unicode XID, raw `r#name` too), numbers and literal
+    suffixes (`0r`, `"x"r`) are read whole, and `b`, `c`, `r`, `br`, `cr`
+    start a literal only as a whole identifier right before the quote; a char
+    literal is one char or one escape (`'\\''`); a lifetime (`'a`, `'r#a`) is
+    not a char. A literal it cannot read raises, so a checker fails closed."""
+    out, i, n = list(text), 0, len(text)
+
+    def blank(start, end):
+        for k in range(start, end):
+            if out[k] != "\n":
+                out[k] = " "
+
+    def comment_end(at):
+        if text.startswith("//", at):
+            end = text.find("\n", at)
+            return n if end < 0 else end
+        if text.startswith("/*", at):
+            depth, end = 1, at + 2
+            while end < n and depth:
+                depth += 1 if text.startswith("/*", end) else -1 if text.startswith("*/", end) else 0
+                end += 2 if text.startswith(("/*", "*/"), end) else 1
+            return end
+        return None
+
+    def ident_char(at, start=False):
+        # Outside literals and comments rustc takes beyond ASCII only identifier characters and whitespace, so any
+        # other non-ASCII character continues an identifier; Python's Unicode tables can be older than Rust's.
+        if at >= n:
+            return False
+        char = text[at]
+        if char.isascii():
+            return char == "_" or (char.isalpha() if start else char.isalnum())
+        return char not in RUST_SPACE
+
+    def continues(at):
+        return ident_char(at)
+
+    def ident_end(at):
+        if not ident_char(at, start=True):
+            return None
+        at += 1
+        while continues(at):
+            at += 1
+        return at
+
+    def doc_comment(at):
+        return (text.startswith(("///", "//!"), at) and not text.startswith("////", at)) or (
+            text.startswith(("/**", "/*!"), at) and not text.startswith(("/***", "/**/"), at))
+
+    def suffixed(end):
+        # A literal's suffix is part of it: `"x"r"y"` is `"x"r` and then a plain `"y"`.
+        return ident_end(end) or end
+
+    def string_end(quote):
+        end = quote + 1
+        while text[end] != '"':
+            end += 2 if text[end] == "\\" else 1
+        return suffixed(end + 1)
+
+    def char_end(quote):
+        rest = RUST_CHAR_REST.match(text, quote + 1)
+        assert rest, ("unreadable char literal", text[quote:quote + 12])
+        return suffixed(rest.end())
+    for k, char in enumerate(text):
+        if char in "\u200e\u200f":
+            out[k] = " "  # whitespace to rustc, not to Python's `\s`
+    if text.startswith("\ufeff"):
+        out[0], i = " ", 1  # rustc drops a byte order mark
+    if text.startswith("#!", i):
+        after = i + 2
+        while after < n:
+            # rustc looks past whitespace and plain comments, not doc comments, for the `[` of an inner attribute.
+            if text[after] in RUST_SPACE:
+                after += 1
+            elif (end := comment_end(after)) is not None and not doc_comment(after):
+                after = end
+            else:
+                break
+        if not text.startswith("[", after):
+            # A shebang line, not an inner attribute: rustc skips it like a comment.
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            blank(i, end)
+            i = end
+    while i < n:
+        if (end := comment_end(i)) is not None:
+            blank(i, end)
+            i = end
+            continue
+        if text[i] in "0123456789":
+            i += 1
+            while continues(i):
+                i += 1  # a number with its suffix: `0r"x"` is `0r` and then a plain string
+            continue
+        if (end := ident_end(i)) is not None:
+            word = text[i:end]
+            if word in ("r", "br", "cr") and (raw := RUST_RAW_QUOTE.match(text, end)):
+                end = suffixed(text.index('"' + raw[1], raw.end()) + 1 + len(raw[1]))
+            elif word in ("b", "c") and text.startswith('"', end):
+                end = string_end(end)
+            elif word == "b" and text.startswith("'", end):
+                end = char_end(end)
+            else:
+                if word == "r" and text.startswith("#", end) and (name := ident_end(end + 1)):
+                    end = name  # a raw identifier: `r#br"x"` is `br` and then a plain string
+                i = end
+                continue
+        elif text[i] == '"':
+            end = string_end(i)
+        elif text[i] == "'":
+            if text.startswith("r#", i + 1) and (name := ident_end(i + 3)):
+                i = name  # a raw lifetime
+                continue
+            label = ident_end(i + 1)
+            if label and not text.startswith("'", label):
+                i = label  # a lifetime or label
+                continue
+            end = char_end(i)
+        else:
+            i += 1
+            continue
+        if literals:
+            blank(i, end)
+        i = end
+    return "".join(out)
+
+
 def rust_attributes(source, item):
     """Return the attribute lists of each `item` declaration in source.
 
     Reads the entire contiguous outer attribute group, irrespective of
-    #[test]/#[ignore]/#[cfg] order, including multiline cfgs.
+    #[test]/#[ignore]/#[cfg] order, including multiline cfgs. rustc takes
+    whitespace, a newline or a comment between `#`, `!` and `[` (`# [ignore]`,
+    `#/**/[ignore]`), comments and code before an attribute on its line, and
+    an inner attribute right before the item (`#![cfg(..)]` opening the module
+    that holds it) applies to the item too, so all of them are read. Comments
+    are blanked first; attribute values keep their strings.
     """
-    groups = re.findall(r"((?:^[ \t]*#\[[^\]]*\](?:\s|//[^\n]*(?:\n|\Z)|/\*[\s\S]*?\*/)*)*)" + item,
-                        source, re.M)
-    return [re.findall(r"#\[([^\]]*)\]", group) for group in groups]
+    start = RUST_ATTRIBUTE_START
+    groups = re.findall(r"((?:" + start + r"[^\]]*\]\s*)*)" + item, blank_rust(source))
+    return [re.findall(start + r"([^\]]*)\]", group) for group in groups]
+
+
+def module_inner_attributes(source, start=0):
+    """The inner attributes (`#![..]`) that open the module body starting at
+    `start` of `source`: they apply to every item of that module."""
+    head = re.compile(r"(?:\s*#\s*!\s*\[[^\]]*\])*").match(blank_rust(source), start)
+    return re.findall(r"#\s*!\s*\[([^\]]*)\]", head[0])
+
+
+# rustc takes whitespace, a newline or a comment between `#`, `!` and `[`, a comment or code before an attribute on its
+# line, and an inner attribute at the start of a module applies to the test right after it. 이것을 실패시키는 것: 속성
+# 묶음이나 속성 내용을 `#[`로만 찾는 것, `#`와 `[` 사이의 줄바꿈을 받지 않는 것, inner 속성(`#!`)을 건너뛰는 것, 주석을
+# 지우지 않고 읽는 것, 속성을 줄 첫머리에서만 찾는 것, Rust 공백인 U+200E를 공백으로 보지 않는 것(그 앞의 `ignore`나
+# `cfg(any())`가 보이지 않아 꺼진 시험을 받음).
+@pytest.mark.parametrize("source, want", [
+    ("# [ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("#\n[ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("#[test]\n#  [cfg(any())]\nfn f() {}\n", ["test", "cfg(any())"]),
+    ("mod tests {\n    #![cfg(any())]\n    #[test]\n    fn f() {}\n}\n", ["cfg(any())", "test"]),
+    ("mod tests {\n    # ! [cfg(any())]\n    #[test]\n    fn f() {}\n}\n", ["cfg(any())", "test"]),
+    ("#[test]\n#/**/[ignore]\nfn f() {}\n", ["test", "ignore"]),
+    ("/* c */ #[ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("#[ignore] /* /* */ */\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("const _: () = (); #[ignore]\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("# [ignore] // c\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+    ("#[ignore]\u200e\n#[test]\nfn f() {}\n", ["ignore", "test"]),
+], ids=["space", "newline", "space-after-test", "inner", "inner-spaced", "comment-between", "comment-before",
+        "nested-comment", "code-before", "line-comment", "mark-between"])
+def test_rust_attributes_read_every_spelling_rustc_takes(source, want):
+    assert rust_attributes(source, r"fn\s+f\s*\(") == [want]
+
+
+def lint_only_cfg_attr(attr):
+    """Whether `attr` is `cfg_attr(<predicate>, allow(...))` or the same with
+    `expect`: a lint level under a condition, which can neither remove an item
+    nor turn a test off. Anything else inside a cfg_attr (cfg, ignore, path,
+    test or a second attribute) is not.
+
+    Every character must pass one of two allow lists: the predicate must be a
+    cfg predicate rust_cfg_holds reads, the attribute must match the lint
+    pattern. Text the split below could misread (an escape, a raw string, a
+    char literal, a comment) passes neither, so it is refused, never read."""
+    found = re.fullmatch(r"\s*cfg_attr\s*\((.*)\)\s*", attr, re.S)
+    if not found:
+        return False
+    body, parts, depth, start, quoted = found[1], [], 0, 0, False
+    for i, c in enumerate(body):
+        if c == '"':
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+    parts.append(body[start:])
+    if len(parts) == 3 and not parts[2].strip():
+        parts.pop()  # one trailing comma
+    lint = r'\s*(?:allow|expect)\s*\(\s*[\w:]+(?:\s*,\s*[\w:]+)*(?:\s*,\s*reason\s*=\s*"[^"\\]*")?\s*,?\s*\)\s*'
+    if len(parts) != 2 or re.fullmatch(lint, parts[1]) is None:
+        return False
+    # The predicate must read as a cfg predicate this file knows, on both
+    # platforms; any failure (an unknown key, a stray token) refuses it.
+    try:
+        for platform in ("linux", "macos"):
+            rust_cfg_holds(parts[0], platform)
+    except Exception:
+        return False
+    return True
 
 
 def assert_cfgs_hold(row, attributes, platforms):
     for attr in attributes:
-        assert not re.match(r"\s*cfg_attr\b", attr), (row["id"], "conditional attributes")
+        # An attribute start read inside an attribute means the reader began in a string or comment and swallowed
+        # the real attribute after it (its `#[ignore]` or `#[cfg(..)]` is then not seen): refuse instead of reading.
+        assert not re.search(RUST_ATTRIBUTE_START, attr), (row["id"], "attribute start inside an attribute", attr)
+        # rustc reads a raw name as the attribute itself (`r#ignore` ignores, `r#path` moves a module).
+        assert not re.match(r"\s*r#", attr), (row["id"], "raw attribute name", attr)
+        # A lint level under cfg_attr keeps the item; any other cfg_attr could hide it.
+        assert not re.match(r"\s*cfg_attr\b", attr) or lint_only_cfg_attr(attr), (row["id"], "conditional attributes")
         cfg = re.fullmatch(r"\s*cfg\s*\((.*)\)\s*", attr, re.S)
         if cfg:
             assert all(rust_cfg_holds(cfg[1], platform) for platform in platforms), (row["id"], "disabled cfg", attr)
+
+
+# 이것을 실패시키는 것: lint 전용 cfg_attr(조건 아래의 allow·expect, 끝의 쉼표 하나, 이유 문자열 안의 괄호와 쉼표 포함)를
+# 거부하는 것(오탐), cfg_attr 안의 ignore·cfg·path나 두 번째 속성을 받는 것, 조건을 읽지 않고 받는 것(escape·raw 문자열·
+# 주석이 구분자를 가려 ignore나 cfg를 숨김), `r#` 이름의 속성을 받는 것(시험이 그 플랫폼에서 꺼질 수 있음).
+@pytest.mark.parametrize("attr, ok", [
+    ('cfg_attr(\n    not(test),\n    allow(dead_code, reason = "the helper calls it from the next change")\n)', True),
+    ('cfg_attr(test, expect(clippy::unwrap_used))', True),
+    ('cfg_attr(not(target_os = "linux"), allow(unused_mut, reason = "a) Linux, b) macOS"))', True),
+    ('cfg_attr(not(test), ignore)', False),
+    ('cfg_attr(test, cfg(target_os = "macos"))', False),
+    ('cfg_attr(test, path = "other.rs")', False),
+    ('cfg_attr(test, allow(dead_code), ignore)', False),
+    ('cfg_attr(test, allow(dead_code),)', True),
+    ('cfg_attr(test /* ( */, ignore /* ) */, allow(dead_code))', False),
+    ('cfg_attr(not(feature = "\\\\"), ignore, doc = ")\\"", allow(dead_code))', False),
+    ('cfg_attr(not(feature = r#"x"y"#), ignore, doc = r#")""#, allow(dead_code))', False),
+    ('cfg_attr(not(feature = "\\\\"), cfg(target_os = "macos"), doc = ")\\"", allow(dead_code))', False),
+    ('cfg_attr(feature = "x", allow(dead_code))', False),
+    ('r#ignore', False),
+    ('r#cfg(target_os = "macos")', False),
+    ('r#cfg_attr(test, ignore)', False),
+], ids=["allow", "expect", "reason-punctuation", "ignore", "cfg", "path", "second", "trailing-comma", "comment",
+        "escape", "raw-string", "escape-cfg", "unknown-predicate", "raw-ignore", "raw-cfg", "raw-cfg-attr"])
+def test_cfgs_hold_take_only_a_lint_level_under_cfg_attr(attr, ok):
+    row = {"id": "X"}
+    if ok:
+        assert_cfgs_hold(row, [attr], {"linux", "macos"})
+    else:
+        with pytest.raises(AssertionError):
+            assert_cfgs_hold(row, [attr], {"linux", "macos"})
+
+
+# rustc reads `#[r#path = ..]` on a module declaration as #[path]: the module then comes from another file.
+# 이것을 실패시키는 것: 모듈 선언의 `r#path`를 받는 것(assert_cfgs_hold의 `r#` 거부를 지우는 것).
+def test_module_path_refuses_a_raw_path_attribute():
+    relay, tests = "crates/bingsu/src/relay.rs", "crates/bingsu/src/relay/tests.rs"
+    real = lambda p: (ROOT / p).read_text().replace("\r\n", "\n")
+    declaration = '#[cfg(all(test, target_os = "linux"))]\nmod tests;'
+    assert real(relay).count(declaration) == 1
+    assert rust_module_path({"id": "X"}, tests, "bin:bingsu", real, {"linux"}) == ["relay", "tests"]
+    moved = real(relay).replace(declaration, declaration.replace("\n", '\n#[r#path = "tests.rs"]\n'))
+    with pytest.raises(AssertionError, match="raw attribute name"):
+        rust_module_path({"id": "X"}, tests, "bin:bingsu", lambda p: moved if p == relay else real(p), {"linux"})
+
+
+# blank_rust는 주석만 지우거나(속성 읽기) 리터럴까지 지운다(cell 수집기). 토큰을 잘못 읽으면 문자열 안의 `/*`를 주석으로
+# 보고 뒤의 진짜 `#[ignore]`까지 지운다. 이것을 실패시키는 것: 중첩 블록 주석을 첫 `*/`에서 끝내는 것(뒤의 `z */`가 코드로
+# 남음), 문자열·raw 문자열·byte·c 문자열·char 안의 `/*`·`//`를 주석으로 보는 것, 문자열의 `\"` escape나 char의 `\'` escape를
+# 모르는 것, raw identifier(`r#br`) 뒤의 문자열을 raw 문자열로 보는 것, lifetime·label을 char로 보는 것, literals에서
+# 문자열을 남기는 것, 읽지 못하는 char를 조용히 넘기는 것, 숫자·리터럴의 접미어(`0r`, `"x"r`)를 접두어로 다시 읽는 것,
+# raw lifetime(`'r#r`)을 끝까지 읽지 않는 것, 결합 문자나 Python 표에 아직 없는 문자(U+323B0)가 든 식별자를 끊는 것,
+# BOM·shebang 줄을 코드로 읽는 것, 주석이나 Rust 공백(U+200E) 뒤에 `[`가 오는 `#!`를 shebang으로 보는 것, doc 주석 뒤에
+# `[`가 오는 `#!`를 inner 속성으로 보는 것(rustc는 그 줄을 shebang으로 지움).
+@pytest.mark.parametrize("text, literals, tokens", [
+    ("a /* x /* y */ z */ b", False, ["a", "b"]),
+    ('s = "/* // */"; t', False, None),
+    ('s = r#"/* " //"#; t', False, None),
+    ('s = br"/*"; t = cr#"//"#; u', False, None),
+    ('s = b"/*"; t = c"//"; u', False, None),
+    ("q = '\"'; /* c */ x", False, ["q", "=", "'\"';", "x"]),
+    ("fn f<'a>(x: &'a str) /* c */ {}", False, ["fn", "f<'a>(x:", "&'a", "str)", "{}"]),
+    ('s = "x"; // c\nt', True, ["s", "=", ";", "t"]),
+    ('m!(\'\\\'\' \'"\' "/*") /* c */ x', False, ["m!('\\''", "'\"'", '"/*")', "x"]),
+    ('m!(r#br"a\\"/*") /* c */ x', False, ['m!(r#br"a\\"/*")', "x"]),
+    ('s = "x \\" /* y"; /* c */ z', False, ["s", "=", '"x', '\\"', "/*", 'y";', "z"]),
+    ("'outer: loop { break 'outer; } /* c */ x", False, ["'outer:", "loop", "{", "break", "'outer;", "}", "x"]),
+    ("c = '\\q'; /* c */ x", False, "raises"),
+    ('m!(0r"a\\"/*") /* c */ x', False, ['m!(0r"a\\"/*")', "x"]),
+    ('m!("x"r"a\\"/*") /* c */ x', False, ['m!("x"r"a\\"/*")', "x"]),
+    ('m!(\'a\'r"a\\"/*") /* c */ x', False, ['m!(\'a\'r"a\\"/*")', "x"]),
+    ('m!(\'r#r"a\\"/*") /* c */ x', False, ['m!(\'r#r"a\\"/*")', "x"]),
+    ('m!(r#a\u0301r"a\\"/*") /* c */ x', False, ['m!(r#a\u0301r"a\\"/*")', "x"]),
+    ('\ufeff#!/usr/bin/env x "\n#![cfg(any())]', False, ["#![cfg(any())]"]),
+    ("#!/*c*/[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+    ("#!\u200e[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+    ('m!(r#a\U000323b0r"a\\"/*") /* c */ x', False, ['m!(r#a\U000323b0r"a\\"/*")', "x"]),
+    ("#!/**doc*/[cfg(any())]\n#[test]", False, ["#[test]"]),
+    ("#!//!doc\n[cfg(any())]", False, ["[cfg(any())]"]),
+    ("#!/**/[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+    ("#!/***/[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+    ("#!////c\n[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+], ids=["nested", "string", "raw", "byte-raw", "byte", "char-quote", "lifetime", "literals", "char-escaped-quote",
+        "raw-identifier", "string-escaped-quote", "label", "unreadable-char", "number-suffix", "string-suffix",
+        "char-suffix", "raw-lifetime", "combining-identifier", "bom-shebang", "inner-not-shebang", "inner-after-mark",
+        "newer-unicode-identifier", "shebang-before-doc-comment", "shebang-before-inner-doc-line",
+        "inner-after-empty-block", "inner-after-starred-block", "inner-after-four-slashes"])
+def test_blank_rust_reads_comments_as_rustc_does(text, literals, tokens):
+    if tokens == "raises":
+        with pytest.raises(AssertionError, match="unreadable char literal"):
+            blank_rust(text, literals)
+        return
+    blanked = blank_rust(text, literals)
+    assert len(blanked) == len(text) and blanked.count("\n") == text.count("\n")
+    assert blanked == text if tokens is None else blanked.split() == tokens
+
+
+# A module's leading inner attributes apply to all of it: at a crate root, at the start of a module file, or right after
+# an inline `mod name {`. 이것을 실패시키는 것: 그 가운데 한 곳의 `#![cfg(any())]`를 보지 않는 것(crate 뿌리, 중간 모듈
+# 파일, 행의 파일, test target 뿌리, test target이 포함한 파일, inline 모듈), inline 모듈을 문자열 안의 `mod inner {`에서
+# 찾는 것(진짜 모듈의 첫머리를 읽지 않음).
+@pytest.mark.parametrize("path, target, edited, name, head", [
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/main.rs", None, ""),
+    ("crates/bingsu/src/commands/command_supervisor.rs", "bin:bingsu", "crates/bingsu/src/commands/mod.rs", None, ""),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/relay/tests.rs", None, ""),
+    ("crates/bingsu/tests/collection_store.rs", "test:collection_store", "crates/bingsu/tests/collection_store.rs", None, ""),
+    ("crates/bingsu/tests/support/x.rs", "test:collection_store", "crates/bingsu/tests/support/x.rs", None, ""),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", None, "relay::tests::inner::f", ""),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", '#[doc = "mod inner {"]', "relay::tests::inner::f", ""),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/relay/tests.rs", None, "\ufeff"),
+    ("crates/bingsu/src/relay/tests.rs", "bin:bingsu", "crates/bingsu/src/relay/tests.rs", None, '#!/usr/bin/env x "\n'),
+], ids=["crate-root", "module-file", "row-file", "test-root", "test-include", "inline", "inline-named-in-a-string",
+        "row-file-bom", "row-file-shebang"])
+def test_module_inner_cfgs_must_hold(path, target, edited, name, head):
+    real = lambda p: (ROOT / p).read_text().replace("\r\n", "\n")
+    files = {}
+    if path.endswith("support/x.rs"):
+        files = {"crates/bingsu/tests/collection_store.rs": '#[path = "support/x.rs"]\nmod x;\n',
+                 path: "#[test]\nfn f() {}\n"}
+    read = lambda p: files[p] if p in files else real(p)
+    row = {"id": "X"}
+    if name is None:
+        rust_module_path(row, path, target, read, {"linux"})
+        files[edited] = head + "#![cfg(any())]\n" + read(edited)
+        with pytest.raises(AssertionError, match="disabled cfg"):
+            rust_module_path(row, path, target, read, {"linux"})
+    else:
+        inline = "\n" + (edited or "") + "\nmod inner {\n    #![cfg(%s)]\n    use super::*;\n    #[test]\n    fn f() {}\n}\n"
+        files[path] = real(path) + inline % "unix"
+        assert rust_libtest_module(row, files[path], path, name, target, read, {"linux"}) == "relay::tests::inner::"
+        files[path] = real(path) + inline % "any()"
+        with pytest.raises(AssertionError, match="disabled cfg"):
+            rust_libtest_module(row, files[path], path, name, target, read, {"linux"})
+
+
+# 문자열 안에서 시작한 가짜 속성이 뒤의 진짜 속성을 삼키면, 그 내용에 진짜 속성의 시작이 남는다. 이것을 실패시키는 것:
+# 속성 안의 속성 시작을 받는 것(문자열 뒤의 `#[ignore]`나 `#[cfg(any())]`가 보이지 않아 꺼진 시험을 받음).
+@pytest.mark.parametrize("prefix", ['const _: &str = r#"\n# [\n"#;\n', 'const _: &str = "\n#[";\n'], ids=["spaced", "tight"])
+@pytest.mark.parametrize("hidden", ["#[ignore]", "#[cfg(any())]"])
+def test_test_attributes_refuse_an_attribute_a_string_swallowed(prefix, hidden):
+    with pytest.raises(AssertionError, match="attribute start inside an attribute"):
+        rust_test_attributes({"id": "X"}, prefix + hidden + "\n#[test]\nfn f() {}\n", "x.rs", "f", {"linux", "macos"})
+    # A string whose `# [` closes inside it swallows nothing: the attributes after it are read as usual.
+    closed = 'const _: &str = "\n# [x]";\n#[allow(dead_code)]\n#[test]\nfn f() {}\n'
+    assert rust_test_attributes({"id": "X"}, closed, "x.rs", "f", {"linux", "macos"}) == ["allow(dead_code)", "test"]
+
+
+def rust_test_attributes(row, source, path, base, platforms):
+    """The attributes of the one `#[test]` fn `base` in `source`, whose own
+    cfgs hold on `platforms`."""
+    groups = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(base) + r"\s*\(")
+    groups = [group for group in groups if group]
+    assert len(groups) == 1, (row["id"], "test declaration", path, base)
+    attributes, = groups
+    assert "test" in [a.strip() for a in attributes], (row["id"], "not a test")
+    assert_cfgs_hold(row, attributes, platforms)
+    return attributes
+
+
+def rust_libtest_module(row, source, path, name, target, read, platforms):
+    """The libtest module prefix (`a::b::`) of `name`, the `module::path::fn`
+    of a test in `path`: the file's own modules come from the declarations
+    that reach it, the inline ones from `name`, and every one's cfgs hold on
+    `platforms`."""
+    # 이것을 실패시키는 것: 표의 모듈 경로를 믿는 것(파일 경로와 mod 선언에서 유도한 경로와 다름).
+    modules = rust_module_path(row, path, target, read, platforms)
+    inline = name.split("::")[len(modules):-1]
+    assert name.split("::")[:len(modules)] == modules, (row["id"], "module path", name, modules)
+    for inner in inline:
+        declaration = r"(?:pub(?:\([^)]*\))?\s+)?mod\s+" + re.escape(inner) + r"\s*\{"
+        found = rust_attributes(source, declaration)
+        assert len(found) == 1, (row["id"], "inline module", inner)
+        assert_cfgs_hold(row, found[0], platforms)
+        # 이것을 실패시키는 것: inline 모듈 첫머리의 `#![cfg(any())]`를 보지 않는 것(그 모듈의 시험이 모두 사라짐).
+        # Found in literal-free code: a string such as `#[doc = "mod tests {"]` is no module.
+        bodies = list(re.finditer(declaration, blank_rust(source, literals=True)))
+        assert len(bodies) == 1, (row["id"], "inline module", inner)
+        assert_cfgs_hold(row, module_inner_attributes(source, bodies[0].end()), platforms)
+    return "::".join(modules + inline) + "::" if modules + inline else ""
 
 
 def rust_module_path(row, path, target, read, platforms):
@@ -941,10 +1346,16 @@ def rust_module_path(row, path, target, read, platforms):
         assert not any(re.match(r"\s*path\b", attr) for attr in found[0]), (row["id"], "module #[path]", parent, name)
         assert_cfgs_hold(row, found[0], platforms)
 
+    def opens(file):
+        # A file's leading inner attributes apply to its whole module (or crate, at a root).
+        # 이것을 실패시키는 것: 파일 첫머리의 `#![cfg(any())]`를 보지 않는 것(그 파일의 시험이 모두 사라짐).
+        assert_cfgs_hold(row, module_inner_attributes(read(file)), platforms)
+
     if target == "lib" or target.startswith("bin:"):
         # 이것을 실패시키는 것: 다른 target의 root·src 밖 파일·root 아래가 아닌 파일을 그 target의 행으로 받는 것.
         root = cargo_target_root(row, f"crates/{crate}/", target, read)
         assert path.endswith(".rs"), (row["id"], "target source", path)
+        opens(root)
         if path == root:
             return []
         base = root.rsplit("/", 1)[0] + "/"
@@ -957,11 +1368,15 @@ def rust_module_path(row, path, target, read, platforms):
             parent = root if not index else (
                 base + prefix + "/mod.rs" if read_exists(read, base + prefix + "/mod.rs") else base + prefix + ".rs")
             declared(parent, name)
+            if index:
+                opens(parent)
+        opens(path)
         return parts
     assert target.startswith("test:"), (row["id"], "unknown target", target)
     name = target.removeprefix("test:")
     assert re.fullmatch(r"\w+", name), (row["id"], "target name", target)
     target_path = f"crates/{crate}/tests/{name}.rs"
+    opens(target_path)
     if path == target_path:
         return []
     # 이것을 실패시키는 것: target 파일이 포함하지 않는 파일을 그 target의 행으로 받는 것.
@@ -978,6 +1393,7 @@ def rust_module_path(row, path, target, read, platforms):
     found = rust_attributes(source, mod + re.escape(modules[0]) + r"\s*;")
     assert len(found) == 1, (row["id"], "module declaration", target_path, modules[0])
     assert_cfgs_hold(row, found[0], platforms)
+    opens(path)
     return modules
 
 
@@ -1117,14 +1533,8 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
             if row.get("gate") in release_gates:
                 assert_release_cells(row, hits)
         else:
-            groups = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(base) + r"\s*\(")
-            groups = [group for group in groups if group]
-            assert len(groups) == 1, (row["id"], "test declaration", path, base)
-            attributes, = groups
-            assert "test" in [a.strip() for a in attributes], (row["id"], "not a test")
-            platforms = ["linux"] if row["platform"].startswith("Linux") else (
-                ["macos"] if row["platform"] == "macOS" else ["linux", "macos"])
-            assert_cfgs_hold(row, attributes, platforms)
+            platforms = row_platforms(row)
+            attributes = rust_test_attributes(row, source, path, base, platforms)
             ignored = any(re.match(r"\s*ignore\b", attr) for attr in attributes)
             # A cgroup cell test runs only in the cell job, ignored elsewhere.
             in_cell = ignored and target == "bin:bingsu" and [a.strip() for a in attributes].count(CELL_IGNORE) == 1
@@ -1155,17 +1565,9 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
                           "crates/bingsu/src/prompt_read.rs": "prompt_read::tests::"}.get(path, "")
                 assert name == base, (row["id"], "historical rows name the function only", name)
             else:
-                # 이것을 실패시키는 것: 표의 모듈 경로를 믿는 것(파일 경로와 mod 선언에서 유도한 경로와 다름).
                 cargo_target = target.split(":", 1)[-1]
-                modules = rust_module_path(row, path, target, read, platforms)
-                inline = name.split("::")[len(modules):-1]
-                assert name.split("::")[:len(modules)] == modules, (row["id"], "module path", name, modules)
-                for inner in inline:
-                    found = rust_attributes(source, r"(?:pub(?:\([^)]*\))?\s+)?mod\s+" + re.escape(inner) + r"\s*\{")
-                    assert len(found) == 1, (row["id"], "inline module", inner)
-                    assert_cfgs_hold(row, found[0], platforms)
+                module = rust_libtest_module(row, source, path, name, target, read, platforms)
                 selection = ["--lib"] if target == "lib" else ["--bin" if target.startswith("bin:") else "--test", cargo_target]
-                module = "::".join(modules + inline) + "::" if modules + inline else ""
             runnable = [run for _, run in commands if run[:2] == ["cargo", "test"] and "--no-run" not in run
                         and ["-p", crate] in [run[i:i+2] for i in range(len(run))]
                         and selection in [run[i:i + len(selection)] for i in range(len(run))]

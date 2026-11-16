@@ -259,6 +259,8 @@ jobs:
           cargo test -j 2 -p bingsu --bin bingsu -- --test-threads=2 | tee "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_execute_only_target_runs_path_only ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_execute_only_script_is_not_loaded ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_target_has_no_new_privs ... ok' "$RUNNER_TEMP/relay-native.txt"
+          grep -Fx 'test relay::tests::test_relay_writes_refusal_to_status ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test commands::exec_path::tests::nonroot_cases_run_for_a_user ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_refuses_after_deadline ... ok' "$RUNNER_TEMP/relay-native.txt"
           grep -Fx 'test relay::tests::test_relay_runs_before_deadline ... ok' "$RUNNER_TEMP/relay-native.txt"
