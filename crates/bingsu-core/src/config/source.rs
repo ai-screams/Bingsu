@@ -810,162 +810,207 @@ fn load_as<R: Into<Root>>(
     // their subgraphs. A replacement origin removes the old reservation.
     let mut root_leaves = Vec::new();
     for r in roots {
-        let r: Root = r.into();
-        let (key, size, trust) = r.meta();
-        if let Some(k) = w.known(key) {
-            if !w.replaces_origin(k, trust) {
-                continue;
-            }
-            order.retain(|&placed| placed != k);
-            root_leaves.retain(|&leaf| leaf != k);
-        }
-        // Promoted roots no longer consume the provisional shape budget.
-        let leaves = root_leaves
-            .iter()
-            .fold(Budget::default(), |mut b, &i: &usize| {
-                let f = &w.nodes[i].found;
-                if f.trust != Trust::Executable {
-                    b.files += 1;
-                    b.bytes += f.opened.bytes.len();
-                }
-                b
-            });
-        // Roots (`conf.d` too) spend the same budget, decided on the size
-        // before the root is read or parsed: a trusted root over it fails
-        // the load, any other root over it is left out unread (W406).
-        let exec = trust == Trust::Executable;
-        let limit = if exec {
-            w.used
-        } else {
-            Budget {
-                files: w.used.files + leaves.files,
-                bytes: w.used.bytes + leaves.bytes,
-            }
-        };
-        if let Some(d) = budget_problem(size, 0, limit) {
-            w.unread_root(r, d);
-            continue;
-        }
-        let r = match r {
-            // Always an error, whatever trust the files would have had: a
-            // shape-only or unsafe place must not drop one of two files and
-            // publish what is left.
-            // 이것을 실패시키는 것: 공존을 그 자리의 신뢰로 판정하는 것(모양 전용·안전하지 않은 두 파일이면
-            // 경고로 내려가 새 스냅샷이 발행됨).
-            Root::TwoFormats { meta, other } => {
-                let d = Diagnostic::new(codes::TWO_FORMATS, Place::Builtin)
-                    .arg("path", String::from_utf8_lossy(&meta.display).into_owned())
-                    .arg("other", String::from_utf8_lossy(&other).into_owned());
-                let meta = RootMeta {
-                    trust: Trust::Executable,
-                    ..meta
-                };
-                w.unread_root(Root::File(meta), d);
-                continue;
-            }
-            Root::Read(o) => o,
-            Root::File(m) => match w.resolver.open_root(&m) {
-                Ok(o) => o,
-                Err(e) => {
-                    let d = Diagnostic::new(codes::EXTENDS_BAD_PATH, Place::Builtin)
-                        .arg("path", String::from_utf8_lossy(&m.display).into_owned())
-                        .arg("reason", e.reason);
-                    w.unread_root(Root::File(m), d);
-                    continue;
-                }
-            },
-        };
-        // Recheck actual bytes before parsing for every trust grade. A root
-        // that grew beyond its budget must not fail an unrelated trusted root.
-        if let Some(d) = budget_problem(r.bytes.len(), 0, limit) {
-            w.resolver.adopt(r.key, None);
-            w.unread_root(Root::Read(r), d);
-            continue;
-        }
-        if exec {
-            w.used.files += 1;
-            w.used.bytes += r.bytes.len();
-        }
-        let i = w.open(r, &[], false);
-        if !exec {
-            root_leaves.push(i);
-        }
-        w.trusted(i, &mut order);
+        add_root(&mut w, r.into(), &mut order, &mut root_leaves);
     }
     // Phase 2: each file that is not trusted, on its own.
     let mut warnings = core::mem::take(&mut w.warnings);
+    let full = shape_leaves(&mut w, &order, &mut warnings);
+    let errors = classify(&mut w.nodes, &mut warnings);
+    let order: Vec<SourceId> = full
+        .into_iter()
+        .filter(|&i| w.nodes[i].found.status == Status::Applied)
+        .map(|i| SourceId(i as u32))
+        .collect();
+    let files: Vec<Found> = w.nodes.into_iter().map(|n| n.found).collect();
+    if errors.is_empty() {
+        Ok(LoadReport {
+            files,
+            order,
+            warnings,
+        })
+    } else {
+        Err(LoadError {
+            files,
+            errors,
+            warnings,
+        })
+    }
+}
+
+/// Phase 1 for one root: whether it replaces a root already met, the budget
+/// on its size, two formats at one place, opening it, the budget on its
+/// actual bytes, then the trusted walk from it.
+fn add_root(w: &mut Walk<'_>, r: Root, order: &mut Vec<usize>, root_leaves: &mut Vec<usize>) {
+    let (key, size, trust) = r.meta();
+    if let Some(k) = w.known(key) {
+        if !w.replaces_origin(k, trust) {
+            return;
+        }
+        order.retain(|&placed| placed != k);
+        root_leaves.retain(|&leaf| leaf != k);
+    }
+    // Promoted roots no longer consume the provisional shape budget.
+    let leaves = root_leaves
+        .iter()
+        .fold(Budget::default(), |mut b, &i: &usize| {
+            let f = &w.nodes[i].found;
+            if f.trust != Trust::Executable {
+                b.files += 1;
+                b.bytes += f.opened.bytes.len();
+            }
+            b
+        });
+    // Roots (`conf.d` too) spend the same budget, decided on the size
+    // before the root is read or parsed: a trusted root over it fails
+    // the load, any other root over it is left out unread (W406).
+    let exec = trust == Trust::Executable;
+    let limit = if exec {
+        w.used
+    } else {
+        Budget {
+            files: w.used.files + leaves.files,
+            bytes: w.used.bytes + leaves.bytes,
+        }
+    };
+    if let Some(d) = budget_problem(size, 0, limit) {
+        w.unread_root(r, d);
+        return;
+    }
+    let r = match r {
+        // Always an error, whatever trust the files would have had: a
+        // shape-only or unsafe place must not drop one of two files and
+        // publish what is left.
+        // 이것을 실패시키는 것: 공존을 그 자리의 신뢰로 판정하는 것(모양 전용·안전하지 않은 두 파일이면
+        // 경고로 내려가 새 스냅샷이 발행됨).
+        Root::TwoFormats { meta, other } => {
+            let d = Diagnostic::new(codes::TWO_FORMATS, Place::Builtin)
+                .arg("path", String::from_utf8_lossy(&meta.display).into_owned())
+                .arg("other", String::from_utf8_lossy(&other).into_owned());
+            let meta = RootMeta {
+                trust: Trust::Executable,
+                ..meta
+            };
+            w.unread_root(Root::File(meta), d);
+            return;
+        }
+        Root::Read(o) => o,
+        Root::File(m) => match w.resolver.open_root(&m) {
+            Ok(o) => o,
+            Err(e) => {
+                let d = Diagnostic::new(codes::EXTENDS_BAD_PATH, Place::Builtin)
+                    .arg("path", String::from_utf8_lossy(&m.display).into_owned())
+                    .arg("reason", e.reason);
+                w.unread_root(Root::File(m), d);
+                return;
+            }
+        },
+    };
+    // Recheck actual bytes before parsing for every trust grade. A root
+    // that grew beyond its budget must not fail an unrelated trusted root.
+    if let Some(d) = budget_problem(r.bytes.len(), 0, limit) {
+        w.resolver.adopt(r.key, None);
+        w.unread_root(Root::Read(r), d);
+        return;
+    }
+    if exec {
+        w.used.files += 1;
+        w.used.bytes += r.bytes.len();
+    }
+    let i = w.open(r, &[], false);
+    if !exec {
+        root_leaves.push(i);
+    }
+    w.trusted(i, order);
+}
+
+/// Phase 2 over the apply order: each file that is not trusted gets its own
+/// walk; returns the order with the subgraphs that were kept.
+fn shape_leaves(w: &mut Walk<'_>, order: &[usize], warnings: &mut Vec<Diagnostic>) -> Vec<usize> {
     let mut full = Vec::with_capacity(order.len());
-    for &i in &order {
+    for &i in order {
         if w.nodes[i].walked || w.nodes[i].found.status == Status::Dropped {
             continue;
         }
         if w.nodes[i].found.trust != Trust::Executable && w.nodes[i].problems.is_empty() {
-            let mut sub = Vec::new();
-            let mut visited = Vec::new();
-            // The leaf itself is the first thing its subgraph spends.
-            let mut spent = Budget {
-                files: 1,
-                bytes: w.nodes[i].found.opened.bytes.len(),
-            };
-            let over = w.used.files + 1 > DISTINCT_FILES_MAX
-                || w.used.bytes + spent.bytes > TOTAL_BYTES_MAX;
-            let outcome = if over {
-                let code = if w.used.files + 1 > DISTINCT_FILES_MAX {
-                    codes::EXTENDS_TOO_MANY
-                } else {
-                    codes::EXTENDS_TOO_BIG
-                };
-                let at = Place::Source {
-                    id: SourceId(i as u32),
-                    span: Span::default(),
-                };
-                let mut d = Diagnostic::new(code, at);
-                d.via = w.nodes[i].found.via.clone();
-                Some(d)
-            } else {
-                w.shaped(i, &mut sub, &mut spent, &mut visited)
-            };
-            match outcome {
-                None => {
-                    w.used.files += spent.files;
-                    w.used.bytes += spent.bytes;
-                    full.extend(sub);
-                }
-                Some(d) => {
-                    // Drop every shape-only node walked here, including
-                    // leaves registered in phase 1. Unsafe keeps its own keys.
-                    for k in visited {
-                        if k != i {
-                            w.nodes[k].found.status = Status::Dropped;
-                        }
-                    }
-                    let id = SourceId(i as u32);
-                    if over || w.nodes[i].found.trust == Trust::ShapeOnly {
-                        w.nodes[i].found.status = Status::Dropped;
-                    } else {
-                        // Unsafe keeps its own keys after a bad descendant,
-                        // so the retained leaf still spends one file and its bytes.
-                        w.used.files += 1;
-                        w.used.bytes += w.nodes[i].found.opened.bytes.len();
-                    }
-                    let mut warn = Diagnostic::new(
-                        codes::SHAPE_FILE_DROPPED,
-                        Place::Source {
-                            id,
-                            span: Span::default(),
-                        },
-                    )
-                    .arg("reason", alloc::format!("{}", d.code));
-                    warn.via = w.nodes[i].found.via.clone();
-                    warnings.push(warn);
-                    warnings.push(d);
-                }
-            }
+            shape_leaf(w, i, &mut full, warnings);
         }
         full.push(i);
     }
+    full
+}
+
+/// One leaf that is not trusted: its subgraph is kept and charged to the
+/// budget, or dropped with a warning (the budget it would have spent comes
+/// back).
+fn shape_leaf(w: &mut Walk<'_>, i: usize, full: &mut Vec<usize>, warnings: &mut Vec<Diagnostic>) {
+    let mut sub = Vec::new();
+    let mut visited = Vec::new();
+    // The leaf itself is the first thing its subgraph spends.
+    let mut spent = Budget {
+        files: 1,
+        bytes: w.nodes[i].found.opened.bytes.len(),
+    };
+    let over =
+        w.used.files + 1 > DISTINCT_FILES_MAX || w.used.bytes + spent.bytes > TOTAL_BYTES_MAX;
+    let outcome = if over {
+        let code = if w.used.files + 1 > DISTINCT_FILES_MAX {
+            codes::EXTENDS_TOO_MANY
+        } else {
+            codes::EXTENDS_TOO_BIG
+        };
+        let at = Place::Source {
+            id: SourceId(i as u32),
+            span: Span::default(),
+        };
+        let mut d = Diagnostic::new(code, at);
+        d.via = w.nodes[i].found.via.clone();
+        Some(d)
+    } else {
+        w.shaped(i, &mut sub, &mut spent, &mut visited)
+    };
+    match outcome {
+        None => {
+            w.used.files += spent.files;
+            w.used.bytes += spent.bytes;
+            full.extend(sub);
+        }
+        Some(d) => {
+            // Drop every shape-only node walked here, including
+            // leaves registered in phase 1. Unsafe keeps its own keys.
+            for k in visited {
+                if k != i {
+                    w.nodes[k].found.status = Status::Dropped;
+                }
+            }
+            let id = SourceId(i as u32);
+            if over || w.nodes[i].found.trust == Trust::ShapeOnly {
+                w.nodes[i].found.status = Status::Dropped;
+            } else {
+                // Unsafe keeps its own keys after a bad descendant,
+                // so the retained leaf still spends one file and its bytes.
+                w.used.files += 1;
+                w.used.bytes += w.nodes[i].found.opened.bytes.len();
+            }
+            let mut warn = Diagnostic::new(
+                codes::SHAPE_FILE_DROPPED,
+                Place::Source {
+                    id,
+                    span: Span::default(),
+                },
+            )
+            .arg("reason", alloc::format!("{}", d.code));
+            warn.via = w.nodes[i].found.via.clone();
+            warnings.push(warn);
+            warnings.push(d);
+        }
+    }
+}
+
+/// Phase 3: a problem in a shape-only file drops it with a warning; a problem
+/// in any other file fails the load. Returns the errors.
+fn classify(nodes: &mut [Node], warnings: &mut Vec<Diagnostic>) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
-    for n in &mut w.nodes {
+    for n in nodes {
         if n.problems.is_empty() || n.found.status == Status::Dropped {
             continue;
         }
@@ -987,25 +1032,7 @@ fn load_as<R: Into<Root>>(
             errors.append(&mut n.problems);
         }
     }
-    let order: Vec<SourceId> = full
-        .into_iter()
-        .filter(|&i| w.nodes[i].found.status == Status::Applied)
-        .map(|i| SourceId(i as u32))
-        .collect();
-    let files: Vec<Found> = w.nodes.into_iter().map(|n| n.found).collect();
-    if errors.is_empty() {
-        Ok(LoadReport {
-            files,
-            order,
-            warnings,
-        })
-    } else {
-        Err(LoadError {
-            files,
-            errors,
-            warnings,
-        })
-    }
+    errors
 }
 
 #[cfg(test)]
