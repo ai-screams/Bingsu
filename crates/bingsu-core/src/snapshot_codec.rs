@@ -1440,8 +1440,31 @@ struct Parts<'c> {
     custom: &'c [CustomSegment],
     widths: &'c [WidthRun],
 }
+/// The steps run in this order and stop at the first failure. `check_counts`
+/// comes first: the band steps index fixed `MAX_BANDS` arrays by band.
 fn check(c: &Parts<'_>) -> Result<(), Error> {
-    let named = |n: &String| c.band_names.is_none_or(|names| names.contains(n));
+    check_counts(c)?;
+    check_band_names(c)?;
+    let mut ranks = [u16::MAX; crate::bands::MAX_BANDS];
+    check_band_ranks(c, &mut ranks)?;
+    check_band_precedence(c, &ranks)?;
+    check_custom_segments(c)?;
+    // Text segments never take a mask bit.
+    const _: () = assert!(crate::field::BUILTIN.len() < 32);
+    if c.collect_mask >> crate::field::BUILTIN.len() != 0 {
+        return Err(Error::Shape);
+    }
+    if !c.variant_lines {
+        return Err(Error::Shape);
+    }
+    for p in [c.palette, c.light_palette] {
+        check_palette(p)?;
+    }
+    check_exec_units(c)?;
+    check_widths(c)
+}
+/// The table sizes the later steps index by.
+fn check_counts(c: &Parts<'_>) -> Result<(), Error> {
     if c.bands.len() > crate::bands::MAX_BANDS
         || c.variants != c.bands.len() + 1
         || c.name_count != c.bands.len()
@@ -1451,6 +1474,9 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
     {
         return Err(Error::Shape);
     }
+    Ok(())
+}
+fn check_band_names(c: &Parts<'_>) -> Result<(), Error> {
     // Band names are arbitrary TOML keys, not segment ids. The source
     // table and merge guarantee uniqueness, including for quoted keys.
     let mut names = BTreeSet::new();
@@ -1461,17 +1487,31 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
     {
         return Err(Error::Shape);
     }
+    Ok(())
+}
+/// `band_order` is a permutation of the bands; fills each band's rank.
+fn check_band_ranks(
+    c: &Parts<'_>,
+    ranks: &mut [u16; crate::bands::MAX_BANDS],
+) -> Result<(), Error> {
     // Validate the supplied order without allocating a graph or recompiling it.
     if c.band_order.len() != c.bands.len() {
         return Err(Error::Shape);
     }
-    let mut ranks = [u16::MAX; crate::bands::MAX_BANDS];
     for (rank, &i) in c.band_order.iter().enumerate() {
         if i >= c.bands.len() || ranks[i] != u16::MAX {
             return Err(Error::Shape);
         }
         ranks[i] = rank as u16;
     }
+    Ok(())
+}
+/// Each band's column range, then `ranks` against the precedence
+/// `bands::before` gives.
+fn check_band_precedence(
+    c: &Parts<'_>,
+    ranks: &[u16; crate::bands::MAX_BANDS],
+) -> Result<(), Error> {
     for b in c.bands {
         if b.min_cols.unwrap_or(0) > b.max_cols.unwrap_or(u16::MAX) {
             return Err(Error::Shape);
@@ -1533,7 +1573,10 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
             }
         }
     }
-    // Text segments take numbers after the built-ins and never a mask bit.
+    Ok(())
+}
+fn check_custom_segments(c: &Parts<'_>) -> Result<(), Error> {
+    // Text segments take numbers after the built-ins.
     if c.custom.len() > crate::config::compile::MAX_CUSTOM_TEXT
         || !c.custom.windows(2).all(|w| w[0].id < w[1].id)
         || c.custom.iter().any(|t| {
@@ -1550,34 +1593,32 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
     {
         return Err(Error::Shape);
     }
-    const _: () = assert!(crate::field::BUILTIN.len() < 32);
-    if c.collect_mask >> crate::field::BUILTIN.len() != 0 {
-        return Err(Error::Shape);
+    Ok(())
+}
+/// A warning names one of the palette's tokens; an ANSI slot is one of 16.
+fn check_palette(p: &ResolvedPalette) -> Result<(), Error> {
+    for w in &p.warnings {
+        let token = match w {
+            PaletteWarning::TextContrast { token, .. }
+            | PaletteWarning::BlockContrast { token, .. }
+            | PaletteWarning::Clipped { token }
+            | PaletteWarning::MarkContrast { token, .. } => Some(*token),
+            PaletteWarning::BackgroundClipped => None,
+        };
+        if token.is_some_and(|n| n >= p.tokens.len()) {
+            return Err(Error::Shape);
+        }
     }
-    if !c.variant_lines {
-        return Err(Error::Shape);
-    }
-    for p in [c.palette, c.light_palette] {
-        for w in &p.warnings {
-            let token = match w {
-                PaletteWarning::TextContrast { token, .. }
-                | PaletteWarning::BlockContrast { token, .. }
-                | PaletteWarning::Clipped { token }
-                | PaletteWarning::MarkContrast { token, .. } => Some(*token),
-                PaletteWarning::BackgroundClipped => None,
-            };
-            if token.is_some_and(|n| n >= p.tokens.len()) {
+    for t in &p.tokens {
+        for a in [t.ansi, t.on_block_ansi] {
+            if matches!(a, AnsiSlot::Slot(n) if n > 15) {
                 return Err(Error::Shape);
             }
         }
-        for t in &p.tokens {
-            for a in [t.ansi, t.on_block_ansi] {
-                if matches!(a, AnsiSlot::Slot(n) if n > 15) {
-                    return Err(Error::Shape);
-                }
-            }
-        }
     }
+    Ok(())
+}
+fn check_exec_units(c: &Parts<'_>) -> Result<(), Error> {
     let mut ids = BTreeSet::new();
     for u in c.exec_units {
         // A unit is looked up by id, and the compiler always writes at least
@@ -1629,6 +1670,11 @@ fn check(c: &Parts<'_>) -> Result<(), Error> {
             }
         }
     }
+    Ok(())
+}
+/// A width run's columns, and the band it names (on the helper's side).
+fn check_widths(c: &Parts<'_>) -> Result<(), Error> {
+    let named = |n: &String| c.band_names.is_none_or(|names| names.contains(n));
     for w in c.widths {
         if w.from > w.to || w.band.as_ref().is_some_and(|n| !named(n)) {
             return Err(Error::Shape);
