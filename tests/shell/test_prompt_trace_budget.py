@@ -4,11 +4,14 @@ from collections import Counter
 from types import SimpleNamespace
 import hashlib
 import re
+import shutil
 
 import pytest
 
-import test_prompt_env_paths as budget
-from test_prompt_env_paths import assert_historical_prompt_trace_budget as assert_prompt_trace_budget
+import test_prompt_env_paths as env_paths
+import trace_support as budget
+from shell_support import ROOT
+from trace_support import assert_historical_prompt_trace_budget as assert_prompt_trace_budget
 
 EXE = "/pinned/bin/bingsu"
 ROOTS = ["/pinned/run", "/pinned/config", "/pinned/state"]
@@ -1602,7 +1605,7 @@ def test_held_root_open_is_absolute_even_with_hostile_cwd(held_trace):
 
 # 이것을 실패시키는 것: open_flags가 O_LARGEFILE을 남기는 것.
 def test_walk_step_accepts_x86_64_largefile_flag():
-    import test_prompt_env_paths as t
+    import trace_support as t
     line = '9 openat(AT_FDCWD</>, "/", O_RDONLY|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC|O_PATH|O_DIRECTORY) = 3</>'
     call = next(c for c in t.parse_trace(line) if c.name == "openat")
     assert t.helper_walk_step(call, "/", ["/root/x/run-t/bingsu"])
@@ -2507,12 +2510,12 @@ def run_helper_captures(monkeypatch, tmp_path, captures):
         def plan(self, libc):
             return self.expected_plan
 
-    monkeypatch.setattr(budget, "HelperStageFixture", Fixture)
-    monkeypatch.setattr(budget, "require_release_helper", lambda _: "gnu")
-    monkeypatch.setattr(budget, "real_bin", lambda: Path(HELPER_EXE))
-    monkeypatch.setattr(budget.shutil, "which", lambda _: "/synthetic/strace")
-    monkeypatch.setattr(budget, "wait_helpers", lambda _: None)
-    budget.test_live_helper_calls_match_stage_formula("collect", tmp_path)
+    monkeypatch.setattr(env_paths, "HelperStageFixture", Fixture)
+    monkeypatch.setattr(env_paths, "require_release_helper", lambda _: "gnu")
+    monkeypatch.setattr(env_paths, "real_bin", lambda: Path(HELPER_EXE))
+    monkeypatch.setattr(shutil, "which", lambda _: "/synthetic/strace")
+    monkeypatch.setattr(env_paths, "wait_helpers", lambda _: None)
+    env_paths.test_live_helper_calls_match_stage_formula("collect", tmp_path)
     return len(used)
 
 
@@ -2532,7 +2535,7 @@ def test_helper_stage_upload_contains_only_fixture_evidence(monkeypatch, tmp_pat
     assert not any(p.is_symlink() for p in root.rglob("*"))
     record = json.loads((root / "collect/attempt-1/attempt.json").read_text())
     assert record["published"] is True and record["errors"] == []
-    _, steps = workflow_job((budget.ROOT / ".github/workflows/shell.yml").read_text(),
+    _, steps = workflow_job((ROOT / ".github/workflows/shell.yml").read_text(),
                             "filter-calls", action_inputs=True)
     upload, = [s for s in steps
                if s.get("uses", "").startswith("actions/upload-artifact@")]
@@ -3137,9 +3140,9 @@ def test_front_platform_facts_counted(primitive):
 
 # 이것을 실패시키는 것: fixture의 청크 메타데이터만 바꾸어 제품 청크 변경을 감추는 것.
 def test_front_chunk_metadata_mutation(monkeypatch):
-    monkeypatch.setattr(budget, 'FRONT_CHUNK', 8192)
+    monkeypatch.setattr(env_paths, 'FRONT_CHUNK', 8192)
     with pytest.raises(AssertionError):
-        budget.test_front_chunk_matches_product_constant()
+        env_paths.test_front_chunk_matches_product_constant()
 
 
 def front_axis_control():
@@ -3173,7 +3176,7 @@ def front_axis_control():
         path = budget.args_of(budget.parse_trace(line)[0])[0].split('<')[1][:-1]
         opened = next(l for l in lines if l.startswith('1 openat(') and l.endswith('<' + path + '>'))
         number = opened.split(' = ')[1].split('<')[0]
-        line = budget.re.sub(r'read\(\d+<', 'read(' + number + '<', line)
+        line = re.sub(r'read\(\d+<', 'read(' + number + '<', line)
         lines.append(line)
     lines += ['1 +++ exited with 0 +++']
     return lines, pinned, store, attempts
