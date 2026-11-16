@@ -8,7 +8,7 @@ use gix_index::entry::stat::Options;
 use gix_object::bstr::ByteSlice;
 use std::{borrow::Cow, path::Path};
 
-#[path = "pattern_caps.rs"]
+#[path = "policy/pattern_caps.rs"]
 mod pattern_caps;
 use pattern_caps::{
     attribute_names, attribute_part_bytes, attribute_parts, class_bytes, is_comment,
