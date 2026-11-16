@@ -946,16 +946,30 @@ def blank_rust(text, literals=False):
             return end
         return None
 
+    def ident_char(at, start=False):
+        # Outside literals and comments rustc takes beyond ASCII only identifier characters and whitespace, so any
+        # other non-ASCII character continues an identifier; Python's Unicode tables can be older than Rust's.
+        if at >= n:
+            return False
+        char = text[at]
+        if char.isascii():
+            return char == "_" or (char.isalpha() if start else char.isalnum())
+        return char not in RUST_SPACE
+
     def continues(at):
-        return at < n and (text[at] == "_" or ("_" + text[at]).isidentifier())
+        return ident_char(at)
 
     def ident_end(at):
-        if at >= n or not (text[at] == "_" or text[at].isidentifier()):
+        if not ident_char(at, start=True):
             return None
         at += 1
         while continues(at):
             at += 1
         return at
+
+    def doc_comment(at):
+        return (text.startswith(("///", "//!"), at) and not text.startswith("////", at)) or (
+            text.startswith(("/**", "/*!"), at) and not text.startswith(("/***", "/**/"), at))
 
     def suffixed(end):
         # A literal's suffix is part of it: `"x"r"y"` is `"x"r` and then a plain `"y"`.
@@ -978,8 +992,14 @@ def blank_rust(text, literals=False):
         out[0], i = " ", 1  # rustc drops a byte order mark
     if text.startswith("#!", i):
         after = i + 2
-        while after < n and (text[after] in RUST_SPACE or comment_end(after) is not None):
-            after = comment_end(after) or after + 1
+        while after < n:
+            # rustc looks past whitespace and plain comments, not doc comments, for the `[` of an inner attribute.
+            if text[after] in RUST_SPACE:
+                after += 1
+            elif (end := comment_end(after)) is not None and not doc_comment(after):
+                after = end
+            else:
+                break
         if not text.startswith("[", after):
             # A shebang line, not an inner attribute: rustc skips it like a comment.
             end = text.find("\n", i)
@@ -1180,8 +1200,9 @@ def test_module_path_refuses_a_raw_path_attribute():
 # 남음), 문자열·raw 문자열·byte·c 문자열·char 안의 `/*`·`//`를 주석으로 보는 것, 문자열의 `\"` escape나 char의 `\'` escape를
 # 모르는 것, raw identifier(`r#br`) 뒤의 문자열을 raw 문자열로 보는 것, lifetime·label을 char로 보는 것, literals에서
 # 문자열을 남기는 것, 읽지 못하는 char를 조용히 넘기는 것, 숫자·리터럴의 접미어(`0r`, `"x"r`)를 접두어로 다시 읽는 것,
-# raw lifetime(`'r#r`)을 끝까지 읽지 않는 것, 결합 문자가 든 식별자를 끊는 것, BOM·shebang 줄을 코드로 읽는 것, 주석이나
-# Rust 공백(U+200E) 뒤에 `[`가 오는 `#!`를 shebang으로 보는 것.
+# raw lifetime(`'r#r`)을 끝까지 읽지 않는 것, 결합 문자나 Python 표에 아직 없는 문자(U+323B0)가 든 식별자를 끊는 것,
+# BOM·shebang 줄을 코드로 읽는 것, 주석이나 Rust 공백(U+200E) 뒤에 `[`가 오는 `#!`를 shebang으로 보는 것, doc 주석 뒤에
+# `[`가 오는 `#!`를 inner 속성으로 보는 것(rustc는 그 줄을 shebang으로 지움).
 @pytest.mark.parametrize("text, literals, tokens", [
     ("a /* x /* y */ z */ b", False, ["a", "b"]),
     ('s = "/* // */"; t', False, None),
@@ -1204,9 +1225,17 @@ def test_module_path_refuses_a_raw_path_attribute():
     ('\ufeff#!/usr/bin/env x "\n#![cfg(any())]', False, ["#![cfg(any())]"]),
     ("#!/*c*/[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
     ("#!\u200e[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+    ('m!(r#a\U000323b0r"a\\"/*") /* c */ x', False, ['m!(r#a\U000323b0r"a\\"/*")', "x"]),
+    ("#!/**doc*/[cfg(any())]\n#[test]", False, ["#[test]"]),
+    ("#!//!doc\n[cfg(any())]", False, ["[cfg(any())]"]),
+    ("#!/**/[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+    ("#!/***/[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
+    ("#!////c\n[cfg(any())] x", False, ["#!", "[cfg(any())]", "x"]),
 ], ids=["nested", "string", "raw", "byte-raw", "byte", "char-quote", "lifetime", "literals", "char-escaped-quote",
         "raw-identifier", "string-escaped-quote", "label", "unreadable-char", "number-suffix", "string-suffix",
-        "char-suffix", "raw-lifetime", "combining-identifier", "bom-shebang", "inner-not-shebang", "inner-after-mark"])
+        "char-suffix", "raw-lifetime", "combining-identifier", "bom-shebang", "inner-not-shebang", "inner-after-mark",
+        "newer-unicode-identifier", "shebang-before-doc-comment", "shebang-before-inner-doc-line",
+        "inner-after-empty-block", "inner-after-starred-block", "inner-after-four-slashes"])
 def test_blank_rust_reads_comments_as_rustc_does(text, literals, tokens):
     if tokens == "raises":
         with pytest.raises(AssertionError, match="unreadable char literal"):
