@@ -15,7 +15,7 @@ import sys
 import pytest
 
 # Helpers only: importing test_* names here would collect them twice.
-from test_collector_security import ROOT, assert_acceptance_table, job_platforms, workflow_job
+from test_collector_security import ROOT, assert_acceptance_table, blank_rust, job_platforms, workflow_job
 
 TABLE = "tests/gate-acceptance.tsv"
 WORKFLOWS = ("ci.yml", "shell.yml")
@@ -1397,43 +1397,6 @@ def cell_files():
             for p in sorted((ROOT / CELL_ROOT).rglob("*.rs"))}
 
 
-def blank_rust_literals(text):
-    """`text` with its comments and string and char literals turned into
-    spaces (newlines kept), so braces and `mod` in them are not code."""
-    out, i, n = list(text), 0, len(text)
-
-    def blank(start, end):
-        for k in range(start, end):
-            if out[k] != "\n":
-                out[k] = " "
-    while i < n:
-        word = i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
-        raw = re.match(r'[bc]?r(#*)"', text[i:]) if word else None
-        if text.startswith("//", i):
-            end = text.find("\n", i)
-            end = n if end < 0 else end
-        elif text.startswith("/*", i):
-            depth, end = 1, i + 2
-            while end < n and depth:
-                depth += 1 if text.startswith("/*", end) else -1 if text.startswith("*/", end) else 0
-                end += 2 if text.startswith(("/*", "*/"), end) else 1
-        elif raw:
-            end = text.index('"' + raw[1], i + len(raw[0])) + 1 + len(raw[1])
-        elif text[i] == '"' or (word and text.startswith(('b"', 'c"'), i)):
-            end = i + (1 if text[i] == '"' else 2)
-            while text[end] != '"':
-                end += 2 if text[end] == "\\" else 1
-            end += 1
-        elif char := re.match(r"b?'(?:\\[^']+|[^\\'])'", text[i:]) if text[i] in "'b" else None:
-            end = i + len(char[0])
-        else:
-            i += 1
-            continue
-        blank(i, end)
-        i = end
-    return "".join(out)
-
-
 def enclosing_modules(code, offset):
     """The names of the inline `mod name {` blocks of literal-free `code`
     that hold `offset`, outermost first."""
@@ -1461,7 +1424,7 @@ def cgroup_cell_tests(files=None):
         parts = path.removeprefix("crates/bingsu/src/").removesuffix(".rs").split("/")
         if parts[-1] == "mod":
             parts.pop()
-        code = blank_rust_literals(text)
+        code = blank_rust(text, literals=True)
         for at in (m.start() for m in re.finditer(re.escape(CGROUP_CELL_REASON), text)):
             if code[at] != "#":
                 continue  # inside a comment or a string: no attribute
