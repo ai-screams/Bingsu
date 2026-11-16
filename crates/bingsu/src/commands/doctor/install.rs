@@ -258,7 +258,7 @@ fn read_pin(c: &Ctx) -> Pin {
 
 /// A folder the helper uses, looked at without making or changing anything.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Folder {
+enum Folder {
     Fine,
     /// It does not exist (yet): the helper makes it when it first needs it.
     NotMade,
