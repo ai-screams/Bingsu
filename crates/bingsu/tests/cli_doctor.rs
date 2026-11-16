@@ -164,23 +164,67 @@ fn doctor_writes_nothing() {
     assert_eq!(e.tree(), before);
 }
 
-/// The source of `doctor.rs` and `doctor_evidence.rs` without their test modules.
+/// The files of `doctor/`, by name with their source. `every_doctor_file_is_checked` holds the list to the folder.
+const DOCTOR_CHILDREN: [(&str, &str); 5] = [
+    (
+        "breaker.rs",
+        include_str!("../src/commands/doctor/breaker.rs"),
+    ),
+    (
+        "install.rs",
+        include_str!("../src/commands/doctor/install.rs"),
+    ),
+    (
+        "render.rs",
+        include_str!("../src/commands/doctor/render.rs"),
+    ),
+    (
+        "system.rs",
+        include_str!("../src/commands/doctor/system.rs"),
+    ),
+    (
+        "terminal_rows.rs",
+        include_str!("../src/commands/doctor/terminal_rows.rs"),
+    ),
+];
+
+/// Every file of the `doctor` command (`doctor.rs`, `doctor/*.rs`, `doctor_evidence.rs`) without its test module.
 fn doctor_source() -> String {
     [
         include_str!("../src/commands/doctor.rs"),
         include_str!("../src/commands/doctor_evidence.rs"),
     ]
-    .iter()
+    .into_iter()
+    .chain(DOCTOR_CHILDREN.iter().map(|(_, text)| *text))
     .map(|all| {
         let all = all.replace("\r\n", "\n");
-        all.split("#[cfg(test)]").next().unwrap().to_owned()
+        // Only the test module is cut: a `#[cfg(test)]` on an import above it must not hide the code after it.
+        all.split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap()
+            .to_owned()
     })
     .collect()
 }
 
+// A file added to `doctor/` but not to `DOCTOR_CHILDREN` would stay outside every source check below.
+// 이것을 실패시키는 것: `doctor/`에 파일을 더하고 목록에 안 넣는 것, 목록에서 한 파일을 빼는 것.
+#[test]
+fn every_doctor_file_is_checked() {
+    let mut on_disk: Vec<String> =
+        std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands/doctor"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+    on_disk.sort();
+    let listed: Vec<&str> = DOCTOR_CHILDREN.iter().map(|(name, _)| *name).collect();
+    assert_eq!(on_disk, listed);
+}
+
 // doctor starts no program: its source names no way to start one, and (Linux) no `execve` happens under it.
-// 이것을 실패시키는 것: doctor 소스에 `Command`나 spawn·exec를 넣는 것, 경로·셸 이름에서 버전을 읽는 `SHELL`·`Cellar` 참조.
-// 확인 명령: grep -nE "Command|spawn|exec[lv]|fork|SHELL|Cellar" crates/bingsu/src/commands/doctor.rs (시험 모듈 앞부분)
+// 이것을 실패시키는 것: doctor 소스에 `Command`나 spawn·exec를 넣는 것, 경로·셸 이름에서 버전을 읽는 `SHELL`·`Cellar` 참조,
+// `doctor/*.rs` 파일을 소스 검사에서 빠뜨리는 것(`every_doctor_file_is_checked`가 폴더와 목록을 맞춘다).
+// 확인 명령: grep -nE "Command|spawn|exec[lv]|fork|SHELL|Cellar" crates/bingsu/src/commands/doctor.rs crates/bingsu/src/commands/doctor/*.rs (시험 모듈 앞부분)
 #[test]
 fn the_source_starts_no_program_and_reads_no_version() {
     let src = doctor_source();
@@ -980,7 +1024,7 @@ fn the_breaker_row_needs_the_session_the_pin_and_the_pwd() {
 // 확인 명령: 두 함수의 본문에서 metadata|current_dir|canonicalize|read_link|shell_folder|exists( 를 grep.
 #[test]
 fn the_breaker_row_never_looks_at_the_folder() {
-    let all = include_str!("../src/commands/doctor.rs").replace("\r\n", "\n");
+    let all = include_str!("../src/commands/doctor/breaker.rs").replace("\r\n", "\n");
     let body = |start: &str| {
         let i = all.find(start).unwrap_or_else(|| panic!("no {start}"));
         let rest = &all[i..];
