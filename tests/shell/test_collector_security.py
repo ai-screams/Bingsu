@@ -906,6 +906,10 @@ ACCEPTANCE_PYTHONS = {
 SEC_REQUIRED_IDS = frozenset({"SEC-FSIZE", "SEC-WRITE", "SEC-FORK", "SEC-LANDLOCK", "SEC-PIDFD", "SEC-NOWAIT"})
 
 
+# Where rustc starts an attribute: `#`, an optional `!` (inner) and `[`, with any whitespace between.
+RUST_ATTRIBUTE_START = r"#\s*!?\s*\["
+
+
 def rust_attributes(source, item):
     """Return the attribute lists of each `item` declaration in source.
 
@@ -915,7 +919,7 @@ def rust_attributes(source, item):
     inner attribute right before the item (`#![cfg(..)]` opening the module
     that holds it) applies to the item too, so both are read.
     """
-    start = r"#\s*!?\s*\["
+    start = RUST_ATTRIBUTE_START
     groups = re.findall(r"((?:^[ \t]*" + start + r"[^\]]*\](?:\s|//[^\n]*(?:\n|\Z)|/\*[\s\S]*?\*/)*)*)" + item,
                         source, re.M)
     return [re.findall(start + r"([^\]]*)\]", group) for group in groups]
@@ -979,6 +983,9 @@ def lint_only_cfg_attr(attr):
 
 def assert_cfgs_hold(row, attributes, platforms):
     for attr in attributes:
+        # An attribute start read inside an attribute means the reader began in a string or comment and swallowed
+        # the real attribute after it (its `#[ignore]` or `#[cfg(..)]` is then not seen): refuse instead of reading.
+        assert not re.search(RUST_ATTRIBUTE_START, attr), (row["id"], "attribute start inside an attribute", attr)
         # rustc reads a raw name as the attribute itself (`r#ignore` ignores, `r#path` moves a module).
         assert not re.match(r"\s*r#", attr), (row["id"], "raw attribute name", attr)
         # A lint level under cfg_attr keeps the item; any other cfg_attr could hide it.
@@ -1030,6 +1037,18 @@ def test_module_path_refuses_a_raw_path_attribute():
     moved = real(relay).replace(declaration, declaration.replace("\n", '\n#[r#path = "tests.rs"]\n'))
     with pytest.raises(AssertionError, match="raw attribute name"):
         rust_module_path({"id": "X"}, tests, "bin:bingsu", lambda p: moved if p == relay else real(p), {"linux"})
+
+
+# 문자열 안에서 시작한 가짜 속성이 뒤의 진짜 속성을 삼키면, 그 내용에 진짜 속성의 시작이 남는다. 이것을 실패시키는 것:
+# 속성 안의 속성 시작을 받는 것(문자열 뒤의 `#[ignore]`나 `#[cfg(any())]`가 보이지 않아 꺼진 시험을 받음).
+@pytest.mark.parametrize("prefix", ['const _: &str = r#"\n# [\n"#;\n', 'const _: &str = "\n#[";\n'], ids=["spaced", "tight"])
+@pytest.mark.parametrize("hidden", ["#[ignore]", "#[cfg(any())]"])
+def test_test_attributes_refuse_an_attribute_a_string_swallowed(prefix, hidden):
+    with pytest.raises(AssertionError, match="attribute start inside an attribute"):
+        rust_test_attributes({"id": "X"}, prefix + hidden + "\n#[test]\nfn f() {}\n", "x.rs", "f", {"linux", "macos"})
+    # A string whose `# [` closes inside it swallows nothing: the attributes after it are read as usual.
+    closed = 'const _: &str = "\n# [x]";\n#[allow(dead_code)]\n#[test]\nfn f() {}\n'
+    assert rust_test_attributes({"id": "X"}, closed, "x.rs", "f", {"linux", "macos"}) == ["allow(dead_code)", "test"]
 
 
 def rust_test_attributes(row, source, path, base, platforms):
