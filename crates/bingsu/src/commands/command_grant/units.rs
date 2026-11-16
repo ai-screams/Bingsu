@@ -21,11 +21,6 @@ pub(super) struct Resolved {
     pub(super) dropped: plan::Dropped,
 }
 
-/// The grant's units: at most `CONFIG_MAX` runnable units whose executable
-/// resolves from the sanitized `PATH` (or `/bin/sh` for a script), each with
-/// its target environment and the digest of its policy before `{dir}`. A
-/// unit whose relay input would pass `RELAY_INPUT_MAX`, or that would push
-/// the grant past one frame, is left out alone; the others still run.
 /// The repository and the sanitized `PATH` folders of one round, which
 /// the config units and the builtin languages share: walking every `PATH`
 /// entry under the ancestor and group rules is the round's largest cost
@@ -74,6 +69,11 @@ pub(crate) fn search(
     })
 }
 
+/// The grant's units: at most `CONFIG_MAX` runnable units whose executable
+/// resolves from the sanitized `PATH` (or `/bin/sh` for a script), each with
+/// its target environment and the digest of its policy before `{dir}`. A
+/// unit whose relay input would pass `RELAY_INPUT_MAX`, or that would push
+/// the grant past one frame, is left out alone; the others still run.
 #[allow(clippy::too_many_arguments, reason = "one round's fixed inputs")]
 pub(super) fn units(
     runnable: &[(String, plan::Runnable)],
