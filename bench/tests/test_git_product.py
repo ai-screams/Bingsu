@@ -643,3 +643,29 @@ def test_the_text_baseline_draws_every_segment_without_a_response(monkeypatch, t
     monkeypatch.setattr(git.M3B, "run", lambda command, env: some)
     with pytest.raises(ValueError, match="draws 1 units"):
         git.command_context("bingsu", directory, case)
+
+
+# The prompt gate prepares the base tip with the candidate's script, so the
+# frame record must find the old inline exchange as well as Exchange::frame.
+# 이것을 실패시키는 것: 한 모양만 받거나 기록 줄을 표시 줄 뒤에 넣는 것.
+@pytest.mark.parametrize("shape", [0, 1])
+def test_frame_record_takes_either_exchange_shape(shape):
+    line, record = git.FRAME_SHAPES[shape]
+    text = f"fn exchange() {{\n{line}\n}}\n"
+    assert git.record_frames(text) == f"fn exchange() {{\n{record}{line}\n}}\n"
+
+
+# 이것을 실패시키는 것: 표시 줄이 없거나, 두 모양이 함께 있거나, 한 모양이 두 번 있는 글을 받아들이는 것.
+@pytest.mark.parametrize("shapes", [[], [0, 1], [1, 1], [0, 0]])
+def test_frame_record_refuses_no_shape_or_more_than_one_line(shapes):
+    text = "".join(git.FRAME_SHAPES[i][0] + "\n" for i in shapes)
+    with pytest.raises(AssertionError, match="exactly one shape"):
+        git.record_frames(text)
+
+
+# 이것을 실패시키는 것: 지금 소스의 모양을 목록에서 빼거나 소스의 표시 줄을 바꾸고 목록을 그대로 두는 것.
+def test_frame_record_matches_the_current_supervisor():
+    source = (ROOT / "crates/bingsu/src/commands/collector_supervisor.rs").read_text()
+    line, record = git.FRAME_SHAPES[1]
+    assert git.record_frames(source) == source.replace(line, record + line)
+

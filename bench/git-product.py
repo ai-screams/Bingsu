@@ -185,6 +185,27 @@ fn main() {
 '''
 
 
+# The gate prepares the base tip with this script too, so each frame is
+# recorded in whichever shape of the exchange the tree has: the frame handling
+# inline in CollectorJob::exchange (base tips from before the Exchange split;
+# delete this pair once no base has it) or Exchange::frame.
+FRAME_SHAPES = (
+    ("                        complete = frame.kind == Kind::Complete;",
+     "                        report.f3_frames.push((now_ns().unwrap(),buffer[..have].to_vec()));\n"),
+    ("        self.complete = frame.kind == Kind::Complete;",
+     "        self.report.f3_frames.push((now_ns().unwrap(), self.buffer[..self.have].to_vec()));\n"),
+)
+
+
+def record_frames(text):
+    """Record every whole frame just before the exchange marks Complete."""
+    counts = [text.count(line) for line, _ in FRAME_SHAPES]
+    if sorted(counts) != [0, 1]:
+        raise AssertionError(f"collector_supervisor.rs: expected one frame line in exactly one shape, found {counts}")
+    line, record = FRAME_SHAPES[counts.index(1)]
+    return text.replace(line, record + line)
+
+
 def prepared_directory(binary, source):
     # Keyed by the source tree too: a base and a candidate whose front binaries are
     # byte-identical (a change that does not reach the product) must not share, and
@@ -219,7 +240,6 @@ def prepare(binary):
     for old, new in [
         ("    pub frames: u16,", "    pub frames: u16,\n    pub f3_frames: Vec<(u64,Vec<u8>)>,"),
         ("            frames: 0,", "            frames: 0,\n            f3_frames: Vec::new(),"),
-        ("                        complete = frame.kind == Kind::Complete;", "                        report.f3_frames.push((now_ns().unwrap(),buffer[..have].to_vec()));\n                        complete = frame.kind == Kind::Complete;"),
         ("            fixture_clock: false,", "            fixture_clock: true,"),
     ]:
         if old == "            frames: 0,":
@@ -227,7 +247,7 @@ def prepare(binary):
             text = text.replace(old, new)
         else:
             text = M3B.replace_required(text, old, new)
-    supervisor.write_text(text)
+    supervisor.write_text(record_frames(text))
     process = copied / "collector_process.rs"
     # The gate prepares the base and the candidate with this one script, so the
     # child attach is matched in either visibility (it became pub(crate) for
