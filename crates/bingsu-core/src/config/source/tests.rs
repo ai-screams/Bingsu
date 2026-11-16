@@ -903,8 +903,8 @@ fn retained_unsafe_leaves_still_spend_their_budget() {
     assert!(codes_of(&g.warnings).contains(&codes::EXTENDS_TOO_BIG));
 }
 
-// 이것을 실패시키는 것: 붙인 모양 전용 하위 그래프를 예산에 더하지 않는 것(하나씩은 예산 안에 드는
-// 하위 그래프 여럿이 합쳐 파일 32개나 1 MiB를 넘음).
+// 이것을 실패시키는 것: 붙인 모양 전용 하위 그래프를 예산에 더하지 않거나 그 잎 하나만 더하는 것(하나씩은
+// 예산 안에 드는 하위 그래프 여럿이 합쳐 파일 32개나 1 MiB를 넘음).
 #[test]
 fn kept_shape_subgraphs_spend_the_budget() {
     let status = |g: &LoadReport, n: &str| {
@@ -914,20 +914,24 @@ fn kept_shape_subgraphs_spend_the_budget() {
             .unwrap()
             .status
     };
-    // Files: the trusted root and 30 more take 31 of the 32; the first shape
-    // leaf takes the last one, so the second one is left out.
+    // Files: the trusted root and 29 more take 30 of the 32; the first shape
+    // leaf and the file it extends take the last two, so the second leaf is
+    // left out.
     let mut roots = vec![opened("root", "extends = [\"shape-a\", \"shape-b\"]", 1)];
-    roots.extend((0..30).map(|i| opened("r", "", i + 2)));
-    let g = load(roots, &mut files(&[("shape-a", ""), ("shape-b", "")]), V).unwrap();
+    roots.extend((0..29).map(|i| opened("r", "", i + 2)));
+    let mut f = files(&[("shape-a", "extends = [\"c\"]"), ("c", ""), ("shape-b", "")]);
+    let g = load(roots, &mut f, V).unwrap();
     assert_eq!(g.order.len(), 32);
     assert_eq!(
         codes_of(&g.warnings),
         [codes::SHAPE_FILE_DROPPED, codes::EXTENDS_TOO_MANY]
     );
     assert_eq!(status(&g, "shape-a"), Status::Applied);
+    assert_eq!(status(&g, "c"), Status::Applied);
     assert_eq!(status(&g, "shape-b"), Status::Dropped);
-    // Bytes: three trusted files and a shape leaf of 256 KiB each make 1 MiB,
-    // so a one-byte shape leaf after them is left out.
+    // Bytes: three trusted files of 256 KiB and a shape subgraph of 256 KiB
+    // (a leaf and the file it extends) make 1 MiB, so a one-byte shape leaf
+    // after them is left out.
     let full = |head: &str| {
         let mut s = String::from(head);
         s.push_str(&"#".repeat(tree::FILE_BYTES_MAX - s.len()));
@@ -938,9 +942,11 @@ fn kept_shape_subgraphs_spend_the_budget() {
         opened("r", &full(""), 2),
         opened("r", &full(""), 3),
     ];
-    let mut f = files(&[("shape-a", &full("")), ("shape-b", "#")]);
+    let head = "extends = [\"c\"]\n";
+    let c = "#".repeat(tree::FILE_BYTES_MAX - head.len());
+    let mut f = files(&[("shape-a", head), ("c", &c), ("shape-b", "#")]);
     let g = load(roots, &mut f, V).unwrap();
-    assert_eq!(order(&g), ["shape-a", "root", "r", "r"]);
+    assert_eq!(order(&g), ["c", "shape-a", "root", "r", "r"]);
     assert_eq!(
         codes_of(&g.warnings),
         [codes::SHAPE_FILE_DROPPED, codes::EXTENDS_TOO_BIG]
@@ -1239,7 +1245,8 @@ fn yaml_goes_to_the_reader_and_comes_back_checked() {
     assert_eq!(codes_of(&e), [codes::FILE_TOO_LARGE]);
 }
 
-// 이것을 실패시키는 것: 읽지 못한 비신뢰 뿌리로 전체를 실패시키거나, 신뢰 뿌리의 읽기 실패를 숨기는 것.
+// 이것을 실패시키는 것: 읽지 못한 비신뢰 뿌리로 전체를 실패시키거나, 신뢰 뿌리의 읽기 실패를 숨기는 것,
+// 그 뿌리를 떨어뜨린 W406에서 원인 인자를 빼는 것.
 #[test]
 fn unread_root_errors_are_trust_scoped() {
     for name in ["shape-root", "unsafe-root"] {
@@ -1251,6 +1258,8 @@ fn unread_root_errors_are_trust_scoped() {
             codes_of(&g.warnings),
             [codes::SHAPE_FILE_DROPPED, codes::EXTENDS_BAD_PATH]
         );
+        assert_dropped(&g.warnings[0], SourceId(0), codes::EXTENDS_BAD_PATH);
+        assert!(g.warnings[0].via.is_empty());
     }
     let e = load(vec![on_disk("root", 0, 1)], &mut files(&[]), V).unwrap_err();
     assert_eq!(e.files[0].status, Status::Failed);

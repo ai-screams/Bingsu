@@ -583,9 +583,7 @@ impl Walk<'_> {
             problems.push(d);
             Status::Applied
         } else {
-            let warn = Diagnostic::new(codes::SHAPE_FILE_DROPPED, d.at)
-                .arg("reason", alloc::format!("{}", d.code));
-            self.warnings.push(warn);
+            self.warnings.push(dropped(SourceId(i as u32), &[], d.code));
             self.warnings.push(d);
             Status::Dropped
         };
