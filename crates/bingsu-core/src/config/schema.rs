@@ -7,9 +7,10 @@
 //! (`additionalProperties: false`): an unknown key is an error, as in
 //! `config check`. Plugin fields cannot be listed ahead of time; `config
 //! check` checks them from the installed declarations.
-use crate::config::check::{DURATION_PATTERN, ENV_NAME_PATTERN};
+use crate::config::check::ENV_NAME_PATTERN;
 use crate::config::keys::{KEYS, KINDS, KeyDef, Level, Ty};
 use crate::config::merge::KeyClass;
+use crate::config::values::DURATION_PATTERN;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
