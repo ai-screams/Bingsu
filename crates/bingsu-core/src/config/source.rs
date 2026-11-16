@@ -940,8 +940,9 @@ fn shape_leaves(w: &mut Walk<'_>, order: &[usize], warnings: &mut Vec<Diagnostic
 }
 
 /// One leaf that is not trusted: its subgraph is kept and charged to the
-/// budget, or dropped with a warning (the budget it would have spent comes
-/// back).
+/// budget, or the files walked under it are dropped with a warning and the
+/// budget they would have spent comes back. The leaf goes with them, unless
+/// it is an unsafe leaf within the budget: that one stays and pays for itself.
 fn shape_leaf(w: &mut Walk<'_>, i: usize, full: &mut Vec<usize>, warnings: &mut Vec<Diagnostic>) {
     let mut sub = Vec::new();
     let mut visited = Vec::new();
@@ -1017,8 +1018,9 @@ fn classify(nodes: &mut [Node], warnings: &mut Vec<Diagnostic>) -> Vec<Diagnosti
     errors
 }
 
-/// The W406 warning for shape-only file `id`, left out because of a problem
-/// with code `reason`; `via` is the `extends` chain that brought it in.
+/// The W406 warning at file `id`: the file, or the files under it, are left
+/// out because of a problem with code `reason`; `via` is the `extends` chain
+/// that brought `id` in.
 fn dropped(id: SourceId, via: &[SourceId], reason: DiagCode) -> Diagnostic {
     let mut warn = Diagnostic::new(
         codes::SHAPE_FILE_DROPPED,
