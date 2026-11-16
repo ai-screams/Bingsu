@@ -274,7 +274,7 @@ PRIMITIVES: dict[str, dict[str, int]] = {
     # (m6-C3b).
     "supervisor_unit_cgroup": {"mkdir": 1, "openat": 2, "fstat": 3, "write": 1},
     "supervisor_own_group": {"pgroup": 1},
-    # command_grant::neutral: the 0500 folder's mkdirat (EEXIST once made),
+    # command_grant::session::neutral: the 0500 folder's mkdirat (EEXIST once made),
     # open and fd_facts, then its emptiness check through a cursor on a
     # duplicate (the dup itself is the "dup" primitive).
     "neutral": {"mkdir": 1, "openat": 1, "fstat": 2, "fd_query": 1, "fd_flags": 1, "seek": 1, "getdents": 2},
@@ -975,7 +975,7 @@ PROCS_PREADS = -(-PROCS_MAX // (PREAD_CHUNK - PID_LINE_MAX + 1)) + 1
 
 
 def _command_session(e: dict, p: HelperPlan) -> None:
-    """command_grant's session lock and session_reclaim:
+    """command_grant's session lock and session::session_reclaim:
     every round of a config with command units takes them, even with nothing
     to run."""
     _close_only_lock(e, create=True)

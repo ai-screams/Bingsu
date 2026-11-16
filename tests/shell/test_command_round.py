@@ -300,7 +300,7 @@ def test_lock_held_while_supervisor_alive(tmp_path, _native_boot_required):
 
 
 # 실행 파일 해석(PATH 정제, 셸 폴더)은 표식 설치 뒤에 한다. 멈춘 마운트 위의 PATH 항목에 막혀도 표식은
-# 매 회차 갱신된다. 이것을 실패시키는 것: 허가 단위 해석(command_grant::units)을 broker 안의 prepare로
+# 매 회차 갱신된다. 이것을 실패시키는 것: 허가 단위 해석(command_grant::units::units)을 broker 안의 prepare로
 # 옮기는 것(도우미가 표식 전에 막히고 watchdog이 끝내 표식이 그대로).
 @linux_only
 def test_blocked_path_entry_never_holds_the_marker(tmp_path, _native_boot_required):
