@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use crate::{Finding, TestSpans, line_of, unraw};
+use crate::test_scope::TestSpans;
+use crate::{Finding, line_of, unraw};
 
 mod data;
 pub(super) use data::Data;
