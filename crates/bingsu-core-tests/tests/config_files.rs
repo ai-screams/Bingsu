@@ -36,13 +36,21 @@ fn duration_corpus_is_shared() {
 }
 
 /// The prompt path stays independent of config parsing and checking.
-const PROMPT_PATH: [(&str, &str); 7] = [
+const PROMPT_PATH: [(&str, &str); 9] = [
     (
         "default_theme.rs",
         include_str!("../../bingsu-core/src/default_theme.rs"),
     ),
     ("render.rs", include_str!("../../bingsu-core/src/render.rs")),
     ("layout.rs", include_str!("../../bingsu-core/src/layout.rs")),
+    (
+        "layout/emit.rs",
+        include_str!("../../bingsu-core/src/layout/emit.rs"),
+    ),
+    (
+        "layout/measure.rs",
+        include_str!("../../bingsu-core/src/layout/measure.rs"),
+    ),
     ("front.rs", include_str!("../../bingsu-core/src/front.rs")),
     (
         "front/staged.rs",
@@ -57,6 +65,27 @@ const PROMPT_PATH: [(&str, &str); 7] = [
         include_str!("../../bingsu-core/src/layout_view.rs"),
     ),
 ];
+
+// 이것을 실패시키는 것: layout/ 아래에 새 파일을 만들고 PROMPT_PATH에 더하지 않는 것(그 파일은 위 검사 밖에 놓인다).
+// `tests.rs`는 시험 코드라 프롬프트 경로가 아니다.
+// 이 시험은 평평한 디렉터리만 훑는다. layout/ 아래 하위 폴더가 생기면 재귀로 넓힌다.
+#[test]
+fn every_layout_file_is_on_the_prompt_path() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../bingsu-core/src/layout");
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if name.ends_with(".rs")
+            && name != "tests.rs"
+            && !PROMPT_PATH
+                .iter()
+                .any(|(listed, _)| *listed == format!("layout/{name}"))
+        {
+            missing.push(name);
+        }
+    }
+    assert!(missing.is_empty(), "not on PROMPT_PATH: {missing:?}");
+}
 
 // 매 프롬프트는 설정을 파싱하지 않는다: 앞단은 컴파일된 snapshot만 읽는다(N4). 파서·합치기·검사는
 // 설정이 바뀔 때 갱신 도우미에서만 돈다.
