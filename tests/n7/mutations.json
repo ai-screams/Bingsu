@@ -2,7 +2,7 @@
   {
     "id": "N-001",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::wire_reject_magic",
+    "anchor": "snapshot::tests::wire_reject_magic",
     "command": [
       "cargo",
       "test",
@@ -12,7 +12,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::wire_reject_magic",
+      "snapshot::tests::wire_reject_magic",
       "--exact",
       "--test-threads=1"
     ],
@@ -29,7 +29,7 @@
   {
     "id": "N-002",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::wire_reject_version",
+    "anchor": "snapshot::tests::wire_reject_version",
     "command": [
       "cargo",
       "test",
@@ -39,7 +39,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::wire_reject_version",
+      "snapshot::tests::wire_reject_version",
       "--exact",
       "--test-threads=1"
     ],
@@ -56,7 +56,7 @@
   {
     "id": "N-003",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::wire_reject_header_length",
+    "anchor": "snapshot::tests::wire_reject_header_length",
     "command": [
       "cargo",
       "test",
@@ -66,7 +66,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::wire_reject_header_length",
+      "snapshot::tests::wire_reject_header_length",
       "--exact",
       "--test-threads=1"
     ],
@@ -83,7 +83,7 @@
   {
     "id": "N-004",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::wire_reject_reserved",
+    "anchor": "snapshot::tests::wire_reject_reserved",
     "command": [
       "cargo",
       "test",
@@ -93,7 +93,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::wire_reject_reserved",
+      "snapshot::tests::wire_reject_reserved",
       "--exact",
       "--test-threads=1"
     ],
@@ -110,7 +110,7 @@
   {
     "id": "N-009",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::wire_reject_abi",
+    "anchor": "snapshot::tests::wire_reject_abi",
     "command": [
       "cargo",
       "test",
@@ -120,7 +120,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::wire_reject_abi",
+      "snapshot::tests::wire_reject_abi",
       "--exact",
       "--test-threads=1"
     ],
@@ -136,7 +136,7 @@
   {
     "id": "N-005",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::wire_reject_compiled_length",
+    "anchor": "snapshot::tests::wire_reject_compiled_length",
     "command": [
       "cargo",
       "test",
@@ -146,7 +146,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::wire_reject_compiled_length",
+      "snapshot::tests::wire_reject_compiled_length",
       "--exact",
       "--test-threads=1"
     ],
@@ -162,7 +162,7 @@
   {
     "id": "N-006",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::rechecksummed_frames_and_limits",
+    "anchor": "snapshot::tests::rechecksummed_frames_and_limits",
     "command": [
       "cargo",
       "test",
@@ -172,7 +172,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::rechecksummed_frames_and_limits",
+      "snapshot::tests::rechecksummed_frames_and_limits",
       "--exact",
       "--test-threads=1"
     ],
@@ -188,7 +188,7 @@
   {
     "id": "N-007",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::compiled_roundtrip_and_frame",
+    "anchor": "snapshot::tests::compiled_roundtrip_and_frame",
     "command": [
       "cargo",
       "test",
@@ -198,7 +198,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::compiled_roundtrip_and_frame",
+      "snapshot::tests::compiled_roundtrip_and_frame",
       "--exact",
       "--test-threads=1"
     ],
@@ -214,7 +214,7 @@
   {
     "id": "N-010",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::all_wire_types_and_tags",
+    "anchor": "snapshot_codec::tests::all_wire_types_and_tags",
     "command": [
       "cargo",
       "test",
@@ -224,7 +224,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::all_wire_types_and_tags",
+      "snapshot_codec::tests::all_wire_types_and_tags",
       "--exact",
       "--test-threads=1"
     ],
@@ -240,7 +240,7 @@
   {
     "id": "N-011",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::all_wire_types_and_tags",
+    "anchor": "snapshot_codec::tests::all_wire_types_and_tags",
     "command": [
       "cargo",
       "test",
@@ -250,7 +250,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::all_wire_types_and_tags",
+      "snapshot_codec::tests::all_wire_types_and_tags",
       "--exact",
       "--test-threads=1"
     ],
@@ -266,7 +266,7 @@
   {
     "id": "N-012",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::all_wire_types_and_tags",
+    "anchor": "snapshot_codec::tests::all_wire_types_and_tags",
     "command": [
       "cargo",
       "test",
@@ -276,7 +276,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::all_wire_types_and_tags",
+      "snapshot_codec::tests::all_wire_types_and_tags",
       "--exact",
       "--test-threads=1"
     ],
@@ -292,7 +292,7 @@
   {
     "id": "N-013",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::bounds_before_allocation",
+    "anchor": "snapshot_codec::tests::bounds_before_allocation",
     "command": [
       "cargo",
       "test",
@@ -302,7 +302,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::bounds_before_allocation",
+      "snapshot_codec::tests::bounds_before_allocation",
       "--exact",
       "--test-threads=1"
     ],
@@ -318,7 +318,7 @@
   {
     "id": "N-014",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::bounds_before_allocation",
+    "anchor": "snapshot_codec::tests::bounds_before_allocation",
     "command": [
       "cargo",
       "test",
@@ -328,7 +328,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::bounds_before_allocation",
+      "snapshot_codec::tests::bounds_before_allocation",
       "--exact",
       "--test-threads=1"
     ],
@@ -344,7 +344,7 @@
   {
     "id": "N-015",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::bounds_before_allocation",
+    "anchor": "snapshot_codec::tests::bounds_before_allocation",
     "command": [
       "cargo",
       "test",
@@ -354,7 +354,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::bounds_before_allocation",
+      "snapshot_codec::tests::bounds_before_allocation",
       "--exact",
       "--test-threads=1"
     ],
@@ -370,7 +370,7 @@
   {
     "id": "N-016",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::codec_reject_trailing_bytes",
+    "anchor": "snapshot_codec::tests::codec_reject_trailing_bytes",
     "command": [
       "cargo",
       "test",
@@ -380,7 +380,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::codec_reject_trailing_bytes",
+      "snapshot_codec::tests::codec_reject_trailing_bytes",
       "--exact",
       "--test-threads=1"
     ],
@@ -396,7 +396,7 @@
   {
     "id": "N-017",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::bounds_before_allocation",
+    "anchor": "snapshot_codec::tests::bounds_before_allocation",
     "command": [
       "cargo",
       "test",
@@ -406,7 +406,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::bounds_before_allocation",
+      "snapshot_codec::tests::bounds_before_allocation",
       "--exact",
       "--test-threads=1"
     ],
@@ -422,7 +422,7 @@
   {
     "id": "N-018",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::codec_reject_arithmetic_overflow",
+    "anchor": "snapshot_codec::tests::codec_reject_arithmetic_overflow",
     "command": [
       "cargo",
       "test",
@@ -432,7 +432,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::codec_reject_arithmetic_overflow",
+      "snapshot_codec::tests::codec_reject_arithmetic_overflow",
       "--exact",
       "--test-threads=1"
     ],
@@ -448,7 +448,7 @@
   {
     "id": "N-019",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -458,7 +458,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -474,7 +474,7 @@
   {
     "id": "N-020",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -484,7 +484,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -500,7 +500,7 @@
   {
     "id": "N-021",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -510,7 +510,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -526,7 +526,7 @@
   {
     "id": "N-022",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -536,7 +536,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -552,7 +552,7 @@
   {
     "id": "N-023",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -562,7 +562,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -578,7 +578,7 @@
   {
     "id": "N-024",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -588,7 +588,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -604,7 +604,7 @@
   {
     "id": "N-025",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -614,7 +614,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -630,7 +630,7 @@
   {
     "id": "N-026",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -640,7 +640,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -656,7 +656,7 @@
   {
     "id": "N-027",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -666,7 +666,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -682,7 +682,7 @@
   {
     "id": "N-028",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::checked_line_invariants",
+    "anchor": "snapshot_codec::tests::checked_line_invariants",
     "command": [
       "cargo",
       "test",
@@ -692,7 +692,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::checked_line_invariants",
+      "snapshot_codec::tests::checked_line_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -708,7 +708,7 @@
   {
     "id": "N-029",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::compiled_invariants",
+    "anchor": "snapshot_codec::tests::compiled_invariants",
     "command": [
       "cargo",
       "test",
@@ -718,7 +718,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::compiled_invariants",
+      "snapshot_codec::tests::compiled_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -734,7 +734,7 @@
   {
     "id": "N-030",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::compiled_invariants",
+    "anchor": "snapshot_codec::tests::compiled_invariants",
     "command": [
       "cargo",
       "test",
@@ -744,7 +744,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::compiled_invariants",
+      "snapshot_codec::tests::compiled_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -760,7 +760,7 @@
   {
     "id": "N-031",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::compiled_invariants",
+    "anchor": "snapshot_codec::tests::compiled_invariants",
     "command": [
       "cargo",
       "test",
@@ -770,7 +770,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::compiled_invariants",
+      "snapshot_codec::tests::compiled_invariants",
       "--exact",
       "--test-threads=1"
     ],
@@ -786,7 +786,7 @@
   {
     "id": "N-032",
     "kind": "rust",
-    "anchor": "snapshot_codec::tests::cases::all_wire_types_and_tags",
+    "anchor": "snapshot_codec::tests::all_wire_types_and_tags",
     "command": [
       "cargo",
       "test",
@@ -796,7 +796,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot_codec::tests::cases::all_wire_types_and_tags",
+      "snapshot_codec::tests::all_wire_types_and_tags",
       "--exact",
       "--test-threads=1"
     ],
@@ -838,7 +838,7 @@
   {
     "id": "N-033",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "anchor": "front::staged::tests::file_facts_gate_every_read",
     "command": [
       "cargo",
       "test",
@@ -848,7 +848,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::file_facts_gate_every_read",
+      "front::staged::tests::file_facts_gate_every_read",
       "--exact",
       "--test-threads=1"
     ],
@@ -864,7 +864,7 @@
   {
     "id": "N-034",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "anchor": "front::staged::tests::file_facts_gate_every_read",
     "command": [
       "cargo",
       "test",
@@ -874,7 +874,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::file_facts_gate_every_read",
+      "front::staged::tests::file_facts_gate_every_read",
       "--exact",
       "--test-threads=1"
     ],
@@ -890,7 +890,7 @@
   {
     "id": "N-035",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "anchor": "front::staged::tests::file_facts_gate_every_read",
     "command": [
       "cargo",
       "test",
@@ -900,7 +900,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::file_facts_gate_every_read",
+      "front::staged::tests::file_facts_gate_every_read",
       "--exact",
       "--test-threads=1"
     ],
@@ -916,7 +916,7 @@
   {
     "id": "N-036",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "anchor": "front::staged::tests::file_facts_gate_every_read",
     "command": [
       "cargo",
       "test",
@@ -926,7 +926,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::file_facts_gate_every_read",
+      "front::staged::tests::file_facts_gate_every_read",
       "--exact",
       "--test-threads=1"
     ],
@@ -942,7 +942,7 @@
   {
     "id": "N-038",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "anchor": "front::staged::tests::file_facts_gate_every_read",
     "command": [
       "cargo",
       "test",
@@ -952,7 +952,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::file_facts_gate_every_read",
+      "front::staged::tests::file_facts_gate_every_read",
       "--exact",
       "--test-threads=1"
     ],
@@ -968,7 +968,7 @@
   {
     "id": "N-039",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::file_facts_gate_every_read",
+    "anchor": "front::staged::tests::file_facts_gate_every_read",
     "command": [
       "cargo",
       "test",
@@ -978,7 +978,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::file_facts_gate_every_read",
+      "front::staged::tests::file_facts_gate_every_read",
       "--exact",
       "--test-threads=1"
     ],
@@ -994,7 +994,7 @@
   {
     "id": "N-040",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::wire_reject_file_capacity",
+    "anchor": "snapshot::tests::wire_reject_file_capacity",
     "command": [
       "cargo",
       "test",
@@ -1004,7 +1004,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::wire_reject_file_capacity",
+      "snapshot::tests::wire_reject_file_capacity",
       "--exact",
       "--test-threads=1"
     ],
@@ -1020,7 +1020,7 @@
   {
     "id": "N-075",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::staged_groups_use_only_the_exact_init_pin",
+    "anchor": "front::staged::tests::staged_groups_use_only_the_exact_init_pin",
     "command": [
       "cargo",
       "test",
@@ -1030,7 +1030,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::staged_groups_use_only_the_exact_init_pin",
+      "front::staged::tests::staged_groups_use_only_the_exact_init_pin",
       "--exact",
       "--test-threads=1"
     ],
@@ -1046,7 +1046,7 @@
   {
     "id": "N-084",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::status_priority_and_trust_rejections",
+    "anchor": "front::staged::tests::status_priority_and_trust_rejections",
     "command": [
       "cargo",
       "test",
@@ -1056,7 +1056,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::status_priority_and_trust_rejections",
+      "front::staged::tests::status_priority_and_trust_rejections",
       "--exact",
       "--test-threads=1"
     ],
@@ -2581,7 +2581,7 @@
   {
     "id": "N-041",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::status_priority_and_trust_rejections",
+    "anchor": "front::staged::tests::status_priority_and_trust_rejections",
     "command": [
       "cargo",
       "test",
@@ -2591,7 +2591,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::status_priority_and_trust_rejections",
+      "front::staged::tests::status_priority_and_trust_rejections",
       "--exact",
       "--test-threads=1"
     ],
@@ -2607,7 +2607,7 @@
   {
     "id": "N-042",
     "kind": "rust",
-    "anchor": "snapshot::tests::cases::crc_reserved_and_legacy_rejected",
+    "anchor": "snapshot::tests::crc_reserved_and_legacy_rejected",
     "command": [
       "cargo",
       "test",
@@ -2617,7 +2617,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "snapshot::tests::cases::crc_reserved_and_legacy_rejected",
+      "snapshot::tests::crc_reserved_and_legacy_rejected",
       "--exact",
       "--test-threads=1"
     ],
@@ -2633,7 +2633,7 @@
   {
     "id": "N-071",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::last_good_uses_its_own_pair_and_keeps_notice",
+    "anchor": "front::staged::tests::last_good_uses_its_own_pair_and_keeps_notice",
     "command": [
       "cargo",
       "test",
@@ -2643,7 +2643,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::last_good_uses_its_own_pair_and_keeps_notice",
+      "front::staged::tests::last_good_uses_its_own_pair_and_keeps_notice",
       "--exact",
       "--test-threads=1"
     ],
@@ -2659,7 +2659,7 @@
   {
     "id": "N-072",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::last_good_uses_its_own_pair_and_keeps_notice",
+    "anchor": "front::staged::tests::last_good_uses_its_own_pair_and_keeps_notice",
     "command": [
       "cargo",
       "test",
@@ -2669,7 +2669,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::last_good_uses_its_own_pair_and_keeps_notice",
+      "front::staged::tests::last_good_uses_its_own_pair_and_keeps_notice",
       "--exact",
       "--test-threads=1"
     ],
@@ -2699,7 +2699,7 @@
   {
     "id": "N-073",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+    "anchor": "front::staged::tests::directory_checks_stop_the_walk_and_preserve_sticky_owner",
     "command": [
       "cargo",
       "test",
@@ -2709,7 +2709,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+      "front::staged::tests::directory_checks_stop_the_walk_and_preserve_sticky_owner",
       "--exact",
       "--test-threads=1"
     ],
@@ -2725,7 +2725,7 @@
   {
     "id": "N-074",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+    "anchor": "front::staged::tests::directory_checks_stop_the_walk_and_preserve_sticky_owner",
     "command": [
       "cargo",
       "test",
@@ -2735,7 +2735,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+      "front::staged::tests::directory_checks_stop_the_walk_and_preserve_sticky_owner",
       "--exact",
       "--test-threads=1"
     ],
@@ -2751,7 +2751,7 @@
   {
     "id": "N-079",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker",
+    "anchor": "front::staged::tests::n7_builtin_collection_survives_invalid_marker",
     "command": [
       "cargo",
       "test",
@@ -2761,7 +2761,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker",
+      "front::staged::tests::n7_builtin_collection_survives_invalid_marker",
       "--exact",
       "--test-threads=1"
     ],
@@ -2777,7 +2777,7 @@
   {
     "id": "N-081",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::compiled_screen_and_only_allowed_units_survive",
+    "anchor": "front::staged::tests::compiled_screen_and_only_allowed_units_survive",
     "command": [
       "cargo",
       "test",
@@ -2787,7 +2787,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::compiled_screen_and_only_allowed_units_survive",
+      "front::staged::tests::compiled_screen_and_only_allowed_units_survive",
       "--exact",
       "--test-threads=1"
     ],
@@ -2803,7 +2803,7 @@
   {
     "id": "N-082",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::compiled_screen_and_only_allowed_units_survive",
+    "anchor": "front::staged::tests::compiled_screen_and_only_allowed_units_survive",
     "command": [
       "cargo",
       "test",
@@ -2813,7 +2813,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::compiled_screen_and_only_allowed_units_survive",
+      "front::staged::tests::compiled_screen_and_only_allowed_units_survive",
       "--exact",
       "--test-threads=1"
     ],
@@ -3003,7 +3003,7 @@
   {
     "id": "N-205",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+    "anchor": "front::staged::tests::directory_checks_stop_the_walk_and_preserve_sticky_owner",
     "command": [
       "cargo",
       "test",
@@ -3013,7 +3013,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::directory_checks_stop_the_walk_and_preserve_sticky_owner",
+      "front::staged::tests::directory_checks_stop_the_walk_and_preserve_sticky_owner",
       "--exact",
       "--test-threads=1"
     ],
@@ -3029,7 +3029,7 @@
   {
     "id": "N-206",
     "kind": "rust",
-    "anchor": "front::staged::tests::cases::n7_missing_context_never_reads_global_store",
+    "anchor": "front::staged::tests::n7_missing_context_never_reads_global_store",
     "command": [
       "cargo",
       "test",
@@ -3039,7 +3039,7 @@
       "bingsu-core",
       "--lib",
       "--",
-      "front::staged::tests::cases::n7_missing_context_never_reads_global_store",
+      "front::staged::tests::n7_missing_context_never_reads_global_store",
       "--exact",
       "--test-threads=1"
     ],
