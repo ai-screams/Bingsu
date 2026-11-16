@@ -536,7 +536,7 @@ impl<'l, 'i> Lay<'l, 'i> {
             styles: Vec::with_capacity(MAX_DEPTH + 1),
             join,
             // NUL never reaches a line, so the empty slots never match.
-            pairs: PairMemo([('\0', '\0', false); 32]),
+            pairs: PairMemo::new(),
         }
     }
 

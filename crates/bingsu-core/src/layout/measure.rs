@@ -40,7 +40,7 @@ pub(super) fn scratch(buf: &mut String, n: usize) {
 }
 
 /// Do `x` then `y` make one grapheme on their own?
-pub(super) fn pair_joins(x: char, y: char) -> bool {
+fn pair_joins(x: char, y: char) -> bool {
     let mut buf = [0u8; 8];
     let n = x.encode_utf8(&mut buf).len();
     let m = y.encode_utf8(&mut buf[n..]).len();
@@ -56,7 +56,7 @@ pub(super) fn pair_joins(x: char, y: char) -> bool {
 /// as `A` then `a` tells. A "may" that does not join only costs a
 /// measurement. A search over every code point on either side of the
 /// border found no width change where this says no (report E3, round 1).
-pub(super) fn may_join(a: char, b: char) -> bool {
+fn may_join(a: char, b: char) -> bool {
     if u32::from(a) < 0x300 && u32::from(b) < 0x300 {
         return false;
     }
@@ -79,7 +79,7 @@ pub(super) fn join_delta(t: &str, h: &str, buf: &mut String, p: WidthProfile) ->
     measure_join(t, h, buf, p)
 }
 
-pub(super) fn measure_join(t: &str, h: &str, buf: &mut String, p: WidthProfile) -> i64 {
+fn measure_join(t: &str, h: &str, buf: &mut String, p: WidthProfile) -> i64 {
     scratch(buf, t.len() + h.len());
     buf.push_str(t);
     buf.push_str(h);
@@ -89,9 +89,13 @@ pub(super) fn measure_join(t: &str, h: &str, buf: &mut String, p: WidthProfile) 
 
 /// `may_join` for the few code point pairs a line repeats at its borders
 /// (a separator glyph and a padding space), remembered per line.
-pub(super) struct PairMemo(pub(super) [(char, char, bool); 32]);
+pub(super) struct PairMemo([(char, char, bool); 32]);
 
 impl PairMemo {
+    pub(super) const fn new() -> Self {
+        Self([('\0', '\0', false); 32])
+    }
+
     pub(super) fn may_join(&mut self, a: char, b: char) -> bool {
         // Multiplicative hashing: a pair and its reverse (space then glyph,
         // glyph then space) land in different slots.
@@ -105,7 +109,7 @@ impl PairMemo {
 }
 
 /// Adds a signed join delta to a width (never below 0).
-pub(super) fn add(w: u32, d: i64) -> u32 {
+fn add(w: u32, d: i64) -> u32 {
     u32::try_from((i64::from(w) + d).max(0)).unwrap_or(u32::MAX)
 }
 

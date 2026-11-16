@@ -68,6 +68,7 @@ const PROMPT_PATH: [(&str, &str); 9] = [
 
 // 이것을 실패시키는 것: layout/ 아래에 새 파일을 만들고 PROMPT_PATH에 더하지 않는 것(그 파일은 위 검사 밖에 놓인다).
 // `tests.rs`는 시험 코드라 프롬프트 경로가 아니다.
+// 이 시험은 평평한 디렉터리만 훑는다. layout/ 아래 하위 폴더가 생기면 재귀로 넓힌다.
 #[test]
 fn every_layout_file_is_on_the_prompt_path() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../bingsu-core/src/layout");

@@ -61,7 +61,7 @@ pub(super) fn clear_line(out: &mut LaidLine, minimal: bool) {
 
 impl Lay<'_, '_> {
     /// Number of pieces item `it` is drawn in.
-    pub(super) fn parts(&self, it: &Item) -> usize {
+    fn parts(&self, it: &Item) -> usize {
         match it.src {
             Src::Seg(s, _) => self.slots[s].short.as_ref().map_or(1, |sh| sh.ends.len()),
             _ => 1,
@@ -69,13 +69,7 @@ impl Lay<'_, '_> {
     }
 
     /// Piece `j` of item `items[i]`: style and text as (before, text, after).
-    pub(super) fn part(
-        &self,
-        items: &[Item],
-        i: usize,
-        j: usize,
-        right_side: bool,
-    ) -> (Style, [&str; 3]) {
+    fn part(&self, items: &[Item], i: usize, j: usize, right_side: bool) -> (Style, [&str; 3]) {
         let it = &items[i];
         match it.src {
             Src::Seg(s, padded) => {
@@ -104,7 +98,7 @@ impl Lay<'_, '_> {
     }
 
     /// The first non-empty piece at or after piece `j` of item `i`.
-    pub(super) fn next_part(
+    fn next_part(
         &self,
         items: &[Item],
         mut i: usize,
