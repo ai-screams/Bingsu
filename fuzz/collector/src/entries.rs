@@ -169,7 +169,8 @@ fn split_flag(data: &[u8]) -> (u8, &[u8]) {
 
 /// The source label the product gives a pattern file, picked by the flag byte:
 /// nested per-directory files, info/exclude, info/attributes and the global
-/// excludes take different add_buffer branches (matcher base, info lists).
+/// excludes take different branches of add_attributes and add_ignore (matcher
+/// base, info lists).
 pub(crate) fn pattern_source(kind: PatternKind, flag: u8) -> PathBuf {
     let name = match kind {
         PatternKind::Ignore => ".gitignore",

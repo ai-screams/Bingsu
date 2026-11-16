@@ -17,8 +17,8 @@ fn add(p: &mut Patterns, bytes: &[u8], source: &str, m: &mut Meter) {
 }
 
 // gix turned this panic into an error; a refused source must leave no list.
-// 이것을 실패시키는 것: add_buffer의 add_patterns_buffer 오류 두 곳 중 하나를
-// 버리는 것.
+// 이것을 실패시키는 것: add_attributes와 add_ignore의 add_patterns_buffer 오류 두
+// 곳 중 하나를 버리는 것.
 #[test]
 fn source_without_a_parent_is_refused() {
     for (kind, axis) in [
