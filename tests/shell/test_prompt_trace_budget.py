@@ -9,8 +9,10 @@ import shutil
 import pytest
 
 import test_prompt_env_paths as env_paths
+import trace_captures
+import trace_live
 import trace_support as budget
-from shell_support import ROOT
+from shell_support import ROOT, trusted_env
 from trace_support import assert_historical_prompt_trace_budget as assert_prompt_trace_budget
 
 EXE = "/pinned/bin/bingsu"
@@ -908,7 +910,7 @@ def collector_verification_trace(collector_exe, *, spawn=True):
 @pytest.mark.parametrize("spawn", [False, True], ids=["verify-only", "spawn"])
 def test_collector_verification_uses_init_pin(pin, spawn):
     script = f"_bingsu_call() {{ '{EXE}' prompt '--collector-exe={pin}'; }}\n".encode()
-    collector_exe = budget.init_collector_exe(script)
+    collector_exe = trace_live.init_collector_exe(script)
     assert collector_exe == pin
     budget.assert_prompt_trace_budget(collector_verification_trace(pin, spawn=spawn), EXE, ROOTS,
                                       collector_exe=collector_exe)
@@ -935,7 +937,7 @@ def test_collector_verification_allows_observed_fd_metadata(operation):
     "'--collector-exe=/a/bingsu-collect' '--collector-exe=/b/bingsu-collect'"])
 def test_collector_init_pin_is_unambiguous(words):
     with pytest.raises(AssertionError):
-        budget.init_collector_exe(words.encode())
+        trace_live.init_collector_exe(words.encode())
 
 
 # 이것을 실패시키는 것: 같은 디렉터리의 다른 파일·쓰기·필수 플래그 누락·다른 pin·살아 있지 않은 fd를 허용하는 것.
@@ -2192,7 +2194,7 @@ def test_command_stage_probe_replay(shape):
 
 def helper_stage_errors(lines, collector, expected, **attribution):
     from fsbudget.gate import check
-    _, counts = budget.measured_helper_calls(lines, HELPER_EXE, collector, **attribution)
+    _, counts = trace_captures.measured_helper_calls(lines, HELPER_EXE, collector, **attribution)
     return check({"helper": counts.get("helper", {})}, {"helper": expected}, "exact", ["helper"])
 
 
@@ -2228,11 +2230,11 @@ def test_helper_stack_guard_exact(stage, damage):
     lines[at:at] = startup
     plan = replace(plan, arch="x86_64")
     if damage is None:
-        budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+        trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
     else:
         kind = "read" if damage == "extra-read" else "seek"
         with pytest.raises(AssertionError, match=rf"{kind}: measured .*\(exact\)"):
-            budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+            trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
 
 
 # x86_64 glibc: Rust std's stack guard seeks /proc/self/maps twice in every
@@ -2268,10 +2270,10 @@ def test_supervisor_stack_guard_exact(damage):
         lines[at:at] = seeks
     plan = replace(plan, arch="x86_64")
     if damage is None:
-        assert budget.check_helper_capture("command_miss", lines, HELPER_EXE, collector, plan) is False
+        assert trace_captures.check_helper_capture("command_miss", lines, HELPER_EXE, collector, plan) is False
     else:
         with pytest.raises(AssertionError, match="supervisor"):
-            budget.check_helper_capture("command_miss", lines, HELPER_EXE, collector, plan)
+            trace_captures.check_helper_capture("command_miss", lines, HELPER_EXE, collector, plan)
 
 
 @pytest.mark.parametrize("ready_after", [0, 1, 3])
@@ -2287,7 +2289,7 @@ def test_collection_warmup_waits_for_rotation(tmp_path, ready_after):
 
     if ready_after == 0:
         (tmp_path / "previous").write_bytes(b"p" * 64)
-    sizes = budget.warm_collection_previous(tmp_path, publish, lambda: waits.append(1))
+    sizes = trace_live.warm_collection_previous(tmp_path, publish, lambda: waits.append(1))
     assert sizes == {"response_bytes": 72 if ready_after else 64, "previous_bytes": 64}
     assert len(prompts) == len(waits) == ready_after
 
@@ -2296,7 +2298,7 @@ def test_collection_warmup_never_rotated_fails(tmp_path):
     (tmp_path / "response").write_bytes(b"r" * 64)
     prompts = []
     with pytest.raises(AssertionError, match="warm-up did not rotate"):
-        budget.warm_collection_previous(tmp_path, lambda: prompts.append(1), lambda: None)
+        trace_live.warm_collection_previous(tmp_path, lambda: prompts.append(1), lambda: None)
     assert len(prompts) == 3
 
 
@@ -2329,7 +2331,7 @@ def test_collection_warmup_does_not_swallow_errors(tmp_path, monkeypatch, damage
         pytest.fail("a real preparation error must not trigger another prompt")
 
     with pytest.raises(error):
-        budget.warm_collection_previous(tmp_path, unexpected, unexpected)
+        trace_live.warm_collection_previous(tmp_path, unexpected, unexpected)
 
 
 def legacy_helper_stage_case(stage):
@@ -2398,10 +2400,10 @@ def test_legacy_helper_stage_trace_mutations(monkeypatch, stage, name, damage):
     from fsbudget.formula import helper_stage_expected
     lines, collector, plan, replacements = legacy_helper_stage_case(stage)
     original, _, _ = helper_stage_case(stage)
-    _, before = budget.measured_helper_calls(original, HELPER_EXE, collector)
-    _, after = budget.measured_helper_calls(lines, HELPER_EXE, collector)
+    _, before = trace_captures.measured_helper_calls(original, HELPER_EXE, collector)
+    _, after = trace_captures.measured_helper_calls(lines, HELPER_EXE, collector)
     assert before == after  # every role unchanged; each alias counts exactly once
-    assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) == (stage == "collect")
+    assert trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) == (stage == "collect")
     kind = HELPER_LEGACY_PATH_KINDS[name]
     if damage == "extra":
         at = replacements[name]
@@ -2420,7 +2422,7 @@ def test_legacy_helper_stage_trace_mutations(monkeypatch, stage, name, damage):
         assert "helper.unknown-fs: measured 1, formula 0 (exact)" in errors
     phase = "prefix" if stage == "collect" else "helper"
     with pytest.raises(AssertionError, match=rf"{phase}\.{kind}.*exact"):
-        budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+        trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
 
 
 # 이것을 실패시키는 것: 판정기가 저장 trace의 종류별 호출 수를 공식과 exact로 비교하지 않는 것,
@@ -2523,12 +2525,12 @@ def run_helper_captures(monkeypatch, tmp_path, captures):
 def test_helper_stage_upload_contains_only_fixture_evidence(monkeypatch, tmp_path_factory):
     import json
     from test_collector_security import workflow_job
-    root = budget.helper_stage_evidence.__wrapped__(tmp_path_factory)
+    root = trace_captures.helper_stage_evidence.__wrapped__(tmp_path_factory)
     root.mkdir()
     unrelated = root.parent / "unrelated-secret-canary"
     unrelated.write_text("not fixture evidence")
     monkeypatch.setenv("M3D_SECRET_CANARY", "must-not-be-inherited")
-    assert "M3D_SECRET_CANARY" not in budget.trusted_env(root)
+    assert "M3D_SECRET_CANARY" not in trusted_env(root)
     assert run_helper_captures(monkeypatch, root, [helper_stage_case("collect")]) == 1
     files = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
     assert files == {f"collect/attempt-1/{name}" for name in ("trace.strace", "stdout", "stderr", "attempt.json")}
@@ -2550,7 +2552,7 @@ def deadline_helper_capture():
     This is a checker fixture, not a claim of a live deadline capture.
     """
     lines, collector, plan = helper_stage_case("collect")
-    _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+    _, roles = trace_captures.measured_helper_attribution(lines, HELPER_EXE, collector)
     threads = [c.ret.split()[0] for c, kind in roles.helper_calls
                if kind == "thread" and c.ret.split()[0].isdigit()]
     supervisor = threads[1]
@@ -2708,7 +2710,7 @@ def test_collect_attempt_mutations(monkeypatch, tmp_path, capture, damage, diagn
     clean = helper_stage_case("collect")
     lines, collector, plan = COLLECT_CAPTURES[capture]()
     # Validate the unmodified fixture first, including the deadline attempts.
-    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) == (capture != "deadline")
+    assert trace_captures.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) == (capture != "deadline")
     if damage == "missing-prefix":
         lines = list(lines)
         at = first_helper_line(lines, r'newfstatat\(\d+</fx/run-t/bingsu>, "", \{.*\) = 0$')
@@ -2723,12 +2725,12 @@ def test_collect_attempt_mutations(monkeypatch, tmp_path, capture, damage, diagn
 
 # 이것을 실패시키는 것: exit 75 회차를 검사하지 않거나 실제 발행 없이 재시도 한도에서 통과하는 것.
 def test_collect_requires_a_publication_within_the_attempt_cap(monkeypatch, tmp_path):
-    with pytest.raises(pytest.fail.Exception, match=f"zero publishes.*{budget.COLLECT_ATTEMPTS}"):
-        run_helper_captures(monkeypatch, tmp_path, [deadline_helper_capture()] * budget.COLLECT_ATTEMPTS)
+    with pytest.raises(pytest.fail.Exception, match=f"zero publishes.*{trace_captures.COLLECT_ATTEMPTS}"):
+        run_helper_captures(monkeypatch, tmp_path, [deadline_helper_capture()] * trace_captures.COLLECT_ATTEMPTS)
     # All capped non-publications remain inspectable after the terminal failure.
     import json
     from collections import Counter
-    for attempt in range(1, budget.COLLECT_ATTEMPTS + 1):
+    for attempt in range(1, trace_captures.COLLECT_ATTEMPTS + 1):
         artifacts = tmp_path / "collect" / f"attempt-{attempt}"
         assert {p.name for p in artifacts.iterdir()} == {"trace.strace", "stdout", "stderr", "attempt.json"}
         assert all(p.is_file() and not p.is_symlink() for p in artifacts.iterdir())
@@ -2747,7 +2749,7 @@ def test_collect_requires_a_publication_within_the_attempt_cap(monkeypatch, tmp_
 def test_collect_accepts_a_deadline_partial_publication(monkeypatch, tmp_path):
     import json
     lines, collector, plan = deadline_published_capture()
-    assert budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) is True
+    assert trace_captures.check_helper_capture("collect", lines, HELPER_EXE, collector, plan) is True
     assert run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)]) == 1
     evidence = json.loads((tmp_path / "collect" / "attempt-1" / "attempt.json").read_text())
     assert evidence["collector_exit"] == 75 and evidence["published"] is True
@@ -2763,7 +2765,7 @@ def test_collect_accepts_a_deadline_partial_publication(monkeypatch, tmp_path):
 def test_collect_rejects_publication_after_failed_verification(capture, result):
     lines, collector, plan = failed_before_install(COLLECT_CAPTURES[capture](), result)
     with pytest.raises(AssertionError, match="publication after a failed supervisor call"):
-        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
+        trace_captures.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
 
 
 # 이것을 실패시키는 것: 부재 확인의 flags 비교에서 musl의 O_LARGEFILE을 빼지 않는 것(CI musl 칸의 정상 발행이 실패).
@@ -2776,7 +2778,7 @@ def test_collect_accepts_musl_absence_probes(capture):
     musl = [line.replace(probe, "O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC) = -1 ENOENT")
             if line.split()[0] == supervisor else line for line in lines]
     assert musl != lines
-    assert budget.check_helper_capture("collect", musl, HELPER_EXE, collector, plan) is True
+    assert trace_captures.check_helper_capture("collect", musl, HELPER_EXE, collector, plan) is True
 
 
 # 이것을 실패시키는 것: 잘린 생성 경로를 fd 주석으로 확인하지 않는 것, 확인할 수 없는 생성을 넘기는 것(fail closed 제거),
@@ -2790,7 +2792,7 @@ def test_collect_accepts_musl_absence_probes(capture):
 def test_collect_rejects_truncated_creation(capture, damage, message):
     lines, collector, plan = creation_then_failure(COLLECT_CAPTURES[capture](), damage)
     with pytest.raises(AssertionError, match=message):
-        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
+        trace_captures.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
 
 
 # 이것을 실패시키는 것: 부재 확인 예외의 syscall·flags 고정을 지우는 것, 단계 생성을 openat으로만 추적하는 것.
@@ -2800,7 +2802,7 @@ def test_collect_rejects_creation_shaped_failures(capture, damage):
     lines, collector, plan = creation_then_failure(COLLECT_CAPTURES[capture](), damage)
     assert lines != COLLECT_CAPTURES[capture]()[0]
     with pytest.raises(AssertionError, match="publication after a failed supervisor call"):
-        budget.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
+        trace_captures.check_helper_capture("collect", lines, HELPER_EXE, collector, plan)
 
 
 def test_collect_checks_deadline_then_accepts_publication(monkeypatch, tmp_path):
@@ -2824,19 +2826,19 @@ def test_collect_exit_zero_without_publish_does_not_pass(monkeypatch, tmp_path):
     lines = [line.replace('exit_group(75)', 'exit_group(0)').replace('exited with 75', 'exited with 0')
              for line in lines]
     with pytest.raises(pytest.fail.Exception, match="zero publishes"):
-        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)] * budget.COLLECT_ATTEMPTS)
+        run_helper_captures(monkeypatch, tmp_path, [(lines, collector, plan)] * trace_captures.COLLECT_ATTEMPTS)
 
 
 # 이것을 실패시키는 것: 새 syscall을 볼 수 없는 제한된 strace 집합으로 되돌리는 것.
 def test_helper_stage_capture_traces_all_calls(monkeypatch, tmp_path):
     from types import SimpleNamespace
-    fixture = object.__new__(budget.HelperStageFixture)
+    fixture = object.__new__(trace_live.HelperStageFixture)
     fixture.base, fixture.pwd, fixture.seq, fixture.script, fixture.env = tmp_path, tmp_path, 0, b"", {}
     commands = []
     def run(command, **kwargs):
         commands.append(command)
         return SimpleNamespace(returncode=0, stderr=b"")
-    monkeypatch.setattr(budget.subprocess, "run", run)
+    monkeypatch.setattr(trace_live.subprocess, "run", run)
     fixture.prompt(tmp_path / "trace")
     assert commands[0][commands[0].index("-e") + 1] == "trace=all"
 
@@ -2847,7 +2849,7 @@ def test_collect_missing_prefix_boundary_is_rejected(deadline):
     from fsbudget.formula import helper_collect_expected
     from fsbudget.gate import check_collect
     lines, collector, plan = deadline_helper_capture()
-    _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+    _, roles = trace_captures.measured_helper_attribution(lines, HELPER_EXE, collector)
     main = next(c.pid for c, kind in roles.helper_calls if kind == "exec")
     boundary = next(i for i, (c, kind) in enumerate(roles.helper_calls)
                     if c.pid == main and c.name == "flock" and '/snapshot.lock>' in c.args
@@ -2993,10 +2995,10 @@ def test_command_stage_traces_match_the_formula(stage, damage):
         from dataclasses import replace
         plan = replace(plan, cgroup_parent=False)
     if damage in (None, "short-gc"):
-        assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
+        assert trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
         return
     with pytest.raises(AssertionError):
-        budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+        trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
 
 
 # m6-C4a7: one stale lock reclaimed with its empty parent, as a release
@@ -3054,9 +3056,9 @@ def test_a_stale_reclaim_is_within_the_gc_bound():
     replayed = with_stale_reclaim(lines)
     assert len(replayed) == len(lines) + len(STALE_RECLAIM)
     counted = replace(plan, session_locks=plan.session_locks + 1, stale_locks=1)
-    assert budget.check_helper_capture("command_miss", replayed, HELPER_EXE, collector, counted) is False
+    assert trace_captures.check_helper_capture("command_miss", replayed, HELPER_EXE, collector, counted) is False
     with pytest.raises(AssertionError):
-        budget.check_helper_capture("command_miss", replayed, HELPER_EXE, collector,
+        trace_captures.check_helper_capture("command_miss", replayed, HELPER_EXE, collector,
                                     replace(plan, session_locks=plan.session_locks + 1))
 
 
@@ -3073,20 +3075,20 @@ def test_an_old_own_lock_is_within_the_gc_bound():
     own = replayed[:at + 2] + replayed[at + len(STALE_RECLAIM):]
     assert len(own) == len(lines) + 2 and own[at].startswith(f"{helper}  newfstatat(")
     counted = replace(plan, session_locks=plan.session_locks + 1)
-    assert budget.check_helper_capture("command_miss", own, HELPER_EXE, collector, counted) is False
+    assert trace_captures.check_helper_capture("command_miss", own, HELPER_EXE, collector, counted) is False
 
 
 def test_collect_counted_events_preserve_all_helper_counts():
     from collections import Counter
     for stage in STAGE_NAMES + COMMAND_STAGE_NAMES:
         lines, collector, _ = helper_stage_case(stage)
-        _, roles = budget.measured_helper_attribution(lines, HELPER_EXE, collector)
+        _, roles = trace_captures.measured_helper_attribution(lines, HELPER_EXE, collector)
         assert Counter(kind for _, kind in roles.helper_calls) == roles.counts["helper"]
 
 
 # 이것을 실패시키는 것: 반환 바이트 대신 요청량, 사본별 ceil 대신 전체 합, metadata 읽기 또는 재읽기 허용.
 def front_read_control(case='checksum-last-good'):
-    attempts = budget.front_attempt_plan(case, 16385)
+    attempts = trace_captures.front_attempt_plan(case, 16385)
     lines = []
     for a in attempts:
         path = '/store/' + ('snapshot' if a.copy == 'current' else 'last-good')
@@ -3098,10 +3100,10 @@ def front_read_control(case='checksum-last-good'):
     return lines, attempts
 
 
-@pytest.mark.parametrize('case', budget.FRONT_CASES)
+@pytest.mark.parametrize('case', trace_captures.FRONT_CASES)
 def test_front_read_control_accepts_each_attempt(case):
     lines, attempts = front_read_control(case)
-    budget.assert_front_reads(budget.parse_trace('\n'.join(lines)), Path('/store'), attempts)
+    trace_captures.assert_front_reads(budget.parse_trace('\n'.join(lines)), Path('/store'), attempts)
 
 
 # 이것을 실패시키는 것: TrustMetadata 읽기·last-good 뒤 재읽기·부분 캡처를 통과시키는 것.
@@ -3120,7 +3122,7 @@ def test_front_read_control_rejects_mutations(mutation):
         lines[3] = lines[3].replace(', 1) = 1', ', 2) = 2')
         lines[7] = lines[7].replace(', 1) = 1', ', 1) = 0')
     with pytest.raises(AssertionError, match='front read sequence'):
-        budget.assert_front_reads(budget.parse_trace('\n'.join(lines)), Path('/store'), attempts)
+        trace_captures.assert_front_reads(budget.parse_trace('\n'.join(lines)), Path('/store'), attempts)
 
 
 # 이것을 실패시키는 것: libc별 fd facts를 무시하거나 유사한 경로 stat으로 대체하는 것.
@@ -3131,11 +3133,11 @@ def test_front_read_control_rejects_mutations(mutation):
 ])
 def test_front_platform_facts_counted(primitive):
     call = budget.parse_trace('1 ' + primitive + ' = 0')[0]
-    assert budget.front_fact_kind(call) == 'fstat'
+    assert trace_captures.front_fact_kind(call) == 'fstat'
     if call.name != 'fstat':
         call.args = call.args.replace('""', '"sibling"')
         with pytest.raises(AssertionError, match='unexpected front facts primitive'):
-            budget.front_fact_kind(call)
+            trace_captures.front_fact_kind(call)
 
 
 # 이것을 실패시키는 것: fixture의 청크 메타데이터만 바꾸어 제품 청크 변경을 감추는 것.
@@ -3188,7 +3190,8 @@ def front_axis_control():
 def test_front_axis_capture_counter(monkeypatch, arch, mutation):
     lines, pinned, store, attempts = front_axis_control()
     # Path confinement has its own live/portable suite; isolate the new counter.
-    monkeypatch.setattr(budget, 'prompt_root_io', lambda *args: None)
+    # The fake goes on the global of the module that calls the name (trace_captures), not where it is defined.
+    monkeypatch.setattr(trace_captures, 'prompt_root_io', lambda *args: None)
     if mutation == 'extra-open':
         lines.insert(1, '1 openat(AT_FDCWD, "/run", O_RDONLY) = 99</run>')
     elif mutation == 'extra-facts':
@@ -3202,10 +3205,10 @@ def test_front_axis_capture_counter(monkeypatch, arch, mutation):
     elif mutation == 'extra-seek':
         lines.insert(1, '1 lseek(99</proc/1/maps>, 0, SEEK_CUR) = 0')
     if mutation == 'none':
-        budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, arch=arch, libc='musl', evidence={})
+        trace_captures.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, arch=arch, libc='musl', evidence={})
     else:
         with pytest.raises(AssertionError):
-            budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, arch=arch, libc='musl', evidence={})
+            trace_captures.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts, arch=arch, libc='musl', evidence={})
 
 
 # A2 keep-musl/unchanged.strace PID 1838, normalized fd/inode/PID.
@@ -3220,7 +3223,8 @@ def test_front_axis_capture_counter(monkeypatch, arch, mutation):
 ])
 def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     lines, pinned, store, attempts = front_axis_control()
-    monkeypatch.setattr(budget, 'prompt_root_io', lambda *args: None)
+    # The fake goes on the global of the module that calls the name (trace_captures), not where it is defined.
+    monkeypatch.setattr(trace_captures, 'prompt_root_io', lambda *args: None)
     if libc == 'gnu':
         startup = []
         for fd, path, reads in [(80, '/etc/ld.so.cache', 0),
@@ -3248,7 +3252,7 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
     baseline = lines.copy()
     boundary = next(i for i, l in enumerate(baseline) if 'PR_SET_SECCOMP' in l)
     baseline[boundary:boundary] = channel
-    budget.check_front_capture(baseline, '/bin/bingsu', pinned, store, attempts,
+    trace_captures.check_front_capture(baseline, '/bin/bingsu', pinned, store, attempts,
                                arch=arch, libc=libc, evidence={})
     if mutation == 'extra-read':
         channel.insert(-1, read)
@@ -3289,10 +3293,10 @@ def test_front_spawn_pipe_counter(monkeypatch, arch, libc, spawn, mutation):
                or mutation == 'late-pipe' and spawn)
     if changed:
         with pytest.raises(AssertionError):
-            budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
+            trace_captures.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
                                        arch=arch, libc=libc, evidence=evidence)
     else:
-        budget.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
+        trace_captures.check_front_capture(lines, '/bin/bingsu', pinned, store, attempts,
                                    arch=arch, libc=libc, evidence=evidence)
         from fsbudget.formula import ENV_PIPE_PRIMITIVES
         expected = Counter({'pipe2': 1, 'read': 1, 'close': 2} if libc == 'musl' and spawn else {})
@@ -3337,7 +3341,7 @@ def test_front_axis_archived_capture(capture, base, arch, mutation):
     _, files = budget.prompt_sources(pinned)
     store = Path(next(iter(files))).parent
     # Published fixture's compiled body is 3008 bytes, not inferred from reads.
-    attempts = budget.front_attempt_plan('normal', 3008)
+    attempts = trace_captures.front_attempt_plan('normal', 3008)
     maps_close = next(i for i, l in enumerate(lines) if ' close(3</proc/' in l and '/maps>' in l)
     pid = lines[maps_close].split()[0]
     replay_env_pipe(lines, pid)
@@ -3355,7 +3359,7 @@ def test_front_axis_archived_capture(capture, base, arch, mutation):
         # Replay x86_64 loader program-header reads; this is no live capture.
         lines[libc_close:libc_close] = [f'{pid} pread64(3</lib/x86_64-linux-gnu/libc.so.6>, "<payload>", 784, 64) = 784'] * 2
         maps_close += 2
-    budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, arch=arch, libc='gnu', evidence={})
+    trace_captures.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, arch=arch, libc='gnu', evidence={})
     # 이것을 실패시키는 것: last-good 뒤 재읽기와 같은 추가 current 읽기를 live 판정기가 허용하는 것.
     extra = next(l for l in lines if ' read(' in l and str(store / 'snapshot') + '>' in l)
     pid = extra.split()[0]
@@ -3390,7 +3394,7 @@ def test_front_axis_archived_capture(capture, base, arch, mutation):
     else:
         lines.insert(-1, extra)
     with pytest.raises(AssertionError):
-        budget.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, arch=arch, libc='gnu', evidence={})
+        trace_captures.check_front_capture(lines, base + '/bin/bingsu', pinned, store, attempts, arch=arch, libc='gnu', evidence={})
 
 
 ALARM_BASE = "/home/tester/pt/r9/test_prompt_binary_names_only_1"
@@ -3560,7 +3564,7 @@ def test_allowlist_attempts_retry_only_proven_deadlines(capsys):
 def role_judge(cap, shape=None):
     """judge_marker_attempt without the full trace judgment: the synthetic
     captures below carry roles and the front's proof, not a whole prompt."""
-    return budget.judge_marker_attempt(cap, shape, trace_judge=lambda cap, shape: None)
+    return trace_captures.judge_marker_attempt(cap, shape, trace_judge=lambda cap, shape: None)
 
 
 def marker_capture(*, alarm=True, write_after=False, exit_code=0, timer=True, helper=True, collectors=1,
@@ -3597,7 +3601,7 @@ def test_front_deadline_exit_needs_its_proof(damage):
     kwargs = {"none": {}, "write-after-alarm": {"write_after": True}, "no-alarm": {"alarm": False},
               "no-timer": {"timer": False}, "exit-1": {"exit_code": 1},
               "record": {"record": b"B1\x1f12\x1fdegraded:trust-invalid\x1e"}}[damage]
-    shape = budget.front_deadline_exit(marker_capture(**kwargs))
+    shape = trace_captures.front_deadline_exit(marker_capture(**kwargs))
     assert shape == ("front-deadline" if damage == "none" else None)
 
 
@@ -3620,8 +3624,8 @@ def test_marker_attempts_retry_only_proven_front_deadlines(capsys):
             made.append(attempt)
             return outcomes[attempt - 1]
         try:
-            return budget.run_allowlist(capture, role_judge, budget.front_deadline_exit,
-                                        budget.MARKER_ATTEMPTS, label="marker invalid"), made
+            return budget.run_allowlist(capture, role_judge, trace_captures.front_deadline_exit,
+                                        trace_captures.MARKER_ATTEMPTS, label="marker invalid"), made
         except BaseException as error:
             error.made = made
             raise
@@ -3637,7 +3641,7 @@ def test_marker_attempts_retry_only_proven_front_deadlines(capsys):
     assert violating.value.made == [1]
     with pytest.raises(pytest.fail.Exception, match="marker invalid: no attempt without a deadline in 8") as endless:
         run([marker_capture()] * 9)
-    assert endless.value.made == list(range(1, 9)) and budget.MARKER_ATTEMPTS == 8
+    assert endless.value.made == list(range(1, 9)) and trace_captures.MARKER_ATTEMPTS == 8
 
 
 def timed_capture(after_us, *, setitimer_ret="0", write_after=False, exit_us=None, **kwargs):
@@ -3657,7 +3661,7 @@ def timed_capture(after_us, *, setitimer_ret="0", write_after=False, exit_us=Non
             at = start + exit_us  # only the exit itself late
         out.append(f"{pid}  {at // 1_000_000}.{at % 1_000_000:06d} {rest}")
     cap.lines = out
-    cap.trace = budget.parse_trace(budget.strip_trace_times("\n".join(out)))
+    cap.trace = budget.parse_trace(trace_captures.strip_trace_times("\n".join(out)))
     return cap
 
 
@@ -3675,7 +3679,7 @@ def test_front_deadline_time_proof(case, expected):
            "write-after": lambda: timed_capture(it_value + 1, write_after=True),
            "untimed": lambda: marker_capture(alarm=False),
            "exit-line-late-only": lambda: timed_capture(1_000, exit_us=it_value + 50)}[case]()
-    assert budget.front_deadline_exit(cap) == expected
+    assert trace_captures.front_deadline_exit(cap) == expected
     if case == "past":
         role_judge(cap, expected)
 
@@ -3683,16 +3687,16 @@ def test_front_deadline_time_proof(case, expected):
 # 이것을 실패시키는 것: 다른 child_capture 시험의 strace 인자에 -ttt를 넣는 것, 시각 열을 떼며 다른 글자를 바꾸는 것,
 # 시각 열 없는 줄을 그대로 넘기는 것.
 def test_trace_times_are_stripped_before_parsing():
-    assert budget.child_strace_argv("/e", ["/bin/bingsu", "prompt"]) == [
+    assert trace_captures.child_strace_argv("/e", ["/bin/bingsu", "prompt"]) == [
         "strace", "-f", "-q", "-y", "-s", "65536", "-e", "trace=all", "-o", "/e", "/bin/bingsu", "prompt"]
-    assert budget.child_strace_argv("/e", ["/bin/bingsu"], timestamps=True)[8:10] == ["-ttt", "-o"]
+    assert trace_captures.child_strace_argv("/e", ["/bin/bingsu"], timestamps=True)[8:10] == ["-ttt", "-o"]
     untimed = "\n".join(marker_capture().lines) + "\n"
     timed = "".join(f"{line.split(None, 1)[0]}  1730265432.{i:06d} {line.split(None, 1)[1]}\n"
                     for i, line in enumerate(untimed.splitlines()))
-    assert budget.strip_trace_times(timed) == untimed
-    assert budget.parse_trace(budget.strip_trace_times(timed)) == budget.parse_trace(untimed)
+    assert trace_captures.strip_trace_times(timed) == untimed
+    assert budget.parse_trace(trace_captures.strip_trace_times(timed)) == budget.parse_trace(untimed)
     with pytest.raises(AssertionError, match="untimed line"):
-        budget.strip_trace_times(untimed)
+        trace_captures.strip_trace_times(untimed)
 
 
 def marker_context(base):
@@ -3727,7 +3731,7 @@ def stored_marker_capture(name, *, record, edit=lambda lines: lines):
     data = gzip.decompress(Path(__file__).with_name("fixtures").joinpath(fixture).read_bytes())
     assert hashlib.sha256(data).hexdigest() == digest
     lines = edit(data.decode().splitlines())
-    untimed = budget.strip_trace_times("\n".join(lines)).splitlines()
+    untimed = trace_captures.strip_trace_times("\n".join(lines)).splitlines()
     return SimpleNamespace(trace=budget.parse_trace("\n".join(untimed)), lines=lines, untimed=untimed,
                            context=marker_context(base), record=record, invalid=False,
                            headers=recorded_headers(fixture))
@@ -3760,14 +3764,14 @@ def test_marker_full_judgment_waives_only_record_bound_items(case):
            "record-without-filter": lambda: stored_marker_capture("silent-valid", record=RECORD),
            "record-filter-removed": lambda: stored_marker_capture("valid", record=RECORD, edit=drop_filter),
            "filtered-empty-stdout-passes": lambda: stored_marker_capture("valid", record=b"")}[case]()
-    assert budget.front_deadline_exit(cap) is None
+    assert trace_captures.front_deadline_exit(cap) is None
     if case == "silent-valid-passes":
-        budget.judge_marker_attempt(cap, budget.marker_shape(cap))
+        trace_captures.judge_marker_attempt(cap, trace_captures.marker_shape(cap))
     elif case == "filtered-empty-stdout-passes":
-        budget.judge_marker_trace(cap)
+        trace_captures.judge_marker_trace(cap)
     else:
         with pytest.raises(AssertionError) as failure:
-            budget.judge_marker_attempt(cap)
+            trace_captures.judge_marker_attempt(cap)
         if "forbidden" in case:
             assert "/hostile/home/.gitconfig" in str(failure.value)
         else:
@@ -3806,29 +3810,29 @@ def test_untimed_silent_exit_is_not_a_proven_deadline():
     front = [line for line in cap.lines if line.split()[0] == cap.lines[0].split()[0]]
     assert any(line.split(None, 1)[1].startswith("setitimer(ITIMER_REAL,") for line in front)
     assert not any("SIGALRM {" in line for line in front) and front[-1].endswith("+++ exited with 0 +++")
-    assert budget.front_deadline_exit(cap) is None
+    assert trace_captures.front_deadline_exit(cap) is None
     made = []
     with pytest.raises(AssertionError):
-        budget.run_allowlist(lambda attempt: made.append(attempt) or cap, budget.judge_marker_attempt,
-                             budget.front_deadline_exit, budget.MARKER_ATTEMPTS, label="marker invalid")
+        budget.run_allowlist(lambda attempt: made.append(attempt) or cap, trace_captures.judge_marker_attempt,
+                             trace_captures.front_deadline_exit, trace_captures.MARKER_ATTEMPTS, label="marker invalid")
     assert made == [1]
 
 
 # 이것을 실패시키는 것: 버리는 마감 시도에 역할 수만 보고 경로·syscall 금지를 건너뛰는 것.
 def test_discarded_deadline_attempt_gets_the_full_trace_judgment():
     cap = keep19_with_alarm()
-    assert budget.front_deadline_exit(cap) == "front-deadline"
-    budget.judge_marker_attempt(cap, "front-deadline")
+    assert trace_captures.front_deadline_exit(cap) == "front-deadline"
+    trace_captures.judge_marker_attempt(cap, "front-deadline")
     pid = cap.lines[0].split()[0]
     hostile = keep19_with_alarm([f'{pid}  openat(AT_FDCWD</>, "/hostile/home/.gitconfig", O_RDONLY|O_CLOEXEC)'
                                  " = -1 ENOENT (No such file or directory)"])
-    assert budget.front_deadline_exit(hostile) == "front-deadline"
+    assert trace_captures.front_deadline_exit(hostile) == "front-deadline"
     with pytest.raises(AssertionError, match="/hostile/home/.gitconfig"):
-        budget.judge_marker_attempt(hostile, "front-deadline")
+        trace_captures.judge_marker_attempt(hostile, "front-deadline")
     made = []
     with pytest.raises(AssertionError, match="/hostile/home/.gitconfig"):
         budget.run_allowlist(lambda attempt: made.append(attempt) or (hostile if attempt == 1 else cap),
-                             budget.judge_marker_attempt, budget.front_deadline_exit, budget.MARKER_ATTEMPTS,
+                             trace_captures.judge_marker_attempt, trace_captures.front_deadline_exit, trace_captures.MARKER_ATTEMPTS,
                              label="marker invalid")
     assert made == [1]
 
@@ -3841,7 +3845,7 @@ def test_front_deadline_rejects_any_write_and_a_disarmed_timer(case):
     kwargs = {"write-before-alarm": {"write_before": "alarm"}, "write-before-timer": {"write_before": "timer"},
               "zero-it-value": {"it_value": 0}}[kind]
     cap = marker_capture(**kwargs) if proof == "alarm" else timed_capture(27_108 + 1, **kwargs)
-    assert budget.front_deadline_exit(cap) is None
+    assert trace_captures.front_deadline_exit(cap) is None
 
 
 def at_time(line, us):
@@ -3894,8 +3898,8 @@ def test_front_deadline_window_does_not_contradict_the_deadline(case, expected):
            "invalid": lambda: SimpleNamespace(**{**vars(silent_valid()), "invalid": True}),
            "record": lambda: stored_marker_capture("silent-valid", record=RECORD),
            "write": lambda: silent_valid(wrote), "exit-1": lambda: silent_valid(exit_1)}[case]()
-    assert budget.front_deadline_window(cap) == expected
-    assert budget.front_deadline_exit(cap) is None
+    assert trace_captures.front_deadline_window(cap) == expected
+    assert trace_captures.front_deadline_exit(cap) is None
 
 
 def run_marker_attempts(captures):
@@ -3905,8 +3909,8 @@ def run_marker_attempts(captures):
         made.append(attempt)
         return captures[attempt - 1]
     try:
-        return budget.run_allowlist(capture, budget.judge_marker_attempt, budget.marker_shape,
-                                    budget.MARKER_ATTEMPTS, label="marker valid"), made
+        return budget.run_allowlist(capture, trace_captures.judge_marker_attempt, trace_captures.marker_shape,
+                                    trace_captures.MARKER_ATTEMPTS, label="marker valid"), made
     except BaseException as error:
         error.made = made
         raise
@@ -4187,16 +4191,16 @@ def test_builtin_stage_traces_match_the_formula(stage, damage):
         at = find(supervisor, r'fcntl\(5<')
         lines.insert(at + 1, f"{supervisor}  fcntl(6, F_SETFD, FD_CLOEXEC) = -1 EBADF (Bad file descriptor)")
     if damage is None:
-        assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is True
+        assert trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is True
     elif damage == "collector-deadline":
         # A deadline after a verified partial: published, judged in full.
-        assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is True
+        assert trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is True
     elif damage == "deadline-unpublished":
         # Nothing verified: the deadline bounds hold and the stage retries.
-        assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
+        assert trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan) is False
     else:
         with pytest.raises(AssertionError):
-            budget.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
+            trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, plan)
 
 
 # The reviewed builtin shape; any other is refused before a formula is given.
@@ -4267,4 +4271,4 @@ def test_builtin_stack_guard_exact(stage):
         fd = re.search(r"close\((\d+)</proc/", lines[at])[1]
         lines[at:at] = [f'{pid} lseek({fd}</proc/{pid}/maps>, 0, SEEK_CUR) = 2906',
                         f'{pid} lseek({fd}</proc/{pid}/maps>, 2822, SEEK_SET) = 2822']
-    assert budget.check_helper_capture(stage, lines, HELPER_EXE, collector, replace(plan, arch="x86_64")) is True
+    assert trace_captures.check_helper_capture(stage, lines, HELPER_EXE, collector, replace(plan, arch="x86_64")) is True

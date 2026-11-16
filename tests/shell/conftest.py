@@ -4,9 +4,9 @@ import shutil
 
 import pytest
 
-# trace_support holds the assertions the trace tests used to hold themselves, and some
+# The trace_* modules hold the assertions the trace tests used to hold themselves, and some
 # tests match their rewritten messages (the values pytest adds): keep rewriting them.
-pytest.register_assert_rewrite("trace_support")
+pytest.register_assert_rewrite("trace_support", "trace_captures", "trace_live")
 
 # Re-export for existing shell tests; cross-suite consumers import shell_support.
 from shell_support import (
