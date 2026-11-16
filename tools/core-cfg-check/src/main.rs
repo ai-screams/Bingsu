@@ -100,15 +100,7 @@ fn main() -> ExitCode {
             eprintln!("{path}: unreadable");
             return ExitCode::FAILURE;
         };
-        let findings = check_identity(&source);
-        for f in &findings {
-            eprintln!("{path}:{}: {}", f.line, f.reason);
-        }
-        return if findings.is_empty() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        return report(path, &check_identity(&source));
     }
     if args.first().is_some_and(|a| a == "--prompt-main") {
         let [_, path] = args.as_slice() else {
@@ -119,15 +111,7 @@ fn main() -> ExitCode {
             eprintln!("{path}: unreadable");
             return ExitCode::FAILURE;
         };
-        let findings = prompt_main::check_prompt_main(&source);
-        for f in &findings {
-            eprintln!("{path}:{}: {}", f.line, f.reason);
-        }
-        return if findings.is_empty() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        return report(path, &prompt_main::check_prompt_main(&source));
     }
     if args.first().is_some_and(|a| a == "--prompt-io") {
         let [_, forbidden, path] = args.as_slice() else {
@@ -139,15 +123,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         };
         let names: Vec<_> = forbidden.split(',').collect();
-        let findings = check_prompt_io(&source, &names);
-        for f in &findings {
-            eprintln!("{path}:{}: {}", f.line, f.reason);
-        }
-        return if findings.is_empty() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        return report(path, &check_prompt_io(&source, &names));
     }
     let binary = args.first().is_some_and(|a| a == "--binary");
     if binary {
@@ -171,14 +147,7 @@ fn main() -> ExitCode {
         } else {
             adapter::check_adapter(&source, &table)
         };
-        for finding in &findings {
-            eprintln!("{file}:{}: {}", finding.line, finding.reason);
-        }
-        return if findings.is_empty() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        return report(file, &findings);
     }
     // Files after `--tcb` (the prompt adapter), then the files after
     // `--test-targets`, then the library files.
@@ -242,6 +211,19 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// A one-file mode's result: each finding as `path:line: reason` on stderr,
+/// and failure when there is any.
+fn report(path: &str, findings: &[Finding]) -> ExitCode {
+    for f in findings {
+        eprintln!("{path}:{}: {}", f.line, f.reason);
+    }
+    if findings.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
