@@ -343,7 +343,8 @@ struct Chosen<'a> {
 
 /// The theme for this prompt: the compiled screen's variant at the envelope's
 /// width, else the default theme. `None` only when there is neither (the
-/// default theme could not be built). Pure.
+/// default theme could not be built). The caller builds `default` only when
+/// `compiled` is `None`; when both are present the compiled screen wins. Pure.
 fn select_theme<'a, L: LayoutView>(
     compiled: Option<&'a L>,
     default: Option<&'a DefaultTheme>,
