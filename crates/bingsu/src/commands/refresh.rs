@@ -462,7 +462,7 @@ fn run(
     })
 }
 /// The identity and encoded bytes of the snapshot this round publishes. Pure:
-/// the same checks and order the inline code had, before the staging writes.
+/// no I/O; `run` calls it between the two budget checks, before any staging write.
 fn new_snapshot(
     report: Option<&report::ConfigReport>,
     export: &super::evidence::EvidenceExport,

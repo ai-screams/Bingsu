@@ -3108,8 +3108,8 @@ mod pure_steps {
         assert!(matches!(call(Some(&report)), Err(StoreError::Unsafe)));
     }
 
-    // 이것을 실패시키는 것: 새 화면을 처음 게시하는 회차(낡은 스냅숏 없음)에서 화면을 고르는 것, 바꾸는 회차에서 낡은
-    // 화면이나 다른 식별자를 고르는 것, 바꾸지 않는 회차에서 마지막 정상본을 현재 것보다 앞세우는 것.
+    // 이것을 실패시키는 것: 새 화면을 처음 게시하는 회차(낡은 스냅숏 없음)에서 화면을 고르는 것, 바꾸는 회차에서 보고서의 화면 대신 낡은
+    // 스냅숏의 화면(값이 같아도 다른 객체)이나 다른 식별자를 고르는 것, 바꾸지 않는 회차에서 마지막 정상본을 현재 것보다 앞세우는 것.
     #[test]
     fn the_display_is_the_new_screen_only_when_replacing_over_an_old_one() {
         let old = published_snapshot("pure-display");
@@ -3122,11 +3122,11 @@ mod pure_steps {
             choose_display(true, None, Some(&fallback), Some(&report), id),
             None
         );
-        // Replacing: the new screen under the new identity.
-        assert_eq!(
-            choose_display(true, Some(&old), Some(&fallback), Some(&report), id),
-            Some((&old.config, id))
-        );
+        // Replacing: the new screen under the new identity. The report's own screen, not a value-equal
+        // copy of the old one: compare addresses.
+        let got = choose_display(true, Some(&old), Some(&fallback), Some(&report), id).unwrap();
+        assert!(std::ptr::eq(got.0, report.snapshot.as_ref().unwrap()));
+        assert_eq!(got.1, id);
         // Keeping: the published snapshot wins over last-good; last-good only stands in for a missing one.
         assert_eq!(
             choose_display(false, Some(&old), Some(&fallback), Some(&report), id)
