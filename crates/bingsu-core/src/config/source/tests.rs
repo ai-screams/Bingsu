@@ -509,7 +509,16 @@ fn assert_shape_via(g: &LoadReport, code: DiagCode, expected: &[&str]) {
     assert_eq!(actual, expected, "{code}");
 }
 
-// 이것을 실패시키는 것: 모양 전용 경로 오류에서 현재 파일의 경유 목록을 빼는 것.
+/// The W406 warning `d` is at file `id` and gives `reason` as its one argument.
+fn assert_dropped(d: &Diagnostic, id: SourceId, reason: DiagCode) {
+    assert_eq!(d.code, codes::SHAPE_FILE_DROPPED);
+    assert!(matches!(d.at, Place::Source { id: at, span } if at == id && span == Span::default()));
+    let args: Vec<(&str, &str)> = d.args.iter().map(|a| (a.name, a.value.as_str())).collect();
+    assert_eq!(args, [("reason", alloc::format!("{reason}").as_str())]);
+}
+
+// 이것을 실패시키는 것: 모양 전용 경로 오류에서 현재 파일의 경유 목록을 빼는 것, 하위 그래프를 떨어뜨린
+// W406에서 경유 목록이나 원인 인자를 빼는 것.
 #[test]
 fn shaped_bad_path_keeps_via() {
     let mut f = files(&[
@@ -523,6 +532,8 @@ fn shaped_bad_path_keeps_via() {
     )
     .unwrap();
     assert_shape_via(&g, codes::EXTENDS_BAD_PATH, &["root", "shape-parent"]);
+    assert_shape_via(&g, codes::SHAPE_FILE_DROPPED, &["root"]);
+    assert_dropped(&g.warnings[0], SourceId(1), codes::EXTENDS_BAD_PATH);
 }
 
 // 이것을 실패시키는 것: 모양 전용 순환 오류에서 현재 파일의 경유 목록을 빼는 것.
@@ -892,6 +903,51 @@ fn retained_unsafe_leaves_still_spend_their_budget() {
     assert!(codes_of(&g.warnings).contains(&codes::EXTENDS_TOO_BIG));
 }
 
+// 이것을 실패시키는 것: 붙인 모양 전용 하위 그래프를 예산에 더하지 않는 것(하나씩은 예산 안에 드는
+// 하위 그래프 여럿이 합쳐 파일 32개나 1 MiB를 넘음).
+#[test]
+fn kept_shape_subgraphs_spend_the_budget() {
+    let status = |g: &LoadReport, n: &str| {
+        g.files
+            .iter()
+            .find(|f| f.opened.display == n.as_bytes())
+            .unwrap()
+            .status
+    };
+    // Files: the trusted root and 30 more take 31 of the 32; the first shape
+    // leaf takes the last one, so the second one is left out.
+    let mut roots = vec![opened("root", "extends = [\"shape-a\", \"shape-b\"]", 1)];
+    roots.extend((0..30).map(|i| opened("r", "", i + 2)));
+    let g = load(roots, &mut files(&[("shape-a", ""), ("shape-b", "")]), V).unwrap();
+    assert_eq!(g.order.len(), 32);
+    assert_eq!(
+        codes_of(&g.warnings),
+        [codes::SHAPE_FILE_DROPPED, codes::EXTENDS_TOO_MANY]
+    );
+    assert_eq!(status(&g, "shape-a"), Status::Applied);
+    assert_eq!(status(&g, "shape-b"), Status::Dropped);
+    // Bytes: three trusted files and a shape leaf of 256 KiB each make 1 MiB,
+    // so a one-byte shape leaf after them is left out.
+    let full = |head: &str| {
+        let mut s = String::from(head);
+        s.push_str(&"#".repeat(tree::FILE_BYTES_MAX - s.len()));
+        s
+    };
+    let roots = vec![
+        opened("root", &full("extends = [\"shape-a\", \"shape-b\"]\n"), 1),
+        opened("r", &full(""), 2),
+        opened("r", &full(""), 3),
+    ];
+    let mut f = files(&[("shape-a", &full("")), ("shape-b", "#")]);
+    let g = load(roots, &mut f, V).unwrap();
+    assert_eq!(order(&g), ["shape-a", "root", "r", "r"]);
+    assert_eq!(
+        codes_of(&g.warnings),
+        [codes::SHAPE_FILE_DROPPED, codes::EXTENDS_TOO_BIG]
+    );
+    assert_eq!(status(&g, "shape-b"), Status::Dropped);
+}
+
 /// Checks that each resolver read is completed before another begins.
 struct Session {
     files: Files,
@@ -1021,7 +1077,8 @@ fn catalog_keeps_rejected_sources_and_uses_device_and_inode() {
     assert_eq!(order(&g), ["a", "b"]);
 }
 
-// 이것을 실패시키는 것: 잘못된 메타 키를 받아들이거나, 격리된 원본의 진단 범위·경유 경로를 잃는 것.
+// 이것을 실패시키는 것: 잘못된 메타 키를 받아들이거나, 격리된 원본의 진단 범위·경유 경로를 잃는 것,
+// 그 파일을 떨어뜨린 W406에서 경유 목록이나 원인 인자를 빼는 것.
 #[test]
 fn metadata_errors_keep_their_source_and_span() {
     for (text, code) in [
@@ -1045,6 +1102,8 @@ fn metadata_errors_keep_their_source_and_span() {
             [codes::SHAPE_FILE_DROPPED, code],
             "{text}"
         );
+        assert_dropped(&g.warnings[0], SourceId(1), code);
+        assert_eq!(g.warnings[0].via, [SourceId(0)]);
         let d = &g.warnings[1];
         assert_eq!(d.via, [SourceId(0)]);
         let Place::Source { id, span } = d.at else {
