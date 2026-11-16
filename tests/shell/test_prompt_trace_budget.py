@@ -1394,6 +1394,10 @@ def test_trace_rejects_filter_before_spawn():
 
 # 새 state pin 위 XDG_STATE_HOME도 없으면 보유 fd 아래 한 이름씩만 생성한다.
 def test_fresh_state_parent_creation_budget():
+    assert_fresh_state_parent_creation_accepted()
+
+
+def assert_fresh_state_parent_creation_accepted():
     lines = valid_trace()
     at = next(i for i, line in enumerate(lines) if 'mkdirat(3</pinned>' in line)
     lines[at:at] = [
@@ -1436,7 +1440,7 @@ def test_trace_needs_creation_and_collector_allowances(monkeypatch, allowance):
 def test_trace_needs_created_ancestor_open_allowance(monkeypatch):
     monkeypatch.setattr(budget, "helper_created_open", lambda *args: False)
     with pytest.raises(AssertionError, match="helper path"):
-        test_fresh_state_parent_creation_budget()
+        assert_fresh_state_parent_creation_accepted()
 
 
 @pytest.mark.parametrize("old,new", [
@@ -2517,7 +2521,7 @@ def run_helper_captures(monkeypatch, tmp_path, captures):
     monkeypatch.setattr(env_paths, "real_bin", lambda: Path(HELPER_EXE))
     monkeypatch.setattr(shutil, "which", lambda _: "/synthetic/strace")
     monkeypatch.setattr(env_paths, "wait_helpers", lambda _: None)
-    env_paths.test_live_helper_calls_match_stage_formula("collect", tmp_path)
+    env_paths.check_live_helper_stage("collect", tmp_path)
     return len(used)
 
 
@@ -3144,7 +3148,7 @@ def test_front_platform_facts_counted(primitive):
 def test_front_chunk_metadata_mutation(monkeypatch):
     monkeypatch.setattr(env_paths, 'FRONT_CHUNK', 8192)
     with pytest.raises(AssertionError):
-        env_paths.test_front_chunk_matches_product_constant()
+        env_paths.check_front_chunk_matches_product()
 
 
 def front_axis_control():
