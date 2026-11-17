@@ -1492,9 +1492,9 @@ fn hide_right<R: Recorder>(
 /// a tie), down to the ellipsis. A one-cell text (the `char` glyph)
 /// cannot get narrower, so it is only ever marked exhausted; so is
 /// any text when the line is over `LINE_BYTES_MAX` but not too wide.
-// Always inline: the step was part of `layout_line_into` before the split, and a
-// call here is paid on the front collection path (a plain `#[inline]` left it
-// outlined at fat LTO).
+// Always inline: outlining this step after the split raised the front
+// collection instruction count, and a plain `#[inline]` left it outlined under
+// fat LTO.
 #[inline(always)]
 fn truncate_left<R: Recorder>(
     lay: &mut Lay<'_, '_>,
