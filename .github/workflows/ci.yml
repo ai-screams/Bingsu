@@ -1254,6 +1254,30 @@ jobs:
             echo "::error::benchmarks without a schema 7 summary with a positive instruction count: $(tr '\n' ' ' <<<"$bad")"
             exit 1
           fi
+      - name: Per-function Callgrind counts of two git benches (probe)
+        if: always()
+        run: |
+          set -o pipefail
+          home="$RUNNER_TEMP/gungraun"
+          find "$home" -path '*git/git/*' -name 'callgrind.*.out*' | sort
+          for b in merge_git.mismatch format_git.clean; do
+            for side in base pr; do
+              if [ "$side" = base ]; then
+                f=$(find "$home" -path "*git/git/$b/*" -name "callgrind.$b.out.base@base" | head -n 1)
+              else
+                f=$(find "$home" -path "*git/git/$b/*" -name "callgrind.$b.out" | head -n 1)
+              fi
+              if [ -z "$f" ]; then
+                echo "no Callgrind output for $b ($side)"
+                continue
+              fi
+              for inc in no yes; do
+                echo "== $b $side inclusive=$inc ($f)"
+                callgrind_annotate --inclusive="$inc" "$f" > "$RUNNER_TEMP/annotate.txt" || echo "callgrind_annotate failed"
+                head -n 40 "$RUNNER_TEMP/annotate.txt"
+              done
+            done
+          done
 
   # Spec section 11 gate: full prompt time (base tip against the merge result,
   # alternated, 200 pairs per case) and stripped binary size, judged with the
