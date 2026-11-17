@@ -246,7 +246,8 @@ def test_a_silent_terminal_gives_unknown_within_the_deadlines(home):
         # tty.rs cannot widen it.
         found = re.search(rf"^pub(?:\([^)]*\))? const {name}: Duration = Duration::from_millis\((\d+)\);",
                           source, re.MULTILINE)
-        assert found, f"{name} is no longer a Duration::from_millis const in tty.rs; review the time bound"
+        assert found, (f"{name} is no longer a one-line Duration::from_millis const in tty.rs (or its shape "
+                       "changed: suffix, path, indent, several lines); review the time bound")
         assert int(found.group(1)) == milliseconds, f"{name} changed; review the silent-terminal time bound"
     # Two unanswered queries take 2 * (200 + 50) ms. Allow another 2 s for
     # loaded-runner scheduling, reporting, stty, EOF and waitpid; shell/binary
