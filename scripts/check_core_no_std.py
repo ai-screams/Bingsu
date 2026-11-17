@@ -101,6 +101,10 @@ BINGSU_GRAPH = {
     ("foldhash", "0.2.0", CRATES_IO): ((), ("lib",)),
     ("equivalent", "1.0.2", CRATES_IO): ((), ("lib",)),
     ("allocator-api2", "0.2.21", CRATES_IO): (("alloc",), ("lib",)),
+    # The sibling build-marker scan (collector::read_build): memchr's substring
+    # search with std (and so alloc) only, the features the collector's Git
+    # crates already use. No build script and no dependency of its own.
+    ("memchr", "2.8.3", CRATES_IO): (("alloc", "std"), ("lib",)),
 }
 # The dedicated prompt binary: the same graph without the CLI.
 PROMPT_GRAPH = {

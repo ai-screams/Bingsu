@@ -27,6 +27,12 @@ bingsu-bench = { path = "../bingsu-bench", optional = true }
 # Without default features: no encoding_rs (the text is UTF-8 already), and
 # no build script or proc-macro enters the shipped graph.
 yaml-rust2 = { version = "=0.13.0", default-features = false }
+# The sibling build-marker scan (collector::read_build): a SIMD substring
+# search over the whole file. Only std (and alloc, which std turns on): the
+# features the collector's graph already uses through bstr, so building both
+# unifies nothing new. std adds run-time CPU feature detection (AVX2 on
+# x86_64); no other dependency comes with it.
+memchr = { version = "=2.8.3", default-features = false, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

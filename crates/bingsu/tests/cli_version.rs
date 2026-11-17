@@ -52,6 +52,18 @@ fn embedded_identity(bytes: &[u8]) -> String {
         .collect()
 }
 
+// A scan of a sibling refuses a file with a marker twice, and a copy of bingsu is scanned
+// as one. 이것을 실패시키는 것: 표지 검색 접두를 리터럴로 쓰는 것(bingsu에 표지 바이트가 한 벌 더 생김), 역할
+// 표지를 빠뜨리는 것.
+#[test]
+fn bingsu_carries_each_marker_once() {
+    let bytes = std::fs::read(env!("CARGO_BIN_EXE_bingsu")).unwrap();
+    for marker in [b"BNGSIBLING-ID02\0", b"BNGROLE-ID02\0\0\0\0"] {
+        let count = bytes.windows(16).filter(|w| w == marker).count();
+        assert_eq!(count, 1, "{marker:?}");
+    }
+}
+
 // 이것을 실패시키는 것: 첫 줄의 형식(버전, 전체 정체, target, rustc 판)을 바꾸거나 정체를 파일에 든 값과 다르게
 // 내는 것, 형제 줄을 빼거나 순서를 바꾸는 것.
 #[test]
