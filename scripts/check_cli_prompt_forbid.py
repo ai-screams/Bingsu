@@ -105,7 +105,7 @@ TCB_SHA256 = {
     # (keep.rs; no code of its own reaches the prompt binary).
     "crates/bingsu-core/src/command/keep.rs": "217bf65950b2e90607f0114cd5a8afcf36ef44cb76698a1cd82d44647c04cba6",
     "crates/bingsu/src/sandbox.rs": "9fb81df86386aded6aef6cf8e485ab6d7fbba4d8ef11000586afa8dc7d2a44d6",
-    "crates/bingsu/Cargo.toml": "c20d60d7c262562331c44fc022c10bd00b1a2a9b53dcfd2ad358708775c27037",
+    "crates/bingsu/Cargo.toml": "0a7c993e21fc744c3b002861d4320e9f83420ea7fc7e8665794c4b80b3ec10b9",
     "crates/bingsu/prompt-syscalls.tsv": "a324b6b21bbda01af82107ae3fecc29e6e2f8fb6d5ccb450bb7c5fc431901e02",
     "crates/bingsu-prompt/src/main.rs": "94585d3f07affd25f2a0b407e7c33759dd8b56f4fc5dd33587d96dd199c838cd",
     "crates/bingsu-prompt/Cargo.toml": "520a117c771ca2b087e0ca92f47593629d89aa23f353258fb76c17aaf791fe8c",

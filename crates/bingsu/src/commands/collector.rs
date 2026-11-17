@@ -165,6 +165,12 @@ pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
     if size > 64 * 1024 * 1024 {
         return Err(StoreError::Unsafe);
     }
+    // The searches read both prefixes from the markers themselves, through
+    // black_box, never from a copy the compiler could make: a second copy of
+    // a marker's bytes in this binary would make it two markers to the next
+    // scan of it.
+    let manifest_marker = memchr::memmem::Finder::new(&bingsu_identity::manifest_tag()[..16]);
+    let role_marker = memchr::memmem::Finder::new(&std::hint::black_box(&super::ROLE_TAG)[..16]);
     let mut buffer = [0u8; 65_536];
     // The identity each marker carries (None when the file ends inside it),
     // and the role of the role marker.
@@ -183,23 +189,26 @@ pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
         } else {
             length.saturating_sub(48)
         };
-        for at in 0..end {
-            let window = &buffer[at..length];
-            if window[..16] == bingsu_identity::manifest_tag()[..16] {
-                if manifest.is_some() {
-                    return Ok(Build::NotSibling);
-                }
-                manifest = Some(window.get(16..48).map(|id| id.try_into().unwrap()));
+        // This read's bytes only: past `length` the buffer still holds an
+        // earlier read, which must never complete a marker cut by the file end.
+        let data = &buffer[..length];
+        // Markers that start before `end` (each start is searched in exactly
+        // one read; the rest move to the next one with the overlap).
+        let starts = &data[..length.min(end + 15)];
+        for at in manifest_marker.find_iter(starts) {
+            if manifest.is_some() {
+                return Ok(Build::NotSibling);
             }
-            if window[..16] == std::hint::black_box(&super::ROLE_TAG)[..16] {
-                if role_tag.is_some() {
-                    return Ok(Build::NotSibling);
-                }
-                role_tag = Some((
-                    window.get(16).copied(),
-                    window.get(17..49).map(|id| id.try_into().unwrap()),
-                ));
+            manifest = Some(data.get(at + 16..at + 48).map(|id| id.try_into().unwrap()));
+        }
+        for at in role_marker.find_iter(starts) {
+            if role_tag.is_some() {
+                return Ok(Build::NotSibling);
             }
+            role_tag = Some((
+                data.get(at + 16).copied(),
+                data.get(at + 17..at + 49).map(|id| id.try_into().unwrap()),
+            ));
         }
         overlap = length - end;
         buffer.copy_within(length - overlap..length, 0);
@@ -377,7 +386,62 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // 이것을 실패시키는 것: 같은 wire 버전의 다른 build-id나 중복 tag를 받는 것.
+    /// A file of two reads: `whole` in the first, at byte 1000, and `cut` at
+    /// the very end of the second, kept to its first `keep` bytes. The rest of
+    /// `cut` sits in the first read at the buffer places the cut part would
+    /// reach past the file end, so only the earlier read could complete it.
+    fn cut_at_the_end(whole: &[u8], cut: &[u8], keep: usize) -> Vec<u8> {
+        const TAIL: usize = 100;
+        // After the second read the buffer holds the 48 overlap bytes, then the tail.
+        let length = 48 + TAIL;
+        let start = length - keep;
+        let mut first = vec![0u8; 65_536];
+        first[1000..1000 + whole.len()].copy_from_slice(whole);
+        first[length..start + cut.len()].copy_from_slice(&cut[keep..]);
+        let mut tail = vec![0u8; TAIL - keep];
+        tail.extend_from_slice(&cut[..keep]);
+        [first, tail].concat()
+    }
+
+    // 이것을 실패시키는 것: 파일 끝에서 잘린 표지의 나머지를 이번 읽기 밖(앞선 읽기가 남긴 버퍼)에서 채우는 것
+    // (`data` 대신 `buffer`에서 정체를 읽음).
+    #[test]
+    fn a_marker_cut_at_the_end_is_not_completed_by_an_earlier_read() {
+        let path = std::env::temp_dir().join(format!("bingsu-cut-marker-{}", std::process::id()));
+        let manifest = bingsu_identity::manifest_tag().to_vec();
+        let role = bingsu_identity::role_tag(bingsu_identity::COLLECTOR_ROLE).to_vec();
+        let check = |bytes: Vec<u8>| {
+            std::fs::write(&path, bytes).unwrap();
+            verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_ok()
+        };
+        // The same layouts with the whole marker at the end are this build.
+        assert!(check(cut_at_the_end(&role, &manifest, manifest.len())));
+        assert!(check(cut_at_the_end(&manifest, &role, role.len())));
+        // The manifest's identity, or the role tag's role and identity, cut.
+        assert!(!check(cut_at_the_end(&role, &manifest, 26)));
+        assert!(!check(cut_at_the_end(&manifest, &role, 21)));
+        assert!(!check(cut_at_the_end(&manifest, &role, 16)));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 64 MiB 상한을 한 바이트 낮추는 것(정확히 64 MiB인 파일을 읽기 전에 거부함).
+    #[test]
+    fn a_file_of_exactly_64_mib_is_read() {
+        use std::os::unix::fs::FileExt;
+        let path = std::env::temp_dir().join(format!("bingsu-64mib-{}", std::process::id()));
+        let file = File::create(&path).unwrap();
+        let valid = collector_fixture();
+        // Sparse: only the markers at the end are written.
+        file.set_len(64 * 1024 * 1024).unwrap();
+        file.write_all_at(&valid, 64 * 1024 * 1024 - valid.len() as u64)
+            .unwrap();
+        let verdict = verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE);
+        std::fs::remove_file(path).unwrap();
+        assert!(verdict.is_ok());
+    }
+
+    // 이것을 실패시키는 것: 같은 wire 버전의 다른 build-id나 중복 tag를 받는 것, 첫 읽기의 마지막 시작 자리(65,487)나
+    // 다음 읽기의 첫 시작 자리(65,488)에서 시작하는 표지를 찾지 못하는 것(manifest와 역할 표지 각각).
     #[test]
     fn sibling_build_id_is_exact() {
         let path = std::env::temp_dir().join(format!("bingsu-worker-build-{}", std::process::id()));
@@ -410,18 +474,26 @@ mod tests {
                 verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_err()
             );
         }
-        for prefix in [0, 65_480, 65_520, 65_535, 65_536] {
-            let mut bytes = vec![0; prefix];
-            bytes.extend(&valid);
-            std::fs::write(&path, &bytes).unwrap();
-            assert!(
-                verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_ok()
-            );
-            bytes.extend(&valid);
-            std::fs::write(&path, bytes).unwrap();
-            assert!(
-                verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_err()
-            );
+        // 65,487 and 65,488 are the last start the first read searches (64 KiB less the
+        // 48 overlap bytes, less one) and the first the next one does. Each order of the
+        // two markers puts each of them at those places.
+        let role_first = [&valid[48..], &valid[..48]].concat();
+        for markers in [&valid, &role_first] {
+            for prefix in [0, 65_480, 65_487, 65_488, 65_520, 65_535, 65_536] {
+                let mut bytes = vec![0; prefix];
+                bytes.extend(markers);
+                std::fs::write(&path, &bytes).unwrap();
+                assert!(
+                    verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE)
+                        .is_ok()
+                );
+                bytes.extend(markers);
+                std::fs::write(&path, bytes).unwrap();
+                assert!(
+                    verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE)
+                        .is_err()
+                );
+            }
         }
         std::fs::remove_file(path).unwrap();
     }

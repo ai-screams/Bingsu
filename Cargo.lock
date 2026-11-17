@@ -48,6 +48,7 @@ dependencies = [
  "bingsu-identity",
  "bingsu-match",
  "libc",
+ "memchr",
  "yaml-rust2",
 ]
 
