@@ -105,12 +105,15 @@ impl PinnedCollector {
         {
             return Err(StoreError::Unsafe);
         }
+        // The stamp is taken before the scan, so the recheck below
+        // (`executable()`) also sees a change made while the scan read the file.
+        let stamp = sys::file_stamp(&executable)?;
         verify_build(&executable, sibling.role)?;
         let pin = Self {
             sibling,
             path: path.to_path_buf(),
             chain,
-            stamp: sys::file_stamp(&executable)?,
+            stamp,
             executable,
             facts,
         };
@@ -160,11 +163,19 @@ pub(crate) enum Build {
 /// refused before it is read. The scan stops at a second marker of either
 /// kind, so a file full of markers costs no more than one read of it.
 pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
-    use std::os::unix::fs::FileExt;
     let size = file.metadata()?.len();
     if size > 64 * 1024 * 1024 {
         return Err(StoreError::Unsafe);
     }
+    scan_build(file, size, role)
+}
+
+/// The scan of a file measured at `size` bytes. A read that returns nothing
+/// before `size` (the file shrank) or more than is left of it (the file grew)
+/// refuses the file: its bytes are no longer the ones measured, and in a file
+/// that grew a second marker could start where the last read stopped looking.
+fn scan_build(file: &File, size: u64, role: u8) -> Result<Build, StoreError> {
+    use std::os::unix::fs::FileExt;
     // The searches read both prefixes from the markers themselves, through
     // black_box, never from a copy the compiler could make: a second copy of
     // a marker's bytes in this binary would make it two markers to the next
@@ -180,7 +191,7 @@ pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
     let mut overlap = 0;
     while offset < size {
         let n = file.read_at(&mut buffer[overlap..], offset)?;
-        if n == 0 {
+        if n == 0 || offset + n as u64 > size {
             return Err(StoreError::Unsafe);
         }
         let length = overlap + n;
@@ -193,7 +204,9 @@ pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
         // earlier read, which must never complete a marker cut by the file end.
         let data = &buffer[..length];
         // Markers that start before `end` (each start is searched in exactly
-        // one read; the rest move to the next one with the overlap).
+        // one read; the rest move to the next one with the overlap). find_iter
+        // gives non-overlapping matches, which are all of them only because
+        // neither prefix overlaps itself (`marker_prefixes_cannot_overlap_themselves`).
         let starts = &data[..length.min(end + 15)];
         for at in manifest_marker.find_iter(starts) {
             if manifest.is_some() {
@@ -384,6 +397,50 @@ mod tests {
             PinnedCollector::verify(path.as_os_str(), sys::current_uid(), &mut RefuseGroupWrite);
         std::fs::remove_dir_all(base).unwrap();
         assert!(result.is_err());
+    }
+
+    // 이것을 실패시키는 것: 잰 크기보다 많이 돌려준 읽기(파일이 커짐)나 크기 전에 끝난 읽기(파일이 줄어듦)를 받는 것.
+    // 커진 파일에서 마지막 읽기는 끝 판정을 놓쳐 그 뒤 48바이트에서 시작하는 둘째 표지를 보지 않는다.
+    #[test]
+    fn a_file_that_changes_size_while_read_is_refused() {
+        let path = std::env::temp_dir().join(format!("bingsu-grown-{}", std::process::id()));
+        let valid = collector_fixture();
+        // Measured at 97 bytes; by the read it has grown to 158, with a second
+        // manifest starting at 110, the first start the last 48 bytes hold.
+        let grown = [
+            valid.as_slice(),
+            &[0; 13],
+            bingsu_identity::manifest_tag().as_slice(),
+        ]
+        .concat();
+        assert_eq!((valid.len(), grown.len()), (97, 158));
+        std::fs::write(&path, &grown).unwrap();
+        let file = File::open(&path).unwrap();
+        let scan = |size| scan_build(&file, size, bingsu_identity::COLLECTOR_ROLE);
+        assert!(matches!(scan(97), Err(StoreError::Unsafe)));
+        // Measured right, the second marker is there.
+        assert_eq!(scan(158).unwrap(), Build::NotSibling);
+        // Measured at 200 bytes: the file ends before that.
+        std::fs::write(&path, &valid).unwrap();
+        assert!(matches!(scan(200), Err(StoreError::Unsafe)));
+        assert_eq!(scan(97).unwrap(), Build::Same);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    // find_iter goes on after the end of each match, so a prefix that
+    // overlapped itself (a border: an end of it equal to its start) could
+    // hide a second marker inside the first. Neither prefix has one.
+    // 이것을 실패시키는 것: 표지 접두를 자기와 겹칠 수 있는 글자로 바꾸는 것(겹친 둘째 표지를 놓쳐 같은 빌드로 봄).
+    #[test]
+    fn marker_prefixes_cannot_overlap_themselves() {
+        for prefix in [
+            &bingsu_identity::manifest_tag()[..16],
+            &super::super::ROLE_TAG[..16],
+        ] {
+            for shift in 1..16 {
+                assert_ne!(prefix[shift..], prefix[..16 - shift], "{prefix:?} {shift}");
+            }
+        }
     }
 
     /// A file of two reads: `whole` in the first, at byte 1000, and `cut` at
