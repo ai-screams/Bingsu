@@ -1,7 +1,8 @@
 """The command stages of a helper round: session, lookup, prefix, GC."""
-from .collect import _session_sweep
-from .plan import HelperPlan, _add
-from .steps import _catalog_commit, _close_only_lock, _metered_stage, _read_checked, _read_response, _registration_open, _reserve_walk, _staged_verify, _store_verify
+from .primitives import _add
+from .helper_collect import _session_sweep
+from .helper_plan import HelperPlan
+from .helper_steps import _catalog_commit, _close_only_lock, _metered_stage, _read_checked, _read_response, _registration_open, _reserve_walk, _staged_verify, _store_verify
 
 
 def _command_session(e: dict, p: HelperPlan) -> None:

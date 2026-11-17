@@ -23,7 +23,8 @@ pub use super::exec_units::{
 use super::exec_units::{Reach, custom_segments, declares_custom, exec_units};
 pub use super::layouts::{Bands, LayoutRef, Side, bands_of, off_bands};
 use super::layouts::{
-    band_replaces_lines, blame, check_layout_budget, drawn, layouts, selectable, without_hidden,
+    Layout, band_replaces_lines, blame, check_layout_budget, drawn, layouts, selectable,
+    without_hidden,
 };
 use super::values::{
     at, bad, boolean, default_str, entries, float, get, int, optional_duration, parse_duration_ms,
@@ -211,33 +212,10 @@ fn palette(r: &MTable, mode: Mode) -> Result<ResolvedPalette, Vec<Diagnostic>> {
     })
 }
 
-/// Compiles `m` (already checked without errors) with `trusted`, the merge
-/// of the executable sources alone. Both display palettes are retained;
-/// `auto` remains in the interface for existing callers. Returns the config
-/// and its warnings and notes; errors carry the place of the key that
-/// caused them.
-pub fn compile(
-    m: &Merged,
-    trusted: &Merged,
-    _auto: Mode,
-) -> Result<(CompiledConfig, Vec<Diagnostic>), Vec<Diagnostic>> {
-    // Check both views before `layouts`/`drawn` can multiply inherited data.
-    check_layout_budget(&trusted.root)?;
-    check_layout_budget(&m.root)?;
-    let r = &m.root;
-    let mut notes = Vec::new();
-    let (mode, light_mode) = match s(r, &["colors", "mode"]).unwrap_or(default_str("colors.mode")) {
-        "dark" => (Mode::Dark, Mode::Dark),
-        "light" => (Mode::Light, Mode::Light),
-        _ => (Mode::Dark, Mode::Light),
-    };
-    let palette = palette(r, mode)?;
-    let light_palette = if mode == light_mode {
-        palette.clone()
-    } else {
-        self::palette(r, light_mode)?
-    };
-    let options = StyleOptions {
+/// The style options the config writes: separator, fill and frame. A value
+/// that is not one of the names stays unset (the check reports it).
+fn style_options(r: &MTable) -> StyleOptions {
+    StyleOptions {
         separator: s(r, &["style", "separator"]).and_then(|v| match v {
             "triangle" => Some(Shape::Triangle),
             "round" => Some(Shape::Round),
@@ -253,10 +231,14 @@ pub fn compile(
         }),
         frame: s(r, &["layout", "frame"]).map(|v| v == "line"),
         ..StyleOptions::default()
-    };
-    // Built-in segments turned off. `enabled` is an execution key: a
-    // shape-only file cannot set it (dropped at the merge), and one from a
-    // file that failed the safety check turns the segment off (W405).
+    }
+}
+
+/// The built-in segments turned off. `enabled` is an execution key: a
+/// shape-only file cannot set it (dropped at the merge), and one from a
+/// file that failed the safety check turns the segment off, which is
+/// reported on `notes` (W405) as the keys are read.
+fn builtin_off<'a>(r: &MTable, notes: &mut Vec<Diagnostic>) -> BTreeSet<&'a str> {
     let mut off: BTreeSet<&str> = BTreeSet::new();
     for d in BUILTIN {
         if let Some(n) = get(r, &["segment", d.id, "enabled"]) {
@@ -273,25 +255,23 @@ pub fn compile(
             }
         }
     }
-    let base_preset = s(r, &["style", "preset"]).unwrap_or(default_str("style.preset"));
-    // `off` above is the built-in segments turned off; these are the bands.
-    let bands_off = off_bands(&trusted.root);
-    let banded = bands_of(m, &bands_off)?;
-    notes.extend(banded.notes.iter().cloned());
-    let profile = WidthProfile::new(
-        int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
-        int(r, &["width", "emoji"]).unwrap_or(2) as u8,
-    )
-    .unwrap_or(WidthProfile::DEFAULT);
-    let shown_bands = selectable(&banded.order, &banded.bands);
-    // What a trusted layout can draw is judged on the trusted merge alone: a
-    // shape-only source may re-order or resize bands, but must not make a band
-    // reachable that the trusted sources never reach. A trusted merge whose
-    // bands fail to order approves nothing.
-    let approved_bands = bands_of(trusted, &bands_off).map_or_else(
+    off
+}
+
+/// What a layout can draw is judged on the trusted merge alone: a shape-only
+/// source may re-order or resize bands, but must not make a band reachable
+/// that the trusted sources never reach. A trusted merge whose bands fail to
+/// order approves nothing. `full_names` are the band names of the full merge
+/// (the indices the compiled bands use).
+fn approved_bands(
+    trusted: &Merged,
+    bands_off: &BTreeSet<&str>,
+    full_names: &[String],
+) -> BTreeSet<Option<u16>> {
+    bands_of(trusted, bands_off).map_or_else(
         |_| BTreeSet::new(),
         |t| {
-            let full = &banded.names;
+            let full = full_names;
             crate::bands::selection_table(&t.order, &t.bands)
                 .into_iter()
                 .filter_map(|(_, _, b)| match b {
@@ -303,164 +283,13 @@ pub fn compile(
                 })
                 .collect()
         },
-    );
-    let reach = Reach::new(approved_bands, shown_bands);
-    // Without a declared user segment of a drawn kind nothing is looked up,
-    // so the usual config compiles exactly as it did before user segments.
-    let custom = if declares_custom(r) {
-        custom_segments(
-            r,
-            &drawn(r, &bands_off, &banded.names),
-            &drawn(&trusted.root, &bands_off, &banded.names),
-            banded.names.len(),
-            &reach,
-            profile,
-            &mut notes,
-        )?
-    } else {
-        Vec::new()
-    };
-    let texts: Vec<&str> = custom.iter().map(|c| c.id.as_str()).collect();
-    let mut variants = Vec::new();
-    let mut mask = 0u32;
-    for lay in layouts(r, &bands_off) {
-        let bt = lay.table.as_ref();
-        let preset_node = bt
-            .and_then(|bt| get(bt, &["style", "preset"]))
-            .or_else(|| get(r, &["style", "preset"]));
-        let p = bt
-            .and_then(|bt| s(bt, &["style", "preset"]))
-            .unwrap_or(base_preset);
-        // A template replaces preset and options (spec section 2 "스타일 세
-        // 단계"); a band's own template wins over the default's.
-        let template = lay.template.as_ref();
-        // Command and language segments are drawn from M6, text segments now;
-        // built-ins turned off are not drawn.
-        let keep = |ids: &[String]| -> Vec<String> {
-            ids.iter()
-                .filter(|id| {
-                    (!id.contains('/') || texts.contains(&id.as_str()))
-                        && !off.contains(id.as_str())
-                })
-                .cloned()
-                .collect()
-        };
-        let owned: Vec<(Vec<String>, Vec<String>)> = lay
-            .lines
-            .iter()
-            .filter(|l| l.enabled)
-            .map(|l| (keep(&l.left), keep(&l.right)))
-            .collect();
-        let refs: Vec<(Vec<&str>, Vec<&str>)> = owned
-            .iter()
-            .map(|(a, b)| {
-                (
-                    a.iter().map(|s| s.as_str()).collect(),
-                    b.iter().map(|s| s.as_str()).collect(),
-                )
-            })
-            .collect();
-        let layout_lines: Vec<LineLayout<'_>> = refs
-            .iter()
-            .map(|(a, b)| LineLayout { left: a, right: b })
-            .collect();
-        let mut involved: Vec<&MNode> = lay.lines.iter().flat_map(|l| l.nodes.iter()).collect();
-        involved.extend(preset_node);
-        involved.extend(template);
-        // Explicit templates replace these options; only generated layouts
-        // depend on their origins (including template-size failures).
-        if template.is_none() {
-            if layout_lines.len() > 1 {
-                involved.extend(get(r, &["layout", "frame"]));
-            }
-            if layout_lines.iter().any(|l| !l.right.is_empty()) {
-                involved.extend(get(r, &["layout", "fill"]));
-            }
-            if let Some(pr) = preset(p) {
-                let effective = options.over(pr.options);
-                if effective.background == Some(true)
-                    && effective.joining == Some(Joining::Attached)
-                    && layout_lines
-                        .iter()
-                        .any(|l| l.left.len() > 1 || l.right.len() > 1)
-                {
-                    involved.extend(get(r, &["style", "separator"]));
-                }
-            }
-        }
-        let where_ = blame(&involved);
-        let text = match template.map(|n| &n.value) {
-            Some(MValue::Scalar(Value::Str(t))) => {
-                // Lines or options written next to a template are not used:
-                // say so, never drop them in silence.
-                if options != StyleOptions::default() || lay.lines.iter().any(|l| l.written) {
-                    notes.push(Diagnostic::new(codes::TEMPLATE_REPLACES_STYLE, where_));
-                }
-                // A band's own template also draws in place of the lines it
-                // takes from `[layout]`: never in silence either.
-                // 이것을 실패시키는 것: 구간이 물려받은 기본 템플릿(자기 것 아님)에 내는 것(N501이 기본 레이아웃에서 이미 알림).
-                if let Some(own) = bt.and_then(|bt| get(bt, &["style", "template"])) {
-                    notes.extend(band_replaces_lines(&lay, own, &banded.widths));
-                }
-                // A `custom/…` reference that is not drawn (turned off, or
-                // undeclared, which W408 names) goes alone; the rest compiles.
-                without_hidden(t, &off, &texts)
-            }
-            _ => {
-                let pr =
-                    preset(p).ok_or_else(|| vec![bad(where_, "style.preset", p, "a preset")])?;
-                generate(pr, &options, &layout_lines)
-                    .map_err(|_| vec![bad(where_, "layout", "", "a layout that fits a template")])?
-            }
-        };
-        let compiled = compile_builtin(&text, &texts)
-            .map_err(|_| vec![bad(where_, "layout", "", "a layout that compiles")])?;
-        // A theme may change how the prompt looks, never erase it: a
-        // shape-only template that draws none of the required segments
-        // (`char`, `dir`) is an error placed in that file, so rule 5 drops
-        // it and the trusted layout stays.
-        if let Some(t) = template.filter(|t| t.origin.trust == Trust::ShapeOnly) {
-            let needed: Vec<usize> = SETUP
-                .iter()
-                .filter(|(id, _, required)| *required && !off.contains(id))
-                .filter_map(|(id, _, _)| BUILTIN.iter().position(|d| d.id == *id))
-                .collect();
-            // Fields may be absent; booleans such as char.failed never
-            // print text. Only the segment itself guarantees an anchor.
-            let draws = |i: usize| {
-                compiled.iter().any(|l| {
-                    l.nodes()
-                        .iter()
-                        .any(|n| matches!(n, Node::Segment { seg, .. } if usize::from(*seg) == i))
-                })
-            };
-            if !needed.is_empty() && !needed.iter().any(|&i| draws(i)) {
-                return Err(vec![bad(
-                    at(t),
-                    "style.template",
-                    "",
-                    "a template that draws char or dir",
-                )]);
-            }
-        }
-        let referenced = crate::collection::selection::references(&compiled);
-        for (i, d) in BUILTIN.iter().enumerate() {
-            if referenced & (1 << i) != 0 && !off.contains(d.id) {
-                mask |= 1 << i;
-            }
-        }
-        variants.push(compiled);
-    }
-    let Bands {
-        bands,
-        names: band_names,
-        order: band_order,
-        widths,
-        ..
-    } = banded;
-    let one = |src: &str| compile_builtin(src, &[]).map(|mut v| v.remove(0));
-    let transient = one("{char}").map_err(|_| Vec::new())?;
-    let vi = one("{char}").map_err(|_| Vec::new())?;
+    )
+}
+
+/// The compiled setup of every built-in segment, in `BUILTIN` order: its
+/// priority, whether it is required and, for `dir`, the shortening methods
+/// and when they apply.
+fn builtin_setup(r: &MTable) -> Vec<Setup> {
     let dir_methods: Vec<Method> = match get(r, &["segment", "dir", "shorten"]) {
         Some(n) => strings(n).iter().map(|x| method(x)).collect(),
         None => DIR_METHODS.to_vec(),
@@ -488,6 +317,263 @@ pub fn compile(
             }
         }
     }
+    setup
+}
+
+/// What every layout variant is compiled against: the merged root and the
+/// values derived from it once, read only.
+struct VariantContext<'a> {
+    r: &'a MTable,
+    options: &'a StyleOptions,
+    off: &'a BTreeSet<&'a str>,
+    texts: &'a [&'a str],
+    base_preset: &'a str,
+    widths: &'a [WidthRun],
+}
+
+/// The ids each enabled line of `lay` draws, left and right. Command and
+/// language segments are drawn from M6, text segments now; built-ins turned
+/// off, and a `custom/…` id that is not drawn, are left out.
+fn drawn_lines(
+    lay: &Layout,
+    texts: &[&str],
+    off: &BTreeSet<&str>,
+) -> Vec<(Vec<String>, Vec<String>)> {
+    let keep = |ids: &[String]| -> Vec<String> {
+        ids.iter()
+            .filter(|id| {
+                (!id.contains('/') || texts.contains(&id.as_str())) && !off.contains(id.as_str())
+            })
+            .cloned()
+            .collect()
+    };
+    lay.lines
+        .iter()
+        .filter(|l| l.enabled)
+        .map(|l| (keep(&l.left), keep(&l.right)))
+        .collect()
+}
+
+/// A theme may change how the prompt looks, never erase it: a shape-only
+/// template that draws none of the required segments (`char`, `dir`) is an
+/// error placed in that file, so rule 5 drops it and the trusted layout
+/// stays. `off` are the built-ins turned off, which are not required.
+fn draws_required_segment(
+    compiled: &[CompiledLine],
+    template: &MNode,
+    off: &BTreeSet<&str>,
+) -> Result<(), Vec<Diagnostic>> {
+    let needed: Vec<usize> = SETUP
+        .iter()
+        .filter(|(id, _, required)| *required && !off.contains(id))
+        .filter_map(|(id, _, _)| BUILTIN.iter().position(|d| d.id == *id))
+        .collect();
+    // Fields may be absent; booleans such as char.failed never
+    // print text. Only the segment itself guarantees an anchor.
+    let draws = |i: usize| {
+        compiled.iter().any(|l| {
+            l.nodes()
+                .iter()
+                .any(|n| matches!(n, Node::Segment { seg, .. } if usize::from(*seg) == i))
+        })
+    };
+    if !needed.is_empty() && !needed.iter().any(|&i| draws(i)) {
+        return Err(vec![bad(
+            at(template),
+            "style.template",
+            "",
+            "a template that draws char or dir",
+        )]);
+    }
+    Ok(())
+}
+
+/// One layout variant (the default layout, or a band's) compiled: its
+/// template or generated lines, the required-segment check, and the built-in
+/// segments it references added to `mask`. Notes go on `notes` in the order
+/// they are found.
+fn compile_variant(
+    lay: &Layout,
+    cx: &VariantContext<'_>,
+    notes: &mut Vec<Diagnostic>,
+    mask: &mut u32,
+) -> Result<Vec<CompiledLine>, Vec<Diagnostic>> {
+    let VariantContext {
+        r,
+        options,
+        off,
+        texts,
+        base_preset,
+        widths,
+    } = *cx;
+    let bt = lay.table.as_ref();
+    let preset_node = bt
+        .and_then(|bt| get(bt, &["style", "preset"]))
+        .or_else(|| get(r, &["style", "preset"]));
+    let p = bt
+        .and_then(|bt| s(bt, &["style", "preset"]))
+        .unwrap_or(base_preset);
+    // A template replaces preset and options (spec section 2 "스타일 세
+    // 단계"); a band's own template wins over the default's.
+    let template = lay.template.as_ref();
+    let owned = drawn_lines(lay, texts, off);
+    let refs: Vec<(Vec<&str>, Vec<&str>)> = owned
+        .iter()
+        .map(|(a, b)| {
+            (
+                a.iter().map(|s| s.as_str()).collect(),
+                b.iter().map(|s| s.as_str()).collect(),
+            )
+        })
+        .collect();
+    let layout_lines: Vec<LineLayout<'_>> = refs
+        .iter()
+        .map(|(a, b)| LineLayout { left: a, right: b })
+        .collect();
+    let mut involved: Vec<&MNode> = lay.lines.iter().flat_map(|l| l.nodes.iter()).collect();
+    involved.extend(preset_node);
+    involved.extend(template);
+    // Explicit templates replace these options; only generated layouts
+    // depend on their origins (including template-size failures).
+    if template.is_none() {
+        if layout_lines.len() > 1 {
+            involved.extend(get(r, &["layout", "frame"]));
+        }
+        if layout_lines.iter().any(|l| !l.right.is_empty()) {
+            involved.extend(get(r, &["layout", "fill"]));
+        }
+        if let Some(pr) = preset(p) {
+            let effective = options.over(pr.options);
+            if effective.background == Some(true)
+                && effective.joining == Some(Joining::Attached)
+                && layout_lines
+                    .iter()
+                    .any(|l| l.left.len() > 1 || l.right.len() > 1)
+            {
+                involved.extend(get(r, &["style", "separator"]));
+            }
+        }
+    }
+    let where_ = blame(&involved);
+    let text = match template.map(|n| &n.value) {
+        Some(MValue::Scalar(Value::Str(t))) => {
+            // Lines or options written next to a template are not used:
+            // say so, never drop them in silence.
+            if *options != StyleOptions::default() || lay.lines.iter().any(|l| l.written) {
+                notes.push(Diagnostic::new(codes::TEMPLATE_REPLACES_STYLE, where_));
+            }
+            // A band's own template also draws in place of the lines it
+            // takes from `[layout]`: never in silence either.
+            // 이것을 실패시키는 것: 구간이 물려받은 기본 템플릿(자기 것 아님)에 내는 것(N501이 기본 레이아웃에서 이미 알림).
+            if let Some(own) = bt.and_then(|bt| get(bt, &["style", "template"])) {
+                notes.extend(band_replaces_lines(lay, own, widths));
+            }
+            // A `custom/…` reference that is not drawn (turned off, or
+            // undeclared, which W408 names) goes alone; the rest compiles.
+            without_hidden(t, off, texts)
+        }
+        _ => {
+            let pr = preset(p).ok_or_else(|| vec![bad(where_, "style.preset", p, "a preset")])?;
+            generate(pr, options, &layout_lines)
+                .map_err(|_| vec![bad(where_, "layout", "", "a layout that fits a template")])?
+        }
+    };
+    let compiled = compile_builtin(&text, texts)
+        .map_err(|_| vec![bad(where_, "layout", "", "a layout that compiles")])?;
+    if let Some(t) = template.filter(|t| t.origin.trust == Trust::ShapeOnly) {
+        draws_required_segment(&compiled, t, off)?;
+    }
+    let referenced = crate::collection::selection::references(&compiled);
+    for (i, d) in BUILTIN.iter().enumerate() {
+        if referenced & (1 << i) != 0 && !off.contains(d.id) {
+            *mask |= 1 << i;
+        }
+    }
+    Ok(compiled)
+}
+
+/// Compiles `m` (already checked without errors) with `trusted`, the merge
+/// of the executable sources alone. Both display palettes are retained;
+/// `auto` remains in the interface for existing callers. Returns the config
+/// and its warnings and notes; errors carry the place of the key that
+/// caused them.
+pub fn compile(
+    m: &Merged,
+    trusted: &Merged,
+    _auto: Mode,
+) -> Result<(CompiledConfig, Vec<Diagnostic>), Vec<Diagnostic>> {
+    // Check both views before `layouts`/`drawn` can multiply inherited data.
+    check_layout_budget(&trusted.root)?;
+    check_layout_budget(&m.root)?;
+    let r = &m.root;
+    let mut notes = Vec::new();
+    let (mode, light_mode) = match s(r, &["colors", "mode"]).unwrap_or(default_str("colors.mode")) {
+        "dark" => (Mode::Dark, Mode::Dark),
+        "light" => (Mode::Light, Mode::Light),
+        _ => (Mode::Dark, Mode::Light),
+    };
+    let palette = palette(r, mode)?;
+    let light_palette = if mode == light_mode {
+        palette.clone()
+    } else {
+        self::palette(r, light_mode)?
+    };
+    let options = style_options(r);
+    // Built-in segments turned off; the W405 notes come before the band notes.
+    let off = builtin_off(r, &mut notes);
+    let base_preset = s(r, &["style", "preset"]).unwrap_or(default_str("style.preset"));
+    // `off` above is the built-in segments turned off; these are the bands.
+    let bands_off = off_bands(&trusted.root);
+    let banded = bands_of(m, &bands_off)?;
+    notes.extend(banded.notes.iter().cloned());
+    let profile = WidthProfile::new(
+        int(r, &["width", "ambiguous"]).unwrap_or(1) as u8,
+        int(r, &["width", "emoji"]).unwrap_or(2) as u8,
+    )
+    .unwrap_or(WidthProfile::DEFAULT);
+    let shown_bands = selectable(&banded.order, &banded.bands);
+    let approved = approved_bands(trusted, &bands_off, &banded.names);
+    let reach = Reach::new(approved, shown_bands);
+    // Without a declared user segment of a drawn kind nothing is looked up,
+    // so the usual config compiles exactly as it did before user segments.
+    let custom = if declares_custom(r) {
+        custom_segments(
+            r,
+            &drawn(r, &bands_off, &banded.names),
+            &drawn(&trusted.root, &bands_off, &banded.names),
+            banded.names.len(),
+            &reach,
+            profile,
+            &mut notes,
+        )?
+    } else {
+        Vec::new()
+    };
+    let texts: Vec<&str> = custom.iter().map(|c| c.id.as_str()).collect();
+    let mut variants = Vec::new();
+    let mut mask = 0u32;
+    let cx = VariantContext {
+        r,
+        options: &options,
+        off: &off,
+        texts: &texts,
+        base_preset,
+        widths: &banded.widths,
+    };
+    for lay in layouts(r, &bands_off) {
+        variants.push(compile_variant(&lay, &cx, &mut notes, &mut mask)?);
+    }
+    let Bands {
+        bands,
+        names: band_names,
+        order: band_order,
+        widths,
+        ..
+    } = banded;
+    let one = |src: &str| compile_builtin(src, &[]).map(|mut v| v.remove(0));
+    let transient = one("{char}").map_err(|_| Vec::new())?;
+    let vi = one("{char}").map_err(|_| Vec::new())?;
+    let setup = builtin_setup(r);
     let exec_units = exec_units(
         r,
         &trusted.root,

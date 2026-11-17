@@ -13,6 +13,7 @@ SEC-PARTIAL	Only validated updates survive malformed/truncated/deadline endings	
 SEC-DRIP	Slow bytes never extend the absolute spawn deadline	Unix	crates/bingsu/tests/collector_lifecycle.rs::slow_drip_does_not_extend_spawn_deadline	M3b
 SEC-READY	Hostile bytes are read only after helper confinement	Unix	crates/bingsu/tests/collector_lifecycle.rs::immediate_ready_is_not_read_or_decoded_before_confinement	M3b
 SEC-VERIFY	Runtime/context/display verified before spawn; reachable product once, cold/redraw/empty zero	Unix	crates/bingsu/tests/collector_lifecycle.rs::verified_screen_spawns_once_before_helper_tsync	M3b
+SEC-STREAM	A partial frame past the 256 KiB response stream cap ends the exchange with Protocol; a stream that stops on the cap waits for its deadline	Unix	crates/bingsu/tests/collector_lifecycle.rs::a_partial_frame_past_the_stream_cap_ends_the_exchange	M7
 SEC-PUBLISH	Same-fd identity/bytes checked before atomic rename	Unix	crates/bingsu/tests/collection_store.rs::publication_checks_same_fd_bytes_and_identity	M3b
 SEC-LOCK	Closing helper duplicate never unlocks live worker	Unix	crates/bingsu/tests/collection_store.rs::helper_close_never_unlocks_live_worker	M3b
 SEC-COLLISION	Exact cwd bytes override hash address	Unix	crates/bingsu/tests/collection_store.rs::hash_collision_never_reuses_or_overwrites_other_cwd	M3b

@@ -15,7 +15,7 @@ import sys
 import pytest
 
 # Helpers only: importing test_* names here would collect them twice.
-from test_collector_security import ROOT, assert_acceptance_table, job_platforms, workflow_job
+from test_collector_security import ROOT, assert_acceptance_table, blank_rust, job_platforms, workflow_job
 
 TABLE = "tests/gate-acceptance.tsv"
 WORKFLOWS = ("ci.yml", "shell.yml")
@@ -714,12 +714,12 @@ def test_supplementary_row_keeps_its_pair_pending(closed):
 # A lib row has no real counterpart yet: a synthetic row and CI step check the
 # lib branch against the real bingsu-core sources.
 LIB_TEST = ("crates/bingsu-core/src/front/staged/tests.rs::"
-            "front::staged::tests::cases::collection_address_is_computed_only_after_advancing_past_the_root")
+            "front::staged::tests::collection_address_is_computed_only_after_advancing_past_the_root")
 LIB_STEP = (
     "      - run: |\n"
     "          set -o pipefail\n"
     "          cargo test -j 2 -p bingsu-core --lib | tee \"$RUNNER_TEMP/core-lib.txt\"\n"
-    "          grep -F 'test front::staged::tests::cases::collection_address_is_computed_only_after_advancing_past_the_root"
+    "          grep -F 'test front::staged::tests::collection_address_is_computed_only_after_advancing_past_the_root"
     " ... ok' \"$RUNNER_TEMP/core-lib.txt\"\n")
 LIB_ANCHOR = "      - name: Collector policy evaluator and table correspondence\n"
 
@@ -736,7 +736,7 @@ def lib_case(damage):
     elif damage == "no-grep":
         step = step.replace("grep -F", "# grep -F")
     elif damage == "module-path":
-        table = table.replace("::front::staged::tests::cases::", "::back::staged::tests::cases::")
+        table = table.replace("::front::staged::tests::", "::back::staged::tests::")
     elif damage == "bin-target":
         table = table.replace("\tlib\t", "\tbin:bingsu-core\t")
     elif damage == "path-module":
@@ -746,8 +746,8 @@ def lib_case(damage):
         path = "crates/bingsu-core/src/front/staged.rs"
         sources[path] = (ROOT / path).read_text().replace("#[cfg(test)]\nmod tests;", '#[cfg(test)]\n#[cfg(target_os = "macos")]\nmod tests;')
     elif damage == "inline-module":
-        path = "crates/bingsu-core/src/front/staged/tests.rs"
-        sources[path] = (ROOT / path).read_text().replace("mod cases {", "mod kases {")
+        table = table.replace("::front::staged::tests::", "::front::staged::tests::kases::")
+        step = step.replace("staged::tests::collection_address", "staged::tests::kases::collection_address")
     texts["ci.yml"] = texts["ci.yml"].replace(LIB_ANCHOR, step + LIB_ANCHOR)
     for path, text in sources.items():
         assert text != (ROOT / path).read_text(), damage
@@ -772,12 +772,13 @@ def test_lib_row_is_accepted_with_its_exact_ci_assertion():
 
 
 # 이것을 실패시키는 것: lib 행을 --test 실행·주석 단언으로 받거나, 표의 모듈 경로·bin target을 믿거나,
-# #[path]·꺼진 cfg·없는 inline 모듈을 지나치는 것.
+# #[path]·꺼진 cfg·없는 inline 모듈을 지나치는 것, 없는 inline 모듈 행이 다른 이유로만 거부되는 것.
 @pytest.mark.parametrize("damage", ["test-target", "no-grep", "module-path", "bin-target",
                                     "path-module", "disabled-module", "inline-module"])
 def test_lib_row_rejects_mutations(damage):
     table, texts, read = lib_case(damage)
-    with pytest.raises(AssertionError):
+    # The missing inline module must be what refuses the row, not a mismatch elsewhere.
+    with pytest.raises(AssertionError, match="inline module" if damage == "inline-module" else None):
         assert_acceptance_table(table, texts, required_ids=frozenset({"GATE-ZOMBIES.1"}),
                                 required_gates=frozenset(M3D_GATE_IDS), read=read)
 
@@ -1388,15 +1389,85 @@ CGROUP_CELLS = ("          - cell: plain\n            opts: \"\"\n"
                 "          - cell: priv\n            opts: --privileged --cgroupns=private\n")
 
 
-def cgroup_cell_tests():
-    """Every Rust test that runs only in the cgroup cells, as its libtest path."""
-    found = set()
-    for path in (ROOT / "crates/bingsu/src/commands").glob("*.rs"):
-        text = path.read_text().replace("\r\n", "\n")
-        for match in re.finditer(re.escape(CGROUP_CELL_REASON) + r"\n\s*fn (\w+)\(", text):
-            inner = [m[1] for m in re.finditer(r"(?m)^(?:pub\(crate\) )?mod (\w+) \{", text[:match.start()])]
-            found.add(f"commands::{path.stem}::{inner[-1]}::{match[1]}")
+CELL_ROOT = "crates/bingsu/src/commands"
+
+
+def cell_files():
+    """Every Rust source under CELL_ROOT, at any depth: the path and its text."""
+    return {str(p.relative_to(ROOT)): p.read_text().replace("\r\n", "\n")
+            for p in sorted((ROOT / CELL_ROOT).rglob("*.rs"))}
+
+
+def enclosing_modules(code, offset):
+    """The names of the inline `mod name {` blocks of literal-free `code`
+    that hold `offset`, outermost first."""
+    names = []
+    for match in re.finditer(r"(?<![\w])mod\s+(\w+)\s*\{", code):
+        depth, end = 0, match.end() - 1
+        while True:
+            depth += {"{": 1, "}": -1}.get(code[end], 0)
+            if depth == 0:
+                break
+            end += 1
+        if match.start() < offset < end:
+            names.append(match[1])
+    return names
+
+
+def cgroup_cell_tests(files=None):
+    """Every Rust test that runs only in the cgroup cells: its libtest path and
+    the file that holds it. The module path comes from the file's place under
+    crates/bingsu/src (`commands/a.rs` is `commands::a`, `commands/a/b.rs` is
+    `commands::a::b`, `mod.rs` is its folder) and then the inline modules
+    around the test."""
+    found = {}
+    for path, text in (cell_files() if files is None else files).items():
+        parts = path.removeprefix("crates/bingsu/src/").removesuffix(".rs").split("/")
+        if parts[-1] == "mod":
+            parts.pop()
+        code = blank_rust(text, literals=True)
+        for at in (m.start() for m in re.finditer(re.escape(CGROUP_CELL_REASON), text)):
+            if code[at] != "#":
+                continue  # inside a comment or a string: no attribute
+            # A mark with another attribute after it would go uncollected: refuse that order.
+            match = re.compile(re.escape(CGROUP_CELL_REASON) + r"\n\s*fn (\w+)\(").match(text, at)
+            assert match, ("a cell mark must come right before its fn", path, text.count("\n", 0, at) + 1)
+            name = "::".join(parts + enclosing_modules(code, at) + [match[1]])
+            assert name not in found, ("cell test named twice", name)
+            found[name] = path
     return found
+
+
+# The cell tests follow their files at any depth and the inline modules that hold them, wherever the module
+# path comes from. 이것을 실패시키는 것: 하위 폴더 파일을 빠뜨리는 것(rglob을 glob으로), 모듈 경로를 파일 이름만으로
+# 정하는 것, 둘러싼 모듈 대신 마지막으로 연 모듈을 쓰는 것, 문자열(raw C 문자열 포함) 안의 괄호를 코드로 세는 것,
+# 주석·문자열 안의 표시를 시험으로 세는 것, fn 앞에 다른 속성이 끼어 표시가 조용히 빠지게 두는 것.
+def test_cell_tests_follow_files_and_their_modules():
+    import os
+    mark = CGROUP_CELL_REASON
+    files = {
+        f"{CELL_ROOT}/a.rs": (
+            'const OPEN: &str = "{";\nfn product() {}\n#[cfg(test)]\nmod tests {\n    const CLOSE: &str = "}";\n'
+            "    // mod hidden { a comment, not a module\n    mod helpers {\n        fn h() {}\n    }\n"
+            f"    #[test]\n    {mark}\n    fn test_in_a() {{}}\n}}\n"),
+        f"{CELL_ROOT}/b/tests.rs": f"mod helpers {{\n    pub fn h() {{}}\n}}\n#[test]\n{mark}\nfn test_in_b() {{}}\n",
+        f"{CELL_ROOT}/c/mod.rs": f"#[cfg(test)]\nmod cell {{\n    #[test]\n    {mark}\n    fn test_in_c() {{}}\n}}\n",
+        f"{CELL_ROOT}/d.rs": (f'mod tests {{\n    const C: &core::ffi::CStr = cr#"" }} ""#;\n    // {mark}\n    // fn commented() {{}}\n'
+                              f'    const S: &str = r#"{mark}\nfn quoted()"#;\n    #[test]\n    {mark}\n    fn test_in_d() {{}}\n}}\n'),
+    }
+    assert cgroup_cell_tests(files) == {
+        "commands::a::tests::test_in_a": f"{CELL_ROOT}/a.rs",
+        "commands::b::tests::test_in_b": f"{CELL_ROOT}/b/tests.rs",
+        "commands::c::cell::test_in_c": f"{CELL_ROOT}/c/mod.rs",
+        "commands::d::tests::test_in_d": f"{CELL_ROOT}/d.rs",
+    }
+    # A mark followed by another attribute would hide its test from the cell job.
+    late = {f"{CELL_ROOT}/e.rs": f'#[test]\n{mark}\n#[cfg(target_os = "linux")]\nfn test_in_e() {{}}\n'}
+    with pytest.raises(AssertionError, match="right before its fn"):
+        cgroup_cell_tests(late)
+    walked = {os.path.relpath(os.path.join(d, f), ROOT) for d, _, names in os.walk(ROOT / CELL_ROOT)
+              for f in names if f.endswith(".rs")}
+    assert set(cell_files()) == walked and any(p.count("/") > 4 for p in walked), "subfolders scanned"
 
 
 def assert_command_cgroup_cells(text):
@@ -1412,7 +1483,7 @@ def assert_command_cgroup_cells(text):
     assert "${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in run
     selected = set(run.split(" --test-threads=1 ")[1].split(" | tee ")[0].split())
     passed = set(re.findall(r"grep -Fx 'test (\S+) \.\.\. ok' ", step))
-    want = cgroup_cell_tests() | CLONE3_CELL_TESTS
+    want = set(cgroup_cell_tests()) | CLONE3_CELL_TESTS
     assert selected == passed == want, sorted((selected | passed | want) - (selected & passed & want))
     step = block.split("      - name: Command cgroup tests in the cell\n")[1].split("\n      - ")[0]
     assert "${{ matrix.opts }} -e BINGSU_CGROUP_CELL=${{ matrix.cell }}" in step
@@ -1783,13 +1854,15 @@ def cell_bypass(shell, damage):
 # 실패시키는 것: 다른 이유로 ignored인 시험(timing 등)을 cell 증거로 받는 것.
 def test_cell_rows_need_the_cell_ignore():
     table = (ROOT / TABLE).read_text()
-    path = "crates/bingsu/src/commands/command_supervisor.rs"
-    source = (ROOT / path).read_text()
-    mark = '#[ignore = "runs in the cgroup cells (BINGSU_CGROUP_CELL)"]\n    fn test_nested_cgroup_removed_postorder'
-    assert source.count(mark) == 1
-    swapped = source.replace(mark, '#[ignore = "timing: elsewhere"]\n    fn test_nested_cgroup_removed_postorder')
     row = [line for line in table.splitlines(True) if line.startswith("GATE-CMD-REAP.2-nested\t")]
     assert len(row) == 1
+    # The file and the test come from the row, wherever the test lives and however it is indented.
+    test = next(csv.DictReader(io.StringIO(table.splitlines(True)[0] + row[0]), delimiter="\t"))["test"]
+    path, fn = test.split("::", 1)[0], test.rsplit("::", 1)[-1]
+    source = (ROOT / path).read_text()
+    mark = re.escape(CGROUP_CELL_REASON) + r"(?=\n\s*fn " + re.escape(fn) + r"\()"
+    assert len(re.findall(mark, source)) == 1
+    swapped = re.sub(mark, '#[ignore = "timing: elsewhere"]', source)
     one = table.splitlines(True)[0] + row[0]
     assert_acceptance_table(one, workflows(), required_ids=frozenset(), required_gates=frozenset(GATE_IDS))
     with pytest.raises(AssertionError):

@@ -619,7 +619,7 @@ def test_read_measurement_matches_the_prepared_tree(tmp_path, declared, environm
 
 
 # 고정 하네스가 복사한 `commands` 모듈을 rustc로 컴파일할 때, 그 트리의 bingsu가 의존하는 CLI 라이브러리
-# (bingsu-match, yaml-rust2)만 extern으로 넘긴다. 의존하지 않는 옛 base 트리에는 넘기지 않고, 이름이 [dependencies] 밖(features,
+# (bingsu-match, yaml-rust2, memchr)만 extern으로 넘긴다. 의존하지 않는 옛 base 트리에는 넘기지 않고, 이름이 [dependencies] 밖(features,
 # 주석)에만 있으면 의존으로 보지 않는다. 이것을 실패시키는 것: 늘 넘기는 것(base 빌드에 그 rlib이 없어 KeyError),
 # 넘기지 않는 것(후보 빌드가 `bingsu_match`를 못 찾음), [dependencies] 밖의 이름까지 세는 것.
 def test_cli_libraries_follow_the_trees_dependencies(tmp_path):
@@ -634,7 +634,9 @@ def test_cli_libraries_follow_the_trees_dependencies(tmp_path):
     assert product.cli_libraries(tree(base)) == ()
     with_yaml = with_match.replace("[features]", 'yaml-rust2 = { version = "=0.13.0", default-features = false }\n\n[features]')
     assert product.cli_libraries(tree(with_yaml)) == ("bingsu_match", "yaml_rust2")
-    assert product.cli_libraries(Path(SOURCE).resolve().parents[1]) == ("bingsu_match", "yaml_rust2")
+    with_memchr = with_yaml.replace("[features]", 'memchr = { version = "=2.8.3", default-features = false, features = ["std"] }\n\n[features]')
+    assert product.cli_libraries(tree(with_memchr)) == ("bingsu_match", "yaml_rust2", "memchr")
+    assert product.cli_libraries(Path(SOURCE).resolve().parents[1]) == ("bingsu_match", "yaml_rust2", "memchr")
 
 
 # 이것을 실패시키는 것: 픽스처 컴파일의 CARGO_PKG_VERSION을 고정 값으로 두는 것, workspace 상속을 따르지 않는 것,

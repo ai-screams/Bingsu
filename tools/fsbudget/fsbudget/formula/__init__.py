@@ -6,24 +6,13 @@ caller-provided coefficients (all 1 for the synthetic program).
 The formulas live in the modules of this package; every name other code uses is
 re-exported here, so `fsbudget.formula` keeps its import path."""
 
-from .builtin import (
-    helper_builtin_expected as helper_builtin_expected,
-)
-from .collect import (
-    EXAMINE_MAX as EXAMINE_MAX,
-    PID_LINE_MAX as PID_LINE_MAX,
-    PREAD_CHUNK as PREAD_CHUNK,
-    PROCS_MAX as PROCS_MAX,
-    PROCS_PREADS as PROCS_PREADS,
-    RECLAIM_MAX as RECLAIM_MAX,
-)
 from .collection import (
     collection_expected as collection_expected,
     collection_front_expected as collection_front_expected,
-    collector_product_expected as collector_product_expected,
 )
 from .collector import (
     CollectorAxes as CollectorAxes,
+    collector_product_expected as collector_product_expected,
     collector_repository_expected as collector_repository_expected,
     collector_success_expected as collector_success_expected,
     git_collection_limits as git_collection_limits,
@@ -43,7 +32,18 @@ from .helper import (
     helper_command_expected as helper_command_expected,
     helper_stage_expected as helper_stage_expected,
 )
-from .plan import (
+from .helper_builtin import (
+    helper_builtin_expected as helper_builtin_expected,
+)
+from .helper_collect import (
+    EXAMINE_MAX as EXAMINE_MAX,
+    PID_LINE_MAX as PID_LINE_MAX,
+    PREAD_CHUNK as PREAD_CHUNK,
+    PROCS_MAX as PROCS_MAX,
+    PROCS_PREADS as PROCS_PREADS,
+    RECLAIM_MAX as RECLAIM_MAX,
+)
+from .helper_plan import (
     HelperPlan as HelperPlan,
     read_to_end_calls as read_to_end_calls,
     verify_build_reads as verify_build_reads,

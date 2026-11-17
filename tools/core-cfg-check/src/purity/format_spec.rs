@@ -93,8 +93,9 @@ fn count_end(s: &[char], at: usize) -> usize {
 }
 
 /// The type of a std::fmt spec (the text after `:`): what is left after
-/// `[[fill]align][sign]['#']['0'][width]['.' [precision]]`. Only a type of
-/// exactly `p` matters to the caller, so other leftovers need no checking.
+/// `[[fill]align][sign]['#']['0'][width]['.' [precision]]`. The callers ask
+/// only whether it is exactly `p` (formats_pointer) or ends in `?`
+/// (formats_debug), so other leftovers need no checking.
 fn spec_type(s: &[char]) -> String {
     let mut k = if matches!(s.get(1), Some('<' | '^' | '>')) {
         2

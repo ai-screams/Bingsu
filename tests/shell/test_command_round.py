@@ -1109,10 +1109,6 @@ def cargo_target(path):
     return "lib" if (ROOT / f"crates/{crate}/src/lib.rs").exists() else f"bin:{crate}"
 
 
-# The cgroup cell job runs and asserts the cell tests of these files only (cgroup_cell_tests), on Linux.
-CELL_FILE = r"crates/bingsu/src/commands/\w+\.rs"
-
-
 def assert_command_row(row, read, cells):
     """A row of tests/command-acceptance.tsv names a test that runs on its platform."""
     import re
@@ -1128,11 +1124,10 @@ def assert_command_row(row, read, cells):
     platforms = row_platforms(row)
     base = name.rsplit("::", 1)[-1]
     attributes = rust_test_attributes(row, source, path, base, platforms)
-    target = cargo_target(path)
-    module = rust_libtest_module(row, source, path, name, target, read, platforms)
+    module = rust_libtest_module(row, source, path, name, cargo_target(path), read, platforms)
     ignored = [a.strip() for a in attributes if re.match(r"\s*ignore\b", a)]
-    cell = (ignored == [CELL_IGNORE] and platforms == {"linux"} and re.fullmatch(CELL_FILE, path) is not None
-            and module + base in cells)
+    # The cell job runs, on Linux only, and asserts exactly the tests cgroup_cell_tests found, each in its file.
+    cell = ignored == [CELL_IGNORE] and platforms == {"linux"} and cells.get(module + base) == path
     assert not ignored or cell, (row["id"], "ignored test", ignored)
 
 
@@ -1152,10 +1147,10 @@ def test_command_table_names_real_tests():
         assert_command_row(row, lambda p: (ROOT / p).read_text(), cells)
 
 
-# 셀 표시는 셀 job이 실제로 돌리고 단언하는 시험에서만 받는다: 셀 job이 모으는 파일에 있고, 그 job이 모은 이름이며,
-# 행이 Linux 행일 때다(셀 job은 Linux에서만 돈다). 다른 target이나 crate 뿌리의 시험이 모듈을 겹쳐 같은 libtest 경로를
-# 가져도 셀 job은 그것을 돌리지 않는다. 입력마다 한 조건만 어긴다. 이것을 실패시키는 것: 셀 판정에서 파일 조건
-# (other-target, crate-root), 모은 이름 조건(uncollected), 행 플랫폼 조건(unix-row)을 빼는 것.
+# 셀 표시는 셀 job이 실제로 돌리고 단언하는 시험에서만 받는다: 셀 job이 모은 (파일, libtest 경로) 쌍과 같고, 행이 Linux
+# 행일 때다(셀 job은 Linux에서만 돈다). 다른 target이나 crate 뿌리의 시험이 모듈을 겹쳐 같은 libtest 경로를 가져도 셀 job은
+# 그것을 돌리지 않는다. 입력마다 한 조건만 어긴다. 이것을 실패시키는 것: 셀 판정에서 파일 대조를 빼고 이름만 보는 것
+# (other-target, crate-root), 쌍 대조를 통째로 빼는 것(uncollected까지), 행 플랫폼 조건을 빼는 것(unix-row).
 def test_command_row_takes_a_cell_mark_only_from_the_cell_files():
     import re
     from conftest import ROOT
@@ -1163,7 +1158,7 @@ def test_command_row_takes_a_cell_mark_only_from_the_cell_files():
     from test_gate_acceptance import cgroup_cell_tests
     cells = cgroup_cell_tests()
     base = "test_nested_cgroup_removed_postorder"
-    name, real_path = "commands::command_supervisor::tests::" + base, "crates/bingsu/src/commands/command_supervisor.rs"
+    name, real_path = "commands::command_supervisor::tests::" + base, "crates/bingsu/src/commands/command_supervisor/tests.rs"
     real = lambda p: (ROOT / p).read_text().replace("\r\n", "\n")
     assert name in cells
     assert_command_row({"id": "CMD-X", "stage": "C3", "platform": "Linux", "test": f"{real_path}::{name}"}, real, cells)

@@ -1,7 +1,8 @@
 """Front formulas: the synthetic front and the front attempts."""
+import re
 from dataclasses import dataclass
 from typing import Literal
-from ..strace_parse import Trace
+from ..strace_parse import Trace, scan
 from .common import ceil_div
 
 
@@ -68,14 +69,12 @@ def front_attempts_expected(C: int, attempts: list[FrontAttempt], chunk: int,
                         + ceil_div(a.body_bytes_read, chunk) for a in attempts) + 1 + 2}
 
 
-def front_read_bytes(trace: "Trace", paths: list[str]) -> dict[str, int]:
+def front_read_bytes(trace: Trace, paths: list[str]) -> dict[str, int]:
     """Returned bytes, never requested bytes; caller supplies one front PID.
 
     Kernel -y names identify descriptors across close/reuse. A malformed trace
     or unmeasurable read is a failure, not zero. No helper data is admissible.
     """
-    import re
-    from ..strace_parse import scan
     # 이것을 실패시키는 것: 파싱 실패 또는 helper 읽기를 앞단 바이트로 수용하는 것.
     if trace.errors or len({c.pid for c in trace}) > 1:
         raise ValueError("front byte accounting needs a valid single-PID trace")

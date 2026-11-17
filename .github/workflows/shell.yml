@@ -541,7 +541,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p bingsu-core --lib --release | tee "$RUNNER_TEMP/short-read.txt"
-          grep -Fx 'test front::staged::tests::cases::short_reads_keep_the_read_limit ... ok' "$RUNNER_TEMP/short-read.txt"
+          grep -Fx 'test front::staged::tests::short_reads_keep_the_read_limit ... ok' "$RUNNER_TEMP/short-read.txt"
       # 이것을 실패시키는 것: debug 칸에서 계수하거나 매개변수 하나의 PASSED 단언을 빼는 것.
       - name: Front attempts equal axis C and byte formulas (release)
         if: matrix.profile == 'release'
@@ -728,9 +728,9 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p bingsu-core --lib --release | tee "$RUNNER_TEMP/b1-core.txt"
-          grep -Fx 'test front::staged::tests::cases::n7_builtin_collection_survives_invalid_marker ... ok' "$RUNNER_TEMP/b1-core.txt"
-          grep -Fx 'test front::staged::tests::cases::finish_refuses_units_when_final_clock_reaches_deadline ... ok' "$RUNNER_TEMP/b1-core.txt"
-          grep -Fx 'test front::staged::tests::cases::staged_plan_emits_fixed_clock_operations_per_path ... ok' "$RUNNER_TEMP/b1-core.txt"
+          grep -Fx 'test front::staged::tests::n7_builtin_collection_survives_invalid_marker ... ok' "$RUNNER_TEMP/b1-core.txt"
+          grep -Fx 'test front::staged::tests::finish_refuses_units_when_final_clock_reaches_deadline ... ok' "$RUNNER_TEMP/b1-core.txt"
+          grep -Fx 'test front::staged::tests::staged_plan_emits_fixed_clock_operations_per_path ... ok' "$RUNNER_TEMP/b1-core.txt"
       - name: Retain B1 failure evidence
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

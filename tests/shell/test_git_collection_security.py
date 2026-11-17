@@ -461,6 +461,10 @@ def test_actual_fifty_ms_partial_preserves_stage_a(corpus, tmp_path):
 
 
 def test_warm_collection_observations(corpus, tmp_path):
+    observe_warm_collection(corpus, tmp_path)
+
+
+def observe_warm_collection(corpus, tmp_path):
     # Timing evidence only: CI samples 20 rounds; a full local run defaults to
     # 200. Neither sample count is a latency/performance acceptance threshold.
     rounds = int(os.environ.get("BINGSU_F1_OBSERVATION_ROUNDS", "200"))
@@ -500,8 +504,8 @@ def test_warm_observation_count_and_raw_evidence(monkeypatch, tmp_path, configur
     def fake_execute(*args, **kwargs):
         calls.append(args)
         return {"result": "Ok(())", "elapsed_ns": len(calls), "times": {"B": 10}}
-    monkeypatch.setitem(test_warm_collection_observations.__globals__, "execute", fake_execute)
-    test_warm_collection_observations({"cases": [{"case": "controlled"}]}, tmp_path)
+    monkeypatch.setitem(globals(), "execute", fake_execute)
+    observe_warm_collection({"cases": [{"case": "controlled"}]}, tmp_path)
     row = json.loads((tmp_path / f"warm-{rounds}.json").read_text())["controlled"]
     assert len(calls) == rounds + 1
     assert row["requested_rounds"] == row["successful_runs"] == len(row["samples"]) == rounds

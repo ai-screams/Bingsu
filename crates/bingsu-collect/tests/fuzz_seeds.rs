@@ -121,8 +121,8 @@ fn every_fuzz_target_calls_its_shared_entry() {
 }
 
 // 이것을 실패시키는 것: pattern_source가 flag와 무관하게 한 label만 돌려주는 것.
-// info 목록, 전역 excludes, 중첩 경로는 서로 다른 add_buffer 분기라 label이
-// 갈려야 fuzz가 그 분기에 닿는다.
+// info 목록, 전역 excludes, 중첩 경로는 add_attributes와 add_ignore 안에서
+// matcher base와 info 목록이 갈리는 곳이라 label이 갈려야 fuzz가 그 갈림에 닿는다.
 #[test]
 fn pattern_flags_reach_every_source_label() {
     use git::io::policy::PatternKind;

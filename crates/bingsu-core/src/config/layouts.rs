@@ -306,7 +306,7 @@ pub(super) fn band_replaces_lines(
 }
 
 /// The index of a band name; a name `names` lacks gets `names.len()`, which
-/// `layout_verdict` treats as unknown.
+/// `exec_units::layout_verdict` treats as unknown.
 fn band_index(names: &[String], name: &Option<String>) -> Option<u16> {
     name.as_ref()
         .map(|n| names.iter().position(|x| x == n).unwrap_or(names.len()) as u16)

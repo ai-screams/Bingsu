@@ -904,7 +904,7 @@ ACCEPTANCE_PYTHONS = {
     "shell.yml": {"$RUNNER_TEMP/venv/bin/python"},
 }
 # Rows the collector table must keep (unique ids and this set: SEC-* evidence).
-SEC_REQUIRED_IDS = frozenset({"SEC-FSIZE", "SEC-WRITE", "SEC-FORK", "SEC-LANDLOCK", "SEC-PIDFD", "SEC-NOWAIT"})
+SEC_REQUIRED_IDS = frozenset({"SEC-FSIZE", "SEC-WRITE", "SEC-FORK", "SEC-LANDLOCK", "SEC-PIDFD", "SEC-NOWAIT", "SEC-STREAM"})
 
 
 # Where rustc starts an attribute: `#`, an optional `!` (inner) and `[`, with any whitespace between.
@@ -1614,7 +1614,8 @@ def assert_acceptance_table(table, workflows, *, required_ids, required_gates=fr
 
 # 이것을 실패시키는 것: 호출에 넘기는 SEC-* 필수 집합에서 하나를 빼, 그 행 없이도 collector 표가 통과하는 것.
 def test_collector_table_keeps_required_security_rows():
-    assert SEC_REQUIRED_IDS == {"SEC-FSIZE", "SEC-WRITE", "SEC-FORK", "SEC-LANDLOCK", "SEC-PIDFD", "SEC-NOWAIT"}
+    assert SEC_REQUIRED_IDS == {"SEC-FSIZE", "SEC-WRITE", "SEC-FORK", "SEC-LANDLOCK", "SEC-PIDFD", "SEC-NOWAIT",
+                                "SEC-STREAM"}
 
 
 # 이것을 실패시키는 것: TSV의 오타·중복 선언·미수집 매개변수·CI에서 실행/단언하지 않는 행.

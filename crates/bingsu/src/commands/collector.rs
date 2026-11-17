@@ -105,12 +105,15 @@ impl PinnedCollector {
         {
             return Err(StoreError::Unsafe);
         }
+        // The stamp is taken before the scan, so the recheck below
+        // (`executable()`) also sees a change made while the scan read the file.
+        let stamp = sys::file_stamp(&executable)?;
         verify_build(&executable, sibling.role)?;
         let pin = Self {
             sibling,
             path: path.to_path_buf(),
             chain,
-            stamp: sys::file_stamp(&executable)?,
+            stamp,
             executable,
             facts,
         };
@@ -160,11 +163,25 @@ pub(crate) enum Build {
 /// refused before it is read. The scan stops at a second marker of either
 /// kind, so a file full of markers costs no more than one read of it.
 pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
-    use std::os::unix::fs::FileExt;
     let size = file.metadata()?.len();
     if size > 64 * 1024 * 1024 {
         return Err(StoreError::Unsafe);
     }
+    scan_build(file, size, role)
+}
+
+/// The scan of a file measured at `size` bytes. A read that returns nothing
+/// before `size` (the file shrank) or more than is left of it (the file grew)
+/// refuses the file: its bytes are no longer the ones measured, and in a file
+/// that grew a second marker could start where the last read stopped looking.
+fn scan_build(file: &File, size: u64, role: u8) -> Result<Build, StoreError> {
+    use std::os::unix::fs::FileExt;
+    // The searches read both prefixes from the markers themselves, through
+    // black_box, never from a copy the compiler could make: a second copy of
+    // a marker's bytes in this binary would make it two markers to the next
+    // scan of it.
+    let manifest_marker = memchr::memmem::Finder::new(&bingsu_identity::manifest_tag()[..16]);
+    let role_marker = memchr::memmem::Finder::new(&std::hint::black_box(&super::ROLE_TAG)[..16]);
     let mut buffer = [0u8; 65_536];
     // The identity each marker carries (None when the file ends inside it),
     // and the role of the role marker.
@@ -174,7 +191,7 @@ pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
     let mut overlap = 0;
     while offset < size {
         let n = file.read_at(&mut buffer[overlap..], offset)?;
-        if n == 0 {
+        if n == 0 || offset + n as u64 > size {
             return Err(StoreError::Unsafe);
         }
         let length = overlap + n;
@@ -183,23 +200,28 @@ pub(crate) fn read_build(file: &File, role: u8) -> Result<Build, StoreError> {
         } else {
             length.saturating_sub(48)
         };
-        for at in 0..end {
-            let window = &buffer[at..length];
-            if window[..16] == bingsu_identity::manifest_tag()[..16] {
-                if manifest.is_some() {
-                    return Ok(Build::NotSibling);
-                }
-                manifest = Some(window.get(16..48).map(|id| id.try_into().unwrap()));
+        // This read's bytes only: past `length` the buffer still holds an
+        // earlier read, which must never complete a marker cut by the file end.
+        let data = &buffer[..length];
+        // Markers that start before `end` (each start is searched in exactly
+        // one read; the rest move to the next one with the overlap). find_iter
+        // gives non-overlapping matches, which are all of them only because
+        // neither prefix overlaps itself (`marker_prefixes_cannot_overlap_themselves`).
+        let starts = &data[..length.min(end + 15)];
+        for at in manifest_marker.find_iter(starts) {
+            if manifest.is_some() {
+                return Ok(Build::NotSibling);
             }
-            if window[..16] == std::hint::black_box(&super::ROLE_TAG)[..16] {
-                if role_tag.is_some() {
-                    return Ok(Build::NotSibling);
-                }
-                role_tag = Some((
-                    window.get(16).copied(),
-                    window.get(17..49).map(|id| id.try_into().unwrap()),
-                ));
+            manifest = Some(data.get(at + 16..at + 48).map(|id| id.try_into().unwrap()));
+        }
+        for at in role_marker.find_iter(starts) {
+            if role_tag.is_some() {
+                return Ok(Build::NotSibling);
             }
+            role_tag = Some((
+                data.get(at + 16).copied(),
+                data.get(at + 17..at + 49).map(|id| id.try_into().unwrap()),
+            ));
         }
         overlap = length - end;
         buffer.copy_within(length - overlap..length, 0);
@@ -323,6 +345,85 @@ mod tests {
         .concat()
     }
 
+    thread_local! {
+        static PIN_TICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static APPEND_AT: std::cell::RefCell<Option<(usize, std::path::PathBuf)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// A meter clock that appends a second manifest to the file at one
+    /// metered step (the tick `APPEND_AT` names).
+    fn append_marker_clock() -> u64 {
+        use std::io::Write;
+        let tick = PIN_TICKS.with(|ticks| {
+            ticks.set(ticks.get() + 1);
+            ticks.get()
+        });
+        APPEND_AT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(at, _)| *at == tick) {
+                let (_, path) = slot.take().unwrap();
+                let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                assert_eq!(file.write(bingsu_identity::manifest_tag()).unwrap(), 48);
+            }
+        });
+        0
+    }
+
+    // The scan itself charges no step, so a change at the stamp lands between
+    // the scan and the stamp when the stamp comes after the scan; only a stamp
+    // taken first makes every step's change visible to the recheck.
+    // 이것을 실패시키는 것: verify_as가 stamp를 표지 검사 뒤에 찍는 것(검사와 stamp 사이에 둘째 표지가 붙은 파일을
+    // 고정함).
+    #[test]
+    fn a_sibling_changed_at_any_step_of_its_pinning_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::current_dir()
+            .unwrap()
+            .join(format!("bingsu-pin-change-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        // Removed also when an assertion fails: the folder is in the crate.
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(base.clone());
+        let path = base.join("bingsu-collect");
+        let place = || {
+            std::fs::write(&path, collector_fixture()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let pin = |at: Option<usize>| {
+            PIN_TICKS.with(|ticks| ticks.set(0));
+            APPEND_AT.with(|slot| *slot.borrow_mut() = at.map(|at| (at, path.clone())));
+            let meter = sys::CollectionMeter::fixture_clock(4_096, 20_000_000, append_marker_clock);
+            let result = PinnedCollector::verify(
+                path.as_os_str(),
+                sys::current_uid(),
+                &mut RefuseGroupWrite,
+            );
+            drop(meter);
+            assert!(
+                APPEND_AT.with(|slot| slot.borrow().is_none()),
+                "{at:?} did not run"
+            );
+            (result.is_ok(), PIN_TICKS.with(|ticks| ticks.get()))
+        };
+        place();
+        let (ok, steps) = pin(None);
+        assert!(ok && steps > 0, "{steps}");
+        for at in 1..=steps {
+            place();
+            assert!(
+                !pin(Some(at)).0,
+                "a change at step {at} of {steps} was pinned"
+            );
+        }
+    }
+
     // 이것을 실패시키는 것: 형제마다 자기 이름·역할을 보지 않고 collector의 것을 쓰는 것.
     #[test]
     fn each_sibling_needs_its_own_name_and_role() {
@@ -377,7 +478,106 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // 이것을 실패시키는 것: 같은 wire 버전의 다른 build-id나 중복 tag를 받는 것.
+    // 이것을 실패시키는 것: 확인한 크기보다 많이 돌려준 읽기(파일이 커짐)나 그 크기 전에 끝난 읽기(파일이 줄어듦)를 받는 것.
+    // 커진 파일에서는 첫 읽기가 마지막 읽기로 판정되지 않아, 그 읽기의 끝 48바이트에서 시작하는 둘째 표지를 보지 않았다.
+    #[test]
+    fn a_read_past_or_short_of_the_measured_size_is_refused() {
+        let path = std::env::temp_dir().join(format!("bingsu-grown-{}", std::process::id()));
+        let valid = collector_fixture();
+        // Measured at 97 bytes; by the read it has grown to 158, with a second
+        // manifest starting at 110, the first start the last 48 bytes hold.
+        let grown = [
+            valid.as_slice(),
+            &[0; 13],
+            bingsu_identity::manifest_tag().as_slice(),
+        ]
+        .concat();
+        assert_eq!((valid.len(), grown.len()), (97, 158));
+        std::fs::write(&path, &grown).unwrap();
+        let file = File::open(&path).unwrap();
+        let scan = |size| scan_build(&file, size, bingsu_identity::COLLECTOR_ROLE);
+        assert!(matches!(scan(97), Err(StoreError::Unsafe)));
+        // Measured right, the second marker is there.
+        assert_eq!(scan(158).unwrap(), Build::NotSibling);
+        // Measured at 200 bytes: the file ends before that.
+        std::fs::write(&path, &valid).unwrap();
+        assert!(matches!(scan(200), Err(StoreError::Unsafe)));
+        assert_eq!(scan(97).unwrap(), Build::Same);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    // find_iter goes on after the end of each match, so a prefix that
+    // overlapped itself (a border: an end of it equal to its start) could
+    // hide a second marker inside the first. Neither prefix has one.
+    // 이것을 실패시키는 것: 표지 접두를 자기와 겹칠 수 있는 글자로 바꾸는 것(겹친 둘째 표지를 놓쳐 같은 빌드로 봄).
+    #[test]
+    fn marker_prefixes_cannot_overlap_themselves() {
+        for prefix in [
+            &bingsu_identity::manifest_tag()[..16],
+            &super::super::ROLE_TAG[..16],
+        ] {
+            for shift in 1..16 {
+                assert_ne!(prefix[shift..], prefix[..16 - shift], "{prefix:?} {shift}");
+            }
+        }
+    }
+
+    /// A file of two reads: `whole` in the first, at byte 1000, and `cut` at
+    /// the very end of the second, kept to its first `keep` bytes. The rest of
+    /// `cut` sits in the first read at the buffer places the cut part would
+    /// reach past the file end, so only the earlier read could complete it.
+    fn cut_at_the_end(whole: &[u8], cut: &[u8], keep: usize) -> Vec<u8> {
+        const TAIL: usize = 100;
+        // After the second read the buffer holds the 48 overlap bytes, then the tail.
+        let length = 48 + TAIL;
+        let start = length - keep;
+        let mut first = vec![0u8; 65_536];
+        first[1000..1000 + whole.len()].copy_from_slice(whole);
+        first[length..start + cut.len()].copy_from_slice(&cut[keep..]);
+        let mut tail = vec![0u8; TAIL - keep];
+        tail.extend_from_slice(&cut[..keep]);
+        [first, tail].concat()
+    }
+
+    // 이것을 실패시키는 것: 파일 끝에서 잘린 표지의 나머지를 이번 읽기 밖(앞선 읽기가 남긴 버퍼)에서 채우는 것
+    // (`data` 대신 `buffer`에서 정체를 읽음).
+    #[test]
+    fn a_marker_cut_at_the_end_is_not_completed_by_an_earlier_read() {
+        let path = std::env::temp_dir().join(format!("bingsu-cut-marker-{}", std::process::id()));
+        let manifest = bingsu_identity::manifest_tag().to_vec();
+        let role = bingsu_identity::role_tag(bingsu_identity::COLLECTOR_ROLE).to_vec();
+        let check = |bytes: Vec<u8>| {
+            std::fs::write(&path, bytes).unwrap();
+            verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_ok()
+        };
+        // The same layouts with the whole marker at the end are this build.
+        assert!(check(cut_at_the_end(&role, &manifest, manifest.len())));
+        assert!(check(cut_at_the_end(&manifest, &role, role.len())));
+        // The manifest's identity, or the role tag's role and identity, cut.
+        assert!(!check(cut_at_the_end(&role, &manifest, 26)));
+        assert!(!check(cut_at_the_end(&manifest, &role, 21)));
+        assert!(!check(cut_at_the_end(&manifest, &role, 16)));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    // 이것을 실패시키는 것: 64 MiB 상한을 한 바이트 낮추는 것(정확히 64 MiB인 파일을 읽기 전에 거부함).
+    #[test]
+    fn a_file_of_exactly_64_mib_is_read() {
+        use std::os::unix::fs::FileExt;
+        let path = std::env::temp_dir().join(format!("bingsu-64mib-{}", std::process::id()));
+        let file = File::create(&path).unwrap();
+        let valid = collector_fixture();
+        // Sparse: only the markers at the end are written.
+        file.set_len(64 * 1024 * 1024).unwrap();
+        file.write_all_at(&valid, 64 * 1024 * 1024 - valid.len() as u64)
+            .unwrap();
+        let verdict = verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE);
+        std::fs::remove_file(path).unwrap();
+        assert!(verdict.is_ok());
+    }
+
+    // 이것을 실패시키는 것: 같은 wire 버전의 다른 build-id나 중복 tag를 받는 것, 첫 읽기의 마지막 시작 자리(65,487)나
+    // 다음 읽기의 첫 시작 자리(65,488)에서 시작하는 표지를 찾지 못하는 것(manifest와 역할 표지 각각).
     #[test]
     fn sibling_build_id_is_exact() {
         let path = std::env::temp_dir().join(format!("bingsu-worker-build-{}", std::process::id()));
@@ -410,18 +610,26 @@ mod tests {
                 verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_err()
             );
         }
-        for prefix in [0, 65_480, 65_520, 65_535, 65_536] {
-            let mut bytes = vec![0; prefix];
-            bytes.extend(&valid);
-            std::fs::write(&path, &bytes).unwrap();
-            assert!(
-                verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_ok()
-            );
-            bytes.extend(&valid);
-            std::fs::write(&path, bytes).unwrap();
-            assert!(
-                verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE).is_err()
-            );
+        // 65,487 and 65,488 are the last start the first read searches (64 KiB less the
+        // 48 overlap bytes, less one) and the first the next one does. Each order of the
+        // two markers puts each of them at those places.
+        let role_first = [&valid[48..], &valid[..48]].concat();
+        for markers in [&valid, &role_first] {
+            for prefix in [0, 65_480, 65_487, 65_488, 65_520, 65_535, 65_536] {
+                let mut bytes = vec![0; prefix];
+                bytes.extend(markers);
+                std::fs::write(&path, &bytes).unwrap();
+                assert!(
+                    verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE)
+                        .is_ok()
+                );
+                bytes.extend(markers);
+                std::fs::write(&path, bytes).unwrap();
+                assert!(
+                    verify_build(&File::open(&path).unwrap(), bingsu_identity::COLLECTOR_ROLE)
+                        .is_err()
+                );
+            }
         }
         std::fs::remove_file(path).unwrap();
     }

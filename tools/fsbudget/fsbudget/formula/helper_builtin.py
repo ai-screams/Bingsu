@@ -1,11 +1,12 @@
 """The builtin language rounds (D3a) of the helper."""
 from dataclasses import replace
-from .collect import _breaker_finish, _collect_prefix, _collection_gc, _publish
-from .command import _command_lookup, _command_session
+from .primitives import _add, _primitives_for
+from .helper_collect import _breaker_finish, _collect_prefix, _collection_gc, _publish
+from .helper_command import _command_lookup, _command_session
 from .helper import _helper_stage_expected
-from .plan import HelperPlan, _LIBC, _add, _check_plan, _use_primitives
-from .steps import _catalog_commit, _close_only_lock, _metered_stage, _read_checked, _read_response, _registration_open, _reserve_walk, _staged_verify, _store_verify
-from .tables import BUILTIN_STAGES, PRIMITIVES, STARTUP_PRIMITIVES
+from .helper_plan import HelperPlan, _check_plan
+from .helper_steps import _catalog_commit, _close_only_lock, _metered_stage, _read_checked, _read_response, _registration_open, _reserve_walk, _staged_verify, _store_verify
+from .tables import BUILTIN_STAGES
 
 
 def _builtin_round(e: dict, p: HelperPlan, stage: str) -> None:
@@ -84,8 +85,7 @@ def helper_builtin_expected(plan: HelperPlan, *, deadline: bool = False) -> dict
     stage = next((s for s in plan.stages if s in BUILTIN_STAGES), None)
     if stage is None:
         raise ValueError("builtin plan required")
-    _use_primitives({**PRIMITIVES, **_LIBC[plan.libc], **STARTUP_PRIMITIVES[plan.arch, plan.libc]})
-    try:
+    with _primitives_for(plan.libc, plan.arch):
         prefix = _helper_stage_expected(replace(plan, stages=("unchanged",)))
         _collect_prefix(prefix, plan)
         _command_lookup(prefix, plan)
@@ -114,5 +114,3 @@ def helper_builtin_expected(plan: HelperPlan, *, deadline: bool = False) -> dict
         _publish(supervisor, plan)
         return {phase: dict(sorted(v.items())) for phase, v in
                 (("prefix", prefix), ("supervisor", supervisor), ("builtin", builtin), ("gc", gc))}
-    finally:
-        _use_primitives(PRIMITIVES)

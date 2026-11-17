@@ -1340,6 +1340,7 @@ aarch64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-core@
 aarch64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 aarch64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 aarch64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+aarch64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 aarch64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 aarch64-apple-darwin	product-all	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 aarch64-apple-darwin	product-all	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -1364,6 +1365,7 @@ aarch64-apple-darwin	product-all	node	hashbrown@0.17.1	default-hasher	-
 aarch64-apple-darwin	product-all	node	hashlink@0.12.2	-	-
 aarch64-apple-darwin	product-all	node	libc@0.2.191	default,std	-
 aarch64-apple-darwin	product-all	node	libm@0.2.16	-	-
+aarch64-apple-darwin	product-all	node	memchr@2.8.3	alloc,std	-
 aarch64-apple-darwin	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 aarch64-apple-darwin	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-apple-darwin	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -1384,6 +1386,7 @@ aarch64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-c
 aarch64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 aarch64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 aarch64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+aarch64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 aarch64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 aarch64-apple-darwin	product-default	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 aarch64-apple-darwin	product-default	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -1407,6 +1410,7 @@ aarch64-apple-darwin	product-default	node	hashbrown@0.17.1	default-hasher	-
 aarch64-apple-darwin	product-default	node	hashlink@0.12.2	-	-
 aarch64-apple-darwin	product-default	node	libc@0.2.191	default,std	-
 aarch64-apple-darwin	product-default	node	libm@0.2.16	-	-
+aarch64-apple-darwin	product-default	node	memchr@2.8.3	alloc,std	-
 aarch64-apple-darwin	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 aarch64-apple-darwin	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-apple-darwin	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -2654,6 +2658,7 @@ aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-
 aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 aarch64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 aarch64-unknown-linux-gnu	product-all	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 aarch64-unknown-linux-gnu	product-all	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -2679,6 +2684,7 @@ aarch64-unknown-linux-gnu	product-all	node	hashbrown@0.17.1	default-hasher	-
 aarch64-unknown-linux-gnu	product-all	node	hashlink@0.12.2	-	-
 aarch64-unknown-linux-gnu	product-all	node	libc@0.2.191	default,std	-
 aarch64-unknown-linux-gnu	product-all	node	libm@0.2.16	-	-
+aarch64-unknown-linux-gnu	product-all	node	memchr@2.8.3	alloc,std	-
 aarch64-unknown-linux-gnu	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 aarch64-unknown-linux-gnu	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-unknown-linux-gnu	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -2700,6 +2706,7 @@ aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-core	bin
 aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 aarch64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 aarch64-unknown-linux-gnu	product-default	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 aarch64-unknown-linux-gnu	product-default	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -2723,6 +2730,7 @@ aarch64-unknown-linux-gnu	product-default	node	hashbrown@0.17.1	default-hasher	-
 aarch64-unknown-linux-gnu	product-default	node	hashlink@0.12.2	-	-
 aarch64-unknown-linux-gnu	product-default	node	libc@0.2.191	default,std	-
 aarch64-unknown-linux-gnu	product-default	node	libm@0.2.16	-	-
+aarch64-unknown-linux-gnu	product-default	node	memchr@2.8.3	alloc,std	-
 aarch64-unknown-linux-gnu	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 aarch64-unknown-linux-gnu	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-unknown-linux-gnu	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -3970,6 +3978,7 @@ aarch64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu
 aarch64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 aarch64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 aarch64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+aarch64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 aarch64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 aarch64-unknown-linux-musl	product-all	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 aarch64-unknown-linux-musl	product-all	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -3995,6 +4004,7 @@ aarch64-unknown-linux-musl	product-all	node	hashbrown@0.17.1	default-hasher	-
 aarch64-unknown-linux-musl	product-all	node	hashlink@0.12.2	-	-
 aarch64-unknown-linux-musl	product-all	node	libc@0.2.191	default,std	-
 aarch64-unknown-linux-musl	product-all	node	libm@0.2.16	-	-
+aarch64-unknown-linux-musl	product-all	node	memchr@2.8.3	alloc,std	-
 aarch64-unknown-linux-musl	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 aarch64-unknown-linux-musl	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-unknown-linux-musl	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -4016,6 +4026,7 @@ aarch64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	bingsu-core	bi
 aarch64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 aarch64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 aarch64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+aarch64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 aarch64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 aarch64-unknown-linux-musl	product-default	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 aarch64-unknown-linux-musl	product-default	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -4039,6 +4050,7 @@ aarch64-unknown-linux-musl	product-default	node	hashbrown@0.17.1	default-hasher	
 aarch64-unknown-linux-musl	product-default	node	hashlink@0.12.2	-	-
 aarch64-unknown-linux-musl	product-default	node	libc@0.2.191	default,std	-
 aarch64-unknown-linux-musl	product-default	node	libm@0.2.16	-	-
+aarch64-unknown-linux-musl	product-default	node	memchr@2.8.3	alloc,std	-
 aarch64-unknown-linux-musl	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 aarch64-unknown-linux-musl	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 aarch64-unknown-linux-musl	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -5290,6 +5302,7 @@ x86_64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-core@0
 x86_64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 x86_64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 x86_64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+x86_64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 x86_64-apple-darwin	product-all	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 x86_64-apple-darwin	product-all	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 x86_64-apple-darwin	product-all	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -5314,6 +5327,7 @@ x86_64-apple-darwin	product-all	node	hashbrown@0.17.1	default-hasher	-
 x86_64-apple-darwin	product-all	node	hashlink@0.12.2	-	-
 x86_64-apple-darwin	product-all	node	libc@0.2.191	default,std	-
 x86_64-apple-darwin	product-all	node	libm@0.2.16	-	-
+x86_64-apple-darwin	product-all	node	memchr@2.8.3	alloc,std	-
 x86_64-apple-darwin	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 x86_64-apple-darwin	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-apple-darwin	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -5334,6 +5348,7 @@ x86_64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-co
 x86_64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 x86_64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 x86_64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+x86_64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 x86_64-apple-darwin	product-default	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 x86_64-apple-darwin	product-default	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 x86_64-apple-darwin	product-default	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -5357,6 +5372,7 @@ x86_64-apple-darwin	product-default	node	hashbrown@0.17.1	default-hasher	-
 x86_64-apple-darwin	product-default	node	hashlink@0.12.2	-	-
 x86_64-apple-darwin	product-default	node	libc@0.2.191	default,std	-
 x86_64-apple-darwin	product-default	node	libm@0.2.16	-	-
+x86_64-apple-darwin	product-default	node	memchr@2.8.3	alloc,std	-
 x86_64-apple-darwin	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 x86_64-apple-darwin	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-apple-darwin	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -6596,6 +6612,7 @@ x86_64-pc-windows-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-bench	bingsu-ben
 x86_64-pc-windows-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-core@0.1.0-rc.1
 x86_64-pc-windows-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 x86_64-pc-windows-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
+x86_64-pc-windows-gnu	product-all	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 x86_64-pc-windows-gnu	product-all	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 x86_64-pc-windows-gnu	product-all	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 x86_64-pc-windows-gnu	product-all	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -6619,6 +6636,7 @@ x86_64-pc-windows-gnu	product-all	node	foldhash@0.2.0	-	-
 x86_64-pc-windows-gnu	product-all	node	hashbrown@0.17.1	default-hasher	-
 x86_64-pc-windows-gnu	product-all	node	hashlink@0.12.2	-	-
 x86_64-pc-windows-gnu	product-all	node	libm@0.2.16	-	-
+x86_64-pc-windows-gnu	product-all	node	memchr@2.8.3	alloc,std	-
 x86_64-pc-windows-gnu	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 x86_64-pc-windows-gnu	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-pc-windows-gnu	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -6638,6 +6656,7 @@ x86_64-pc-windows-gnu	product-default	edge	bingsu-match@0.1.0-rc.1	regex	regex@1
 x86_64-pc-windows-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-core@0.1.0-rc.1
 x86_64-pc-windows-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 x86_64-pc-windows-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
+x86_64-pc-windows-gnu	product-default	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 x86_64-pc-windows-gnu	product-default	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 x86_64-pc-windows-gnu	product-default	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 x86_64-pc-windows-gnu	product-default	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -6660,6 +6679,7 @@ x86_64-pc-windows-gnu	product-default	node	foldhash@0.2.0	-	-
 x86_64-pc-windows-gnu	product-default	node	hashbrown@0.17.1	default-hasher	-
 x86_64-pc-windows-gnu	product-default	node	hashlink@0.12.2	-	-
 x86_64-pc-windows-gnu	product-default	node	libm@0.2.16	-	-
+x86_64-pc-windows-gnu	product-default	node	memchr@2.8.3	alloc,std	-
 x86_64-pc-windows-gnu	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 x86_64-pc-windows-gnu	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-pc-windows-gnu	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -7907,6 +7927,7 @@ x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-c
 x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 x86_64-unknown-linux-gnu	product-all	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 x86_64-unknown-linux-gnu	product-all	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 x86_64-unknown-linux-gnu	product-all	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -7932,6 +7953,7 @@ x86_64-unknown-linux-gnu	product-all	node	hashbrown@0.17.1	default-hasher	-
 x86_64-unknown-linux-gnu	product-all	node	hashlink@0.12.2	-	-
 x86_64-unknown-linux-gnu	product-all	node	libc@0.2.191	default,std	-
 x86_64-unknown-linux-gnu	product-all	node	libm@0.2.16	-	-
+x86_64-unknown-linux-gnu	product-all	node	memchr@2.8.3	alloc,std	-
 x86_64-unknown-linux-gnu	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 x86_64-unknown-linux-gnu	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-unknown-linux-gnu	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -7953,6 +7975,7 @@ x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-core	bing
 x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 x86_64-unknown-linux-gnu	product-default	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 x86_64-unknown-linux-gnu	product-default	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 x86_64-unknown-linux-gnu	product-default	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -7976,6 +7999,7 @@ x86_64-unknown-linux-gnu	product-default	node	hashbrown@0.17.1	default-hasher	-
 x86_64-unknown-linux-gnu	product-default	node	hashlink@0.12.2	-	-
 x86_64-unknown-linux-gnu	product-default	node	libc@0.2.191	default,std	-
 x86_64-unknown-linux-gnu	product-default	node	libm@0.2.16	-	-
+x86_64-unknown-linux-gnu	product-default	node	memchr@2.8.3	alloc,std	-
 x86_64-unknown-linux-gnu	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 x86_64-unknown-linux-gnu	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-unknown-linux-gnu	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -9223,6 +9247,7 @@ x86_64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	bingsu-core	bingsu-
 x86_64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 x86_64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 x86_64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+x86_64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 x86_64-unknown-linux-musl	product-all	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 x86_64-unknown-linux-musl	product-all	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 x86_64-unknown-linux-musl	product-all	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -9248,6 +9273,7 @@ x86_64-unknown-linux-musl	product-all	node	hashbrown@0.17.1	default-hasher	-
 x86_64-unknown-linux-musl	product-all	node	hashlink@0.12.2	-	-
 x86_64-unknown-linux-musl	product-all	node	libc@0.2.191	default,std	-
 x86_64-unknown-linux-musl	product-all	node	libm@0.2.16	-	-
+x86_64-unknown-linux-musl	product-all	node	memchr@2.8.3	alloc,std	-
 x86_64-unknown-linux-musl	product-all	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 x86_64-unknown-linux-musl	product-all	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-unknown-linux-musl	product-all	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
@@ -9269,6 +9295,7 @@ x86_64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	bingsu-core	bin
 x86_64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	bingsu-identity	bingsu-identity@0.1.0-rc.1
 x86_64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	bingsu-match	bingsu-match@0.1.0-rc.1
 x86_64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	libc	libc@0.2.191
+x86_64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	memchr	memchr@2.8.3
 x86_64-unknown-linux-musl	product-default	edge	bingsu@0.1.0-rc.1	yaml-rust2	yaml-rust2@0.13.0
 x86_64-unknown-linux-musl	product-default	edge	hashbrown@0.17.1	foldhash	foldhash@0.2.0
 x86_64-unknown-linux-musl	product-default	edge	hashlink@0.12.2	hashbrown	hashbrown@0.17.1
@@ -9292,6 +9319,7 @@ x86_64-unknown-linux-musl	product-default	node	hashbrown@0.17.1	default-hasher	-
 x86_64-unknown-linux-musl	product-default	node	hashlink@0.12.2	-	-
 x86_64-unknown-linux-musl	product-default	node	libc@0.2.191	default,std	-
 x86_64-unknown-linux-musl	product-default	node	libm@0.2.16	-	-
+x86_64-unknown-linux-musl	product-default	node	memchr@2.8.3	alloc,std	-
 x86_64-unknown-linux-musl	product-default	node	regex-automata@0.4.18	alloc,meta,nfa-pikevm,nfa-thompson,std,syntax,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment,unicode-word-boundary	-
 x86_64-unknown-linux-musl	product-default	node	regex-syntax@0.8.11	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-
 x86_64-unknown-linux-musl	product-default	node	regex@1.13.1	std,unicode,unicode-age,unicode-bool,unicode-case,unicode-gencat,unicode-perl,unicode-script,unicode-segment	-

@@ -135,6 +135,12 @@ def test_legacy_collector_entry_is_removed():
 # 이것을 실패시키는 것: 앞단의 collection 대기, 제품 worker 생성 또는 실제 trace 회차 생략.
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux strace acceptance row")
 def test_four_hundred_product_prompts_never_wait_for_collection(tmp_path, capsys):
+    check_four_hundred_product_prompts(tmp_path, capsys)
+
+
+def check_four_hundred_product_prompts(tmp_path, capsys):
+    """Trace 400 product prompts and judge every one. The Linux acceptance test and
+    its portable replay (stored fixtures in place of strace) both call this."""
     strace = shutil.which("strace")
     assert strace, "this Linux acceptance test must execute strace"
     session = SnapshotSession(tmp_path)
@@ -339,8 +345,7 @@ def test_lifecycle_counts_deadline_empty_runs_but_requires_a_record(tmp_path, mo
     with expected:
         # Keep the fixture's report captured; the real acceptance run reports
         # through capsys.disabled() even with the requested pytest -q gate.
-        test_four_hundred_product_prompts_never_wait_for_collection(
-            tmp_path, SimpleNamespace(disabled=nullcontext))
+        check_four_hundred_product_prompts(tmp_path, SimpleNamespace(disabled=nullcontext))
     report = capsys.readouterr().out
     assert f"records={records}, deadline-empty={400 - records}, traced=400" in report
 
