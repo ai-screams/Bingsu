@@ -1492,6 +1492,10 @@ fn hide_right<R: Recorder>(
 /// a tie), down to the ellipsis. A one-cell text (the `char` glyph)
 /// cannot get narrower, so it is only ever marked exhausted; so is
 /// any text when the line is over `LINE_BYTES_MAX` but not too wide.
+// Always inline: the step was part of `layout_line_into` before the split, and a
+// call here is paid on the front collection path (a plain `#[inline]` left it
+// outlined at fat LTO).
+#[inline(always)]
 fn truncate_left<R: Recorder>(
     lay: &mut Lay<'_, '_>,
     b: &mut Bufs,
@@ -1535,6 +1539,8 @@ fn truncate_left<R: Recorder>(
 
 /// Step 5: optional left references, lowest priority (then
 /// rightmost) first.
+// Always inline, as `truncate_left` (see there).
+#[inline(always)]
 fn hide_left_optional<R: Recorder>(
     lay: &mut Lay<'_, '_>,
     b: &mut Bufs,
@@ -1579,6 +1585,8 @@ fn drop_decoration<R: Recorder>(
 /// Step 4's cut of one text. A read-only prefix (the marker) is decoration,
 /// never a path component or a partially truncated token: it is reserved even
 /// at step four and only the path after it is cut.
+// Always inline, as `truncate_left` (see there).
+#[inline(always)]
 fn truncated_text(lay: &Lay<'_, '_>, s: usize, cut: u32, keep: Keep) -> Short {
     let p = lay.o.profile;
     if let Some(prefix) = lay.readonly_prefix(s) {
