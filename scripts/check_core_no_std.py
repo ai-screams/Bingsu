@@ -50,10 +50,10 @@ CORE_GRAPH = {
     ("unicode-segmentation", "1.13.3", CRATES_IO): ((), ("lib",)),
     # TOML for the config model (M3a S1): `parse` without `std`. Its nesting
     # caps rely on the `unbounded` feature staying off; this pin keeps it so.
-    ("toml", "1.1.8+spec-1.1.0", CRATES_IO): (("parse",), ("lib",)),
+    ("toml", "1.2.1+spec-1.1.0", CRATES_IO): (("parse",), ("lib",)),
     ("toml_parser", "1.1.5+spec-1.1.0", CRATES_IO): (("alloc",), ("lib",)),
-    ("toml_datetime", "1.1.2+spec-1.1.0", CRATES_IO): (("alloc",), ("lib",)),
-    ("serde_spanned", "1.1.2", CRATES_IO): (("alloc",), ("lib",)),
+    ("toml_datetime", "1.1.3+spec-1.1.0", CRATES_IO): (("alloc",), ("lib",)),
+    ("serde_spanned", "1.1.3", CRATES_IO): (("alloc",), ("lib",)),
     ("winnow", "1.0.4", CRATES_IO): ((), ("lib",)),
 }
 # The shipped binary with default features (bench-stubs off): core's graph,
