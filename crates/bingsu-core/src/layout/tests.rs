@@ -1148,6 +1148,23 @@ fn steps_in_order() {
     assert_eq!(log.band, None);
 }
 
+// 이것을 실패시키는 것: 3단계가 맞은 뒤에도 4단계 이후(왼쪽 선택 항목 숨기기 등)로 넘어가는 것.
+#[test]
+fn the_steps_stop_at_the_first_one_that_fits() {
+    let mut f = fixture(&["Works"], "main");
+    f.values[idx("status")] = value("status", "EEEEEEEEEE", &[]);
+    f.setup[idx("status")].required = true;
+    let t = "{dir} {git}{@fill}{status}{@nl}{char}";
+    let (out, log) = logged(t, &f, 20);
+    assert!(!out[0].minimal);
+    let steps: Vec<Step> = log.steps.iter().map(|s| s.1).collect();
+    assert_eq!(steps.last(), Some(&Step::HideRight), "{steps:?}");
+    assert!(
+        text(&out[0].left).contains("main"),
+        "step 5 must not run: {out:?}"
+    );
+}
+
 // 이것을 실패시키는 것: 단계와 숨김(값 없음, 2·3·5·7단계)이 기록되지 않거나, 다른 이유로·두 번·줄에 없는 세그먼트까지
 // 기록되는 것, 맞는 방식이 없을 때 고른 방식 번호가 틀리는 것, 7단계가 `char`를 숨긴 것으로 기록하는 것.
 #[test]

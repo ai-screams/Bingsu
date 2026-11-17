@@ -2,7 +2,7 @@
 //! cleared-line helpers, and the `Lay` methods that walk the drawn items into
 //! runs. Split from `layout` so that file keeps the measuring-and-fitting
 //! decisions.
-use super::{Item, LaidLine, Lay, Run, Src, item_style};
+use super::{Item, Kind, LaidLine, Lay, Run, SepKind, Shape, Src};
 use crate::color::sgr::{DIM, Style};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -161,5 +161,43 @@ impl Lay<'_, '_> {
             at = end;
         }
         n
+    }
+}
+
+/// Style of cleaned item `i`. Separators take the colors of the blocks
+/// next to them (design brief interlock rule): a left side separator `▶`
+/// has the block before as text color and the block after as background, a
+/// right side `◀` the reverse; a head takes the block after, a tail the
+/// block before, on the default background; `flat` is a space on the
+/// neighboring block's background.
+fn item_style(items: &[Item], i: usize, right_side: bool) -> Style {
+    let it = items[i];
+    let Kind::Sep(kind, shape) = it.kind else {
+        return it.style;
+    };
+    let block_at = |j: Option<usize>| match j.and_then(|j| items.get(j)) {
+        Some(Item {
+            kind: Kind::Content,
+            block: Some(b),
+            ..
+        }) => Some(*b),
+        _ => None,
+    };
+    let (prev, next) = (block_at(i.checked_sub(1)), block_at(Some(i + 1)));
+    let (fg, bg) = match kind {
+        SepKind::Head => (next, None),
+        SepKind::Tail => (prev, None),
+        SepKind::Sep if right_side => (next, prev),
+        SepKind::Sep => (prev, next),
+    };
+    let (fg, bg) = if shape == Shape::Flat {
+        (None, next.or(prev))
+    } else {
+        (fg, bg)
+    };
+    Style {
+        fg: fg.unwrap_or_default(),
+        bg: bg.unwrap_or_default(),
+        attrs: 0,
     }
 }
