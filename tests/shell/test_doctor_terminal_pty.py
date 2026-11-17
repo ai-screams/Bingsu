@@ -234,15 +234,18 @@ def test_a_light_terminal_warns_when_auto_and_asks_nothing_otherwise(home):
 # 이것을 실패시키는 것: 응답 없이 무한 대기하는 것(run의 제한), 첫 질문 전에 비정상 종료하는 것(종료 코드, 질문
 # 유무보다 먼저 봄), 커서 질문을 아예 하지 않는 것(질문 유무), 첫 침묵 뒤 CPR을 다시 묻는 것(횟수), 첫 CPR부터
 # 종료까지 두 질의의 마감과 여유를 넘기는 것(경과 시간), tty.rs에서 두 상수의 값을 바꾸거나 그 선언을 찾을 수 없게
-# 하는 것(소스 핀; 값은 같고 끝 주석이나 가시성만 다른 선언은 통과), 침묵을 경고나 오류로 매기는 것(unknown 상태와
-# 종료 코드), 터미널 모드를 복구하지 않는 것(stty 비교).
+# 하는 것(소스 핀; 끝 주석이나 가시성만 다른 선언은 통과, 주석 처리한 선언 줄은 세지 않음), 침묵을 경고나 오류로
+# 매기는 것(unknown 상태와 종료 코드), 터미널 모드를 복구하지 않는 것(stty 비교).
 def test_a_silent_terminal_gives_unknown_within_the_deadlines(home):
     deadlines_ms = {"REPLY_TIMEOUT": 200, "LATE_REPLY_DRAIN": 50}
     source = (Path(__file__).resolve().parents[2] / "crates/bingsu/src/commands/tty.rs").read_text()
     for name, milliseconds in deadlines_ms.items():
-        # Compare the value only. The bound below comes from the copies, never from the
-        # source, so a longer wait in tty.rs cannot widen it.
-        found = re.search(rf"const {name}: Duration = Duration::from_millis\((\d+)\);", source)
+        # The value of the one-line declaration, not the whole line: a trailing comment or
+        # another `pub(...)` still passes, a commented-out copy of the line does not count.
+        # The bound below comes from the copies, never from the source, so a longer wait in
+        # tty.rs cannot widen it.
+        found = re.search(rf"^pub(?:\([^)]*\))? const {name}: Duration = Duration::from_millis\((\d+)\);",
+                          source, re.MULTILINE)
         assert found, f"{name} is no longer a Duration::from_millis const in tty.rs; review the time bound"
         assert int(found.group(1)) == milliseconds, f"{name} changed; review the silent-terminal time bound"
     # Two unanswered queries take 2 * (200 + 50) ms. Allow another 2 s for
