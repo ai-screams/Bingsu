@@ -512,7 +512,7 @@ config checker and the renderer read, so a name it prints is a name the config a
 
 | `KIND` | Columns |
 | -- | -- |
-| `presets` | The seven style presets: `lean`, `triangle`, `pill`, `slant`, `diamond`, `block`, `bracket` |
+| `presets` | The eight style presets: `lean`, `triangle`, `pill`, `capsule`, `slant`, `diamond`, `block`, `bracket` |
 | `segments` | A built-in segment and the color role it draws with |
 | `flavors` | The color flavors |
 | `roles` | A color role and the palette colors it points to in dark and in light mode |
@@ -532,6 +532,7 @@ $ bingsu list presets --preview --icons unicode
 lean     ~/projects/api main                                         2.3s 12:34
 triangle  ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
 pill     ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
+capsule  ◂ ~/projects/api ▸ main ▸                             ◂ 2.3s ◂ 12:34 ▸
 slant     ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
 diamond  ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
 block      ~/projects/api     main                             2.3s     12:34  

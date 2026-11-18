@@ -324,7 +324,7 @@
                 "type": "object",
                 "properties": {
                   "preset": {
-                    "enum": ["lean", "triangle", "pill", "slant", "diamond", "block", "bracket"],
+                    "enum": ["lean", "triangle", "pill", "capsule", "slant", "diamond", "block", "bracket"],
                     "examples": ["lean"],
                     "description": "Style preset in this band.",
                     "x-bingsu-description-ko": "이 구간의 스타일 프리셋.",
@@ -514,7 +514,7 @@
       "type": "object",
       "properties": {
         "preset": {
-          "enum": ["lean", "triangle", "pill", "slant", "diamond", "block", "bracket"],
+          "enum": ["lean", "triangle", "pill", "capsule", "slant", "diamond", "block", "bracket"],
           "default": "triangle",
           "examples": ["triangle"],
           "description": "Style preset.",
