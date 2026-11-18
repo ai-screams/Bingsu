@@ -43,7 +43,7 @@ fn every_kind_prints_rows_and_a_bad_word_is_a_usage_error() {
     let presets = bingsu().args(["list", "presets"]).output().unwrap();
     assert_eq!(
         String::from_utf8(presets.stdout).unwrap(),
-        "lean\ntriangle\npill\nslant\ndiamond\nblock\nbracket\n"
+        "lean\ntriangle\npill\ncapsule\nslant\ndiamond\nblock\nbracket\n"
     );
     for args in [
         &["list"][..],
@@ -59,7 +59,7 @@ fn every_kind_prints_rows_and_a_bad_word_is_a_usage_error() {
 }
 
 // 이것을 실패시키는 것: 미리보기가 현재 폴더를 쓰지 않는 것, 터미널이 아닌데 escape를 내는 것,
-// 프리셋 줄 수가 일곱이 아닌 것.
+// 프리셋 줄 수가 여덟이 아닌 것.
 #[cfg(unix)]
 #[test]
 fn preview_draws_one_plain_line_per_preset_for_the_current_folder() {
@@ -74,7 +74,7 @@ fn preview_draws_one_plain_line_per_preset_for_the_current_folder() {
         .unwrap();
     assert_eq!(o.status.code(), Some(0), "{o:?}");
     let out = String::from_utf8(o.stdout).unwrap();
-    assert_eq!(out.lines().count(), 7, "{out}");
+    assert_eq!(out.lines().count(), 8, "{out}");
     assert!(!out.contains('\x1b'), "{out}");
     for l in out.lines() {
         assert!(
@@ -115,7 +115,7 @@ fn preview_takes_the_width_from_columns_or_the_terminal() {
                 String::from_utf8(o.stdout).unwrap()
             }
         };
-        assert_eq!(out.lines().count(), 7, "{out}");
+        assert_eq!(out.lines().count(), 8, "{out}");
         out.lines().map(|l| l.chars().count()).max().unwrap()
     };
     assert_eq!(widest(None, Some(123)), 122);

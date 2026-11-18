@@ -12,7 +12,7 @@ The engine is the "ice"; themes, segments and plugins are "toppings" layered on 
 - **License**: MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
 - **Stage**: M3a (config, snapshot, refresh helper), M3b (collector process protocol, supervision, publication) and
   M3c (git, path facts, safe reads), M3d (performance and process gates, measured budgets), M4 (zsh integration) and
-  M6 (running user-defined commands) are done; M7 is in progress: the first-use commands (`setup`, `list`, `explain`, `doctor`, `help`, `config edit`, `--version`), the seven built-in presets
+  M6 (running user-defined commands) are done; M7 is in progress: the first-use commands (`setup`, `list`, `explain`, `doctor`, `help`, `config edit`, `--version`), the eight built-in presets
   and JSON and YAML config files are done, and the first release is not made (the workspace version is `0.1.0-rc.1`). Known gaps so far:
   `bingsu explain --timings` is not built, the shell checks of `bingsu doctor` work in zsh only, and a `config.yaml` in the settings folder
   is not read. M5 (bash and fish integration) is deferred until after M7. M4 is closed with open items: the shell time gate runs on Linux only and records its

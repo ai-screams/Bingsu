@@ -136,7 +136,7 @@ impl KeyDef {
 use Level::{Advanced, Basic, Expert};
 
 const PRESETS: &[&str] = &[
-    "lean", "triangle", "pill", "slant", "diamond", "block", "bracket",
+    "lean", "triangle", "pill", "capsule", "slant", "diamond", "block", "bracket",
 ];
 const SHAPES: &[&str] = &["triangle", "round", "slant", "flat"];
 const SHORTEN: &[&str] = &["none", "repo", "abbrev", "depth", "unique"];

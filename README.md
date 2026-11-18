@@ -15,7 +15,7 @@ A cross-shell terminal theme and prompt engine for bash, zsh and fish.
 > **bingsu is in early development (M3a, M3b, M3c, M3d, M4 and M6 done; bash and fish integration (M5) comes after M7).** `bingsu prompt` draws the built-in default prompt
 > in bash, zsh and fish, or your own look from a TOML config file, with git status collected in the background. Your
 > own text, command and environment variable segments are drawn; commands run in the background, on Linux and macOS.
-> M7 is in progress: the first-use commands (`setup`, `list`, `explain`, `doctor`, `help`, `config edit`) and the seven built-in style presets are done; the first release is not made yet. There is no release yet. Published performance numbers do not exist yet.
+> M7 is in progress: the first-use commands (`setup`, `list`, `explain`, `doctor`, `help`, `config edit`) and the eight built-in style presets are done; the first release is not made yet. There is no release yet. Published performance numbers do not exist yet.
 > This README describes what is being built. The feature list below describes the plan; the Status table records what works today.
 
 ## What is bingsu?
@@ -92,8 +92,8 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | zsh integration (M4) | Done for zsh 5.8 and 5.9: shell notices, exit status and duration, a transient line for past prompts, vi mode prompt switching, redraw when the terminal width changes, and runs next to a pinned oh-my-zsh. Not complete: the shell time gate runs on Linux only, records its verdict without failing the job, and some runs can end BLOCKED; the redraw time has no recorded value on Linux or macOS. bash and fish already handle the exit status and duration; they get the notices, transient line, vi mode switch and width redraw in M5, which comes after M7 |
 | User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width; your text, command and environment variable segments, and node, python, rust and go versions where a layout draws them |
 | User commands and segments (M6) | Done on Linux and macOS: text, command and `env` segments are drawn, commands run in the background with a cleaned environment, time limits, caching and `match`, and the built-in language segments show versions. User-defined language segments run their version command where their project files are found. See [docs/config.md](docs/config.md), which also says how a team shares a config, and [docs/writing-command-segments.md](docs/writing-command-segments.md) for writing a command segment others will use. Not complete: on macOS the helper's check of the folders on `PATH` is slower than on Linux, because it asks the system about each account's group membership; this delays the first value of a command segment (the prompt does not wait for it); on macOS, prompt time has only a record-only run on one Mac: no case was slower than M4 beyond that run's noise, and the cost of command segments could not be called; the Linux CI prompt gate gives the verdict |
-| Theme selection and customization | Partly: seven style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
-| First-use commands and presets (M7) | In progress. Done: the seven built-in presets (`lean`, `triangle`, `pill`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file; `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation, the zsh hooks and the terminal; `bingsu config edit` opens your settings file and applies it when it is valid; JSON and YAML config files are read; `bingsu --version` shows the build and whether its sibling programs are from the same build; `bingsu help CODE` explains a diagnostic. Still to come in M7: the first release. Not complete: `bingsu explain --timings` (time per segment) is not built; the shell checks of `bingsu doctor` work in zsh only; a `config.yaml` in the settings folder is not read and nothing reports it. See [Setting up and customizing](#setting-up-and-customizing) |
+| Theme selection and customization | Partly: eight style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
+| First-use commands and presets (M7) | In progress. Done: the eight built-in presets (`lean`, `triangle`, `pill`, `capsule`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file; `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation, the zsh hooks and the terminal; `bingsu config edit` opens your settings file and applies it when it is valid; JSON and YAML config files are read; `bingsu --version` shows the build and whether its sibling programs are from the same build; `bingsu help CODE` explains a diagnostic. Still to come in M7: the first release. Not complete: `bingsu explain --timings` (time per segment) is not built; the shell checks of `bingsu doctor` work in zsh only; a `config.yaml` in the settings folder is not read and nothing reports it. See [Setting up and customizing](#setting-up-and-customizing) |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
 
@@ -190,7 +190,7 @@ Without a terminal it asks nothing, so all three arguments are needed. [docs/con
 
 ### 1. Pick a theme
 
-Seven style presets draw the same segments in different shapes. `bingsu list presets --preview` draws each one with
+Eight style presets draw the same segments in different shapes. `bingsu list presets --preview` draws each one with
 your current folder (the other values are samples):
 
 ```console
@@ -198,6 +198,7 @@ $ bingsu list presets --preview --icons unicode
 lean     ~/projects/api main                                         2.3s 12:34
 triangle  ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
 pill     ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
+capsule  ◂ ~/projects/api ▸ main ▸                             ◂ 2.3s ◂ 12:34 ▸
 slant     ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
 diamond  ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
 block      ~/projects/api     main                             2.3s     12:34  
@@ -209,6 +210,7 @@ bracket  [~/projects/api] [main]                                 [2.3s] [12:34]
 | `lean` | No background colors; plain spaces between segments |
 | `triangle` | The default: blocks joined by triangle separators |
 | `pill` | Each segment in its own rounded block |
+| `capsule` | Blocks joined by triangle separators, with a rounded cap at each end of a side |
 | `slant` | Blocks joined by slanted separators |
 | `diamond` | Each segment in its own pointed block |
 | `block` | Each segment in its own flat block |

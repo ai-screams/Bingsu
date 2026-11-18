@@ -1,4 +1,4 @@
-//! The seven built-in presets: the ASCII icon set draws only ASCII, every
+//! The eight built-in presets: the ASCII icon set draws only ASCII, every
 //! preset ends a full upper line on the target cell (all widths 0–200), and
 //! the `bracket` preset drops a segment's brackets with the segment.
 use bingsu_core::field::{BUILTIN, Field, Value, segment};

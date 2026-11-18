@@ -67,7 +67,7 @@ pub struct Preset {
     pub options: StyleOptions,
 }
 
-/// The seven first-release presets (the style playground's seven):
+/// The eight first-release presets (the style playground's seven, then `capsule`):
 /// each is a combination of the option keys, no renderer code of its own.
 pub const PRESETS: &[Preset] = &[
     Preset {
@@ -102,6 +102,18 @@ pub const PRESETS: &[Preset] = &[
             head: Some(Cap::Shape(Shape::Round)),
             tail: Some(Cap::Shape(Shape::Round)),
             joining: Some(Joining::Spaced),
+            fill: Some(FillKind::Space),
+            frame: Some(false),
+        },
+    },
+    Preset {
+        name: "capsule",
+        options: StyleOptions {
+            background: Some(true),
+            separator: Some(Shape::Triangle),
+            head: Some(Cap::Shape(Shape::Round)),
+            tail: Some(Cap::Shape(Shape::Round)),
+            joining: Some(Joining::Attached),
             fill: Some(FillKind::Space),
             frame: Some(false),
         },
@@ -411,7 +423,8 @@ mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: 새 프리셋 다섯의 머리·꼬리·구분자·연결이 바뀌는 것, `bracket`이 `char`를 감싸거나
+    // 이것을 실패시키는 것: 새 프리셋 다섯과 `capsule`의 머리·꼬리·구분자·연결이 바뀌는 것(`capsule`이 `Spaced`로 가거나
+    // 머리가 `None`이 되는 것, 오른쪽 둘째 블록 앞뒤 포함), `bracket`이 `char`를 감싸거나
     // 괄호를 그룹 밖에 두는 것(값 없는 세그먼트에 `[]`가 남음), 프리셋 이름 목록(`config` 키 enum)과 표가 갈라지는 것.
     #[test]
     fn first_release_presets() {
@@ -424,6 +437,12 @@ mod tests {
             g("slant"),
             "{dir:block}{@sep:slant}{git:block}{@tail:slant}{@fill:space}{@head:slant}{status:block}{@sep:slant}{time:block}{@nl}{char:block}{@tail:slant}"
         );
+        // `capsule`: TWO has two blocks on each side. Round caps sit only on the outer ends of a side
+        // (head before the first block, tail after the last); between blocks the triangle separator.
+        assert_eq!(
+            g("capsule"),
+            "{@head:round}{dir:block}{@sep:triangle}{git:block}{@tail:round}{@fill:space}{@head:round}{status:block}{@sep:triangle}{time:block}{@tail:round}{@nl}{@head:round}{char:block}{@tail:round}"
+        );
         assert_eq!(g("diamond"), g("pill").replace("round", "triangle"));
         assert_eq!(g("block"), g("pill").replace("round", "flat"));
         assert_eq!(
@@ -434,7 +453,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "lean", "triangle", "pill", "slant", "diamond", "block", "bracket"
+                "lean", "triangle", "pill", "capsule", "slant", "diamond", "block", "bracket"
             ]
         );
         for n in names {
