@@ -179,12 +179,14 @@ fn every_preset_fits_and_has_an_ascii_form() {
     }
 }
 
-// 이것을 실패시키는 것: 값 없는 세그먼트의 `[`·`]`가 남는 것(`{@group}` 없이 글을 잇는 것).
+// The brackets of `bracket` touch, and go with a segment that has no value.
+// 이것을 실패시키는 것: 값 없는 세그먼트의 `[`·`]`가 남는 것(`{@group}` 없이 글을 잇는 것), 괄호 사이에
+// `{@sep:flat}`을 남기는 것(빈칸이 생김).
 #[test]
 fn bracket_drops_with_a_segment_that_has_no_value() {
     let with = lines_at("bracket", IconSet::Ascii, 80, true);
     assert!(
-        with[0].0.starts_with("[~/Works/themes] [x1]"),
+        with[0].0.starts_with("[~/Works/themes][x1]"),
         "{:?}",
         with[0].0
     );
@@ -210,9 +212,10 @@ fn two(left: &'static [&'static str], right: &'static [&'static str]) -> [LineLa
     ]
 }
 
-// 이것을 실패시키는 것: 값 없는 세그먼트가 간격 공백을 남기는 것(Spaced 생성기가 조건 없는 공백을 쓸 때:
-// 오른쪽 끝이 마지막 칸에 닿지 않고, 가운데가 비면 공백이 두 겹이 됨). 값 없는 세그먼트는 레이아웃에서
-// 뺀 것과 같은 글자·폭을 내야 하고, 오른쪽이 있는 윗줄은 어떤 폭에서도 목표 칸에서 끝난다.
+// 이것을 실패시키는 것: 값 없는 세그먼트가 간격 공백을 남기는 것(빈칸 생성기가 조건 없는 공백을 쓸 때:
+// 오른쪽 끝이 마지막 칸에 닿지 않고, 가운데가 비면 공백이 두 겹이 됨), 빈칸 없는 프리셋에 빈칸을 더하는 것
+// (첫 세그먼트가 빈 오른쪽 줄과 마지막 세그먼트가 빈 왼쪽 줄에서 채움 옆에 한 칸이 남음). 값 없는 세그먼트는
+// 레이아웃에서 뺀 것과 같은 글자·폭을 내야 하고, 오른쪽이 있는 윗줄은 어떤 폭에서도 목표 칸에서 끝난다.
 #[test]
 fn an_empty_segment_leaves_no_gap_and_the_right_edge_stays_aligned() {
     // (with an empty one, the same without it, the ids with a value)
@@ -247,14 +250,11 @@ fn an_empty_segment_leaves_no_gap_and_the_right_edge_stays_aligned() {
             for (n, (with_empty, without, present)) in cases.iter().enumerate() {
                 for w in 0..=200u16 {
                     let a = laid(p.name, set, w, with_empty, present);
-                    // An empty segment in the middle or at the end of the right
-                    // side draws exactly what leaving it out draws: no stray gap
-                    // and no doubled one. At the start of a run, or on the
-                    // left, the gap beside the fill may stay (one cell).
-                    if n < 2 {
-                        let b = laid(p.name, set, w, without, present);
-                        assert_eq!(a[0].0, b[0].0, "{} case {n} w={w}", p.name);
-                    }
+                    // An empty segment draws exactly what leaving it out draws,
+                    // wherever it is: no stray gap and no doubled one. No preset
+                    // has a gap, so not even beside the fill (cases 2 and 3).
+                    let b = laid(p.name, set, w, without, present);
+                    assert_eq!(a, b, "{} case {n} w={w}", p.name);
                     // Room for everything: the right edge is on the last cell.
                     let (text, used, max) = &a[0];
                     if w >= 40 {
@@ -289,8 +289,8 @@ fn one_end_of_bracket_keeps_both_sides_bracketed() {
         }
         let drawn = laid_with("bracket", &o, IconSet::Ascii, 80, &layout, &present);
         let line = drawn[0].0.as_str();
-        assert!(line.starts_with("[~/Works/themes] [x1]"), "{o:?}: {line:?}");
-        assert!(line.ends_with("[x1] [x1]"), "{o:?}: {line:?}");
+        assert!(line.starts_with("[~/Works/themes][x1]"), "{o:?}: {line:?}");
+        assert!(line.ends_with("[x1][x1]"), "{o:?}: {line:?}");
         assert_eq!(drawn, base, "{o:?}");
     }
 }

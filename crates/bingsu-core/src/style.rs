@@ -92,13 +92,13 @@ pub struct Preset {
     pub options: StyleOptions,
 }
 
+/// A preset's options; no built-in preset turns the gap on.
 const fn options(
     body: Body,
     separator: Shape,
     outer_end: Cap,
     inner_end: Cap,
     joining: Joining,
-    gap: bool,
 ) -> StyleOptions {
     StyleOptions {
         body: Some(body),
@@ -106,7 +106,7 @@ const fn options(
         outer_end: Some(outer_end),
         inner_end: Some(inner_end),
         joining: Some(joining),
-        gap: Some(gap),
+        gap: Some(false),
         fill: Some(FillKind::Space),
         frame: Some(false),
     }
@@ -118,8 +118,10 @@ const fn preset_of(name: &'static str, options: StyleOptions) -> Preset {
 
 /// The eight first-release presets (the style playground's seven, then `capsule`):
 /// each is a combination of the option keys, no renderer code of its own.
-/// `pill`, `diamond`, `block` and `bracket` keep a blank cell between
-/// blocks (`gap`); a separator shape under `Capped` is not drawn.
+/// None puts a blank cell between blocks (`gap`): `pill` and `diamond`
+/// repeat their ends on every block, the blocks touching, `block` draws
+/// touching blocks without ends, `bracket` touching `[…]`. A separator shape
+/// under `Adjacent` or `Capped` is not drawn.
 pub const PRESETS: &[Preset] = &[
     preset_of(
         "lean",
@@ -129,7 +131,6 @@ pub const PRESETS: &[Preset] = &[
             Cap::None,
             Cap::None,
             Joining::Attached,
-            false,
         ),
     ),
     preset_of(
@@ -140,7 +141,6 @@ pub const PRESETS: &[Preset] = &[
             Cap::None,
             Cap::Shape(Shape::Triangle),
             Joining::Attached,
-            false,
         ),
     ),
     preset_of(
@@ -151,7 +151,6 @@ pub const PRESETS: &[Preset] = &[
             Cap::Shape(Shape::Round),
             Cap::Shape(Shape::Round),
             Joining::Capped,
-            true,
         ),
     ),
     preset_of(
@@ -162,7 +161,6 @@ pub const PRESETS: &[Preset] = &[
             Cap::Shape(Shape::Round),
             Cap::Shape(Shape::Round),
             Joining::Attached,
-            false,
         ),
     ),
     preset_of(
@@ -173,7 +171,6 @@ pub const PRESETS: &[Preset] = &[
             Cap::None,
             Cap::Shape(Shape::Slant),
             Joining::Attached,
-            false,
         ),
     ),
     preset_of(
@@ -184,7 +181,6 @@ pub const PRESETS: &[Preset] = &[
             Cap::Shape(Shape::Triangle),
             Cap::Shape(Shape::Triangle),
             Joining::Capped,
-            true,
         ),
     ),
     preset_of(
@@ -192,10 +188,9 @@ pub const PRESETS: &[Preset] = &[
         options(
             Body::Block,
             Shape::Flat,
-            Cap::Shape(Shape::Flat),
-            Cap::Shape(Shape::Flat),
-            Joining::Capped,
-            true,
+            Cap::None,
+            Cap::None,
+            Joining::Adjacent,
         ),
     ),
     preset_of(
@@ -206,7 +201,6 @@ pub const PRESETS: &[Preset] = &[
             Cap::None,
             Cap::None,
             Joining::Capped,
-            true,
         ),
     ),
 ];
@@ -484,16 +478,18 @@ mod tests {
         }
     }
 
+    // No preset has a gap: `pill` and `diamond` repeat their ends on every block and the blocks
+    // touch, `block` draws touching blocks without ends, `bracket` touching `[…]`.
     // 이것을 실패시키는 것: 새 프리셋 다섯과 `capsule`의 끝·구분자·이음이 바뀌는 것(`capsule`이 `Capped`로 가거나
     // 바깥 끝이 `None`이 되는 것, 오른쪽 둘째 블록 앞뒤 포함), `bracket`이 `char`를 감싸거나
     // 괄호를 그룹 밖에 두는 것(값 없는 세그먼트에 `[]`가 남음), 프리셋 이름 목록(`config` 키 enum)과 표가 갈라지는 것,
-    // `Capped` + 빈칸의 빈칸을 그룹 밖으로 옮기거나 오른쪽 줄에서 블록 뒤에 두는 것(옛 네 모양의 템플릿이 바뀜).
+    // 네 프리셋 하나를 빈칸 모양으로 되돌리는 것, `block`에 끝칸을 남기는 것.
     #[test]
     fn first_release_presets() {
         let g = |n| generate(preset(n).unwrap(), &StyleOptions::default(), &TWO).unwrap();
         assert_eq!(
             g("pill"),
-            "{@group}{@head:round}{dir:block}{@tail:round} {@end}{@group}{@head:round}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@tail:round}{@end}{@group} {@head:round}{time:block}{@tail:round}{@end}{@nl}{@head:round}{char:block}{@tail:round}"
+            "{@group}{@head:round}{dir:block}{@tail:round}{@end}{@group}{@head:round}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@tail:round}{@end}{@group}{@head:round}{time:block}{@tail:round}{@end}{@nl}{@head:round}{char:block}{@tail:round}"
         );
         assert_eq!(
             g("slant"),
@@ -506,10 +502,13 @@ mod tests {
             "{@head:round}{dir:block}{@sep:triangle}{git:block}{@tail:round}{@fill:space}{@head:round}{status:block}{@sep:triangle}{time:block}{@tail:round}{@nl}{@head:round}{char:block}{@tail:round}"
         );
         assert_eq!(g("diamond"), g("pill").replace("round", "triangle"));
-        assert_eq!(g("block"), g("pill").replace("round", "flat"));
+        assert_eq!(
+            g("block"),
+            "{dir:block}{git:block}{@fill:space}{status:block}{time:block}{@nl}{char:block}"
+        );
         assert_eq!(
             g("bracket"),
-            "{@group}[{dir}]{@end}{@sep:flat}{@group}[{git}]{@end}{@fill:space}{@group}[{status}]{@end}{@sep:flat}{@group}[{time}]{@end}{@nl}{char}"
+            "{@group}[{dir}]{@end}{@group}[{git}]{@end}{@fill:space}{@group}[{status}]{@end}{@group}[{time}]{@end}{@nl}{char}"
         );
         let names: Vec<&str> = PRESETS.iter().map(|p| p.name).collect();
         assert_eq!(
@@ -521,6 +520,35 @@ mod tests {
         for n in names {
             assert!(compile(&g(n), BUILTIN).is_ok(), "{n}");
         }
+    }
+
+    // A gap between blocks with ends of their own is an option: the four presets draw their gapped
+    // shapes with `gap = true` (and `block` with flat ends and `caps`). The gap rides in each
+    // block's group, after a left block and before a right one.
+    // 이것을 실패시키는 것: `Capped` + 빈칸의 빈칸을 그룹 밖으로 옮기는 것, 오른쪽 줄에서 빈칸을 블록 뒤에 두는 것,
+    // 배경 없는 몸체의 빈칸을 빼는 것.
+    #[test]
+    fn gapped_shapes_come_from_the_options() {
+        let g = |n, o: StyleOptions| generate(preset(n).unwrap(), &o, &TWO).unwrap();
+        let gap = StyleOptions {
+            gap: Some(true),
+            ..StyleOptions::default()
+        };
+        let pill = "{@group}{@head:round}{dir:block}{@tail:round} {@end}{@group}{@head:round}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@tail:round}{@end}{@group} {@head:round}{time:block}{@tail:round}{@end}{@nl}{@head:round}{char:block}{@tail:round}";
+        assert_eq!(g("pill", gap), pill);
+        assert_eq!(g("diamond", gap), pill.replace("round", "triangle"));
+        let flat = Some(Cap::Shape(Shape::Flat));
+        let block = StyleOptions {
+            outer_end: flat,
+            inner_end: flat,
+            joining: Some(Joining::Capped),
+            ..gap
+        };
+        assert_eq!(g("block", block), pill.replace("round", "flat"));
+        assert_eq!(
+            g("bracket", gap),
+            "{@group}[{dir}]{@end}{@sep:flat}{@group}[{git}]{@end}{@fill:space}{@group}[{status}]{@end}{@sep:flat}{@group}[{time}]{@end}{@nl}{char}"
+        );
     }
 
     // 이것을 실패시키는 것: 옵션이 프리셋 위에 얹히지 않거나(키별), 템플릿이 있는데 프리셋·옵션을 쓰는 것.
@@ -700,27 +728,18 @@ mod tests {
         }
     }
 
-    // The approved shapes come from the option keys alone, laid over a preset.
-    // 이것을 실패시키는 것: Capped의 블록마다 그룹을 빼는 것(새 pill·diamond), 오른쪽 줄에서 바깥 끝과
-    // 안쪽 끝을 바꿔 쓰지 않는 것(둥글게·사선·삼각형), `none`에 빈칸을 넣는 것(새 block은 프리셋의 빈칸을
-    // 그대로 둔다), 끝 `flat`을 그리지 않는 것.
+    // The approved shapes: the four presets as they are, and three mixes of outer end, joint and
+    // inner end from the option keys laid over a preset.
+    // 이것을 실패시키는 것: 네 프리셋 하나를 빈칸 모양으로 되돌리는 것, Capped의 블록마다 그룹을 빼는 것(pill·diamond),
+    // 오른쪽 줄에서 바깥 끝과 안쪽 끝을 바꿔 쓰지 않는 것(둥글게·사선·삼각형), 끝 `flat`을 그리지 않는 것.
     #[test]
-    fn approved_shapes_come_from_the_option_keys() {
+    fn approved_shapes_come_from_presets_and_option_keys() {
         let g = |p: &str, o: StyleOptions| generate(preset(p).unwrap(), &o, &EIGHT).unwrap();
-        let no_gap = StyleOptions {
-            gap: Some(false),
-            ..StyleOptions::default()
-        };
-        assert_eq!(g("pill", no_gap), NEW_PILL);
-        assert_eq!(g("diamond", no_gap), NEW_DIAMOND);
-        assert_eq!(g("bracket", no_gap), NEW_BRACKET);
-        let touching = StyleOptions {
-            outer_end: Some(Cap::None),
-            inner_end: Some(Cap::None),
-            joining: Some(Joining::Adjacent),
-            ..StyleOptions::default()
-        };
-        assert_eq!(g("block", touching), NEW_BLOCK);
+        let none = StyleOptions::default();
+        assert_eq!(g("pill", none), NEW_PILL);
+        assert_eq!(g("diamond", none), NEW_DIAMOND);
+        assert_eq!(g("block", none), NEW_BLOCK);
+        assert_eq!(g("bracket", none), NEW_BRACKET);
         let mix = |outer, sep: StyleOptions, inner| StyleOptions {
             outer_end: outer,
             inner_end: inner,

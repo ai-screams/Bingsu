@@ -197,24 +197,24 @@ your current folder (the other values are samples):
 $ bingsu list presets --preview --icons unicode
 lean     ~/projects/api main                                         2.3s 12:34
 triangle  ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
-pill     ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
+pill     ◂ ~/projects/api ▸◂ main ▸                           ◂ 2.3s ▸◂ 12:34 ▸
 capsule  ◂ ~/projects/api ▸ main ▸                             ◂ 2.3s ◂ 12:34 ▸
 slant     ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
-diamond  ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
-block      ~/projects/api     main                             2.3s     12:34  
-bracket  [~/projects/api] [main]                                 [2.3s] [12:34]
+diamond  ◂ ~/projects/api ▸◂ main ▸                           ◂ 2.3s ▸◂ 12:34 ▸
+block     ~/projects/api  main                                     2.3s  12:34 
+bracket  [~/projects/api][main]                                   [2.3s][12:34]
 ```
 
 | Preset | Look |
 | -- | -- |
 | `lean` | No background colors; plain spaces between segments |
 | `triangle` | The default: blocks joined by triangle separators |
-| `pill` | Each segment in its own rounded block |
+| `pill` | Each segment in its own rounded block, the blocks touching |
 | `capsule` | Blocks joined by triangle separators, with a rounded cap at each end of a side |
 | `slant` | Blocks joined by slanted separators |
-| `diamond` | Each segment in its own pointed block |
-| `block` | Each segment in its own flat block |
-| `bracket` | No backgrounds; each segment inside `[` `]` |
+| `diamond` | Each segment in its own pointed block, the blocks touching |
+| `block` | Colored blocks that touch, with no end shapes |
+| `bracket` | No backgrounds; each segment inside `[` `]`, the brackets touching |
 
 Pick one in the config. `icons` chooses the symbols: `nerd` needs a Nerd Font, `unicode` and `ascii` need nothing.
 

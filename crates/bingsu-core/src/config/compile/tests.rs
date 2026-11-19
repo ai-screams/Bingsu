@@ -224,7 +224,7 @@ const EFFECTS: &[(&str, &str)] = &[
     ),
     ("segment.dir.when", "[segment.dir]\nwhen = \"always\"\n"),
     ("segment.duration.min", "[segment.duration]\nmin = \"5s\"\n"),
-    ("style.gap", "[style]\npreset = \"pill\"\ngap = false\n"),
+    ("style.gap", "[style]\npreset = \"pill\"\ngap = true\n"),
     ("style.inner_end", "[style]\ninner_end = \"round\"\n"),
     ("style.outer_end", "[style]\nouter_end = \"round\"\n"),
     ("style.preset", "[style]\npreset = \"lean\"\n"),
@@ -307,8 +307,8 @@ fn variant_is(c: &CompiledConfig, band: Option<usize>, template: &str) {
 /// Templates the built-in layout (host, dir, git | status, duration, jobs, venv, time; char)
 /// gets from a preset and the block-shape keys, written out.
 const TRIANGLE_OUTER_ROUND: &str = "{@head:round}{host:block}{@sep:triangle}{dir:block}{@sep:triangle}{git:block}{@tail:triangle}{@fill:space}{@head:triangle}{status:block}{@sep:triangle}{duration:block}{@sep:triangle}{jobs:block}{@sep:triangle}{venv:block}{@sep:triangle}{time:block}{@tail:round}{@nl}{@head:round}{char:block}{@tail:triangle}";
-const PILL_OUTER_NONE: &str = "{@group}{host:block}{@tail:round} {@end}{@group}{dir:block}{@tail:round} {@end}{@group}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@end}{@group} {@head:round}{duration:block}{@end}{@group} {@head:round}{jobs:block}{@end}{@group} {@head:round}{venv:block}{@end}{@group} {@head:round}{time:block}{@end}{@nl}{char:block}{@tail:round}";
-const PILL_NO_GAP: &str = "{@group}{@head:round}{host:block}{@tail:round}{@end}{@group}{@head:round}{dir:block}{@tail:round}{@end}{@group}{@head:round}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@tail:round}{@end}{@group}{@head:round}{duration:block}{@tail:round}{@end}{@group}{@head:round}{jobs:block}{@tail:round}{@end}{@group}{@head:round}{venv:block}{@tail:round}{@end}{@group}{@head:round}{time:block}{@tail:round}{@end}{@nl}{@head:round}{char:block}{@tail:round}";
+const PILL_OUTER_NONE: &str = "{@group}{host:block}{@tail:round}{@end}{@group}{dir:block}{@tail:round}{@end}{@group}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@end}{@group}{@head:round}{duration:block}{@end}{@group}{@head:round}{jobs:block}{@end}{@group}{@head:round}{venv:block}{@end}{@group}{@head:round}{time:block}{@end}{@nl}{char:block}{@tail:round}";
+const PILL_GAP: &str = "{@group}{@head:round}{host:block}{@tail:round} {@end}{@group}{@head:round}{dir:block}{@tail:round} {@end}{@group}{@head:round}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@tail:round}{@end}{@group} {@head:round}{duration:block}{@tail:round}{@end}{@group} {@head:round}{jobs:block}{@tail:round}{@end}{@group} {@head:round}{venv:block}{@tail:round}{@end}{@group} {@head:round}{time:block}{@tail:round}{@end}{@nl}{@head:round}{char:block}{@tail:round}";
 const TRIANGLE_CAPS: &str = "{@group}{host:block}{@tail:triangle}{@end}{@group}{dir:block}{@tail:triangle}{@end}{@group}{git:block}{@tail:triangle}{@end}{@fill:space}{@group}{@head:triangle}{status:block}{@end}{@group}{@head:triangle}{duration:block}{@end}{@group}{@head:triangle}{jobs:block}{@end}{@group}{@head:triangle}{venv:block}{@end}{@group}{@head:triangle}{time:block}{@end}{@nl}{char:block}{@tail:triangle}";
 const LEAN_CAPS: &str =
     "{host}{dir}{git}{@fill:space}{status}{duration}{jobs}{venv}{time}{@nl}{char}";
@@ -381,7 +381,7 @@ fn style_options_read_the_block_shape_keys() {
 
 // Each block-shape key reaches the compiled default layout, and a written key covers the
 // preset's value (the joint included: `pill` with a triangle separator is `capsule`).
-// 이것을 실패시키는 것: 쓴 키가 프리셋 값을 덮지 않는 것(쓴 `none` 끝, `false` 빈칸, 모양 구분자가 프리셋의
+// 이것을 실패시키는 것: 쓴 키가 프리셋 값을 덮지 않는 것(쓴 `none` 끝, `true` 빈칸, 모양 구분자가 프리셋의
 // `caps`를 덮지 않음), 컴파일이 루트 옵션을 생성에 넘기지 않는 것.
 #[test]
 fn block_shape_keys_reach_the_compiled_template() {
@@ -396,9 +396,9 @@ fn block_shape_keys_reach_the_compiled_template() {
         PILL_OUTER_NONE,
     );
     variant_is(
-        &compiled("[style]\npreset = \"pill\"\ngap = false\n"),
+        &compiled("[style]\npreset = \"pill\"\ngap = true\n"),
         None,
-        PILL_NO_GAP,
+        PILL_GAP,
     );
     variant_is(
         &compiled("[style]\nseparator = \"caps\"\n"),
