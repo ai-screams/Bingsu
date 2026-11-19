@@ -416,7 +416,9 @@ pub(crate) mod tests {
         }
     }
 
-    // 이것을 실패시키는 것: 생성에 사용한 frame/fill/separator의 출처를 잃어 신뢰 설정 전체를 거부하는 것.
+    // 이것을 실패시키는 것: 생성에 사용한 frame/fill/separator/끝/빈칸의 출처를 잃어 신뢰 설정 전체를 거부하는 것
+    // (모양 전용 파일이 쓴 `outer_end`·`inner_end`·`separator = 'caps'`·`gap` 때문에 넘친 템플릿을 사용자 파일 탓으로 돌림),
+    // 배경 없는 몸체에서 빈칸이 꺼진 이음이나 맞닿은 세그먼트의 빈칸을 탓하지 않는 것.
     #[test]
     fn generated_template_overflow_isolates_style_option_origins() {
         let line = |ids: &[&str], right: &str| {
@@ -437,10 +439,40 @@ pub(crate) mod tests {
         fill_ids[..3].fill("duration");
         fill_ids[3] = "status";
         let fill_user = alloc::format!("[layout]\nfill = 'dot'\n{}", line(&fill_ids, "'time'"));
+        // Each block-shape key below makes a template that fits (with `triangle`, or the preset
+        // the user names) grow past the cap.
+        let outer_user = line(&vec!["dir"; 156], "");
+        let inner_user = alloc::format!(
+            "[style]\ninner_end = 'none'\n{}",
+            line(&vec!["dir"; 157], "")
+        );
+        let caps_user = line(&vec!["dir"; 100], "");
+        let gap_user = alloc::format!(
+            "[style]\npreset = 'pill'\ngap = false\n{}",
+            line(&vec!["dir"; 79], "")
+        );
+        // Without a background: touching segments (`none`) grow with a separator shape or a gap.
+        let touching_user = alloc::format!(
+            "[style]\npreset = 'lean'\nseparator = 'none'\n{}",
+            line(&vec!["dir"; 300], "")
+        );
         for (user, shape) in [
             (frame_user, "[layout]\nframe = 'line'\n"),
             (separator_user, "[style]\nseparator = 'triangle'\n"),
             (fill_user, "[layout]\nfill = 'space'\n"),
+            (outer_user, "[style]\nouter_end = 'round'\n"),
+            (inner_user, "[style]\ninner_end = 'round'\n"),
+            (caps_user, "[style]\nseparator = 'caps'\n"),
+            (gap_user, "[style]\ngap = true\n"),
+            (touching_user.clone(), "[style]\nseparator = 'flat'\n"),
+            (touching_user, "[style]\ngap = true\n"),
+            (
+                alloc::format!(
+                    "[style]\npreset = 'lean'\nseparator = 'caps'\n{}",
+                    line(&vec!["dir"; 300], "")
+                ),
+                "[style]\ngap = true\n",
+            ),
         ] {
             let baseline = read(&user, &[]).snapshot.unwrap();
             let r = read_late(&user, shape);
@@ -452,6 +484,45 @@ pub(crate) mod tests {
             assert_eq!(r.files[2].status, Status::Dropped);
             assert_eq!(r.order, [SourceId(0), SourceId(1)]);
             assert_eq!(r.snapshot.unwrap(), baseline, "{shape}");
+        }
+    }
+
+    // A block-shape key that cannot change the generated template is not blamed for it: a layout
+    // too long on its own stays the user's error, and the shape-only file that set the key stays.
+    // 이것을 실패시키는 것: 배경 없는 몸체의 끝 키, 구분자 글리프 옆의 빈칸, 빈칸이 켜진 배경 없는 몸체의 이음을
+    // 탓할 키에 넣는 것(효과 없는 키를 쓴 테마가 빠짐).
+    #[test]
+    fn a_block_shape_key_without_effect_is_not_blamed() {
+        let dirs = vec!["dir"; 400]
+            .iter()
+            .map(|id| alloc::format!("'{id}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let line = alloc::format!("[layout.line1]\nleft = [{dirs}]\nright = []\n");
+        for (style, shape) in [
+            (
+                "preset = 'lean'\n",
+                "[style]\nouter_end = 'round'\ninner_end = 'round'\n",
+            ),
+            ("", "[style]\ngap = true\n"),
+            (
+                "preset = 'lean'\ngap = true\n",
+                "[style]\nseparator = 'round'\n",
+            ),
+        ] {
+            let user = alloc::format!("[style]\n{style}{line}");
+            assert!(
+                read(&user, &[]).snapshot.is_none(),
+                "{style}: too long alone"
+            );
+            let r = read_late(&user, shape);
+            assert!(
+                !codes_of(&r).contains(&codes::SHAPE_FILE_DROPPED),
+                "{shape}: {:?}",
+                r.diagnostics
+            );
+            assert_ne!(r.files[2].status, Status::Dropped, "{shape}");
+            assert!(r.snapshot.is_none(), "{shape}");
         }
     }
 

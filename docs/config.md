@@ -141,6 +141,84 @@ the same way: once a layout from your own files draws it at some width, its valu
 it, including a theme's layout at a narrow width. Naming a segment only in a theme's layout does not run the command
 or show the variable.
 
+## Block shapes
+
+`style.preset` chooses the whole shape of the blocks. Four keys under `[style]` each change one part of it and leave
+the rest to the preset:
+
+| Key | Values | What it changes |
+| -- | -- | -- |
+| `outer_end` | `none`, `triangle`, `round`, `slant`, `flat` | The end of each run of blocks at the edge of the screen |
+| `separator` | `triangle`, `round`, `slant`, `flat`, `none`, `caps` | The joint between two blocks: a separator of that shape, nothing (`none`, the blocks touch), or the ends again (`caps`, every block repeats the outer and the inner end) |
+| `inner_end` | the same as `outer_end` | The end of each run of blocks that faces the middle of the line |
+| `gap` | `true`, `false` | One blank cell between blocks that have ends of their own |
+
+A run of blocks is the segments on one side of a line. The right side mirrors the left: the outer end of the left
+run is at the left edge of the screen, the outer end of the right run at the right edge, and both inner ends face the
+fill between them.
+
+```text
+[outer end] dir [joint] git [inner end]      fill      [inner end] status [joint] duration [outer end]
+^ left edge of the screen                                              right edge of the screen ^
+```
+
+The lines below were drawn by zsh at 60 columns with `icons = "unicode"`, `left = ["dir", "git"]` and
+`right = ["status", "duration"]` on line 1 and the folder shortened to its repository name (`api`), after a command
+that failed after 2.1 seconds:
+
+```text
+# no style keys: the triangle preset
+ api ▸ main ▸                                   ◂ 1 ◂ 2.1s
+# outer_end = "round"
+◂ api ▸ main ▸                                 ◂ 1 ◂ 2.1s ▸
+# inner_end = "none"
+ api ▸ main                                       1 ◂ 2.1s
+# outer_end = "round", separator = "none", inner_end = "round"
+◂ api  main ▸                                   ◂ 1  2.1s ▸
+```
+
+A key you write lays over the preset's value, key by key, and that includes the joint: `preset = "pill"` with
+`separator = "triangle"` draws exactly what `preset = "capsule"` draws. A template (`style.template`) replaces the
+preset and all of these keys.
+
+`separator = "caps"` repeats the outer and the inner end on every block, so each segment sits in a block of its own.
+`gap = true` then puts one blank cell between those blocks. Among the built-in presets `pill`, `diamond`, `block` and
+`bracket` set `gap = true`:
+
+```text
+# preset = "pill"
+◂ api ▸ ◂ main ▸                             ◂ 1 ▸ ◂ 2.1s ▸
+# preset = "pill", gap = false
+◂ api ▸◂ main ▸                               ◂ 1 ▸◂ 2.1s ▸
+```
+
+On blocks with a background, `gap` changes nothing with a separator shape or with `none`: a separator takes the
+colors of the blocks on both sides, and a blank cell between them would cut that.
+
+Without a background (`lean`, `bracket`) there are no ends: the end keys change nothing, and `bracket` puts `[` and
+`]` around every segment except `char` on both sides whatever they say. There a separator shape draws one blank cell, `none` and
+`caps` make the segments touch, and `gap = true` puts the blank cell back. Text that touches is not reported, since a
+segment of your own may bring its own spacing:
+
+```text
+# preset = "lean"
+api main                                             1 2.1s
+# preset = "lean", separator = "none"
+apimain                                               12.1s
+# preset = "bracket", gap = false
+[api][main]                                       [1][2.1s]
+```
+
+These keys are read under `[style]` only, not under `[layout.when.NAME.style]`. They lay over a band's own preset as
+well, so a band with `preset = "triangle"` under `separator = "caps"` at the top draws a mix of the two. A band's
+template replaces them like any template: the built-in `narrow` band draws its own template under 60 columns, and
+`bingsu config check` notes that (N501) when you write one of these keys.
+
+In the `unicode` and `ascii` icon sets `triangle`, `round` and `slant` all draw as `◂` and `▸` (`<` and `>` in
+`ascii`), so `pill` and `diamond`, or `triangle` and `slant`, look the same there; `flat` is a blank cell on the
+block's color in every set. The keys take every value in any icon set, since one config may be used in several
+terminals.
+
 ## Narrow terminals
 
 A layout band (`[layout.when.NAME]`) is chosen for a range of widths. It takes the lines of `[layout]` unless it has

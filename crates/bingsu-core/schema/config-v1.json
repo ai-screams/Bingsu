@@ -778,6 +778,27 @@
     "style": {
       "type": "object",
       "properties": {
+        "gap": {
+          "type": "boolean",
+          "examples": [true],
+          "description": "One blank cell between blocks: with separator caps, or on a preset without background.",
+          "x-bingsu-description-ko": "블록 사이 빈칸 한 칸: separator가 caps이거나 배경 없는 프리셋일 때.",
+          "x-bingsu-level": "advanced"
+        },
+        "inner_end": {
+          "enum": ["none", "triangle", "round", "slant", "flat"],
+          "examples": ["triangle"],
+          "description": "Shape at the end of each run of blocks that faces the middle.",
+          "x-bingsu-description-ko": "블록 줄의 가운데 쪽 끝 모양.",
+          "x-bingsu-level": "advanced"
+        },
+        "outer_end": {
+          "enum": ["none", "triangle", "round", "slant", "flat"],
+          "examples": ["round"],
+          "description": "Shape at the screen-edge end of each run of blocks.",
+          "x-bingsu-description-ko": "블록 줄의 화면 가장자리 쪽 끝 모양.",
+          "x-bingsu-level": "advanced"
+        },
         "preset": {
           "enum": ["lean", "triangle", "pill", "capsule", "slant", "diamond", "block", "bracket"],
           "default": "triangle",
@@ -787,10 +808,10 @@
           "x-bingsu-level": "basic"
         },
         "separator": {
-          "enum": ["triangle", "round", "slant", "flat"],
+          "enum": ["triangle", "round", "slant", "flat", "none", "caps"],
           "examples": ["round"],
-          "description": "Separator shape between blocks.",
-          "x-bingsu-description-ko": "블록 사이 구분자 모양.",
+          "description": "Between blocks: a separator shape, none (blocks touch) or caps (each block repeats the end shapes).",
+          "x-bingsu-description-ko": "블록 사이: 구분자 모양, none(그냥 맞닿음), caps(블록마다 끝 모양을 되풀이함).",
           "x-bingsu-level": "advanced"
         },
         "template": {

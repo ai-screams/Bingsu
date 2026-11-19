@@ -224,6 +224,9 @@ const EFFECTS: &[(&str, &str)] = &[
     ),
     ("segment.dir.when", "[segment.dir]\nwhen = \"always\"\n"),
     ("segment.duration.min", "[segment.duration]\nmin = \"5s\"\n"),
+    ("style.gap", "[style]\npreset = \"pill\"\ngap = false\n"),
+    ("style.inner_end", "[style]\ninner_end = \"round\"\n"),
+    ("style.outer_end", "[style]\nouter_end = \"round\"\n"),
     ("style.preset", "[style]\npreset = \"lean\"\n"),
     ("style.separator", "[style]\nseparator = \"round\"\n"),
     ("width.ambiguous", "[width]\nambiguous = 2\n"),
@@ -237,6 +240,10 @@ const EFFECTS: &[(&str, &str)] = &[
         "[layout.when.wide.style]\ntemplate = \"{dir}{@nl}{char}\"\n",
     ),
 ];
+/// Keys whose effect shows only against another base than the built-in theme:
+/// a gap needs blocks with ends of their own (the built-in `triangle` has a
+/// separator glyph), so `style.gap` is tried against `pill`.
+const EFFECT_BASES: &[(&str, &str)] = &[("style.gap", "[style]\npreset = \"pill\"\n")];
 /// Shape keys that cannot change the output yet, and why.
 const NO_EFFECT: [(&str, &str); 4] = [
     (
@@ -271,8 +278,11 @@ fn every_shape_key_changes_the_compiled_config() {
                 // Band keys are tried on a band of their own, against the
                 // same band without the key.
                 let wide = "[layout.when.wide]\nmin_cols = 100\n";
+                let other_base = EFFECT_BASES.iter().find(|(p, _)| *p == k.path);
                 let (with, without) = if src.contains("layout.when.wide") {
                     (alloc::format!("{wide}{src}"), compiled(wide))
+                } else if let Some((_, b)) = other_base {
+                    (String::from(*src), compiled(b))
                 } else {
                     (String::from(*src), base.clone())
                 };
@@ -286,6 +296,173 @@ fn every_shape_key_changes_the_compiled_config() {
     let r = read("[layout]\ntransient = \"char\"\n", &[]);
     assert!(r.snapshot.is_some());
     assert_eq!(codes_of(&r), [codes::KEY_PLANNED]);
+}
+
+/// The default variant (or band `band`'s) against the compiled `template`.
+fn variant_is(c: &CompiledConfig, band: Option<usize>, template: &str) {
+    let want = compile_builtin(template, &[]).unwrap();
+    assert_eq!(c.variants[band.map_or(0, |b| b + 1)], want, "{template}");
+}
+
+/// Templates the built-in layout (host, dir, git | status, duration, jobs, venv, time; char)
+/// gets from a preset and the block-shape keys, written out.
+const TRIANGLE_OUTER_ROUND: &str = "{@head:round}{host:block}{@sep:triangle}{dir:block}{@sep:triangle}{git:block}{@tail:triangle}{@fill:space}{@head:triangle}{status:block}{@sep:triangle}{duration:block}{@sep:triangle}{jobs:block}{@sep:triangle}{venv:block}{@sep:triangle}{time:block}{@tail:round}{@nl}{@head:round}{char:block}{@tail:triangle}";
+const PILL_OUTER_NONE: &str = "{@group}{host:block}{@tail:round} {@end}{@group}{dir:block}{@tail:round} {@end}{@group}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@end}{@group} {@head:round}{duration:block}{@end}{@group} {@head:round}{jobs:block}{@end}{@group} {@head:round}{venv:block}{@end}{@group} {@head:round}{time:block}{@end}{@nl}{char:block}{@tail:round}";
+const PILL_NO_GAP: &str = "{@group}{@head:round}{host:block}{@tail:round}{@end}{@group}{@head:round}{dir:block}{@tail:round}{@end}{@group}{@head:round}{git:block}{@tail:round}{@end}{@fill:space}{@group}{@head:round}{status:block}{@tail:round}{@end}{@group}{@head:round}{duration:block}{@tail:round}{@end}{@group}{@head:round}{jobs:block}{@tail:round}{@end}{@group}{@head:round}{venv:block}{@tail:round}{@end}{@group}{@head:round}{time:block}{@tail:round}{@end}{@nl}{@head:round}{char:block}{@tail:round}";
+const TRIANGLE_CAPS: &str = "{@group}{host:block}{@tail:triangle}{@end}{@group}{dir:block}{@tail:triangle}{@end}{@group}{git:block}{@tail:triangle}{@end}{@fill:space}{@group}{@head:triangle}{status:block}{@end}{@group}{@head:triangle}{duration:block}{@end}{@group}{@head:triangle}{jobs:block}{@end}{@group}{@head:triangle}{venv:block}{@end}{@group}{@head:triangle}{time:block}{@end}{@nl}{char:block}{@tail:triangle}";
+const LEAN_CAPS: &str =
+    "{host}{dir}{git}{@fill:space}{status}{duration}{jobs}{venv}{time}{@nl}{char}";
+
+// `style.separator` is two engine fields: a shape is a glyph between blocks (Attached), `none`
+// touching blocks and `caps` blocks with ends of their own; a written `none` end and a written
+// `false` gap are values, not "unset".
+// 이것을 실패시키는 것: `style_options`가 새 키 하나를 읽지 않는 것, `none`·`caps`를 모양으로 읽거나 모양 값의
+// 이음을 비워 두는 것(프리셋의 이음이 남음), 쓴 `none` 끝이나 `false` 빈칸을 쓰지 않은 것으로 읽는 것.
+#[test]
+fn style_options_read_the_block_shape_keys() {
+    let o = |src: &str| style_options(&crate::config::check::tests::merged_with(src, &[]).root);
+    let d = StyleOptions::default;
+    assert_eq!(
+        o("[style]\nseparator = \"caps\"\n"),
+        StyleOptions {
+            joining: Some(Joining::Capped),
+            ..d()
+        }
+    );
+    assert_eq!(
+        o("[style]\nseparator = \"none\"\n"),
+        StyleOptions {
+            joining: Some(Joining::Adjacent),
+            ..d()
+        }
+    );
+    for (v, sh) in [
+        ("triangle", Shape::Triangle),
+        ("round", Shape::Round),
+        ("slant", Shape::Slant),
+        ("flat", Shape::Flat),
+    ] {
+        assert_eq!(
+            o(&alloc::format!("[style]\nseparator = \"{v}\"\n")),
+            StyleOptions {
+                separator: Some(sh),
+                joining: Some(Joining::Attached),
+                ..d()
+            }
+        );
+        assert_eq!(
+            o(&alloc::format!(
+                "[style]\nouter_end = \"{v}\"\ninner_end = \"{v}\"\n"
+            )),
+            StyleOptions {
+                outer_end: Some(Cap::Shape(sh)),
+                inner_end: Some(Cap::Shape(sh)),
+                ..d()
+            }
+        );
+    }
+    assert_eq!(
+        o("[style]\nouter_end = \"none\"\ninner_end = \"none\"\ngap = false\n"),
+        StyleOptions {
+            outer_end: Some(Cap::None),
+            inner_end: Some(Cap::None),
+            gap: Some(false),
+            ..d()
+        }
+    );
+    assert_eq!(
+        o("[style]\ngap = true\n"),
+        StyleOptions {
+            gap: Some(true),
+            ..d()
+        }
+    );
+}
+
+// Each block-shape key reaches the compiled default layout, and a written key covers the
+// preset's value (the joint included: `pill` with a triangle separator is `capsule`).
+// 이것을 실패시키는 것: 쓴 키가 프리셋 값을 덮지 않는 것(쓴 `none` 끝, `false` 빈칸, 모양 구분자가 프리셋의
+// `caps`를 덮지 않음), 컴파일이 루트 옵션을 생성에 넘기지 않는 것.
+#[test]
+fn block_shape_keys_reach_the_compiled_template() {
+    variant_is(
+        &compiled("[style]\nouter_end = \"round\"\n"),
+        None,
+        TRIANGLE_OUTER_ROUND,
+    );
+    variant_is(
+        &compiled("[style]\npreset = \"pill\"\nouter_end = \"none\"\n"),
+        None,
+        PILL_OUTER_NONE,
+    );
+    variant_is(
+        &compiled("[style]\npreset = \"pill\"\ngap = false\n"),
+        None,
+        PILL_NO_GAP,
+    );
+    variant_is(
+        &compiled("[style]\nseparator = \"caps\"\n"),
+        None,
+        TRIANGLE_CAPS,
+    );
+    assert_eq!(
+        compiled("[style]\npreset = \"pill\"\nseparator = \"triangle\"\n").variants,
+        compiled("[style]\npreset = \"capsule\"\n").variants
+    );
+}
+
+// P1: the root block-shape keys lay over a band's own preset too, while a band template (the
+// built-in `narrow`, under 60 columns) draws in place of preset and options.
+// 이것을 실패시키는 것: 구간 프리셋에서 루트 옵션을 버리는 것, `narrow`에 루트 옵션을 얹는 것(템플릿 대신 생성),
+// 59/60 경계를 하나 미는 것.
+#[test]
+fn root_style_keys_lay_over_a_band_preset_but_not_a_band_template() {
+    let c = compiled(
+        "[style]\npreset = \"lean\"\nseparator = \"caps\"\n[layout.when.wide]\nmin_cols = 100\n[layout.when.wide.style]\npreset = \"triangle\"\n",
+    );
+    let wide = c.band_names.iter().position(|n| n == "wide").unwrap();
+    variant_is(&c, Some(wide), TRIANGLE_CAPS);
+    variant_is(&c, None, LEAN_CAPS);
+    assert_eq!(
+        crate::bands::select(&c.band_order, &c.bands, 100),
+        Some(wide)
+    );
+    let caps = compiled("[style]\nseparator = \"caps\"\n");
+    let plain = compiled("");
+    let narrow = caps.band_names.iter().position(|n| n == "narrow").unwrap();
+    variant_is(&caps, Some(narrow), crate::default_theme::NARROW_TEMPLATE);
+    variant_is(&caps, None, TRIANGLE_CAPS);
+    for (w, band) in [(59, Some(narrow)), (60, None)] {
+        assert_eq!(
+            crate::bands::select(&caps.band_order, &caps.bands, w),
+            band,
+            "{w}"
+        );
+    }
+    // Drawn: at 59 the band's template, as without the keys; at 60 the default layout with
+    // them, as when the band is off.
+    let no_band =
+        compiled("[style]\nseparator = \"caps\"\n[layout.when.narrow]\nenabled = false\n");
+    let at = |c: &CompiledConfig, w| draw(c.theme(), &c.setup(), IconSet::Ascii, w).upper;
+    assert_eq!(at(&caps, 59), at(&plain, 59));
+    assert_ne!(at(&caps, 59), at(&no_band, 59));
+    assert_eq!(at(&caps, 60), at(&no_band, 60));
+}
+
+// The block-shape keys are shape keys: a theme (a shape-only file) sets them like the user does.
+// 이것을 실패시키는 것: 새 키를 실행 키로 두는 것(모양 전용 파일에서 W401로 떨어짐), 테마의 값을 쓰지 않는 것.
+#[test]
+fn a_theme_may_set_the_block_shape_keys() {
+    let keys =
+        "[style]\nouter_end = \"round\"\ninner_end = \"slant\"\nseparator = \"caps\"\ngap = true\n";
+    let r = read("extends = [\"shape-t\"]\n", &[("shape-t", keys)]);
+    assert!(
+        !codes_of(&r).contains(&codes::EXEC_KEY_IGNORED),
+        "{:?}",
+        codes_of(&r)
+    );
+    assert_eq!(r.snapshot.unwrap().variants, compiled(keys).variants);
+    assert_ne!(compiled(keys).variants, compiled("").variants);
 }
 
 /// One drawn command segment with `body` as its keys. Its `[layout.line1]`
