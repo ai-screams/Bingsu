@@ -196,7 +196,7 @@ On blocks with a background, `gap` changes nothing with a separator shape or wit
 colors of the blocks on both sides, and a blank cell between them would cut that.
 
 Without a background (`lean`, `bracket`) there are no ends: the end keys change nothing, and `bracket` puts `[` and
-`]` around every segment on both sides whatever they say. There a separator shape draws one blank cell, `none` and
+`]` around every segment except `char` on both sides whatever they say. There a separator shape draws one blank cell, `none` and
 `caps` make the segments touch, and `gap = true` puts the blank cell back. Text that touches is not reported, since a
 segment of your own may bring its own spacing:
 
