@@ -181,32 +181,34 @@ A key you write lays over the preset's value, key by key, and that includes the 
 `separator = "triangle"` draws exactly what `preset = "capsule"` draws. A template (`style.template`) replaces the
 preset and all of these keys.
 
-`separator = "caps"` repeats the outer and the inner end on every block, so each segment sits in a block of its own.
-`gap = true` then puts one blank cell between those blocks. Among the built-in presets `pill`, `diamond`, `block` and
-`bracket` set `gap = true`:
+`separator = "caps"` repeats the outer and the inner end on every block, so each segment sits in a block of its own
+and the blocks touch; `pill` and `diamond` draw that way. No built-in preset turns `gap` on: `gap = true` puts one
+blank cell between such blocks:
 
 ```text
 # preset = "pill"
-◂ api ▸ ◂ main ▸                             ◂ 1 ▸ ◂ 2.1s ▸
-# preset = "pill", gap = false
 ◂ api ▸◂ main ▸                               ◂ 1 ▸◂ 2.1s ▸
+# preset = "pill", gap = true
+◂ api ▸ ◂ main ▸                             ◂ 1 ▸ ◂ 2.1s ▸
 ```
 
 On blocks with a background, `gap` changes nothing with a separator shape or with `none`: a separator takes the
 colors of the blocks on both sides, and a blank cell between them would cut that.
 
 Without a background (`lean`, `bracket`) there are no ends: the end keys change nothing, and `bracket` puts `[` and
-`]` around every segment except `char` on both sides whatever they say. There a separator shape draws one blank cell, `none` and
-`caps` make the segments touch, and `gap = true` puts the blank cell back. Text that touches is not reported, since a
-segment of your own may bring its own spacing:
+`]` around every segment except `char` on both sides whatever they say. There a separator shape draws one blank cell,
+`none` and `caps` make the segments touch, and `gap = true` puts the blank cell back. Text that touches is not
+reported, since a segment of your own may bring its own spacing:
 
 ```text
 # preset = "lean"
 api main                                             1 2.1s
 # preset = "lean", separator = "none"
 apimain                                               12.1s
-# preset = "bracket", gap = false
+# preset = "bracket"
 [api][main]                                       [1][2.1s]
+# preset = "bracket", gap = true
+[api] [main]                                     [1] [2.1s]
 ```
 
 These keys are read under `[style]` only, not under `[layout.when.NAME.style]`. They lay over a band's own preset as
@@ -609,12 +611,12 @@ terminal. It starts no command, reads no config and writes nothing.
 $ bingsu list presets --preview --icons unicode
 lean     ~/projects/api main                                         2.3s 12:34
 triangle  ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
-pill     ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
+pill     ◂ ~/projects/api ▸◂ main ▸                           ◂ 2.3s ▸◂ 12:34 ▸
 capsule  ◂ ~/projects/api ▸ main ▸                             ◂ 2.3s ◂ 12:34 ▸
 slant     ~/projects/api ▸ main ▸                               ◂ 2.3s ◂ 12:34 
-diamond  ◂ ~/projects/api ▸ ◂ main ▸                         ◂ 2.3s ▸ ◂ 12:34 ▸
-block      ~/projects/api     main                             2.3s     12:34  
-bracket  [~/projects/api] [main]                                 [2.3s] [12:34]
+diamond  ◂ ~/projects/api ▸◂ main ▸                           ◂ 2.3s ▸◂ 12:34 ▸
+block     ~/projects/api  main                                     2.3s  12:34 
+bracket  [~/projects/api][main]                                   [2.3s][12:34]
 ```
 
 ### Why a segment is hidden: `bingsu explain`
