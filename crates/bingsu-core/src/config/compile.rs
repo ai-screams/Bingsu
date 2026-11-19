@@ -45,7 +45,7 @@ use crate::icons::IconSet;
 use crate::layout::{SegmentSetup, When};
 use crate::render::Theme;
 use crate::shorten::Method;
-use crate::style::{Joining, LineLayout, StyleOptions, generate, preset};
+use crate::style::{Body, Cap, Joining, LineLayout, StyleOptions, generate, preset};
 use crate::template::compile::{CompiledLine, FillKind, Node, Shape, compile_builtin};
 use crate::width::WidthProfile;
 use alloc::collections::BTreeSet;
@@ -212,17 +212,44 @@ fn palette(r: &MTable, mode: Mode) -> Result<ResolvedPalette, Vec<Diagnostic>> {
     })
 }
 
-/// The style options the config writes: separator, fill and frame. A value
-/// that is not one of the names stays unset (the check reports it).
+fn shape(v: &str) -> Option<Shape> {
+    match v {
+        "triangle" => Some(Shape::Triangle),
+        "round" => Some(Shape::Round),
+        "slant" => Some(Shape::Slant),
+        "flat" => Some(Shape::Flat),
+        _ => None,
+    }
+}
+
+/// An end shape: a written `none` is a value that covers the preset's end.
+fn end_shape(v: Option<&str>) -> Option<Cap> {
+    match v? {
+        "none" => Some(Cap::None),
+        v => shape(v).map(Cap::Shape),
+    }
+}
+
+/// The style options the config writes: the ends, the joint between
+/// blocks (`style.separator`: a shape is a separator glyph, `none` touching
+/// blocks, `caps` blocks with ends of their own), the gap, fill and frame. A
+/// value that is not one of the names stays unset (the check reports it).
 fn style_options(r: &MTable) -> StyleOptions {
+    let (separator, joining) = match s(r, &["style", "separator"]) {
+        Some("none") => (None, Some(Joining::Adjacent)),
+        Some("caps") => (None, Some(Joining::Capped)),
+        Some(v) => match shape(v) {
+            Some(sh) => (Some(sh), Some(Joining::Attached)),
+            None => (None, None),
+        },
+        None => (None, None),
+    };
     StyleOptions {
-        separator: s(r, &["style", "separator"]).and_then(|v| match v {
-            "triangle" => Some(Shape::Triangle),
-            "round" => Some(Shape::Round),
-            "slant" => Some(Shape::Slant),
-            "flat" => Some(Shape::Flat),
-            _ => None,
-        }),
+        separator,
+        joining,
+        outer_end: end_shape(s(r, &["style", "outer_end"])),
+        inner_end: end_shape(s(r, &["style", "inner_end"])),
+        gap: boolean(r, &["style", "gap"]),
         fill: s(r, &["layout", "fill"]).and_then(|v| match v {
             "space" => Some(FillKind::Space),
             "dot" => Some(FillKind::Dot),
@@ -443,14 +470,32 @@ fn compile_variant(
             involved.extend(get(r, &["layout", "fill"]));
         }
         if let Some(pr) = preset(p) {
-            let effective = options.over(pr.options);
-            if effective.background == Some(true)
-                && effective.joining == Some(Joining::Attached)
+            // The keys whose value can change this generated template (a
+            // shape-only file that set one is then blamed for a template
+            // that does not fit, not the user's file). The separator keeps
+            // its earlier guard for lines of two or more blocks; the other
+            // keys have none, since two lines of one block a side stay far
+            // under the length cap.
+            let o = options.over(pr.options);
+            let block = o.body == Some(Body::Block);
+            if block {
+                involved.extend(get(r, &["style", "outer_end"]));
+                involved.extend(get(r, &["style", "inner_end"]));
+            }
+            if (block || o.gap != Some(true))
                 && layout_lines
                     .iter()
                     .any(|l| l.left.len() > 1 || l.right.len() > 1)
             {
                 involved.extend(get(r, &["style", "separator"]));
+            }
+            let gapped = match o.joining {
+                Some(Joining::Capped) => true,
+                Some(Joining::Adjacent) => !block,
+                _ => false,
+            };
+            if gapped {
+                involved.extend(get(r, &["style", "gap"]));
             }
         }
     }

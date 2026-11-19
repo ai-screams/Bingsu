@@ -138,7 +138,11 @@ use Level::{Advanced, Basic, Expert};
 const PRESETS: &[&str] = &[
     "lean", "triangle", "pill", "capsule", "slant", "diamond", "block", "bracket",
 ];
-const SHAPES: &[&str] = &["triangle", "round", "slant", "flat"];
+/// Values of `style.outer_end` and `style.inner_end`.
+const ENDS: &[&str] = &["none", "triangle", "round", "slant", "flat"];
+/// Values of `style.separator`: a separator shape, blocks that touch, or
+/// blocks that each repeat the end shapes.
+const JOINTS: &[&str] = &["triangle", "round", "slant", "flat", "none", "caps"];
 const SHORTEN: &[&str] = &["none", "repo", "abbrev", "depth", "unique"];
 const CMD: &[&str] = &["command"];
 const CMD_LANG: &[&str] = &["command", "language"];
@@ -674,6 +678,30 @@ pub const KEYS: &[KeyDef] = &[
     .default("\"2s\""),
     key("style", Ty::Table, Basic, "Style.", "스타일."),
     key(
+        "style.gap",
+        Ty::Bool,
+        Advanced,
+        "One blank cell between blocks: with separator caps, or on a preset without background.",
+        "블록 사이 빈칸 한 칸: separator가 caps이거나 배경 없는 프리셋일 때.",
+    )
+    .example("true"),
+    key(
+        "style.inner_end",
+        Ty::Enum(ENDS),
+        Advanced,
+        "Shape at the end of each run of blocks that faces the middle.",
+        "블록 줄의 가운데 쪽 끝 모양.",
+    )
+    .example("\"triangle\""),
+    key(
+        "style.outer_end",
+        Ty::Enum(ENDS),
+        Advanced,
+        "Shape at the screen-edge end of each run of blocks.",
+        "블록 줄의 화면 가장자리 쪽 끝 모양.",
+    )
+    .example("\"round\""),
+    key(
         "style.preset",
         Ty::Enum(PRESETS),
         Basic,
@@ -683,10 +711,10 @@ pub const KEYS: &[KeyDef] = &[
     .default("\"triangle\""),
     key(
         "style.separator",
-        Ty::Enum(SHAPES),
+        Ty::Enum(JOINTS),
         Advanced,
-        "Separator shape between blocks.",
-        "블록 사이 구분자 모양.",
+        "Between blocks: a separator shape, none (blocks touch) or caps (each block repeats the end shapes).",
+        "블록 사이: 구분자 모양, none(그냥 맞닿음), caps(블록마다 끝 모양을 되풀이함).",
     )
     .example("\"round\""),
     key(
@@ -1027,6 +1055,9 @@ mod tests {
             "segment.dir.shorten",
             "segment.dir.when",
             "segment.duration.min",
+            "style.gap",
+            "style.inner_end",
+            "style.outer_end",
             "style.preset",
             "style.separator",
             "style.template",
@@ -1040,6 +1071,31 @@ mod tests {
             missing.is_empty() && extra.is_empty(),
             "missing {missing:?}, extra {extra:?}"
         );
+    }
+
+    // The block-shape keys: closed value lists, a theme may set them, and none of them runs
+    // anything (spec section 2: they choose how blocks are drawn, not what runs).
+    // 이것을 실패시키는 것: 새 행을 `.exec()`나 `.not_in_theme()`로 두는 것, 끝 값과 이음 값을 한 목록으로
+    // 합치는 것(`caps`가 끝 값이 되거나 `none`이 이음에서 빠짐), 단계를 바꾸는 것.
+    #[test]
+    fn block_shape_keys_are_shape_keys_a_theme_may_set() {
+        let ends = ["none", "triangle", "round", "slant", "flat"];
+        let joints = ["triangle", "round", "slant", "flat", "none", "caps"];
+        for (path, want) in [
+            ("style.outer_end", Some(&ends[..])),
+            ("style.inner_end", Some(&ends[..])),
+            ("style.separator", Some(&joints[..])),
+            ("style.gap", None),
+        ] {
+            let names: Vec<&str> = path.split('.').collect();
+            let k = lookup(&names).unwrap();
+            assert_eq!((k.path, k.class, k.theme), (path, KeyClass::Shape, true));
+            assert_eq!(k.level, Level::Advanced, "{path}");
+            assert_eq!(k.default, None, "{path}: the preset decides");
+            assert_eq!(enum_values(&names), want, "{path}");
+            assert_eq!(slot(&names), Slot::Shape, "{path}");
+        }
+        assert_eq!(lookup(&["style", "gap"]).unwrap().ty, Ty::Bool);
     }
 
     // 이것을 실패시키는 것: `*`보다 글자 그대로의 행을 먼저 고르지 않는 것.
