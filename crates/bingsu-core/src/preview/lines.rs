@@ -500,6 +500,47 @@ mod tests {
         }
     }
 
+    // 이것을 실패시키는 것: run 경계를 건너는 VS16(`#` 뒤, keycap 그림 글자)과 ZWJ(두 사람 이모지)를 앞 run의 한
+    // cluster로 묶지 않는 것, 그 칸 폭에 설정의 emoji 폭(1이나 2) 대신 기본값을 쓰는 것, 이어지는 칸의 위치·paint를
+    // 뒤 run에서 가져오는 것, run 칸 합이 layout의 폭(`runs_width`)과 다른 것. 마지막 칸이 끝나는 곳이 쪽의 폭이라
+    // 오른쪽 쪽이 줄의 마지막 칸에서 끝난다.
+    #[test]
+    fn emoji_sequences_join_across_runs() {
+        for profile in [WidthProfile::DEFAULT, WidthProfile::new(1, 1).unwrap()] {
+            let e = profile.emoji();
+            let mk = |parts: &[(&str, &str)]| {
+                PreviewSide::new(&runs(parts), &pal(), ColorDepth::TrueColor, profile)
+            };
+            let keycap = [("#", "path"), ("\u{FE0F}x", "muted")];
+            let s = mk(&keycap);
+            let p: Vec<Paint> = s.runs().map(|r| r.paint).collect();
+            assert_ne!(p[0], p[1]);
+            assert_eq!(
+                cells(&s),
+                [(0, "#\u{FE0F}", e, p[0]), (u32::from(e), "x", 1, p[1])]
+            );
+            assert_eq!(run_cells(&s), [u32::from(e), 1]);
+
+            let family = [
+                ("\u{1F469}", "path"),
+                ("\u{200D}", "muted"),
+                ("\u{1F469}", "fg"),
+            ];
+            let s = mk(&family);
+            let p: Vec<Paint> = s.runs().map(|r| r.paint).collect();
+            assert!(p[0] != p[1] && p[1] != p[2] && p[0] != p[2]);
+            assert_eq!(cells(&s), [(0, "\u{1F469}\u{200D}\u{1F469}", e, p[0])]);
+            assert_eq!(run_cells(&s), [u32::from(e), 0, 0]);
+
+            for parts in [&keycap[..], &family] {
+                let s = mk(parts);
+                assert_eq!(s.width(), runs_width(&runs(parts), profile), "{parts:?}");
+                let last = s.cells().last().unwrap();
+                assert_eq!(last.at + u32::from(last.width), s.width(), "{parts:?}");
+            }
+        }
+    }
+
     // 이것을 실패시키는 것: 옆 쪽 맨 앞의 바탕 없는 표지를 뒤 글자에 붙이거나 칸 위치를 1 늘리는 것.
     // 폭 0 칸은 이것 하나뿐이다(`no_cell_code_point_stands_alone`).
     #[test]

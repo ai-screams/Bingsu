@@ -445,6 +445,91 @@ mod tests {
         }
     }
 
+    // 이것을 실패시키는 것: 기본 팔레트가 쓰지 않는 값에서 `write_paint`가 `write_sgr`와 갈라지는 것: 밝은 16색 슬롯
+    // 9–15(글자 90+, 배경 100+), 기본 슬롯, 256색 번호의 끝값(0, 15, 16, 231, 232, 255), RGB 끝값, 팔레트 밖 token
+    // 번호, `write_sgr`가 아직 쓰지 않는 속성 비트(0..=255 전부, 새 비트가 한쪽에만 들어가면 갈라진다).
+    #[test]
+    fn paint_writes_what_write_sgr_writes_on_any_palette() {
+        let base = palette();
+        let edges = [0u8, 7, 8, 15, 16, 231, 232, 255];
+        let slot = |k: usize| match k % 17 {
+            16 => AnsiSlot::Default,
+            n => AnsiSlot::Slot(n as u8),
+        };
+        let rgb = |k: usize| {
+            let v = edges[k % edges.len()];
+            crate::color::math::Srgb8 {
+                r: v,
+                g: 255 - v,
+                b: v / 2,
+            }
+        };
+        let tokens: Vec<_> = (0..17)
+            .map(|k| {
+                let mut t = base.tokens[k % base.tokens.len()];
+                t.ansi = slot(k);
+                t.on_block_ansi = slot(16 - k);
+                t.fg256 = edges[k % edges.len()];
+                t.bg256 = edges[(k + 3) % edges.len()];
+                t.on_block256 = edges[(k + 5) % edges.len()];
+                t.fg = rgb(k);
+                t.bg = rgb(k + 2);
+                t.on_block = rgb(k + 4);
+                t
+            })
+            .collect();
+        let p = ResolvedPalette {
+            tokens,
+            background: base.background,
+            warnings: Vec::new(),
+        };
+        let n = p.tokens.len() as u16;
+        // Two indexes past the palette: the next one and the largest.
+        let ids = (0..n).chain([n, u16::MAX]);
+        let kinds = |i| {
+            [
+                Color::Default,
+                Color::Text(i),
+                Color::Block(i),
+                Color::OnBlock(i),
+            ]
+        };
+        let (mut slots, mut indexed) = (Vec::new(), Vec::new());
+        for i in ids {
+            let j = if i < n { (i + 1) % n } else { i };
+            for depth in [
+                ColorDepth::TrueColor,
+                ColorDepth::Ansi256,
+                ColorDepth::Ansi16,
+            ] {
+                for fg in kinds(i) {
+                    for bg in kinds(j) {
+                        for attrs in 0..=u8::MAX {
+                            let s = Style { fg, bg, attrs };
+                            let resolved = paint(s, &p, depth);
+                            let (mut want, mut got) = (Vec::new(), Vec::new());
+                            write_sgr(s, &p, depth, &mut want);
+                            write_paint(resolved, &mut got);
+                            assert_eq!(got, want, "{s:?} {depth:?}");
+                            for ink in [resolved.fg, resolved.bg] {
+                                match ink {
+                                    Ink::Ansi(k) => slots.push(k),
+                                    Ink::Indexed(k) => indexed.push(k),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The palette did reach every slot and both ends of the 256 range.
+        slots.sort();
+        slots.dedup();
+        assert_eq!(slots, (0..16).collect::<Vec<u8>>());
+        assert!(indexed.contains(&0) && indexed.contains(&255));
+    }
+
     // 이것을 실패시키는 것: 색 없음과 기본 슬롯 token을 다른 값으로 푸는 것(기본 배경이 기본으로 읽히지 않는다),
     // 모드를 바꿔도 같은 paint가 나오는 것(칸 비교가 다시 그리기를 놓친다), 깊이를 무시하는 것.
     #[test]

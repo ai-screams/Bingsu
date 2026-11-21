@@ -430,6 +430,70 @@ fn the_right_side_ends_on_the_last_cell() {
     }
 }
 
+// 이것을 실패시키는 것: 오른쪽 쪽의 keycap(`#` + VS16)과 ZWJ 이모지를 설정의 emoji 폭(1, 2)이 아닌 폭으로 세는 것
+// (오른쪽이 layout이 잰 폭과 달라 줄의 마지막 칸에서 끝나지 않는다), 칸 위치가 쪽의 폭에서 끝나지 않는 것, 프롬프트와
+// 다른 바이트를 내는 것.
+#[test]
+fn emoji_on_the_right_side_ends_on_the_last_cell() {
+    for emoji in [1u8, 2] {
+        let c = compile(&format!(
+            "icons = \"unicode\"\n[width]\nemoji = {emoji}\n\
+             [segment.\"custom/key\"]\nkind = \"text\"\ntext = \"#\u{FE0F}\"\n\
+             [segment.\"custom/fam\"]\nkind = \"text\"\ntext = \"\u{1F469}\u{200D}\u{1F469}\"\n\
+             [layout.line2]\nleft = [\"char\"]\nright = [\"custom/key\", \"custom/fam\"]\n"
+        ));
+        same_as_the_prompt(&c, &format!("emoji {emoji}"));
+        for w in [60u16, 80, 120] {
+            let (l, _) = preview_fields(
+                &c,
+                Mode::Dark,
+                IconSet::Unicode,
+                w,
+                ColorDepth::TrueColor,
+                FOLDERS[1],
+            );
+            let input = l.last().unwrap();
+            let right = &input.right;
+            assert!(
+                right.text().contains("#\u{FE0F}")
+                    && right.text().contains("\u{1F469}\u{200D}\u{1F469}"),
+                "{emoji} {w}: {:?}",
+                right.text()
+            );
+            let runs: Vec<Run> = right
+                .runs()
+                .map(|r| Run {
+                    text: r.text.into(),
+                    style: r.style,
+                })
+                .collect();
+            assert_eq!(
+                right.width(),
+                layout::runs_width(&runs, c.profile),
+                "{emoji} {w}"
+            );
+            let last = right.cells().last().unwrap();
+            assert_eq!(
+                last.at + u32::from(last.width),
+                right.width(),
+                "{emoji} {w}"
+            );
+            assert_eq!(
+                input.right_at + right.width(),
+                line_target(&c, w),
+                "{emoji} {w}"
+            );
+            assert!(input.left.width() <= input.right_at, "{emoji} {w}");
+            let wide: Vec<u8> = right
+                .cells()
+                .filter(|x| x.text.contains('\u{FE0F}') || x.text.contains('\u{200D}'))
+                .map(|x| x.width)
+                .collect();
+            assert_eq!(wide, [emoji, emoji], "{emoji} {w}");
+        }
+    }
+}
+
 // 이것을 실패시키는 것: 표본 값이 설계와 다른 것(host, git `main`과 수정·새 파일 1, 2.1 s, 작업 1, 시간 없음),
 // 폴더 이름의 제어 글자·bidi가 run 글자에 남는 것, 절대 경로가 아닌 폴더를 그리는 것, 아이콘 인자를 무시하는 것,
 // 줄 끝 SGR reset이 빠지는 것.
