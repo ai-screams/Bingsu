@@ -15,7 +15,10 @@ ALTERNATE = 1049
 class Screen(pyte.Screen):
     """pyte.Screen with the xterm alternate screen (private mode 1049): on
     entry the rows and the cursor are kept and the screen clears, on leaving
-    both come back. Without it an app's rows stay on the screen after it ends."""
+    both come back. Without it an app's rows stay on the screen after it ends.
+    As in xterm, the cursor's visibility (mode 25) is not part of what comes
+    back, and a resize while the alternate screen is on resizes the kept rows
+    too."""
 
     def __init__(self, columns, lines):
         self.kept = None
@@ -29,10 +32,29 @@ class Screen(pyte.Screen):
 
     def reset_mode(self, *modes, **kwargs):
         if kwargs.get("private") and ALTERNATE in modes and self.kept is not None:
+            hidden = self.cursor.hidden
             self.buffer, self.cursor = self.kept
+            self.cursor.hidden = hidden
             self.kept = None
             self.dirty.update(range(self.lines))
         super().reset_mode(*modes, **kwargs)
+
+    def resize(self, lines=None, columns=None):
+        lines, columns = lines or self.lines, columns or self.columns
+        if self.kept is not None and (lines, columns) != (self.lines, self.columns):
+            # pyte's resize on the kept rows and cursor first, then on the
+            # alternate ones from the same old size.
+            size, alternate = (self.lines, self.columns), (self.buffer, self.cursor)
+            self.buffer, self.cursor = self.kept
+            super().resize(lines, columns)
+            self.kept = (self.buffer, self.cursor)
+            (self.lines, self.columns), (self.buffer, self.cursor) = size, alternate
+        super().resize(lines, columns)
+
+    def private_mode(self, mode) -> bool:
+        """Whether private mode `mode` (1049, 25, 2004, 2026...) is set; pyte
+        keeps private modes shifted left by 5."""
+        return (mode << 5) in self.mode
 
 
 class ScreenSession:

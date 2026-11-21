@@ -1,0 +1,822 @@
+//! A full-screen session on the user's terminal, for `bingsu setup`'s
+//! editor. Not on any prompt path.
+//!
+//! [`Tty::full_screen`] takes the query guard's raw mode (no echo, no line
+//! editing, no signal keys, no output flow control, non-blocking writes;
+//! `ICRNL` stays, so Enter comes as `\n`, or `\r` where the mode has no
+//! `ICRNL`) and then turns the alternate screen on (`CSI ? 1049 h`), hides
+//! the cursor (`CSI ? 25 l`) and turns bracketed paste on
+//! (`CSI ? 2004 h`). The caller then loops on [`Session::wait`], which
+//! returns one [`Event`]:
+//!
+//! - `Input(bytes)`: what one read gave (keys, pasted text, late replies),
+//!   not parsed. Ctrl-C (0x03) and Ctrl-Z (0x1a) come as bytes: the caller
+//!   ends on the first and calls [`Session::suspend`] on the second.
+//! - `Writable`: asked for with `write = true` while the caller still has
+//!   bytes of a frame; [`Session::write_some`] takes the rest.
+//! - `Resized(size)`: the window size changed (SIGWINCH). Draw everything
+//!   again.
+//! - `Resumed(size)`: the session came back after a stop (Ctrl-Z, SIGTSTP,
+//!   SIGSTOP) or a continue. The screen and the mode were taken again,
+//!   input typed meanwhile was dropped and a frame cut by the stop was
+//!   ended: drop pending output and key parser state, draw everything again.
+//! - `Signal(sig)`: SIGINT, SIGTERM or SIGHUP came. End: dropping the
+//!   session restores the terminal, and the process then ends with that
+//!   signal (status 130, 143 or 129 in a shell). A signal the process
+//!   ignored (SIGHUP under `nohup`) stays ignored.
+//! - `Hangup`: the terminal went away (a read gave 0 or EIO, or the
+//!   terminal is gone while the session waits in the background). End
+//!   without saving.
+//! - `Timeout`: `until` passed, for the caller's timers. Never while the
+//!   session is in the background: nothing can be drawn then, and
+//!   `Resumed` follows.
+//!
+//! Frames. `write_some(rest)` is one non-blocking write of the rest of the
+//! frame being written: it returns how much the terminal took (0 when it
+//! takes nothing now). A frame the terminal took only in part is cut: a
+//! stop or the end drops what is still queued and ends the escape sequence
+//! the terminal is in (`CAN ESC \`) before anything else. A frame that
+//! uses synchronized output calls `mark_synced(true)` before it writes
+//! `CSI ? 2026 h` and `mark_synced(false)` once its `CSI ? 2026 l` was
+//! taken, so the end turns it off when a frame was cut inside it.
+//!
+//! Stop and continue. Ctrl-Z (`suspend`) and SIGTSTP put the terminal back
+//! (as on the way out, below) and stop: Ctrl-Z stops the whole process
+//! group, as the terminal's own Ctrl-Z would; a SIGTSTP from outside stops
+//! this process. When the process goes on (`fg`, `bg`, or at once in an
+//! orphaned process group, where the kernel drops the stop), it looks
+//! whether it is the terminal's foreground job. If so it takes the terminal
+//! again (reading its mode anew), drops the input typed meanwhile, turns the
+//! modes on and reports `Resumed`. If not (`bg`) it touches nothing (no
+//! read, no write, no mode change: a background job would get SIGTTIN or,
+//! with `tostop`, SIGTTOU) and waits for the next SIGCONT or SIGWINCH,
+//! looking once a second whether the terminal is still there. A continue
+//! without a stop of the session's own (SIGSTOP, a stray SIGCONT) is taken
+//! the same way: the terminal is put back first and then taken again.
+//! SIGTSTP ignored when the session began stays ignored, and `suspend` then
+//! does nothing.
+//!
+//! The way out (drop, after `Signal`, `Hangup` or the caller's end), with
+//! what was turned on only, each mode recorded as on before its bytes are
+//! written (a reset of a mode never set is harmless): the cut escape is
+//! ended, then one write of `CSI ? 2026 l`, `CSI 0 m`, `CSI ? 2004 l`,
+//! `CSI ? 25 h` and `CSI ? 1049 l` that waits at most [`LEAVE_WAIT`], and
+//! then the terminal mode, whatever became of those bytes
+//! (`tcsetattr(TCSANOW)`, `tcflush(TCIFLUSH)`, the descriptor flags). A
+//! terminal that takes no output or hung up may keep the alternate screen:
+//! putting the screen back is bounded best effort; the mode is always put
+//! back while the session is the foreground job, and never touched from the
+//! background. Signals not handled here (SIGQUIT, SIGKILL, SIGSEGV...) leave
+//! the terminal raw on the alternate screen until `reset` or `stty sane`.
+//!
+//! Waking. Signal handlers set a flag and write one byte to a non-blocking
+//! pipe; the wait selects on the terminal and that pipe together, so a
+//! signal that comes between the flag check and the wait is not lost. The
+//! pipe is made once per process and never closed. SIGTSTP, SIGCONT and
+//! SIGWINCH have flags of their own: they never cancel a query.
+//!
+//! No file is read or written while a session waits: only the terminal
+//! and the wake pipe. One guard at a time per process ([`Tty::raw`] or a
+//! session): the flags and handlers are process-wide.
+use super::{
+    CAUGHT, RawGuard, SIGNALS, STOP, Size, Tty, WAKE, WRITE_TIMEOUT, cancel_half_escape,
+    fits_select, flush_input, foreground, ready, window_size, write_once,
+};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+/// How long putting the modes back may wait for the terminal to take the
+/// bytes.
+pub const LEAVE_WAIT: Duration = Duration::from_millis(500);
+
+/// How often a session in the background looks whether the terminal is
+/// still there: a background job gets no signal when the terminal's session
+/// ends (a shell that does not hang up its jobs).
+const BACKGROUND_CHECK: Duration = Duration::from_secs(1);
+
+/// `BACKGROUND_CHECK`, or a test's own.
+fn background_check() -> Duration {
+    #[cfg(test)]
+    if let Some(d) = test_session::BACKGROUND_CHECK.get() {
+        return d;
+    }
+    BACKGROUND_CHECK
+}
+
+/// The most one read takes.
+const INPUT_CHUNK: usize = 1024;
+
+/// Modes the session turns on, one bit each.
+const ALT: u8 = 1;
+const HIDDEN: u8 = 2;
+const PASTE: u8 = 4;
+const SYNC: u8 = 8;
+
+/// Turning the modes on, in order.
+const ENTER: [(u8, &[u8]); 3] = [
+    (ALT, b"\x1b[?1049h"),
+    (HIDDEN, b"\x1b[?25l"),
+    (PASTE, b"\x1b[?2004h"),
+];
+
+/// What puts back the modes in `modes`, in the order of the way out: the
+/// end of synchronized output first (a terminal holds the screen until
+/// then), the alternate screen last.
+fn leave_bytes(modes: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    if modes & SYNC != 0 {
+        out.extend_from_slice(b"\x1b[?2026l");
+    }
+    if modes != 0 {
+        out.extend_from_slice(b"\x1b[0m");
+    }
+    if modes & PASTE != 0 {
+        out.extend_from_slice(b"\x1b[?2004l");
+    }
+    if modes & HIDDEN != 0 {
+        out.extend_from_slice(b"\x1b[?25h");
+    }
+    if modes & ALT != 0 {
+        out.extend_from_slice(b"\x1b[?1049l");
+    }
+    out
+}
+
+/// What `Session::wait` saw.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Event<'a> {
+    Input(&'a [u8]),
+    Writable,
+    Resized(Size),
+    Resumed(Size),
+    Signal(libc::c_int),
+    Hangup,
+    Timeout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    /// The foreground job, with the terminal taken.
+    Running,
+    /// Continued without the terminal (`bg`), or not given it back yet.
+    Background,
+    /// The terminal went away.
+    Gone,
+}
+
+static TSTP_SEEN: AtomicBool = AtomicBool::new(false);
+static CONT_SEEN: AtomicBool = AtomicBool::new(false);
+static WINCH_SEEN: AtomicBool = AtomicBool::new(false);
+
+/// The job control signals the session handles, in the order of
+/// `Session::old`.
+const JOB_SIGNALS: [libc::c_int; 3] = [libc::SIGTSTP, libc::SIGCONT, libc::SIGWINCH];
+
+extern "C" fn on_job_signal(sig: libc::c_int) {
+    let seen = match sig {
+        libc::SIGTSTP => &TSTP_SEEN,
+        libc::SIGCONT => &CONT_SEEN,
+        _ => &WINCH_SEEN,
+    };
+    seen.store(true, Ordering::SeqCst);
+    super::wake();
+}
+
+/// The action that sends `sig` to `on_job_signal`. SA_RESTART: the session
+/// wakes on the pipe, so other calls need not end early.
+fn job_action() -> libc::sigaction {
+    // SAFETY: an all-zero `sigaction` is a valid starting value.
+    let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
+    act.sa_sigaction = on_job_signal as extern "C" fn(libc::c_int) as usize;
+    act.sa_flags = libc::SA_RESTART;
+    // SAFETY: `act.sa_mask` is a valid signal set to empty.
+    unsafe { libc::sigemptyset(&mut act.sa_mask) };
+    act
+}
+
+/// Sets `sig`'s action to `act`; the one it replaced, `None` when the call
+/// failed and nothing changed.
+fn set_action(sig: libc::c_int, act: &libc::sigaction) -> Option<libc::sigaction> {
+    // SAFETY: an all-zero `sigaction` is a valid value for the call to fill.
+    let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: `act` is initialised and `was` receives the old action.
+    (unsafe { libc::sigaction(sig, act, &mut was) } == 0).then_some(was)
+}
+
+/// `sig`'s action now.
+fn action(sig: libc::c_int) -> libc::sigaction {
+    // SAFETY: an all-zero `sigaction` is a valid value for the call to fill.
+    let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new action only reads the current one into `was`.
+    unsafe { libc::sigaction(sig, std::ptr::null(), &mut was) };
+    was
+}
+
+/// The default action.
+fn default_action() -> libc::sigaction {
+    plain_action(libc::SIG_DFL)
+}
+
+/// Ignoring the signal.
+fn ignore_action() -> libc::sigaction {
+    plain_action(libc::SIG_IGN)
+}
+
+fn plain_action(handler: libc::sighandler_t) -> libc::sigaction {
+    // SAFETY: an all-zero `sigaction` is SIG_DFL with no flags.
+    let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
+    act.sa_sigaction = handler;
+    // SAFETY: `act.sa_mask` is a valid signal set to empty.
+    unsafe { libc::sigemptyset(&mut act.sa_mask) };
+    act
+}
+
+/// The wake pipe (read end, write end), made once per process and never
+/// closed, so a handler that loaded the write end's number never writes
+/// into a file that took the number over. Its write end is in `WAKE` from
+/// then on: signals in a later query write there too, and the next wait
+/// drains them.
+static PIPE: Mutex<Option<(RawFd, RawFd)>> = Mutex::new(None);
+
+/// The wake pipe's read end, made on the first call.
+fn wake_pipe() -> std::io::Result<RawFd> {
+    let mut pipe = PIPE.lock().unwrap_or_else(|e| e.into_inner());
+    // 이것을 실패시키는 것: 부를 때마다 새로 만드는 것(the_wake_pipe_is_non_blocking_closed_on_exec_and_made_once).
+    if let Some((read, _)) = *pipe {
+        return Ok(read);
+    }
+    let (read, write) = super::sys::nonblocking_pipe()?;
+    // 이것을 실패시키는 것: 이 검사를 빼는 것(FD_SETSIZE 위의 pipe를 select에 넣음; a_wake_pipe_above_fd_setsize_is_refused).
+    if !fits_select(read.as_raw_fd()) || !fits_select(write.as_raw_fd()) {
+        return Err(std::io::Error::other(
+            "the wake pipe's descriptors do not fit select",
+        ));
+    }
+    let ends = (read.into_raw_fd(), write.into_raw_fd());
+    *pipe = Some(ends);
+    WAKE.store(ends.1, Ordering::SeqCst);
+    Ok(ends.0)
+}
+
+/// Reads and drops what the wake pipe holds (it is non-blocking).
+fn drain(fd: RawFd) {
+    let mut chunk = [0u8; 64];
+    for _ in 0..64 {
+        // SAFETY: `fd` is the wake pipe's read end; `chunk` is writable.
+        let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if n <= 0 {
+            break;
+        }
+    }
+}
+
+/// The first of SIGINT, SIGTERM and SIGHUP a handler took.
+fn caught() -> Option<libc::c_int> {
+    let bits = CAUGHT.load(Ordering::SeqCst);
+    SIGNALS.into_iter().find(|&sig| bits & (1u64 << sig) != 0)
+}
+
+/// Writes all of `buf` to `fd`, waiting for room until `until`; signals do
+/// not end it (it puts things back on the way out). The bytes taken.
+fn write_bounded(fd: RawFd, mut buf: &[u8], until: Instant) -> usize {
+    let whole = buf.len();
+    let wait = ready(fd, false, true);
+    while !buf.is_empty() {
+        match write_once(fd, buf) {
+            Ok(0) => break,
+            Ok(n) => buf = &buf[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                if Instant::now() >= until {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if !wait(until) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    whole - buf.len()
+}
+
+/// What `select` reported.
+struct Ready {
+    input: bool,
+    output: bool,
+    wake: bool,
+}
+
+/// Waits until `tty` can be read (or written, with `write`), `wake` can be
+/// read, or `until` passes. `None`: the call failed (other than EINTR,
+/// which reports nothing ready).
+#[allow(
+    clippy::unnecessary_fallible_conversions,
+    reason = "`tv_usec` is 32 bits on macOS and 64 on Linux; one spelling for both"
+)]
+fn select(tty: Option<RawFd>, wake: RawFd, write: bool, until: Option<Instant>) -> Option<Ready> {
+    let mut tv = until.map(|until| {
+        let left = until.saturating_duration_since(Instant::now());
+        libc::timeval {
+            tv_sec: left.as_secs().try_into().unwrap_or(0),
+            tv_usec: left.subsec_micros().try_into().unwrap_or(0),
+        }
+    });
+    let mut reads = std::mem::MaybeUninit::<libc::fd_set>::uninit();
+    let mut writes = std::mem::MaybeUninit::<libc::fd_set>::uninit();
+    // SAFETY: `reads` is writable memory; FD_ZERO initialises all of it.
+    unsafe { libc::FD_ZERO(reads.as_mut_ptr()) };
+    // SAFETY: as above.
+    unsafe { libc::FD_ZERO(writes.as_mut_ptr()) };
+    // SAFETY: FD_ZERO above initialised both sets.
+    let mut reads = unsafe { reads.assume_init() };
+    // SAFETY: as above.
+    let mut writes = unsafe { writes.assume_init() };
+    // SAFETY: the wake pipe fits the set (`wake_pipe` checked it).
+    unsafe { libc::FD_SET(wake, &mut reads) };
+    let mut top = wake;
+    if let Some(tty) = tty {
+        // SAFETY: `Tty::open` refused a terminal that does not fit the set.
+        unsafe { libc::FD_SET(tty, &mut reads) };
+        if write {
+            // SAFETY: as above.
+            unsafe { libc::FD_SET(tty, &mut writes) };
+        }
+        top = top.max(tty);
+    }
+    let timeout = tv
+        .as_mut()
+        .map_or(std::ptr::null_mut(), |tv| tv as *mut libc::timeval);
+    // SAFETY: the sets and the time are valid for the call; no error set.
+    let n = unsafe {
+        libc::select(
+            top + 1,
+            &mut reads,
+            &mut writes,
+            std::ptr::null_mut(),
+            timeout,
+        )
+    };
+    if n < 0 {
+        return (std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted)
+            .then_some(Ready {
+                input: false,
+                output: false,
+                wake: true,
+            });
+    }
+    // SAFETY: `reads` was filled by select; `wake` is in range.
+    let wake = unsafe { libc::FD_ISSET(wake, &reads) };
+    let (input, output) = match tty {
+        Some(tty) => (
+            // SAFETY: as above.
+            unsafe { libc::FD_ISSET(tty, &reads) },
+            // SAFETY: as above.
+            write && unsafe { libc::FD_ISSET(tty, &writes) },
+        ),
+        None => (false, false),
+    };
+    Some(Ready {
+        input,
+        output,
+        wake,
+    })
+}
+
+/// The terminal in full-screen use, from `Tty::full_screen` until it is
+/// dropped. See the module comment.
+pub struct Session<'a> {
+    /// Dropped after `Session::drop`: the mode, then the handlers of
+    /// SIGINT, SIGTERM and SIGHUP go back, then a signal taken is raised.
+    guard: RawGuard<'a>,
+    fd: RawFd,
+    /// The wake pipe's read end.
+    wake: RawFd,
+    state: State,
+    /// Turned on and not put back yet (recorded before each write).
+    modes: u8,
+    /// The terminal took part of a frame and not the rest.
+    cut: bool,
+    /// `Resumed` is due.
+    resumed: bool,
+    size: Size,
+    /// The actions SIGTSTP, SIGCONT and SIGWINCH had (`None`: not
+    /// replaced; SIGTSTP is left alone when it was ignored).
+    old: [Option<libc::sigaction>; 3],
+    input: [u8; INPUT_CHUNK],
+}
+
+impl Tty {
+    /// The terminal in full-screen use until the session is dropped. An
+    /// error when `Tty::raw` refuses (not the foreground job, another guard
+    /// alive), when the wake pipe cannot be made, or when the modes could
+    /// not all be turned on in time (a terminal that takes no output) or a
+    /// signal came meanwhile: then what was turned on is put back, and a
+    /// signal taken ends the process.
+    pub fn full_screen(&self) -> std::io::Result<Session<'_>> {
+        // First, so that a failure leaves the terminal alone.
+        let wake = wake_pipe()?;
+        let guard = self.raw()?;
+        let fd = self.file.as_raw_fd();
+        let mut session = Session {
+            guard,
+            fd,
+            wake,
+            state: State::Running,
+            modes: 0,
+            cut: false,
+            resumed: false,
+            size: Size::default(),
+            old: [None; 3],
+            input: [0; INPUT_CHUNK],
+        };
+        // A signal an earlier session took and never handled.
+        // 이것을 실패시키는 것: 이 깃발을 지우지 않는 것(앞 세션 끝에 온 SIGTSTP로 새 세션이 멈춤; a_new_session_starts_with_no_signal_seen).
+        for seen in [&TSTP_SEEN, &CONT_SEEN, &WINCH_SEEN] {
+            seen.store(false, Ordering::SeqCst);
+        }
+        let ours = job_action();
+        for (slot, sig) in session.old.iter_mut().zip(JOB_SIGNALS) {
+            // 이것을 실패시키는 것: 무시하던 SIGTSTP에도 처리기를 거는 것(an_ignored_stop_stays_ignored).
+            if sig == libc::SIGTSTP && action(sig).sa_sigaction == libc::SIG_IGN {
+                continue;
+            }
+            *slot = set_action(sig, &ours);
+        }
+        session.enter()?;
+        session.size = window_size(self.file.as_fd()).unwrap_or_default();
+        Ok(session)
+    }
+}
+
+impl Session<'_> {
+    /// The window size when the session began or last changed (0 when the
+    /// terminal does not know).
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    /// Waits for the next event; see the module comment. `write`: the
+    /// caller has bytes of a frame left and wants `Writable`. `until`: when
+    /// to give `Timeout` (`None`: no time limit).
+    pub fn wait(&mut self, write: bool, until: Option<Instant>) -> Event<'_> {
+        loop {
+            // The pipe before the flags: a signal after the flag check
+            // leaves its byte for the select below.
+            // 이것을 실패시키는 것: 깃발을 본 뒤에 pipe를 비우는 것(그 사이 신호의 바이트를 지워 select가 깨어나지 않음).
+            drain(self.wake);
+            if let Some(sig) = caught() {
+                return Event::Signal(sig);
+            }
+            if TSTP_SEEN.load(Ordering::SeqCst) {
+                self.stop(false);
+            }
+            let winch = WINCH_SEEN.swap(false, Ordering::SeqCst);
+            // 이것을 실패시키는 것: SIGCONT 뒤 전경 작업인지 다시 보지 않는 것(bg로 이어 간 작업이 터미널을 다시 잡음).
+            if CONT_SEEN.swap(false, Ordering::SeqCst) || (winch && self.state == State::Background)
+            {
+                self.check();
+            }
+            match self.state {
+                State::Gone => return Event::Hangup,
+                State::Background => {
+                    // Nothing of the terminal: the pipe only.
+                    // 이것을 실패시키는 것: 배경에서 터미널을 기다리고 읽는 것(SIGTTIN으로 멈춤; stop_bg_and_fg_under_a_job_control_shell).
+                    let until = Instant::now() + background_check();
+                    match select(None, self.wake, false, Some(until)) {
+                        Some(r) if r.wake => {}
+                        _ => self.check(),
+                    }
+                    continue;
+                }
+                State::Running => {}
+            }
+            if std::mem::take(&mut self.resumed) {
+                return Event::Resumed(self.size);
+            }
+            if winch {
+                let now = window_size(self.guard.tty.file.as_fd()).unwrap_or(self.size);
+                if now != self.size {
+                    self.size = now;
+                    return Event::Resized(now);
+                }
+            }
+            #[cfg(test)]
+            test_session::before_select();
+            let Some(ready) = select(Some(self.fd), self.wake, write, until) else {
+                self.state = State::Gone;
+                return Event::Hangup;
+            };
+            if ready.wake {
+                continue;
+            }
+            if ready.input {
+                // SAFETY: `fd` is the open terminal; `input` is writable.
+                let n = unsafe {
+                    libc::read(self.fd, self.input.as_mut_ptr().cast(), self.input.len())
+                };
+                match usize::try_from(n) {
+                    Ok(0) => {
+                        self.state = State::Gone;
+                        return Event::Hangup;
+                    }
+                    Ok(n) => return Event::Input(&self.input[..n]),
+                    Err(_) => {
+                        let kind = std::io::Error::last_os_error().kind();
+                        if !matches!(
+                            kind,
+                            std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                        ) {
+                            self.state = State::Gone;
+                            return Event::Hangup;
+                        }
+                        continue;
+                    }
+                }
+            }
+            if ready.output {
+                return Event::Writable;
+            }
+            if until.is_some_and(|until| Instant::now() >= until) {
+                return Event::Timeout;
+            }
+        }
+    }
+
+    /// One non-blocking write of `rest`, the part of the frame being
+    /// written that the terminal has not taken yet: the bytes taken (0 when
+    /// it takes nothing now, and always 0 outside the foreground). An error
+    /// means the terminal went away.
+    pub fn write_some(&mut self, rest: &[u8]) -> std::io::Result<usize> {
+        if self.state != State::Running || rest.is_empty() {
+            return Ok(0);
+        }
+        match self.write_once(rest) {
+            Ok(n) => {
+                // 이것을 실패시키는 것: 일부만 받은 쓰기를 끊김으로 치지 않는 것(쓰다 만 단계의 CANCEL이 빠짐).
+                self.cut = n < rest.len();
+                Ok(n)
+            }
+            // Nothing taken: the frame is as cut as it was.
+            // 이것을 실패시키는 것: 받지 않은 쓰기를 끊김으로 치는 것(a_frame_the_terminal_took_nothing_of_is_not_cancelled).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(0)
+            }
+            Err(e) => {
+                self.state = State::Gone;
+                Err(e)
+            }
+        }
+    }
+
+    /// One `write(2)` of `rest`; in tests, a terminal that takes only part
+    /// of it can stand in (`test_terminal::ROOM`).
+    fn write_once(&self, rest: &[u8]) -> std::io::Result<usize> {
+        #[cfg(test)]
+        if let Some(r) =
+            super::test_terminal::ROOM.with(|room| super::test_terminal::write(room, self.fd, rest))
+        {
+            return r;
+        }
+        write_once(self.fd, rest)
+    }
+
+    /// A frame with synchronized output begins (`true`, before its
+    /// `CSI ? 2026 h` is written) or its end was taken (`false`).
+    pub fn mark_synced(&mut self, on: bool) {
+        if on {
+            self.modes |= SYNC;
+        } else {
+            self.modes &= !SYNC;
+        }
+    }
+
+    /// Ctrl-Z: puts the terminal back and stops the process group, as the
+    /// terminal's own Ctrl-Z would. Returns once the process goes on; the
+    /// next `wait` gives `Resumed` (or waits in the background first).
+    /// Nothing when SIGTSTP was ignored when the session began.
+    pub fn suspend(&mut self) {
+        // 이것을 실패시키는 것: 무시하던 SIGTSTP인데도 멈추는 것(an_ignored_stop_stays_ignored).
+        if self.old[0].is_some() && self.state == State::Running {
+            self.stop(true);
+        }
+    }
+
+    /// `write_bounded` on the terminal; in tests, a terminal that takes only
+    /// part of the bytes can stand in (`test_terminal::ROOM`).
+    fn put(&self, bytes: &[u8], until: Instant) -> usize {
+        #[cfg(test)]
+        if let Some(taken) = test_session::hooked_write(self.fd, bytes, until) {
+            return taken;
+        }
+        write_bounded(self.fd, bytes, until)
+    }
+
+    /// Turns the modes on, each recorded before its bytes are written. An
+    /// error when the terminal did not take them in time or a signal asked
+    /// to end meanwhile.
+    fn enter(&mut self) -> std::io::Result<()> {
+        for (step, (mode, bytes)) in ENTER.into_iter().enumerate() {
+            // 이것을 실패시키는 것: 쓴 뒤에 기록하는 것(반쯤 나간 1049h를 되돌리지 않음; an_entry_the_terminal_stopped_taking_is_put_back).
+            self.modes |= mode;
+            let taken = self.put(bytes, Instant::now() + WRITE_TIMEOUT);
+            if taken < bytes.len() {
+                self.cut = taken > 0;
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+            #[cfg(test)]
+            test_session::entered(step);
+            #[cfg(not(test))]
+            let _ = step;
+            // 이것을 실패시키는 것: 들어가는 동안 온 종료 신호를 보지 않는 것(나머지 모드를 켠 뒤에야 끝남).
+            if STOP.load(Ordering::SeqCst) {
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+        }
+        Ok(())
+    }
+
+    /// Puts the terminal back as it was found: the cut escape ends, the
+    /// modes go off (at most `LEAVE_WAIT`), then the mode, whatever became
+    /// of those bytes. `false`: not the terminal's foreground job, so
+    /// nothing was touched.
+    fn leave(&mut self) -> bool {
+        // 이것을 실패시키는 것: 전경 작업이 아닌데 터미널을 건드리는 것(배경에서 tcsetattr: SIGTTOU로 멈춤).
+        if !foreground(self.fd) {
+            return false;
+        }
+        if self.cut {
+            cancel_half_escape(self.fd);
+            self.cut = false;
+        }
+        let bytes = leave_bytes(self.modes);
+        if !bytes.is_empty() {
+            let taken = self.put(&bytes, Instant::now() + LEAVE_WAIT);
+            // 이것을 실패시키는 것: 반쯤 나간 복구 열을 끊지 않는 것(터미널이 escape 안에 남음; a_way_out_the_terminal_stopped_taking_is_ended).
+            if taken > 0 && taken < bytes.len() {
+                cancel_half_escape(self.fd);
+            }
+        }
+        self.modes = 0;
+        // Whatever became of the bytes above.
+        self.guard.raw.restore_terminal();
+        true
+    }
+
+    /// Puts the terminal back and stops: the process group (`whole_group`,
+    /// Ctrl-Z) or this process (a SIGTSTP from outside). Then `check`.
+    fn stop(&mut self, whole_group: bool) {
+        TSTP_SEEN.store(false, Ordering::SeqCst);
+        if self.state == State::Running {
+            self.leave();
+        }
+        if whole_group {
+            // The rest of the process group stops as on the terminal's own
+            // Ctrl-Z. This process's copy is ignored, so dropped when sent:
+            // otherwise it reaches the session's handler (at once, or later
+            // on another thread) and stops the session a second time.
+            // 이것을 실패시키는 것: 그룹에 보내지 않는 것(같은 그룹의 다른 프로세스가 멈추지 않음), 제 몫을 무시하지 않고
+            // 보내는 것(나중에 받은 제 몫으로 한 번 더 멈춤; ctrl_z_puts_the_terminal_back_and_takes_it_again).
+            set_action(libc::SIGTSTP, &ignore_action());
+            // SAFETY: sends SIGTSTP to this process group.
+            unsafe { libc::kill(0, libc::SIGTSTP) };
+        }
+        // A signal raised for this thread is taken before the call returns:
+        // the default action stops the process here. In an orphaned process
+        // group the kernel drops the stop, and the call returns at once.
+        set_action(libc::SIGTSTP, &default_action());
+        // SAFETY: raises SIGTSTP in this thread.
+        unsafe { libc::raise(libc::SIGTSTP) };
+        set_action(libc::SIGTSTP, &job_action());
+        // This continue is the one `check` handles now.
+        CONT_SEEN.store(false, Ordering::SeqCst);
+        self.check();
+    }
+
+    /// After a continue (or a window change, or a quiet second, in the
+    /// background): whether the terminal is there and this is its
+    /// foreground job. If so the terminal is taken again (from the mode it
+    /// has now), input typed meanwhile is dropped, the modes go on and
+    /// `Resumed` is due.
+    fn check(&mut self) {
+        // SAFETY: `fd` is open; the call reads the terminal's group.
+        let owner = unsafe { libc::tcgetpgrp(self.fd) };
+        // SAFETY: getpgrp takes no arguments and cannot fail.
+        let own = unsafe { libc::getpgrp() };
+        if owner < 0 {
+            self.state = State::Gone;
+            return;
+        }
+        if owner != own {
+            self.state = State::Background;
+            return;
+        }
+        // A continue without a stop of ours (SIGSTOP, a stray SIGCONT):
+        // the terminal is put back first, so it is taken from its own mode.
+        if self.guard.raw.on || self.modes != 0 {
+            self.leave();
+        }
+        // 이것을 실패시키는 것: 다시 들어갈 때 모드를 새로 읽지 않는 것(멈춘 사이 바꾼 stty가 나갈 때 사라짐; stop_bg_and_fg_under_a_job_control_shell).
+        if self.guard.raw.reenter().is_err() {
+            self.state = State::Gone;
+            return;
+        }
+        // 이것을 실패시키는 것: 멈춘 사이 친 글자를 버리지 않는 것(재개 뒤 키로 읽힘).
+        let _ = flush_input(self.fd);
+        self.state = State::Running;
+        // A signal or a terminal that takes nothing: `wait` reports it next.
+        let _ = self.enter();
+        self.size = window_size(self.guard.tty.file.as_fd()).unwrap_or(self.size);
+        self.resumed = true;
+    }
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        // Not the foreground job (in the background, or the terminal gone):
+        // the terminal is not touched, neither here nor by the guard after.
+        // 이것을 실패시키는 것: 그때 guard의 복구를 막지 않는 것(배경에서 tcsetattr: SIGTTOU로 멈춤; a_session_that_lost_the_terminal_does_not_touch_it).
+        if !self.leave() {
+            self.guard.raw.on = false;
+        }
+        // 이것을 실패시키는 것: 처리기를 되돌리지 않는 것(entering_and_leaving_put_every_mode_back_in_order의 handlers back).
+        for (old, sig) in self.old.iter().zip(JOB_SIGNALS) {
+            if let Some(old) = old {
+                set_action(sig, old);
+            }
+        }
+    }
+}
+
+/// Signals at chosen stages, for tests.
+#[cfg(test)]
+mod test_session {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Raised once the given step of `enter` wrote its bytes.
+        pub(super) static AFTER_STEP: Cell<Option<(usize, libc::c_int)>> = const { Cell::new(None) };
+        /// Raised once, just before `wait` selects (after it read the flags).
+        pub(super) static BEFORE_SELECT: Cell<Option<libc::c_int>> = const { Cell::new(None) };
+        /// How often the background session looks at the terminal.
+        pub(super) static BACKGROUND_CHECK: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
+    }
+
+    /// One of `put`'s writes on a terminal that takes only part of it
+    /// (`test_terminal::ROOM`, which it then clears): the bytes taken.
+    /// `None`: no such terminal.
+    pub(super) fn hooked_write(
+        fd: std::os::fd::RawFd,
+        mut buf: &[u8],
+        until: std::time::Instant,
+    ) -> Option<usize> {
+        use super::super::test_terminal;
+        let whole = buf.len();
+        test_terminal::ROOM.with(|room| {
+            room.get()?;
+            while !buf.is_empty() {
+                match test_terminal::write(room, fd, buf) {
+                    Some(Ok(n)) => buf = &buf[n..],
+                    _ => {
+                        let _ = test_terminal::wait(room, until);
+                        break;
+                    }
+                }
+            }
+            room.set(None);
+            Some(whole - buf.len())
+        })
+    }
+
+    fn raise(sig: libc::c_int) {
+        // SAFETY: raises `sig` in this thread; its handler runs before the
+        // call returns.
+        unsafe { libc::raise(sig) };
+    }
+
+    pub(super) fn entered(step: usize) {
+        if let Some((at, sig)) = AFTER_STEP.get() {
+            if at == step {
+                AFTER_STEP.set(None);
+                raise(sig);
+            }
+        }
+    }
+
+    pub(super) fn before_select() {
+        if let Some(sig) = BEFORE_SELECT.take() {
+            raise(sig);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
