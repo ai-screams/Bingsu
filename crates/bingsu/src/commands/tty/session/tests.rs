@@ -377,17 +377,41 @@ fn slow_terminal_child() {
     say(&format!("took {}", s.write_some(b"FRAME").unwrap()));
 }
 
-// SIGSTOP (no handler can run before it) and SIGCONT: the terminal is put
-// back first and then taken again, and the caller is told to draw again.
-// 이것을 실패시키는 것: 제 정지가 아닌 재개에서 먼저 되돌리지 않는 것(모드를 두 번 켬), 다시 잡지 않는 것.
+// SIGSTOP (no handler can run before it), seen stopped, then SIGCONT: the
+// terminal is put back first and then taken again, and the caller is told
+// to draw again. 이것을 실패시키는 것: 제 정지가 아닌 재개에서 먼저 되돌리지 않는 것(모드를 두 번 켬), 다시 잡지
+// 않는 것.
 #[test]
-fn a_continue_without_a_stop_of_its_own_takes_the_terminal_again() {
+fn a_continue_after_a_sigstop_takes_the_terminal_again() {
     let mut t = start("continued_child", &[]);
-    t.expect(ENTER_ALL);
+    t.expect(b"READY");
     // SAFETY: stops the child this test started.
     assert_eq!(unsafe { libc::kill(t.pid(), libc::SIGSTOP) }, 0);
+    let (_, status) = wait_for(t.pid(), libc::WUNTRACED);
+    assert!(
+        libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGSTOP,
+        "the child did not stop (status {status:#x}): {}",
+        shown(&t.all)
+    );
     // SAFETY: as above, continues it.
     assert_eq!(unsafe { libc::kill(t.pid(), libc::SIGCONT) }, 0);
+    continued(t);
+}
+
+// A SIGCONT with no stop at all is taken the same way: the session cannot
+// tell it from the end of a stop it did not see.
+// 이것을 실패시키는 것: 제 정지가 아닌 재개에서 먼저 되돌리지 않는 것, 다시 잡지 않는 것.
+#[test]
+fn a_lone_continue_takes_the_terminal_again() {
+    let mut t = start("continued_child", &[]);
+    t.expect(b"READY");
+    // SAFETY: continues the child this test started, which runs.
+    assert_eq!(unsafe { libc::kill(t.pid(), libc::SIGCONT) }, 0);
+    continued(t);
+}
+
+/// The rest of the two tests above.
+fn continued(mut t: Pty) {
     t.expect(b"AGAIN");
     t.send(b"q");
     let (lines, all) = t.mode_restored_after();
@@ -396,6 +420,7 @@ fn a_continue_without_a_stop_of_its_own_takes_the_terminal_again() {
         shown(&all),
         shown(&cat(&[
             ENTER_ALL,
+            b"\x1b[H\x1b[2JREADY",
             LEAVE_ALL,
             ENTER_ALL,
             b"\x1b[H\x1b[2JAGAIN",
@@ -409,6 +434,7 @@ fn a_continue_without_a_stop_of_its_own_takes_the_terminal_again() {
 fn continued_child() {
     let tty = take_terminal();
     let mut s = tty.full_screen().unwrap();
+    draw(&mut s, b"READY");
     loop {
         match s.wait(false, Some(Instant::now() + WAIT)) {
             e @ Event::Resumed(_) => {
