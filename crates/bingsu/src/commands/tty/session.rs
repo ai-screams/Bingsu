@@ -347,6 +347,12 @@ fn drain(fd: RawFd) {
     }
 }
 
+/// The session's end: a caught exit signal goes first, then `Hangup`.
+fn ended() -> Event<'static> {
+    // 이것을 실패시키는 것: 받은 종료 신호보다 Hangup을 먼저 알리는 것(a_failed_reentry_ends_the_session의 TERM 칸).
+    caught().map_or(Event::Hangup, Event::Signal)
+}
+
 /// The first of SIGINT, SIGTERM and SIGHUP a handler took.
 fn caught() -> Option<libc::c_int> {
     let bits = CAUGHT.load(Ordering::SeqCst);
@@ -568,7 +574,7 @@ impl Session<'_> {
                 self.check();
             }
             match self.state {
-                State::Gone => return Event::Hangup,
+                State::Gone => return ended(),
                 State::Background => {
                     // Nothing of the terminal: the pipe only.
                     // 이것을 실패시키는 것: 배경에서 터미널을 기다리고 읽는 것(SIGTTIN으로 멈춤; stop_bg_and_fg_under_a_job_control_shell).
@@ -595,7 +601,7 @@ impl Session<'_> {
             test_session::before_select();
             let Some(ready) = select(Some(self.fd), self.wake, write, until) else {
                 self.state = State::Gone;
-                return Event::Hangup;
+                return ended();
             };
             if ready.wake {
                 continue;
@@ -614,7 +620,7 @@ impl Session<'_> {
                 match usize::try_from(n) {
                     Ok(0) => {
                         self.state = State::Gone;
-                        return Event::Hangup;
+                        return ended();
                     }
                     Ok(n) => return Event::Input(&self.input[..n]),
                     Err(_) => {
@@ -624,7 +630,7 @@ impl Session<'_> {
                             std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
                         ) {
                             self.state = State::Gone;
-                            return Event::Hangup;
+                            return ended();
                         }
                         continue;
                     }
@@ -896,14 +902,32 @@ impl Session<'_> {
         // 이것을 실패시키는 것: 멈춘 사이 친 글자를 버리지 않는 것(재개 뒤 키로 읽힘).
         let _ = flush_input(self.fd);
         self.state = State::Running;
-        // A signal or a terminal that takes nothing: `wait` reports it next.
-        if self.enter() == Entered::Lost {
-            // Taken away again meanwhile: the next continue takes it.
-            self.state = State::Background;
-            return;
+        #[cfg(test)]
+        test_session::arm_reentry();
+        // `Resumed` only once the modes are on again.
+        // 이것을 실패시키는 것: 다시 들어가기에 실패해도 Resumed를 알리는 것(a_failed_reentry_ends_the_session).
+        match self.enter() {
+            Entered::Done => {
+                self.size = window_size(self.guard.tty.file.as_fd()).unwrap_or(self.size);
+                self.resumed = true;
+            }
+            // An exit came: `wait` reports it next, and the drop puts back
+            // what is on.
+            Entered::Signal => {}
+            // Taken away again meanwhile: the next continue takes it. (The
+            // SIGCONT of a `bg` that took it is pending then and would move
+            // the session to the background at the next `wait` as well, and
+            // `owns` refuses the terminal to a session that lost it; no test
+            // tells this line from those.)
+            Entered::Lost => self.state = State::Background,
+            // The terminal did not take the modes: what went out is put
+            // back, and the session ends (`Hangup`, or a caught exit first).
+            // 이것을 실패시키는 것: 되돌리지 않는 것, 끝내지 않는 것(a_failed_reentry_ends_the_session).
+            Entered::Failed => {
+                self.leave();
+                self.state = State::Gone;
+            }
         }
-        self.size = window_size(self.guard.tty.file.as_fd()).unwrap_or(self.size);
-        self.resumed = true;
     }
 }
 
@@ -938,6 +962,25 @@ mod test_session {
         pub(super) static AFTER_RAW: Cell<Option<libc::c_int>> = const { Cell::new(None) };
         /// Raised once, in order, once `leave` wrote the way out (0: none).
         pub(super) static DURING_LEAVE: Cell<[libc::c_int; 2]> = const { Cell::new([0; 2]) };
+        /// Moved into `ROOM`, `AFTER_STEP` and `DURING_LEAVE` right before
+        /// `check` turns the modes on again, so the stop's own way out does
+        /// not use them up.
+        pub(super) static REENTRY_ROOM: Cell<Option<(usize, super::super::test_terminal::Then)>> = const { Cell::new(None) };
+        pub(super) static REENTRY_STEP: Cell<Option<(usize, libc::c_int)>> = const { Cell::new(None) };
+        pub(super) static REENTRY_LEAVE: Cell<[libc::c_int; 2]> = const { Cell::new([0; 2]) };
+    }
+
+    pub(super) fn arm_reentry() {
+        if let Some(room) = REENTRY_ROOM.take() {
+            super::super::test_terminal::ROOM.set(Some(room));
+        }
+        if let Some(step) = REENTRY_STEP.take() {
+            AFTER_STEP.set(Some(step));
+        }
+        let leave = REENTRY_LEAVE.take();
+        if leave != [0; 2] {
+            DURING_LEAVE.set(leave);
+        }
     }
 
     pub(super) fn during_leave() {

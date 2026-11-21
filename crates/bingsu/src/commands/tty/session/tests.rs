@@ -458,6 +458,75 @@ fn a_stop_the_kernel_drops_comes_back_at_once() {
     }
 }
 
+// Taking the terminal again after a stop (here one the kernel drops, in
+// this orphaned process group) fails: the terminal takes 3 bytes of the
+// alternate screen's switch and then nothing (`partial`), nothing at all
+// (`timeout`), or the write fails (`eio`). What went out is ended and put
+// back and the session ends with `Hangup`, or with the SIGTERM that came
+// as it put things back (`failsignal`). A SIGTERM while taking it again
+// (`signal`) ends it with that signal, with no `Resumed`.
+// 이것을 실패시키는 것: 실패해도 Resumed를 알리는 것, 반쯤 켠 모드를 되돌리지 않는 것, 끝내지 않는 것, 받은 종료 신호보다
+// Hangup을 먼저 알리는 것, 들어가는 중 온 종료 신호에도 Resumed를 알리는 것.
+#[test]
+fn a_failed_reentry_ends_the_session() {
+    let again = cat(&[ENTER_ALL, LEAVE_ALL]);
+    let back = b"\x1b[0m\x1b[?1049l".as_slice();
+    for case in ["partial", "timeout", "eio", "signal", "failsignal"] {
+        let mut t = start("reentry_child", &[("BINGSU_TEST_REENTRY", case)]);
+        let want = match case {
+            "partial" => {
+                t.expect(&cat(&[&again, b"\x1b[?"]));
+                t.send(&[test_terminal::READ]);
+                cat(&[&again, b"\x1b[?", CANCEL, back])
+            }
+            "signal" => cat(&[&again, b"\x1b[?1049h", back]),
+            _ => cat(&[&again, back]),
+        };
+        let (lines, status, out, err) = t.end();
+        assert!(t.mode_restored(), "{case}");
+        assert_eq!(shown(&t.all), shown(&want), "{case}");
+        let event = lines.first().cloned().unwrap_or_default();
+        if case == "signal" || case == "failsignal" {
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{case}: {out}\n{err}");
+            assert_eq!(event, format!("Signal({})", libc::SIGTERM), "{case}");
+        } else {
+            assert!(status.success(), "{case}: {out}\n{err}");
+            assert_eq!(event, "Hangup", "{case}");
+        }
+        // The timeout waits out the write limit; the failed write does not.
+        let took: u128 = lines[1].strip_prefix("took ").unwrap().parse().unwrap();
+        match case {
+            "timeout" => assert!(took >= 300, "{took} ms"),
+            "eio" => assert!(took < 280, "{took} ms"),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+#[ignore = "child: a session on a pseudo-terminal"]
+fn reentry_child() {
+    use test_terminal::Then;
+    let tty = take_terminal();
+    let mut s = tty.full_screen().unwrap();
+    match param("BINGSU_TEST_REENTRY").as_str() {
+        "partial" => test_session::REENTRY_ROOM.set(Some((3, Then::Stall))),
+        "timeout" => test_session::REENTRY_ROOM.set(Some((0, Then::Stall))),
+        "eio" => test_session::REENTRY_ROOM.set(Some((0, Then::Fail))),
+        "signal" => test_session::REENTRY_STEP.set(Some((0, libc::SIGTERM))),
+        "failsignal" => {
+            test_session::REENTRY_ROOM.set(Some((0, Then::Stall)));
+            test_session::REENTRY_LEAVE.set([libc::SIGTERM, 0]);
+        }
+        case => panic!("{case}"),
+    }
+    test_session::BEFORE_SELECT.set(Some(libc::SIGTSTP));
+    let start = Instant::now();
+    let event = format!("{:?}", s.wait(false, Some(Instant::now() + WAIT)));
+    say(&event);
+    say(&format!("took {}", start.elapsed().as_millis()));
+}
+
 // Ctrl-Z as the key (0x1a, ISIG is off): `suspend` stops the process group;
 // in this orphaned group the stop is dropped and the session comes back.
 // 이것을 실패시키는 것: suspend가 터미널을 되돌리지 않거나 다시 잡지 않는 것.
@@ -775,6 +844,11 @@ fn job_shell(scenario: &str) -> (Vec<String>, Vec<u8>) {
         t.expect(b"REDRAW 1");
     }
     match scenario {
+        "reenterlost" => {
+            t.send(b"\x1a");
+            t.expect(b"REDRAW 2");
+            t.send(b"q");
+        }
         "writestop" | "writestopfg" => {
             t.expect(b"REDRAW 2");
             t.send(b"q");
@@ -1052,6 +1126,34 @@ fn an_entry_whose_terminal_was_taken_writes_no_more() {
     assert_eq!(shown(&all), shown(b"\x1b[?1049h"));
 }
 
+// Ctrl-Z and `fg`; while the terminal is taken again, SIGSTOP and `bg`: the
+// session waits in the background (writing nothing) and the next `fg` puts
+// back the half-entered modes and takes the terminal again.
+// 이것을 실패시키는 것: 다시 들어가다 터미널을 잃은 세션을 배경으로 두지 않는 것(배경에서 다시 그려 SIGTTOU로 멈춤).
+#[test]
+fn a_reentry_whose_terminal_was_taken_waits_for_the_next_continue() {
+    let (lines, all) = job_shell("reenterlost");
+    for want in [
+        "stopped by STOP true",
+        "background quiet true",
+        "job: resumed 1",
+        "job ended true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    let again = cat(&[
+        b"\x1b[?1049h",
+        b"\x1b[0m\x1b[?1049l",
+        ENTER_ALL,
+        b"\x1b[H\x1b[2JREDRAW 2",
+    ]);
+    assert!(
+        all.windows(again.len()).any(|w| w == again),
+        "{}",
+        shown(&all)
+    );
+}
+
 // The raw switch fails once the job control handlers are in: they go back.
 // 이것을 실패시키는 것: 실패한 진입에서 처리기를 되돌리지 않는 것.
 #[test]
@@ -1262,6 +1364,34 @@ fn job_shell_child() {
         libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTSTP
     ));
     say(&format!("restored at the stop {}", mode() == before));
+    if scenario == "reenterlost" {
+        // `fg`; the job stops again (SIGSTOP) after the first mode went on
+        // again; `bg`, then `fg`.
+        give_terminal(pid);
+        // SAFETY: continues the job's process group.
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        give_terminal(own);
+        say(&format!(
+            "stopped by STOP {}",
+            libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGSTOP
+        ));
+        // SAFETY: as above.
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        std::thread::sleep(Duration::from_millis(300));
+        let (got, _) = wait_for(pid, libc::WNOHANG | libc::WUNTRACED);
+        say(&format!("background quiet {}", got == 0));
+        give_terminal(pid);
+        // SAFETY: as above.
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        give_terminal(own);
+        say(&format!(
+            "job ended {}",
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+        ));
+        return;
+    }
     if scenario == "stopterm" {
         // `fg`, with a SIGTERM sent while the job is stopped.
         give_terminal(pid);
@@ -1365,7 +1495,7 @@ fn job_child() {
     // Only a signal brings the session back here, not the once-a-second look.
     if matches!(
         scenario.as_str(),
-        "stop" | "winch" | "rawstop" | "writestop" | "writetaken" | "readtaken"
+        "stop" | "winch" | "rawstop" | "writestop" | "writetaken" | "readtaken" | "reenterlost"
     ) {
         test_session::BACKGROUND_CHECK.set(Some(Duration::from_secs(60)));
     }
@@ -1404,6 +1534,7 @@ fn job_child() {
         "leaveterm" => test_session::DURING_LEAVE.set([libc::SIGTERM, 0]),
         "leavecont" => test_session::DURING_LEAVE.set([libc::SIGTSTP, libc::SIGCONT]),
         "enterlost" => test_session::AFTER_STEP.set(Some((0, libc::SIGSTOP))),
+        "reenterlost" => test_session::REENTRY_STEP.set(Some((0, libc::SIGSTOP))),
         _ => {}
     }
     let tty = Tty::open().unwrap();
