@@ -147,6 +147,18 @@ fn leave_bytes(modes: u8) -> Vec<u8> {
     out
 }
 
+/// How turning the modes on ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Entered {
+    Done,
+    /// An exit signal came.
+    Signal,
+    /// No longer the terminal's foreground job.
+    Lost,
+    /// The terminal did not take the bytes in time, or the write failed.
+    Failed,
+}
+
 /// What `Session::wait` saw.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event<'a> {
@@ -514,7 +526,14 @@ impl Tty {
             size: Size::default(),
             input: [0; INPUT_CHUNK],
         };
-        session.enter()?;
+        match session.enter() {
+            Entered::Done => {}
+            Entered::Signal => return Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+            Entered::Lost => {
+                return Err(std::io::Error::other("not the terminal's foreground job"));
+            }
+            Entered::Failed => return Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+        }
         session.size = window_size(self.file.as_fd()).unwrap_or_default();
         Ok(session)
     }
@@ -582,6 +601,12 @@ impl Session<'_> {
                 continue;
             }
             if ready.input {
+                // Not read when the terminal is no longer this job's: a
+                // background job's read stops it (SIGTTIN).
+                // 이것을 실패시키는 것: 읽기 전에 소유를 보지 않는 것(배경에서 읽어 SIGTTIN으로 멈춤; a_session_that_lost_the_terminal_reads_nothing).
+                if !self.owns() {
+                    continue;
+                }
                 // SAFETY: `fd` is the open terminal; `input` is writable.
                 let n = unsafe {
                     libc::read(self.fd, self.input.as_mut_ptr().cast(), self.input.len())
@@ -619,9 +644,8 @@ impl Session<'_> {
     /// it takes nothing now, and always 0 outside the foreground). An error
     /// means the terminal went away.
     pub fn write_some(&mut self, rest: &[u8]) -> std::io::Result<usize> {
-        // A stop that an exit cancelled gave the terminal back already.
-        // 이것을 실패시키는 것: 되돌린 터미널에 쓰는 것(a_terminate_during_the_way_out_ends_without_a_stop의 AFTER).
-        if self.state != State::Running || !self.guard.raw.on || rest.is_empty() {
+        // 이것을 실패시키는 것: 쓰기 전에 소유를 보지 않는 것(a_write_after_a_stop_and_bg_writes_nothing).
+        if rest.is_empty() || !self.owns() {
             return Ok(0);
         }
         match self.write_once(rest) {
@@ -659,6 +683,32 @@ impl Session<'_> {
         write_once(self.fd, rest)
     }
 
+    /// Whether the session may use the terminal now: it took it and did not
+    /// give it back (a stop that an exit cancelled gives it back), no
+    /// continue waits to be handled (SIGSTOP and `fg` or `bg` since the
+    /// last wait), and it is still the foreground job (a shell can take the
+    /// terminal back without a stop; the session is then in the
+    /// background). The next `wait` takes it from there. Between this check
+    /// and the call that follows, a SIGSTOP and `bg` can still come: with
+    /// `tostop` the kernel stops the job then (SIGTTOU), and without it a
+    /// write reaches the screen. In a process with more threads the
+    /// continue's handler can run on another one a moment after this one
+    /// goes on, so a continue can still be missed here then; in the
+    /// foreground the write lands before `Resumed` redraws.
+    fn owns(&mut self) -> bool {
+        // 이것을 실패시키는 것: 되돌린 터미널을 제 것으로 보는 것(a_terminate_during_the_way_out_ends_without_a_stop의 AFTER),
+        // 처리하지 않은 재개를 보지 않는 것(a_write_after_a_stop_and_fg_waits_for_the_resume).
+        if self.state != State::Running || !self.guard.raw.on || CONT_SEEN.load(Ordering::SeqCst) {
+            return false;
+        }
+        // 이것을 실패시키는 것: 전경인지 보지 않는 것(a_write_after_the_terminal_was_taken_writes_nothing).
+        if !foreground(self.fd) {
+            self.state = State::Background;
+            return false;
+        }
+        true
+    }
+
     /// A frame with synchronized output begins (`true`, before its
     /// `CSI ? 2026 h` is written) or its end was taken (`false`).
     pub fn mark_synced(&mut self, on: bool) {
@@ -690,17 +740,21 @@ impl Session<'_> {
         write_bounded(self.fd, bytes, until)
     }
 
-    /// Turns the modes on, each recorded before its bytes are written. An
-    /// error when the terminal did not take them in time or a signal asked
-    /// to end meanwhile.
-    fn enter(&mut self) -> std::io::Result<()> {
+    /// Turns the modes on, each recorded before its bytes are written and
+    /// each written only while this is the foreground job.
+    fn enter(&mut self) -> Entered {
         for (step, (mode, bytes)) in ENTER.into_iter().enumerate() {
+            // 이것을 실패시키는 것: 쓰기 전에 전경인지 보지 않는 것(배경에서 모드를 씀: tostop과 SIGTTOU로 멈춤;
+            // an_entry_whose_terminal_was_taken_writes_no_more).
+            if !foreground(self.fd) {
+                return Entered::Lost;
+            }
             // 이것을 실패시키는 것: 쓴 뒤에 기록하는 것(반쯤 나간 1049h를 되돌리지 않음; an_entry_the_terminal_stopped_taking_is_put_back).
             self.modes |= mode;
             let taken = self.put(bytes, Instant::now() + WRITE_TIMEOUT);
             if taken < bytes.len() {
                 self.cut = taken > 0;
-                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+                return Entered::Failed;
             }
             #[cfg(test)]
             test_session::entered(step);
@@ -708,10 +762,10 @@ impl Session<'_> {
             let _ = step;
             // 이것을 실패시키는 것: 들어가는 동안 온 종료 신호를 보지 않는 것(나머지 모드를 켠 뒤에야 끝남).
             if STOP.load(Ordering::SeqCst) {
-                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                return Entered::Signal;
             }
         }
-        Ok(())
+        Entered::Done
     }
 
     /// Puts the terminal back as it was found: the cut escape ends, the
@@ -843,7 +897,11 @@ impl Session<'_> {
         let _ = flush_input(self.fd);
         self.state = State::Running;
         // A signal or a terminal that takes nothing: `wait` reports it next.
-        let _ = self.enter();
+        if self.enter() == Entered::Lost {
+            // Taken away again meanwhile: the next continue takes it.
+            self.state = State::Background;
+            return;
+        }
         self.size = window_size(self.guard.tty.file.as_fd()).unwrap_or(self.size);
         self.resumed = true;
     }

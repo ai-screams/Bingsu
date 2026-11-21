@@ -771,8 +771,18 @@ fn job_shell(scenario: &str) -> (Vec<String>, Vec<u8>) {
             ("BINGSU_TEST_REPORT", report.to_str().unwrap()),
         ],
     );
-    t.expect(b"REDRAW 1");
+    if scenario != "enterlost" {
+        t.expect(b"REDRAW 1");
+    }
     match scenario {
+        "writestop" | "writestopfg" => {
+            t.expect(b"REDRAW 2");
+            t.send(b"q");
+        }
+        "readtaken" => {
+            t.expect(b"SHELL took");
+            t.send(b"x");
+        }
         "rawstop" => {
             t.expect(b"REDRAW 2");
             t.send(b"q");
@@ -968,6 +978,80 @@ fn a_terminate_while_stopped_ends_without_taking_the_terminal() {
     assert_eq!(shown(&all), shown(&want));
 }
 
+// `Writable`, then SIGSTOP and `bg` before the write: the write waits for
+// the next `wait` (nothing reaches the terminal from the background), and
+// `fg` takes the terminal again. 이것을 실패시키는 것: 쓰기 전에 소유를 보지 않는 것(배경에서 써서 tostop과
+// SIGTTOU로 멈춤).
+#[test]
+fn a_write_after_a_stop_and_bg_writes_nothing() {
+    let (lines, all) = job_shell("writestop");
+    for want in [
+        "stopped by STOP true",
+        "job: wrote 0",
+        "background quiet true",
+        "job: resumed 1",
+        "job ended true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    assert!(!all.windows(5).any(|w| w == b"FRAME"), "{}", shown(&all));
+}
+
+// `Writable`, then SIGSTOP and `fg`: still the foreground job, but the
+// continue is not handled yet (the shell may have drawn on the screen), so
+// the write waits for `Resumed`. 이것을 실패시키는 것: 처리하지 않은 재개를 보지 않고 쓰는 것(FRAME이 나감).
+#[test]
+fn a_write_after_a_stop_and_fg_waits_for_the_resume() {
+    let (lines, all) = job_shell("writestopfg");
+    for want in [
+        "stopped by STOP true",
+        "job: wrote 0",
+        "job: resumed 1",
+        "job ended true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    assert!(!all.windows(5).any(|w| w == b"FRAME"), "{}", shown(&all));
+}
+
+// The shell takes the terminal back without stopping the job, which then
+// writes. 이것을 실패시키는 것: 쓰기 전에 전경인지 보지 않는 것(배경에서 써서 SIGTTOU로 멈춤).
+#[test]
+fn a_write_after_the_terminal_was_taken_writes_nothing() {
+    let (lines, all) = job_shell("writetaken");
+    for want in [
+        "job: wrote 0",
+        "background quiet true",
+        "ended by TERM without a stop true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    assert!(!all.windows(5).any(|w| w == b"FRAME"), "{}", shown(&all));
+}
+
+// The shell takes the terminal back without stopping the job, and a key
+// comes: the job, which sees it readable, does not read it.
+// 이것을 실패시키는 것: 읽기 전에 소유를 보지 않는 것(배경에서 읽어 SIGTTIN으로 멈춤).
+#[test]
+fn a_session_that_lost_the_terminal_reads_nothing() {
+    let (lines, _) = job_shell("readtaken");
+    for want in ["background quiet true", "ended by TERM without a stop true"] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+}
+
+// SIGSTOP after the first mode went on, and `bg`: the entry writes no more
+// from the background and fails. 이것을 실패시키는 것: 들어가는 쓰기마다 전경인지 보지 않는 것(배경에서 25l을 써서
+// SIGTTOU로 멈춤).
+#[test]
+fn an_entry_whose_terminal_was_taken_writes_no_more() {
+    let (lines, all) = job_shell("enterlost");
+    for want in ["stopped by STOP true", "job: entry Other", "job ended true"] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    assert_eq!(shown(&all), shown(b"\x1b[?1049h"));
+}
+
 // The raw switch fails once the job control handlers are in: they go back.
 // 이것을 실패시키는 것: 실패한 진입에서 처리기를 되돌리지 않는 것.
 #[test]
@@ -1065,7 +1149,75 @@ fn job_shell_child() {
             }
         }
     });
+    if scenario == "enterlost" {
+        // Stopped (SIGSTOP) after the first mode went on; `bg`.
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        give_terminal(own);
+        say(&format!(
+            "stopped by STOP {}",
+            libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGSTOP
+        ));
+        // SAFETY: continues the job's process group.
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        say(&format!(
+            "job ended {}",
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+        ));
+        return;
+    }
     wait_line("job: ready");
+    if scenario == "writestop" || scenario == "writestopfg" {
+        // The job stops itself (SIGSTOP) between `Writable` and its write.
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        say(&format!(
+            "stopped by STOP {}",
+            libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGSTOP
+        ));
+        if scenario == "writestop" {
+            // `bg`: the write must wait; the job must touch nothing.
+            give_terminal(own);
+            // SAFETY: continues the job's process group.
+            assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+            wait_line("job: wrote");
+            std::thread::sleep(Duration::from_millis(300));
+            let (got, _) = wait_for(pid, libc::WNOHANG | libc::WUNTRACED);
+            say(&format!("background quiet {}", got == 0));
+            give_terminal(pid);
+        }
+        // `fg` (for `writestopfg`, the terminal never left the job).
+        // SAFETY: as above.
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        give_terminal(own);
+        say(&format!(
+            "job ended {}",
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+        ));
+        return;
+    }
+    if scenario == "writetaken" || scenario == "readtaken" {
+        // The shell takes the terminal back without stopping the job; the
+        // job then writes (`writetaken`) or keys come (`readtaken`).
+        give_terminal(own);
+        if scenario == "writetaken" {
+            wait_line("job: wrote");
+        } else {
+            print(b"SHELL took\n");
+            wait_queued(1);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let (got, _) = wait_for(pid, libc::WNOHANG | libc::WUNTRACED);
+        say(&format!("background quiet {}", got == 0));
+        // SAFETY: sends SIGTERM to the job.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        say(&format!(
+            "ended by TERM without a stop {}",
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGTERM
+        ));
+        return;
+    }
     if scenario == "leaveterm" {
         // Ctrl-Z, and a SIGTERM while the terminal is put back.
         let (_, status) = wait_for(pid, libc::WUNTRACED);
@@ -1211,7 +1363,10 @@ fn job_shell_child() {
 fn job_child() {
     let scenario = param("BINGSU_TEST_SCENARIO");
     // Only a signal brings the session back here, not the once-a-second look.
-    if matches!(scenario.as_str(), "stop" | "winch" | "rawstop") {
+    if matches!(
+        scenario.as_str(),
+        "stop" | "winch" | "rawstop" | "writestop" | "writetaken" | "readtaken"
+    ) {
         test_session::BACKGROUND_CHECK.set(Some(Duration::from_secs(60)));
     }
     if scenario == "hangup" {
@@ -1248,12 +1403,50 @@ fn job_child() {
         "rawstop" => test_session::AFTER_RAW.set(Some(libc::SIGTSTP)),
         "leaveterm" => test_session::DURING_LEAVE.set([libc::SIGTERM, 0]),
         "leavecont" => test_session::DURING_LEAVE.set([libc::SIGTSTP, libc::SIGCONT]),
+        "enterlost" => test_session::AFTER_STEP.set(Some((0, libc::SIGSTOP))),
         _ => {}
     }
     let tty = Tty::open().unwrap();
-    let mut s = tty.full_screen().unwrap();
+    let mut s = match tty.full_screen() {
+        Ok(s) => s,
+        Err(e) => {
+            say(&format!("job: entry {:?}", e.kind()));
+            return;
+        }
+    };
     draw(&mut s, b"REDRAW 1");
     say("job: ready");
+    match scenario.as_str() {
+        "writestop" | "writestopfg" => {
+            assert_eq!(s.wait(true, Some(Instant::now() + WAIT)), Event::Writable);
+            // SAFETY: stops this process, as a SIGSTOP from outside would.
+            unsafe { libc::raise(libc::SIGSTOP) };
+            if scenario == "writestopfg" {
+                // In this process another thread may handle the SIGCONT a
+                // moment later; the write is made once its flag is set.
+                let until = Instant::now() + WAIT;
+                while !CONT_SEEN.load(Ordering::SeqCst) {
+                    assert!(Instant::now() < until, "no continue");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            let wrote = s.write_some(b"FRAME").unwrap_or(0);
+            say(&format!("job: wrote {wrote}"));
+        }
+        "writetaken" => {
+            // SAFETY: getpgrp takes no arguments and cannot fail.
+            let own = unsafe { libc::getpgrp() };
+            let until = Instant::now() + WAIT;
+            // SAFETY: fd 0 is the terminal; the call reads its group.
+            while unsafe { libc::tcgetpgrp(0) } == own {
+                assert!(Instant::now() < until, "the shell never took the terminal");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let wrote = s.write_some(b"FRAME").unwrap_or(0);
+            say(&format!("job: wrote {wrote}"));
+        }
+        _ => {}
+    }
     let mut resumed = 0;
     let mut typed = Vec::new();
     loop {
