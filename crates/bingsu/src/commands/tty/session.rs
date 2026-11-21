@@ -248,8 +248,12 @@ fn wake_pipe() -> std::io::Result<RawFd> {
         return Ok(read);
     }
     let (read, write) = super::sys::nonblocking_pipe()?;
-    // 이것을 실패시키는 것: 이 검사를 빼는 것(FD_SETSIZE 위의 pipe를 select에 넣음; a_wake_pipe_above_fd_setsize_is_refused).
-    if !fits_select(read.as_raw_fd()) || !fits_select(write.as_raw_fd()) {
+    // 이것을 실패시키는 것: 이 검사를 빼거나 한 끝만 보는 것(FD_SETSIZE에 걸친 pipe를 select에 넣음;
+    // a_wake_pipe_above_fd_setsize_is_refused는 읽는 끝 1023, 쓰는 끝 1024).
+    if ![&read, &write]
+        .iter()
+        .all(|end| fits_select(end.as_raw_fd()))
+    {
         return Err(std::io::Error::other(
             "the wake pipe's descriptors do not fit select",
         ));

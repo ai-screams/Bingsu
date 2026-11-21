@@ -657,7 +657,7 @@ fn hang_up_child() {
     say(&format!("{:?}", s.wait(false, None)));
 }
 
-// 이것을 실패시키는 것: 깨우기 pipe가 FD_SETSIZE 위에 있어도 쓰는 것(select의 집합 밖에 씀).
+// 이것을 실패시키는 것: 깨우기 pipe의 끝 하나가 FD_SETSIZE에 있어도 쓰는 것(select의 집합 밖에 씀).
 #[test]
 fn a_wake_pipe_above_fd_setsize_is_refused() {
     let t = start("high_pipe_child", &[]);
@@ -678,7 +678,8 @@ fn high_pipe_child() {
     limit.rlim_cur = limit.rlim_max.min(want);
     // SAFETY: `limit` is a valid rlimit.
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
-    // Every number below FD_SETSIZE taken, so the pipe gets two above.
+    // Every number below FD_SETSIZE taken but the last, so the pipe's read
+    // end fits select and its write end does not.
     let mut held = Vec::new();
     loop {
         let file = std::fs::File::open("/dev/null").unwrap();
@@ -688,6 +689,9 @@ fn high_pipe_child() {
             break;
         }
     }
+    let last = held.pop().unwrap();
+    assert_eq!(last.as_raw_fd(), size - 1);
+    drop(last);
     say(&format!("refused {}", wake_pipe().is_err()));
 }
 
