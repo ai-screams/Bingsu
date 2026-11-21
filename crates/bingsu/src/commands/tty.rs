@@ -286,14 +286,17 @@ struct Raw {
 
 /// The terminal's mode and this descriptor's status flags, as they are.
 fn read_mode(fd: RawFd) -> std::io::Result<(libc::termios, libc::c_int)> {
-    let mut saved = std::mem::MaybeUninit::<libc::termios>::uninit();
-    // SAFETY: `fd` is an open descriptor and `saved` is writable memory
+    // Zeroed first: tcgetattr need not write every byte. musl passes the
+    // structure to the TCGETS ioctl, whose kernel structure is shorter (the
+    // tail of `c_cc` and the two speeds stay as they were).
+    // SAFETY: an all-zero `termios` (integers and arrays of integers) is a
+    // valid value.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is an open descriptor and `saved` is a valid structure
     // of the type tcgetattr fills.
-    if unsafe { libc::tcgetattr(fd, saved.as_mut_ptr()) } != 0 {
+    if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: tcgetattr returned 0, so it wrote the whole structure.
-    let saved = unsafe { saved.assume_init() };
     // SAFETY: `fd` is open; F_GETFL only reads its status flags.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags == -1 {
