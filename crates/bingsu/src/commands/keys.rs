@@ -93,30 +93,42 @@ mod tests {
     }
 }
 
-/// Keys read from a real pseudo-terminal in raw mode: split sequences,
-/// pastes, Enter under `ICRNL`, Ctrl-D, and a hang-up. The child test runs
-/// in a process of its own with the pseudo-terminal as its controlling
-/// terminal; the parent types into it and reads what it reports.
+/// Keys read from a real pseudo-terminal in raw mode (`Tty::raw`, the mode
+/// the editor uses): split sequences, late rests, pastes, an 8-bit string,
+/// Enter under `ICRNL`, Ctrl-D, bursts and a hang-up. The child test runs in
+/// a process of its own with the pseudo-terminal as its controlling
+/// terminal. Each step is synchronized, so no result depends on the
+/// scheduler: the parent types into the terminal, then tells the child on
+/// a control pipe how many bytes to read as one read and at which logical
+/// time, and waits for the child's answer on its standard output. What this
+/// shows is the real terminal's bytes (raw mode, `ICRNL`, no echo, 8-bit
+/// bytes kept) going through the reader; the time bounds themselves are
+/// the pure tests' business.
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod pty {
     use super::KeyInput;
-    use crate::commands::tty::{Terminal, Tty};
+    use crate::commands::tty::Tty;
     use std::fs::File;
-    use std::io::Read;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::os::unix::process::CommandExt as _;
     use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc::{Receiver, channel};
     use std::time::{Duration, Instant};
 
     /// The longest any step may take.
     const WAIT: Duration = Duration::from_secs(10);
 
+    /// The control pipe's descriptor in the child.
+    const CONTROL: RawFd = 3;
+
     struct Pty {
         _spawns: std::sync::MutexGuard<'static, ()>,
         master: Option<File>,
+        control: File,
+        answers: Receiver<String>,
         child: Child,
-        unread: Vec<u8>,
-        all: Vec<u8>,
     }
 
     #[allow(
@@ -143,240 +155,195 @@ mod pty {
             },
             0
         );
+        let mut ends = [-1; 2];
+        // SAFETY: `ends` has room for the two descriptors.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
         // Without close-on-exec the child would hold the master too, and
-        // closing it here would not hang up.
-        for fd in [master, slave] {
-            // SAFETY: the descriptors openpty just made.
+        // closing it here would not hang up; the control pipe's read end
+        // reaches the child only as fd 3.
+        for fd in [master, slave, ends[0], ends[1]] {
+            // SAFETY: descriptors just made.
             let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
             assert_eq!(rc, 0);
         }
-        // SAFETY: a new descriptor, owned once from here on.
+        // SAFETY: new descriptors, each owned once from here on.
         let master = unsafe { File::from_raw_fd(master) };
         // SAFETY: as above.
         let slave = unsafe { OwnedFd::from_raw_fd(slave) };
-        assert_eq!(
-            // SAFETY: the test owns the master's description.
-            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
-            0
-        );
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                &format!("commands::keys::pty::{name}"),
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .stdin(Stdio::from(slave))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        // SAFETY: as above.
+        let read_end = unsafe { OwnedFd::from_raw_fd(ends[0]) };
+        // SAFETY: as above.
+        let control = unsafe { File::from_raw_fd(ends[1]) };
+        let from = read_end.as_raw_fd();
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            &format!("commands::keys::pty::{name}"),
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let hook = move || {
+            // SAFETY: `from` is open in the child until exec.
+            let rc = unsafe { libc::dup2(from, CONTROL) };
+            // SAFETY: fd 3 is open now; the call clears close-on-exec, also
+            // when dup2 had nothing to do (`from` was 3).
+            if rc < 0 || unsafe { libc::fcntl(CONTROL, libc::F_SETFD, 0) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        };
+        // SAFETY: between fork and exec the hook calls only dup2 and fcntl,
+        // which are async-signal-safe.
+        unsafe { cmd.pre_exec(hook) };
+        let mut child = cmd.spawn().unwrap();
+        drop(read_end);
+        let (tx, answers) = channel();
+        let out = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                // libtest's "test ... " has no newline before the output.
+                if let Some((_, answer)) = line.split_once("ANSWER ") {
+                    if tx.send(answer.to_owned()).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
         Pty {
             _spawns: spawns,
             master: Some(master),
+            control,
+            answers,
             child,
-            unread: Vec::new(),
-            all: Vec::new(),
         }
     }
 
+    /// Writes all of `bytes` to `fd`.
+    fn put(fd: RawFd, bytes: &[u8]) {
+        let done = crate::commands::sys::write_fd(fd, bytes);
+        assert!(matches!(done, crate::commands::sys::WriteOutcome::Done));
+    }
+
     impl Pty {
-        /// Reads what the child wrote for up to `d`; `true` once `stop`
-        /// says so of what is unread.
-        fn pump(&mut self, d: Duration, stop: impl Fn(&[u8]) -> bool) -> bool {
-            let until = Instant::now() + d;
-            let mut buf = [0u8; 256];
-            loop {
-                if stop(&self.unread) {
-                    return true;
-                }
-                let Some(mut m) = self.master.as_ref() else {
-                    return false;
-                };
-                if let Ok(n @ 1..) = m.read(&mut buf) {
-                    self.unread.extend_from_slice(&buf[..n]);
-                    self.all.extend_from_slice(&buf[..n]);
-                    continue;
-                }
-                if Instant::now() >= until {
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(2));
+        /// The child's next answer. On a timeout the child is ended and
+        /// its error output shown.
+        fn answer(&mut self) -> String {
+            if let Ok(answer) = self.answers.recv_timeout(WAIT) {
+                return answer;
             }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let mut err = String::new();
+            if let Some(mut e) = self.child.stderr.take() {
+                let _ = e.read_to_string(&mut err);
+            }
+            panic!("no answer from the child:\n{err}");
         }
 
-        fn expect(&mut self, want: &[u8]) {
-            let found = |b: &[u8]| b.windows(want.len()).any(|w| w == want);
-            assert!(
-                self.pump(WAIT, found),
-                "no {:?} in {:?}",
-                want.escape_ascii().to_string(),
-                self.all.escape_ascii().to_string()
-            );
-            let at = self
-                .unread
-                .windows(want.len())
-                .position(|w| w == want)
-                .unwrap();
-            self.unread.drain(..at + want.len());
+        fn tell(&mut self, line: &str) {
+            put(self.control.as_raw_fd(), format!("{line}\n").as_bytes());
         }
 
-        /// The next report of the child: `keys bytes` (bytes `-` for a
-        /// tick).
-        fn next_report(&mut self) -> String {
-            let line = |b: &[u8]| b.windows(2).any(|w| w == b"\r\n");
-            assert!(
-                self.pump(WAIT, line),
-                "no report in {:?}",
-                self.all.escape_ascii().to_string()
-            );
-            let at = self.unread.windows(2).position(|w| w == b"\r\n").unwrap();
-            let text = String::from_utf8_lossy(&self.unread[..at]).into_owned();
-            self.unread.drain(..at + 2);
-            text.strip_prefix("K ")
-                .unwrap_or_else(|| panic!("not a report: {text:?}"))
-                .to_owned()
+        /// Types `bytes` as the terminal's user would; the child reads them
+        /// as one read at `at` ms. Its answer: the keys and the bytes read,
+        /// in hex.
+        fn read(&mut self, bytes: &[u8], at: u64) -> String {
+            put(self.master.as_ref().unwrap().as_raw_fd(), bytes);
+            self.tell(&format!("R {at} {}", bytes.len()));
+            self.answer()
         }
 
-        /// The keys of the next report.
-        fn next_keys(&mut self) -> String {
-            let report = self.next_report();
-            report
-                .rsplit_once(' ')
-                .map_or(report.clone(), |(k, _)| k.to_owned())
+        /// The child ticks at `at` ms. Its answer: the keys and `-`.
+        fn tick(&mut self, at: u64) -> String {
+            self.tell(&format!("T {at}"));
+            self.answer()
         }
 
-        /// Types as the terminal's user would, in one write.
-        fn send(&mut self, bytes: &[u8]) {
-            let fd = self.master.as_ref().unwrap().as_raw_fd();
-            // SAFETY: the master is open and `bytes` is a valid slice.
-            let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
-            assert_eq!(usize::try_from(n).ok(), Some(bytes.len()));
-        }
-
-        /// Reads for `d` without typing.
-        fn idle(&mut self, d: Duration) {
-            self.pump(d, |_| false);
-        }
-
-        /// Types `x` once the reader is surely back in Ground (past any
-        /// drain) and checks that it is the next report: nothing came out
-        /// of what was typed before.
-        fn nothing_more(&mut self) {
-            self.idle(Duration::from_millis(250));
-            self.send(b"x");
-            assert_eq!(self.next_keys(), "[Char(120)]");
-        }
-
-        /// Closes the master (the terminal goes away) and waits for the
-        /// child, which must pass or end with SIGHUP. Its `ANSWER` lines.
-        fn hang_up(mut self) -> Vec<String> {
+        /// Closes the master (the terminal goes away), lets the child read
+        /// once more and waits for it, which must pass or end with SIGHUP.
+        /// Its last answer.
+        fn hang_up(mut self) -> String {
             self.master = None;
+            self.tell("E");
+            let answer = self.answer();
             let until = Instant::now() + WAIT;
             let status = loop {
                 if let Some(status) = self.child.try_wait().unwrap() {
                     break status;
                 }
-                if Instant::now() >= until {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    panic!("the child did not end");
-                }
+                assert!(Instant::now() < until, "the child did not end");
                 std::thread::sleep(Duration::from_millis(5));
             };
-            let mut out = String::new();
-            let mut err = String::new();
-            self.child
-                .stdout
-                .take()
-                .unwrap()
-                .read_to_string(&mut out)
-                .unwrap();
-            self.child
-                .stderr
-                .take()
-                .unwrap()
-                .read_to_string(&mut err)
-                .unwrap();
-            // The terminal's hang-up also sends SIGHUP to the child, a
-            // session leader: the guard takes it and raises it again once
-            // the terminal is put back, after the report.
+            // The hang-up also sends SIGHUP to the child, a session leader:
+            // the guard takes it and raises it again once the terminal is
+            // put back, after the answer.
             use std::os::unix::process::ExitStatusExt as _;
             assert!(
                 status.success() || status.signal() == Some(libc::SIGHUP),
-                "{status:?}\n{out}\n{err}"
+                "{status:?}"
             );
-            out.lines()
-                .filter_map(|l| l.split_once("ANSWER "))
-                .map(|(_, a)| a.to_owned())
-                .collect()
+            answer
         }
     }
 
-    // 이것을 실패시키는 것: 실제 raw 터미널에서 나뉜 화살표의 `[`·`A`나 늦은 나머지가 키가 되는 것, 표지 있는 붙여
-    // 넣기나 표지 없는 묶음의 키가 나오는 것, 묶음 안의 Ctrl-C를 버리는 것, Enter가 ICRNL로 LF가 되어 오는데 Enter로 읽지 않는 것, Ctrl-D를 입력의
-    // 끝으로 보는 것, 끊긴 터미널을 입력의 끝으로 알리지 않는 것.
+    // 이것을 실패시키는 것: 실제 raw 터미널의 바이트로 나뉜 화살표를 하나로 읽지 않는 것, Esc 판정 뒤 늦은 창 안의
+    // 나머지를 키로 내는 것과 창 밖의 키를 버리는 것, 끝 표지가 나뉜 붙여 넣기나 8비트 문자열의 내용을 키로 내는 것,
+    // 묶음의 키를 내는 것과 그 안의 Ctrl-C를 버리는 것, ICRNL로 LF가 되어 오는 Enter를 Enter로 읽지 않는 것(또는
+    // raw 모드가 ICRNL을 끄는 것), Ctrl-D를 입력의 끝으로 보는 것, 끊긴 터미널을 입력의 끝으로 알리지 않는 것.
     #[test]
     fn keys_on_a_pseudo_terminal() {
         let mut t = start("keys_child");
-        t.expect(b"READY\r\n");
+        assert_eq!(t.answer(), "READY");
 
-        // An arrow key split 5 ms apart: Up. A child that reads the ESC and
-        // then does not read for 30 ms makes it the Esc key and drops the
-        // rest as late; either way no `[` or `A`. Not covered: a child
-        // stalled for about 125 ms or more between the two reads sees the
-        // rest past the late window, and this test fails (the window's
-        // limit, the same on a real terminal).
-        t.send(b"\x1b");
-        std::thread::sleep(Duration::from_millis(5));
-        t.send(b"[A");
-        let split = t.next_keys();
-        assert!(split == "[Up]" || split == "[Esc]", "{split}");
-        t.nothing_more();
+        // An arrow key in two reads 5 ms apart: Up.
+        assert_eq!(t.read(b"\x1b", 0), "[] 1b");
+        assert_eq!(t.read(b"[A", 5), "[Up] 5b41");
+        // The rest 50 ms after the Esc key: late, dropped.
+        assert_eq!(t.read(b"\x1b", 100), "[] 1b");
+        assert_eq!(t.tick(130), "[Esc] -");
+        assert_eq!(t.read(b"OA", 180), "[] 4f41");
+        assert_eq!(t.read(b"x", 300), "[Char(120)] 78");
+        // Past the late window: two keys.
+        assert_eq!(t.read(b"\x1b", 400), "[] 1b");
+        assert_eq!(t.tick(430), "[Esc] -");
+        assert_eq!(t.read(b"OA", 600), "[Char(79), Char(65)] 4f41");
 
-        // Split 50 ms apart: the Esc key, and the late rest is dropped (a
-        // child that reads both at once reads Up). A stall of about 80 ms
-        // or more between the reads fails, as above.
-        t.send(b"\x1b");
-        std::thread::sleep(Duration::from_millis(50));
-        t.send(b"OA");
-        let late = t.next_keys();
-        assert!(late == "[Esc]" || late == "[Up]", "{late}");
-        println!("split 5 ms: {split}; split 50 ms: {late}");
-        t.nothing_more();
+        // Enter: raw mode keeps ICRNL, so CR comes as LF; CR LF in one read
+        // is two Enter keys of one read. Ctrl-D is a key.
+        assert_eq!(t.read(b"\r", 700), "[Enter] 0a");
+        assert_eq!(t.read(b"\n", 701), "[Enter] 0a");
+        assert_eq!(t.read(b"\r\n", 702), "[Enter, Enter] 0a0a");
+        assert_eq!(t.read(b"\x04", 703), "[Ctrl(100)] 04");
 
-        // Enter: raw mode keeps ICRNL, so CR comes as LF.
-        t.send(b"\r");
-        assert_eq!(t.next_report(), "[Enter] 0a");
-        t.send(b"\n");
-        assert_eq!(t.next_report(), "[Enter] 0a");
-        // Ctrl-D is a key; the reader goes on.
-        t.send(b"\x04");
-        assert_eq!(t.next_keys(), "[Ctrl(100)]");
+        // A bracketed paste, its end mark split, fewer than four keys per
+        // read (so the marks drop it, not the burst guess); the drain after
+        // it ends 100 ms after its last byte.
+        assert_eq!(t.read(b"\x1b[200~q\r", 800), "[] 1b5b3230307e710a");
+        assert_eq!(t.read(b"s\x1b[20", 801), "[] 731b5b3230");
+        assert_eq!(t.read(b"1~", 802), "[] 317e");
+        assert_eq!(t.tick(902), "[] -");
+        assert_eq!(t.read(b"x", 903), "[Char(120)] 78");
 
-        // A bracketed paste, its end mark split: nothing. Fewer than four
-        // keys per read, so it is the marks that drop it, not a burst.
-        t.send(b"\x1b[200~q\r");
-        std::thread::sleep(Duration::from_millis(5));
-        t.send(b"s\x1b[20");
-        std::thread::sleep(Duration::from_millis(5));
-        t.send(b"1~");
-        t.nothing_more();
+        // An 8-bit APC (0x9f ... 0x9c) holding two CRs in two reads.
+        assert_eq!(t.read(b"\x9f\r", 1000), "[] 9f0a");
+        assert_eq!(t.read(b"\r\x9c", 1001), "[] 0a9c");
+        assert_eq!(t.tick(1101), "[] -");
 
-        // Four keys in one read without the marks: nothing, but for a
-        // Ctrl-C in them.
-        t.send(b"qqqq");
-        t.nothing_more();
-        t.send(b"qq\x03q");
-        assert_eq!(t.next_keys(), "[Ctrl(99)]");
-        t.nothing_more();
+        // Four keys in one read: none, but for a Ctrl-C among them; three
+        // keys are typed keys.
+        assert_eq!(t.read(b"qqqq", 1200), "[] 71717171");
+        assert_eq!(t.read(b"qq\x03q", 1201), "[Ctrl(99)] 71710371");
+        assert_eq!(
+            t.read(b"jjj", 1202),
+            "[Char(106), Char(106), Char(106)] 6a6a6a"
+        );
 
-        // Three keys in one read are typed keys, reported together.
-        t.send(b"jjj");
-        assert_eq!(t.next_keys(), "[Char(106), Char(106), Char(106)]");
-
-        assert_eq!(t.hang_up(), ["end of input"]);
+        assert_eq!(t.hang_up(), "end of input");
     }
 
     /// Waits until `fd` can be read or `until` passes.
@@ -430,42 +397,59 @@ mod pty {
         Tty::open().expect("the pseudo-terminal is the controlling terminal")
     }
 
-    /// The child: the terminal in raw mode (`Tty::raw`, the mode the editor
-    /// uses), each read of fd 0 (the same terminal) fed to the key reader
-    /// as it comes, and each tick at the reader's deadline. Keys are
-    /// reported on the terminal as `K <keys> <bytes of the read in hex>`.
+    fn say(answer: &str) {
+        println!("ANSWER {answer}");
+        let _ = std::io::stdout().flush();
+    }
+
+    /// The child: the terminal in raw mode, and the parent's steps from the
+    /// control pipe: `R <ms> <n>` reads `n` bytes of the terminal and feeds
+    /// them as one read at `<ms>`, `T <ms>` ticks, `E` reads until the
+    /// terminal is gone. Each step answers `<keys> <bytes in hex>`.
     #[test]
     #[ignore = "child: reads keys on a pseudo-terminal"]
     fn keys_child() {
         let tty = take_terminal();
-        let mut g = tty.raw().unwrap();
-        let mut input = KeyInput::new(Instant::now());
-        // Output keeps ONLCR: `\n` comes out as `\r\n`.
-        g.write(b"READY\n").unwrap();
-        let end = Instant::now() + 3 * WAIT;
+        let _raw = tty.raw().unwrap();
+        // SAFETY: the parent passed the control pipe's read end as fd 3,
+        // owned here alone.
+        let control = BufReader::new(unsafe { File::from_raw_fd(CONTROL) });
+        let origin = Instant::now();
+        let at = |ms: &str| origin + Duration::from_millis(ms.parse().unwrap());
+        let mut input = KeyInput::new(origin);
         let mut buf = [0u8; 1024];
-        while Instant::now() < end {
-            let until = input
-                .deadline()
-                .unwrap_or_else(|| Instant::now() + Duration::from_secs(1));
-            let (keys, bytes) = if readable(0, until) {
-                // SAFETY: fd 0 is the terminal; `buf` is writable.
-                let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
-                // Readable but nothing (or EIO): the terminal went away.
-                let Ok(n @ 1..) = usize::try_from(n) else {
-                    println!("ANSWER end of input");
+        // Reads what the terminal has, once it has some: `None` when it is
+        // gone (a read of 0 bytes, or EIO).
+        let read = |buf: &mut [u8]| {
+            assert!(readable(0, Instant::now() + WAIT), "nothing to read");
+            // SAFETY: fd 0 is the terminal; `buf` is writable.
+            let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+            usize::try_from(n).ok().filter(|&n| n > 0)
+        };
+        say("READY");
+        for line in control.lines() {
+            let line = line.unwrap();
+            let words: Vec<&str> = line.split(' ').collect();
+            match words[..] {
+                ["R", ms, n] => {
+                    let n: usize = n.parse().unwrap();
+                    let mut got = Vec::new();
+                    while got.len() < n {
+                        let k = read(&mut buf).expect("the terminal is there");
+                        got.extend_from_slice(&buf[..k]);
+                    }
+                    let hex: String = got.iter().map(|b| format!("{b:02x}")).collect();
+                    say(&format!("{:?} {hex}", input.feed(&got, at(ms)).as_slice()));
+                }
+                ["T", ms] => say(&format!("{:?} -", input.tick(at(ms)).as_slice())),
+                ["E"] => {
+                    while read(&mut buf).is_some() {}
+                    say("end of input");
                     return;
-                };
-                let hex: String = buf[..n].iter().map(|b| format!("{b:02x}")).collect();
-                (input.feed(&buf[..n], Instant::now()), hex)
-            } else {
-                (input.tick(Instant::now()), "-".to_owned())
-            };
-            if !keys.is_empty() {
-                let line = format!("K {:?} {bytes}\n", keys.as_slice());
-                g.write(line.as_bytes()).unwrap();
+                }
+                _ => panic!("unknown step {line:?}"),
             }
         }
-        panic!("no hang-up");
+        panic!("the control pipe closed");
     }
 }
