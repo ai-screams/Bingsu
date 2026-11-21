@@ -777,6 +777,12 @@ fn job_shell(scenario: &str) -> (Vec<String>, Vec<u8>) {
             t.expect(b"REDRAW 2");
             t.send(b"q");
         }
+        "leaveterm" | "stopterm" => t.send(b"\x1a"),
+        "leavecont" => {
+            t.send(b"\x1a");
+            t.expect(b"REDRAW 2");
+            t.send(b"q");
+        }
         "stop" => {
             t.send(b"\x1a");
             t.expect(b"SHELL bg");
@@ -821,7 +827,7 @@ fn stop_bg_and_fg_under_a_job_control_shell() {
         "stopped by TSTP true",
         "restored at the stop true",
         "the job's other process stopped too true",
-        "job: back from the stop",
+        "job: back from the stop, wrote 0",
         "background quiet true",
         "job: resumed 1",
         "job: typed q",
@@ -899,6 +905,66 @@ fn a_stop_right_after_the_raw_switch_puts_the_terminal_back() {
         b"\x1b[H\x1b[2JREDRAW 2",
         LEAVE_ALL,
     ]);
+    assert_eq!(shown(&all), shown(&want));
+}
+
+// Ctrl-Z, and a SIGTERM while the terminal is put back: the exit goes first,
+// nothing of the process group stops, and nothing is written to the
+// terminal given back. 이것을 실패시키는 것: 되돌리는 동안 온 종료 요청을 보지 않고 멈추는 것(셸이 정지를 봄),
+// 되돌린 터미널에 쓰는 것(AFTER).
+#[test]
+fn a_terminate_during_the_way_out_ends_without_a_stop() {
+    let (lines, all) = job_shell("leaveterm");
+    for want in [
+        "job: back from the stop, wrote 0",
+        "ended by TERM without a stop true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    let want = cat(&[ENTER_ALL, b"\x1b[H\x1b[2JREDRAW 1", LEAVE_ALL]);
+    assert_eq!(shown(&all), shown(&want));
+}
+
+// Ctrl-Z, and SIGTSTP then SIGCONT while the terminal is put back: the
+// continue drops the stop (and the SIGTSTP before it), as the kernel drops
+// a pending stop on SIGCONT. 이것을 실패시키는 것: 되돌리는 동안 온 재개를 보지 않고 멈추는 것, SIGCONT가 그 앞의
+// SIGTSTP를 지우지 않는 것(다시 잡은 뒤 한 번 더 멈춤).
+#[test]
+fn a_continue_during_the_way_out_cancels_the_stop() {
+    let (lines, all) = job_shell("leavecont");
+    for want in [
+        "job: back from the stop, wrote 5",
+        "job: resumed 1",
+        "ended without a stop true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    let want = cat(&[
+        ENTER_ALL,
+        b"\x1b[H\x1b[2JREDRAW 1",
+        LEAVE_ALL,
+        ENTER_ALL,
+        b"AFTER\x1b[H\x1b[2JREDRAW 2",
+        LEAVE_ALL,
+    ]);
+    assert_eq!(shown(&all), shown(&want));
+}
+
+// A SIGTERM sent while the job is stopped comes with the SIGCONT of `fg`:
+// the session ends with it and does not take the terminal again.
+// 이것을 실패시키는 것: 재개 뒤 종료 요청을 보지 않고 다시 들어가는 것(두 번째 진입 열).
+#[test]
+fn a_terminate_while_stopped_ends_without_taking_the_terminal() {
+    let (lines, all) = job_shell("stopterm");
+    for want in [
+        "stopped by TSTP true",
+        "restored at the stop true",
+        "job: back from the stop, wrote 0",
+        "ended by TERM after the stop true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    let want = cat(&[ENTER_ALL, b"\x1b[H\x1b[2JREDRAW 1", LEAVE_ALL]);
     assert_eq!(shown(&all), shown(&want));
 }
 
@@ -986,7 +1052,7 @@ fn job_shell_child() {
     });
     let wait_line = |want: &str| loop {
         let line = told.recv_timeout(WAIT).expect(want);
-        if line.ends_with(want) {
+        if line.contains(want) {
             return;
         }
     };
@@ -1000,6 +1066,30 @@ fn job_shell_child() {
         }
     });
     wait_line("job: ready");
+    if scenario == "leaveterm" {
+        // Ctrl-Z, and a SIGTERM while the terminal is put back.
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        say(&format!(
+            "ended by TERM without a stop {}",
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGTERM
+        ));
+        return;
+    }
+    if scenario == "leavecont" {
+        // Ctrl-Z, and SIGTSTP then SIGCONT while the terminal is put back.
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        let stopped = libc::WIFSTOPPED(status);
+        if stopped {
+            // A broken build stopped: `fg`, so the test can end.
+            give_terminal(pid);
+            // SAFETY: continues the job's process group.
+            unsafe { libc::kill(-pid, libc::SIGCONT) };
+            wait_for(pid, libc::WUNTRACED);
+        }
+        give_terminal(own);
+        say(&format!("ended without a stop {}", !stopped));
+        return;
+    }
     if scenario == "taken" {
         give_terminal(own);
         // SAFETY: sends SIGTERM to the job.
@@ -1020,6 +1110,21 @@ fn job_shell_child() {
         libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTSTP
     ));
     say(&format!("restored at the stop {}", mode() == before));
+    if scenario == "stopterm" {
+        // `fg`, with a SIGTERM sent while the job is stopped.
+        give_terminal(pid);
+        // SAFETY: sends SIGTERM to the stopped job; it comes with SIGCONT.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        // SAFETY: continues the job's process group.
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        give_terminal(own);
+        say(&format!(
+            "ended by TERM after the stop {}",
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGTERM
+        ));
+        return;
+    }
     if scenario == "rawstop" {
         // `fg`.
         give_terminal(pid);
@@ -1139,8 +1244,11 @@ fn job_child() {
     if let Some(sibling) = &sibling {
         say(&format!("job: sibling {}", sibling.id()));
     }
-    if scenario == "rawstop" {
-        test_session::AFTER_RAW.set(Some(libc::SIGTSTP));
+    match scenario.as_str() {
+        "rawstop" => test_session::AFTER_RAW.set(Some(libc::SIGTSTP)),
+        "leaveterm" => test_session::DURING_LEAVE.set([libc::SIGTERM, 0]),
+        "leavecont" => test_session::DURING_LEAVE.set([libc::SIGTSTP, libc::SIGCONT]),
+        _ => {}
     }
     let tty = Tty::open().unwrap();
     let mut s = tty.full_screen().unwrap();
@@ -1152,7 +1260,8 @@ fn job_child() {
         match s.wait(false, None) {
             Event::Input(b"\x1a") => {
                 s.suspend();
-                say("job: back from the stop");
+                let wrote = s.write_some(b"AFTER").unwrap_or(0);
+                say(&format!("job: back from the stop, wrote {wrote}"));
             }
             Event::Input(b) => {
                 typed.extend_from_slice(b);

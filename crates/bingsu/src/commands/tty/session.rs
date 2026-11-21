@@ -180,7 +180,15 @@ const JOB_SIGNALS: [libc::c_int; 3] = [libc::SIGTSTP, libc::SIGCONT, libc::SIGWI
 extern "C" fn on_job_signal(sig: libc::c_int) {
     let seen = match sig {
         libc::SIGTSTP => &TSTP_SEEN,
-        libc::SIGCONT => &CONT_SEEN,
+        libc::SIGCONT => {
+            // A continue drops a stop not taken yet, as the kernel drops a
+            // pending SIGTSTP when SIGCONT is sent. Cleared before the
+            // continue is set: a SIGTSTP whose handler runs in between (the
+            // handlers can nest) is then kept, not lost.
+            // 이것을 실패시키는 것: 지우지 않는 것(재개 뒤 남은 SIGTSTP로 한 번 더 멈춤; a_continue_during_the_way_out_cancels_the_stop).
+            TSTP_SEEN.store(false, Ordering::SeqCst);
+            &CONT_SEEN
+        }
         _ => &WINCH_SEEN,
     };
     seen.store(true, Ordering::SeqCst);
@@ -611,7 +619,9 @@ impl Session<'_> {
     /// it takes nothing now, and always 0 outside the foreground). An error
     /// means the terminal went away.
     pub fn write_some(&mut self, rest: &[u8]) -> std::io::Result<usize> {
-        if self.state != State::Running || rest.is_empty() {
+        // A stop that an exit cancelled gave the terminal back already.
+        // 이것을 실패시키는 것: 되돌린 터미널에 쓰는 것(a_terminate_during_the_way_out_ends_without_a_stop의 AFTER).
+        if self.state != State::Running || !self.guard.raw.on || rest.is_empty() {
             return Ok(0);
         }
         match self.write_once(rest) {
@@ -720,6 +730,8 @@ impl Session<'_> {
         let bytes = leave_bytes(self.modes);
         if !bytes.is_empty() {
             let taken = self.put(&bytes, Instant::now() + LEAVE_WAIT);
+            #[cfg(test)]
+            test_session::during_leave();
             // 이것을 실패시키는 것: 반쯤 나간 복구 열을 끊지 않는 것(터미널이 escape 안에 남음; a_way_out_the_terminal_stopped_taking_is_ended).
             if taken > 0 && taken < bytes.len() {
                 cancel_half_escape(self.fd);
@@ -735,8 +747,22 @@ impl Session<'_> {
     /// Ctrl-Z) or this process (a SIGTSTP from outside). Then `check`.
     fn stop(&mut self, whole_group: bool) {
         TSTP_SEEN.store(false, Ordering::SeqCst);
+        CONT_SEEN.store(false, Ordering::SeqCst);
         if self.state == State::Running {
             self.leave();
+        }
+        // Putting the terminal back can take a while (a terminal slow to
+        // take output). What came meanwhile goes first, before anything of
+        // the process group stops: an exit (`wait` reports it, and nothing
+        // is taken again), or a continue (the stop is dropped).
+        // 이것을 실패시키는 것: 종료 요청을 보지 않고 멈추는 것(a_terminate_during_the_way_out_ends_without_a_stop).
+        if caught().is_some() {
+            return;
+        }
+        // 이것을 실패시키는 것: 재개를 보지 않고 멈추는 것(a_continue_during_the_way_out_cancels_the_stop).
+        if CONT_SEEN.swap(false, Ordering::SeqCst) {
+            self.check();
+            return;
         }
         if whole_group {
             // The rest of the process group stops as on the terminal's own
@@ -766,6 +792,12 @@ impl Session<'_> {
         self.wait_for_continue(Instant::now() + LATE_CONTINUE);
         // This continue is the one `check` handles now.
         CONT_SEEN.store(false, Ordering::SeqCst);
+        // An exit sent while the process was stopped comes with the
+        // continue: the terminal is not taken again.
+        // 이것을 실패시키는 것: 멈춘 사이 온 종료 요청을 보지 않고 다시 잡는 것(a_terminate_while_stopped_ends_without_taking_the_terminal).
+        if caught().is_some() {
+            return;
+        }
         self.check();
     }
 
@@ -846,6 +878,16 @@ mod test_session {
         pub(super) static FAIL_RAW: Cell<bool> = const { Cell::new(false) };
         /// Raised once, right after the raw switch.
         pub(super) static AFTER_RAW: Cell<Option<libc::c_int>> = const { Cell::new(None) };
+        /// Raised once, in order, once `leave` wrote the way out (0: none).
+        pub(super) static DURING_LEAVE: Cell<[libc::c_int; 2]> = const { Cell::new([0; 2]) };
+    }
+
+    pub(super) fn during_leave() {
+        for sig in DURING_LEAVE.take() {
+            if sig != 0 {
+                raise(sig);
+            }
+        }
     }
 
     pub(super) fn after_raw() {
