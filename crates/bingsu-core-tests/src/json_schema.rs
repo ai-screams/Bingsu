@@ -1,5 +1,5 @@
-//! Checks JSON texts against `schema/diag-output-v1.json` with the schema
-//! test validator (`scripts/check_json_schema.py`; `BINGSU_SCHEMA_PY` is the
+//! Checks JSON texts against `schema/diag-output-v1.json` (or another schema
+//! of that folder, `validate_against`) with the schema test validator (`scripts/check_json_schema.py`; `BINGSU_SCHEMA_PY` is the
 //! python of the venv made from `scripts/schema-requirements.txt`).
 //! Shared by `#[path]` with the CLI tests; standard library only.
 #![allow(dead_code)]
@@ -25,17 +25,23 @@ fn quote(text: &str) -> String {
     out
 }
 
-#[allow(clippy::disallowed_methods, reason = "a test feeding a child's stdin")]
-/// `Ok` when every document passes (against `$defs/<def>` when given), else
-/// the validator's complaints.
+/// `Ok` when every document passes `schema/diag-output-v1.json` (against
+/// `$defs/<def>` when given), else the validator's complaints.
 pub fn validate(def: Option<&str>, documents: &[&str]) -> Result<(), String> {
+    validate_against("diag-output-v1.json", def, documents)
+}
+
+#[allow(clippy::disallowed_methods, reason = "a test feeding a child's stdin")]
+/// `validate` with the schema file `schema` of `crates/bingsu-core/schema`.
+pub fn validate_against(schema: &str, def: Option<&str>, documents: &[&str]) -> Result<(), String> {
     let script = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../scripts/check_json_schema.py"
     );
     let docs: Vec<String> = documents.iter().map(|d| quote(d)).collect();
     let request = format!(
-        "{{\"def\":{},\"documents\":[{}]}}",
+        "{{\"schema\":{},\"def\":{},\"documents\":[{}]}}",
+        quote(schema),
         def.map_or("null".to_owned(), quote),
         docs.join(",")
     );
