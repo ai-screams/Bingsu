@@ -28,7 +28,8 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu setup [--yes] [--icons nerd|unicode] [--mode auto|dark|light]";
+const USAGE: &str =
+    "usage: bingsu setup [--yes] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]";
 const FILE: &str = "config.toml";
 /// The names of the one place `setup` writes: the file it makes, and the
 /// JSON name that stands in the same place.
@@ -50,7 +51,7 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
             Some("--yes") => out.yes = true,
             Some("--icons") => {
                 let v = it.next().flatten().and_then(Icons::parse);
-                out.icons = Some(v.ok_or("--icons takes nerd or unicode")?);
+                out.icons = Some(v.ok_or("--icons takes nerd, light, unicode or ascii")?);
             }
             Some("--mode") => {
                 let v = it.next().flatten().and_then(Mode::parse);
@@ -424,9 +425,18 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 인자 값 검사를 빼는 것(모르는 아이콘·모드·남는 단어를 받음), 값 없는 `--icons`를
-    // 받는 것.
+    // 받는 것, 아이콘 낱말 넷 중 하나를 받지 않거나 다른 집합으로 읽는 것, 거부 문구가 받는 낱말을 다 말하지
+    // 않는 것.
     #[test]
     fn arguments_are_read_strictly() {
+        for icons in Icons::ALL {
+            let a = parse(&args(&["--icons", icons.word()])).unwrap();
+            assert_eq!(a.icons, Some(icons));
+        }
+        let e = parse(&args(&["--icons", "emoji"])).unwrap_err();
+        assert_eq!(e, "--icons takes nerd, light, unicode or ascii");
+        let words = Icons::ALL.map(Icons::word).join("|");
+        assert!(USAGE.contains(&format!("[--icons {words}]")), "{USAGE}");
         let a = parse(&args(&["--yes", "--icons", "nerd", "--mode", "light"])).unwrap();
         assert_eq!(
             a,
@@ -438,7 +448,11 @@ mod tests {
         );
         for bad in [
             &["--icons", "emoji"][..],
+            &["--icons", "Light"],
+            &["--icons", "ASCII"],
+            &["--icons", ""],
             &["--icons"],
+            &["--yes", "--icons=light"],
             &["--mode", "dim"],
             &["--mode"],
             &["extra"],

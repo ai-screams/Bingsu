@@ -103,6 +103,27 @@ def test_reply_restores_the_terminal_and_is_not_echoed(home):
     assert 'mode = "dark"' in config(home)
 
 
+# 이것을 실패시키는 것: 터미널에서 `--icons`로 준 light·ascii를 받지 않는 것(사용법 오류로 끝남), 미리 답한
+# 아이콘 질문을 다시 묻는 것, 색 모드 질문을 건너뛰는 것, 그 집합의 시작 프리셋(light → triangle, ascii →
+# lean)을 쓰지 않는 것.
+@pytest.mark.parametrize(("icons", "preset"), [("light", "triangle"), ("ascii", "lean")])
+def test_icons_given_on_a_terminal_skip_only_that_question(home, icons, preset):
+    child = spawn(home, "--icons", icons)
+    child.expect(QUERY)
+    child.send(DARK)
+    child.expect(rb"the terminal looks dark")
+    child.send("\n")
+    child.expect(rb"\[Y/n\] ")
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 0, text
+    assert before == after, (before, after)
+    assert "Can you see them?" not in text, text
+    written = config(home)
+    assert f'icons = "{icons}"' in written and f'preset = "{preset}"' in written, written
+    assert 'mode = "dark"' in written
+
+
 # 이것을 실패시키는 것: 응답이 없을 때 시간 제한 없이 기다리는 것, 시간 초과 뒤 복구하지 않는 것,
 # 시간 초과를 선택 질문("the terminal did not say")으로 잇지 않는 것.
 def test_silence_times_out_restores_and_asks(home):

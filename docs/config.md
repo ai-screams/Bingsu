@@ -516,8 +516,9 @@ Add this to your shell's startup file to start bingsu:
 eval "$(bingsu init zsh)"
 ```
 
-Without a terminal it asks nothing and needs `--yes --icons nerd|unicode --mode auto|dark|light`. On a terminal,
-`--icons` and `--mode` answer their question in advance and `--yes` skips the final confirmation.
+Without a terminal it asks nothing and needs `--yes --icons nerd|light|unicode|ascii --mode auto|dark|light`. On a
+terminal, `--icons` and `--mode` answer their question in advance and `--yes` skips the final confirmation. The file
+starts from the `triangle` preset with `nerd` or `light` and from `lean` with `unicode` or `ascii`.
 
 ### Editing: `bingsu config edit`
 

@@ -95,9 +95,61 @@ fn without_a_terminal_a_missing_argument_is_a_usage_error_and_writes_nothing() {
     }
     for bad in [
         &["--icons", "emoji", "--yes", "--mode", "auto"][..],
+        &["--icons", "Light", "--yes", "--mode", "auto"],
         &["--bogus"],
     ] {
-        assert_eq!(h.run(bad).status.code(), Some(2), "{bad:?}");
+        let o = h.run(bad);
+        assert_eq!(o.status.code(), Some(2), "{bad:?}");
+        assert_eq!(h.tree(), Vec::<String>::new(), "{bad:?}");
+    }
+    let o = h.run(&["--icons", "emoji", "--yes", "--mode", "auto"]);
+    assert!(
+        text(&o.stderr).contains("--icons takes nerd, light, unicode or ascii"),
+        "{}",
+        text(&o.stderr)
+    );
+}
+
+// 이것을 실패시키는 것: 아이콘 집합 넷 중 하나를 터미널 없는 경로에서 받지 않는 것, 파일에 다른 집합이나 다른
+// 시작 프리셋(nerd·light → triangle, unicode·ascii → lean)을 쓰는 것, 만든 파일이 `config check`를 통과하지
+// 못하는 것, 같은 선택으로 다시 부르면 차이를 알리는 것(시작 설정과 비교가 갈라짐).
+#[test]
+fn every_icon_set_writes_its_starter_and_it_checks() {
+    for (icons, preset) in [
+        ("nerd", "triangle"),
+        ("light", "triangle"),
+        ("unicode", "lean"),
+        ("ascii", "lean"),
+    ] {
+        let h = Home::new(&format!("icons-{icons}"));
+        let args = ["--yes", "--icons", icons, "--mode", "auto"];
+        let o = h.run(&args);
+        assert_eq!(o.status.code(), Some(0), "{icons}: {o:?}");
+        let file = std::fs::read_to_string(h.config()).unwrap();
+        assert_eq!(
+            file.matches(&format!("\nicons = \"{icons}\"\n")).count(),
+            1,
+            "{file}"
+        );
+        assert_eq!(
+            file.matches(&format!("\npreset = \"{preset}\"\n")).count(),
+            1,
+            "{file}"
+        );
+        let c = h.run(&["config", "check"]);
+        assert_eq!(c.status.code(), Some(0), "{icons}: {}", text(&c.stderr));
+        assert!(
+            text(&c.stdout).contains("result: valid"),
+            "{icons}: {}",
+            text(&c.stdout)
+        );
+        let again = h.run(&args);
+        assert_eq!(again.status.code(), Some(0), "{icons}: {again:?}");
+        assert!(
+            text(&again.stderr).contains("It already has the choices you made."),
+            "{icons}: {}",
+            text(&again.stderr)
+        );
     }
 }
 
