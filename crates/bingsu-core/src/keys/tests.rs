@@ -165,6 +165,42 @@ fn a_broken_sequence_begins_again_or_drains() {
     assert_eq!(run(&[b"\x1b[1\x03"], ms(1)), []);
 }
 
+// 이것을 실패시키는 것: C1 도입 바이트를 홀로 버리는 것(문자열 안의 Enter가 다른 호출에서 키가 됨, 0x03이 취소가
+// 됨), 0x9c로 문자열을 끝내지 않는 것, 8비트 CSI 끝 표지를 놓치는 것, UTF-8 글자의 이어지는 0x9c·0x9b를 끝으로
+// 읽는 것, ESC 뒤 C1 바이트를 함께 버리는 것, 떠도는 C1 바이트를 키로 내는 것.
+#[test]
+fn c1_controls_are_their_esc_forms() {
+    // The reported case: an APC whose Enter keys come in two reads.
+    let mut r = KeyReader::new();
+    assert_eq!(r.feed(b"\x9f\r", Duration::ZERO).as_slice(), []);
+    assert_eq!(r.feed(b"\r\x9c", ms(1)).as_slice(), []);
+    assert_eq!(r.deadline(), Some(ms(1) + DRAIN_QUIET));
+    assert_eq!(one(b"\x9f\x03\x9c"), []);
+    assert_eq!(one(b"\x9bZ"), [BackTab]);
+    // After ESC, a C1 byte is read again.
+    assert_eq!(one(b"\x1b\x9f\r\x9c"), []);
+    assert_eq!(one(b"\x1b\x9bA"), [Up]);
+    // Stray C1 bytes are no keys.
+    assert_eq!(one(b"\x9cq\x85\x9c"), [Char(b'q')]);
+    // A continuation byte of a character is no C1 control: `Û` is C3 9B.
+    assert_eq!(one(b"\xc3\x9bA"), [Char(b'A')]);
+    // In a payload a continuation 0x9c ends nothing (`Ŝ` is C5 9C), a 0x9c
+    // after a whole character does.
+    let mut r = KeyReader::new();
+    r.feed(b"\x1b]\xc5\x9c", Duration::ZERO);
+    assert_eq!(r.deadline(), Some(STR_TIME));
+    let mut r = KeyReader::new();
+    r.feed(b"\x1b]\xc5\x9c\x9c", Duration::ZERO);
+    assert_eq!(r.deadline(), Some(DRAIN_QUIET));
+    // The same for the 0x9b of an 8-bit end mark (`ě` is C4 9B).
+    let mut r = KeyReader::new();
+    r.feed(b"\x1b[200~\xc4\x9b201~", Duration::ZERO);
+    assert_eq!(r.deadline(), Some(PASTE_TIME));
+    let mut r = KeyReader::new();
+    r.feed(b"\x1b[200~\xc4\x9b\x9b201~", Duration::ZERO);
+    assert_eq!(r.deadline(), Some(DRAIN_QUIET));
+}
+
 // 이것을 실패시키는 것: ESC ESC의 둘째를 다시 읽지 않는 것.
 #[test]
 fn esc_esc_is_an_esc_and_a_new_start() {
@@ -190,6 +226,17 @@ const SAMPLES: &[(&[u8], &[Key])] = &[
     (b"\x1bP1$r0m\x1b\\", &[]),
     (b"\x1b_q\rs\x1b\x1b\\", &[]),
     (b"\x1b[12;40R", &[]),
+    (b"\x9bA", &[Up]),
+    (b"\x8fD", &[Left]),
+    (b"\x9b1;5Aj", &[Char(b'j')]),
+    (b"\x9d11;rgb:0000/0000/0000\x9c", &[]),
+    (b"\x9f\r\r\x03\x9c", &[]),
+    (b"\x90q\x1b\\", &[]),
+    (b"\x1b]q\r\x9c", &[]),
+    (b"\x9b200~q\rs\x9b201~", &[]),
+    (b"\x9b200~q\x1b[201~", &[]),
+    (b"\x1b[200~q\xc4\x9b201~\x9b201~", &[]),
+    (b"\x1b]\xc5\x9cq\x07", &[]),
 ];
 
 // 이것을 실패시키는 것: 읽기 경계에서 시퀀스를 끊는 것(어느 분할 지점에서든 `[`, `A`, 내용의 `q`가 키가 됨),
@@ -223,20 +270,30 @@ const COMMANDS: &[u8] = b"qs\r\n19ur\x03\x1a\x04gilc";
 #[test]
 fn payload_never_becomes_keys() {
     let mut wrapped: Vec<Vec<u8>> = Vec::new();
-    for intro in *b"]P_^X" {
-        for end in [&b"\x07"[..], b"\x1b\\"] {
-            let mut v = alloc::vec![0x1b, intro];
+    let intros: [&[u8]; 10] = [
+        b"\x1b]", b"\x1bP", b"\x1b_", b"\x1b^", b"\x1bX", b"\x9d", b"\x90", b"\x9f", b"\x9e",
+        b"\x98",
+    ];
+    for intro in intros {
+        for end in [&b"\x07"[..], b"\x1b\\", b"\x9c"] {
+            let mut v = intro.to_vec();
             v.extend_from_slice(COMMANDS);
             v.extend_from_slice(end);
             v.extend_from_slice(COMMANDS);
             wrapped.push(v);
         }
     }
-    let mut paste = b"\x1b[200~".to_vec();
-    paste.extend_from_slice(COMMANDS);
-    paste.extend_from_slice(b"\x1b[201~");
-    paste.extend_from_slice(COMMANDS);
-    wrapped.push(paste);
+    for (start, end) in [
+        (&b"\x1b[200~"[..], &b"\x1b[201~"[..]),
+        (b"\x9b200~", b"\x9b201~"),
+        (b"\x1b[200~", b"\x9b201~"),
+    ] {
+        let mut paste = start.to_vec();
+        paste.extend_from_slice(COMMANDS);
+        paste.extend_from_slice(end);
+        paste.extend_from_slice(COMMANDS);
+        wrapped.push(paste);
+    }
     // Over the length cap: the rest of the sequence and of the read drains.
     let mut long = b"\x1b[".to_vec();
     long.extend_from_slice(&[b'1'; SEQ_MAX]);

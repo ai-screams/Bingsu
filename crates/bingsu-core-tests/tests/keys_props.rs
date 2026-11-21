@@ -103,13 +103,14 @@ fn joined(picked: &[usize]) -> (Vec<u8>, Vec<Key>, usize) {
     (bytes, keys, count)
 }
 
-/// What a string or paste that begins with ESC gives when cut at `cuts`
-/// with `gaps`: no key, or the Esc key alone when the first read is that
-/// ESC and the next comes `ESC_WAIT` or more later (the rest is then a late
-/// sequence).
-fn esc_alone_if_cut_after_it(cuts: &[usize], gaps: &[u64]) -> Vec<Key> {
+/// What a string or paste gives when cut at `cuts` with `gaps`: no key,
+/// or the Esc key alone when it begins with ESC (not a C1 introducer), the
+/// first read is that ESC and the next comes `ESC_WAIT` or more later (the
+/// rest is then a late sequence).
+fn esc_alone_if_cut_after_it(bytes: &[u8], cuts: &[usize], gaps: &[u64]) -> Vec<Key> {
     let first = cuts.iter().copied().filter(|&c| c > 0).min();
-    if first == Some(1)
+    if bytes.first() == Some(&0x1b)
+        && first == Some(1)
         && gaps
             .first()
             .is_some_and(|&g| u128::from(g) >= ESC_WAIT.as_millis())
@@ -162,20 +163,23 @@ proptest! {
     // 가는 것, 끝난 뒤 Ground로 돌아오지 않는 것.
     #[test]
     fn a_string_gives_no_keys(
-        intro in prop::sample::select(b"]P_^X".to_vec()),
-        st in any::<bool>(),
+        intro in prop::sample::select(vec![
+            &b"\x1b]"[..], b"\x1bP", b"\x1b_", b"\x1b^", b"\x1bX",
+            b"\x9d", b"\x90", b"\x9f", b"\x9e", b"\x98",
+        ]),
+        end in prop::sample::select(vec![&b"\x07"[..], b"\x1b\\", b"\x9c"]),
         payload in prop::collection::vec(any::<u8>(), 0..300),
         tail in prop::collection::vec(any::<u8>(), 0..20),
         cuts in prop::collection::vec(0usize..340, 0..20),
         gaps in prop::collection::vec(0u64..=50, 1..20),
     ) {
-        let mut bytes = vec![0x1b, intro];
-        bytes.extend(payload.iter().copied().filter(|&b| b != 0x07 && b != 0x1b));
-        bytes.extend_from_slice(if st { b"\x1b\\" } else { b"\x07" });
+        let mut bytes = intro.to_vec();
+        bytes.extend(payload.iter().copied().filter(|&b| !matches!(b, 0x07 | 0x1b | 0x9c)));
+        bytes.extend_from_slice(end);
         bytes.extend(tail.iter().copied().filter(|&b| b != 0x1b));
         let mut r = KeyReader::new();
         let (keys, now) = run_from(&mut r, Duration::ZERO, &bytes, &cuts, &gaps);
-        prop_assert_eq!(keys, esc_alone_if_cut_after_it(&cuts, &gaps));
+        prop_assert_eq!(keys, esc_alone_if_cut_after_it(&bytes, &cuts, &gaps));
         prop_assert_eq!(r.feed(b"q", now).as_slice().to_vec(), vec![Key::Char(b'q')]);
     }
 
@@ -183,20 +187,25 @@ proptest! {
     // 나뉜 끝 표지를 놓쳐 Ground로 돌아오지 않는 것.
     #[test]
     fn a_bracketed_paste_gives_no_keys(
+        start in prop::sample::select(vec![&b"\x1b[200~"[..], b"\x9b200~"]),
+        end in prop::sample::select(vec![&b"\x1b[201~"[..], b"\x9b201~"]),
         payload in prop::collection::vec(any::<u8>(), 0..2000),
         tail in prop::collection::vec(any::<u8>(), 0..20),
         cuts in prop::collection::vec(0usize..2040, 0..30),
         gaps in prop::collection::vec(0u64..=50, 1..30),
     ) {
-        let end = b"\x1b[201~";
-        prop_assume!(!payload.windows(end.len()).any(|w| w == end));
-        let mut bytes = b"\x1b[200~".to_vec();
+        // No end mark in the payload. (A payload that ends inside a UTF-8
+        // character hides an 8-bit end mark: the paste then ends at its
+        // time bound, and still gives no keys.)
+        prop_assume!(!payload.windows(6).any(|w| w == b"\x1b[201~"));
+        prop_assume!(!payload.windows(5).any(|w| w == b"\x9b201~"));
+        let mut bytes = start.to_vec();
         bytes.extend_from_slice(&payload);
         bytes.extend_from_slice(end);
         bytes.extend(tail.iter().copied().filter(|&b| b != 0x1b));
         let mut r = KeyReader::new();
         let (keys, now) = run_from(&mut r, Duration::ZERO, &bytes, &cuts, &gaps);
-        prop_assert_eq!(keys, esc_alone_if_cut_after_it(&cuts, &gaps));
+        prop_assert_eq!(keys, esc_alone_if_cut_after_it(&bytes, &cuts, &gaps));
         prop_assert_eq!(r.feed(b"q", now).as_slice().to_vec(), vec![Key::Char(b'q')]);
     }
 
@@ -205,6 +214,7 @@ proptest! {
     fn the_late_rest_of_a_sequence_gives_no_keys(
         tail in prop::sample::select(vec![
             &b"[A"[..],
+            b"]11;rgb:0000/0000/0000\x9c",
             b"OA",
             b"O5A",
             b"[1;5D",

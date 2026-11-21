@@ -15,10 +15,10 @@
 //! | -- | -- | -- | -- | -- |
 //! | Ground | | | | |
 //! | Esc | `ESC` | the next byte, or `ESC_WAIT` (30 ms) with none: the Esc key | 30 ms | the Esc key |
-//! | Csi | `ESC [` | a final byte 0x40-0x7e | `SEQ_MAX` (32) bytes, `SEQ_TIME` (200 ms) | Drain |
-//! | Ss3 | `ESC O` | as Csi | as Csi | Drain |
-//! | Str | `ESC ]`, `ESC P`, `ESC _`, `ESC ^`, `ESC X` | BEL, or ST (`ESC \`) | `STR_MAX` (4,096) bytes, `STR_TIME` (500 ms) | Drain |
-//! | Paste | `ESC [ 200 ~` | `ESC [ 201 ~` | `PASTE_MAX` (1 MiB), `PASTE_TIME` (5 s) | Drain |
+//! | Csi | `ESC [`, 0x9b | a final byte 0x40-0x7e | `SEQ_MAX` (32) bytes, `SEQ_TIME` (200 ms) | Drain |
+//! | Ss3 | `ESC O`, 0x8f | as Csi | as Csi | Drain |
+//! | Str | `ESC ]`, `ESC P`, `ESC _`, `ESC ^`, `ESC X`, 0x9d, 0x90, 0x9f, 0x9e, 0x98 | BEL, or ST (`ESC \`, 0x9c) | `STR_MAX` (4,096) bytes, `STR_TIME` (500 ms) | Drain |
+//! | Paste | `ESC [ 200 ~` (or with 0x9b) | `ESC [ 201 ~` (or with 0x9b) | `PASTE_MAX` (1 MiB), `PASTE_TIME` (5 s) | Drain |
 //! | Utf8 | 0xC2-0xF4 | the last continuation byte | 3 more bytes | |
 //! | Drain | a bound passed, a string or a paste ended | `DRAIN_QUIET` (100 ms) with no input | | |
 //!
@@ -53,6 +53,16 @@
 //!   `0xE2 ESC [ A` would lose the arrow, or the ESC of `ESC [ 200 ~`
 //!   would be swallowed and its `2` would pick a value. Any other byte that
 //!   breaks Csi or Ss3 drains.
+//! - 8-bit (C1) controls: an introducer (0x9b CSI, 0x8f SS3, 0x9d OSC,
+//!   0x90 DCS, 0x9f APC, 0x9e PM, 0x98 SOS) that is no part of a UTF-8
+//!   character begins the same state as its `ESC` form (a C1 introducer
+//!   counts as two bytes towards `SEQ_MAX`), and 0x9c ends a string as ST
+//!   does; other C1 bytes are dropped. Inside a string or a paste a byte
+//!   0x80-0xbf that continues a UTF-8 character of the payload is payload,
+//!   never 0x9c or the 0x9b of an 8-bit end mark (`Ŝ` is `C5 9C`). Without
+//!   this, `0x9f`, a pause, Enter and `0x9c` would give an Enter key from a
+//!   string. After ESC a byte outside ASCII is read again from Ground (the
+//!   ESC is dropped), so `ESC 0x9d` cannot hide an OSC either.
 //! - Ss3 takes parameter bytes as Csi does: some terminals send
 //!   `ESC O 5 A`, and the `5` would otherwise pick a value.
 //! - ESC ESC: the first is the Esc key, the second begins again.
@@ -113,6 +123,10 @@ const BEL: u8 = 0x07;
 const CANCEL: Key = Key::Ctrl(b'c');
 /// The paste end mark.
 const PASTE_END: &[u8] = b"\x1b[201~";
+/// The 8-bit CSI, which stands for the first two bytes of the end mark.
+const CSI8: u8 = 0x9b;
+/// The 8-bit ST.
+const ST8: u8 = 0x9c;
 /// The parameter bytes of the paste start mark, `ESC [ 200 ~`.
 const PASTE_START: [u8; 3] = *b"200";
 /// Bytes of a Csi or Ss3 sequence kept to tell its key: ESC, the
@@ -222,18 +236,21 @@ enum State {
         at: Duration,
     },
     Seq(InSeq),
-    /// `len` bytes after the introducer; `esc`: the last one was ESC.
+    /// `len` bytes after the introducer; `esc`: the last one was ESC;
+    /// `cont`: continuation bytes of a UTF-8 character still to come.
     Str {
         since: Duration,
         len: usize,
         esc: bool,
+        cont: u8,
     },
     /// `len` bytes after the start mark; `matched`: how much of the end
-    /// mark the last bytes were.
+    /// mark the last bytes were; `cont` as for Str.
     Paste {
         since: Duration,
         len: usize,
         matched: usize,
+        cont: u8,
     },
     /// `need` continuation bytes to come, the next one in `lo..=hi`.
     Utf8 {
@@ -403,22 +420,26 @@ impl KeyReader {
                 self.ground(b, now, found);
                 false
             }
-            State::Esc { at } => {
-                self.after_esc(b, at, now, found);
-                false
-            }
+            State::Esc { at } => self.after_esc(b, at, now, found),
             State::Seq(seq) => self.in_seq(b, seq, now, found),
-            State::Str { since, len, esc } => {
+            State::Str {
+                since,
+                len,
+                esc,
+                cont,
+            } => {
                 let len = len.saturating_add(1);
+                let in_char = continues(cont, b);
                 // 이것을 실패시키는 것: 길이 상한을 보지 않는 것, 끝난 뒤 Ground로 가는 것(반사된 글의 BEL 뒤가 키가 됨),
-                // ESC 다음이 아닌 `\`로 끝내는 것.
-                if len > STR_MAX || b == BEL || (esc && b == b'\\') {
+                // ESC 다음이 아닌 `\`로 끝내는 것, 0x9c로 끝내지 않는 것, UTF-8 글자의 이어지는 0x9c로 끝내는 것.
+                if len > STR_MAX || b == BEL || (esc && b == b'\\') || (b == ST8 && !in_char) {
                     self.drain(now);
                 } else {
                     self.state = State::Str {
                         since,
                         len,
                         esc: b == ESC,
+                        cont: next_cont(cont, b),
                     };
                 }
                 false
@@ -427,14 +448,18 @@ impl KeyReader {
                 since,
                 len,
                 matched,
+                cont,
             } => {
                 let len = len.saturating_add(1);
-                // 이것을 실패시키는 것: 끝 표지 짝 맞추기에서 ESC로 다시 시작하지 않는 것(`ESC ESC [201~`를 놓침), 길이
-                // 상한을 보지 않는 것, 끝난 뒤 Ground로 가는 것(가짜 끝 표지 뒤가 키가 됨).
+                // 이것을 실패시키는 것: 끝 표지 짝 맞추기에서 ESC로 다시 시작하지 않는 것(`ESC ESC [201~`를 놓침), 8비트
+                // CSI의 끝 표지를 놓치는 것, UTF-8 글자의 이어지는 0x9b를 끝 표지로 읽는 것, 길이 상한을 보지 않는 것,
+                // 끝난 뒤 Ground로 가는 것(가짜 끝 표지 뒤가 키가 됨).
                 let matched = if PASTE_END.get(matched) == Some(&b) {
                     matched + 1
                 } else if b == ESC {
                     1
+                } else if b == CSI8 && !continues(cont, b) {
+                    2
                 } else {
                     0
                 };
@@ -445,6 +470,7 @@ impl KeyReader {
                         since,
                         len,
                         matched,
+                        cont: next_cont(cont, b),
                     };
                 }
                 false
@@ -493,6 +519,14 @@ impl KeyReader {
             0x7f | 0x08 => found.key(Some(Key::Backspace)),
             0x00..=0x1f => found.key(Some(Key::Ctrl((b | 0x40).to_ascii_lowercase()))),
             0x20..=0x7e => found.key(Some(Key::Char(b))),
+            // A C1 control (no character continues here): an introducer
+            // begins its sequence as its ESC form does, others are dropped.
+            // 이것을 실패시키는 것: C1 도입 바이트를 홀로 버리는 것(`0x9f \r 0x9c`의 Enter가 키가 됨).
+            0x80..=0x9f => {
+                if let Some(state) = introduce(b - 0x40, now, false) {
+                    self.state = state;
+                }
+            }
             0xc2..=0xdf => self.utf8(1, 0x80, 0xbf),
             0xe0 => self.utf8(2, 0xa0, 0xbf),
             0xed => self.utf8(2, 0x80, 0x9f),
@@ -500,7 +534,7 @@ impl KeyReader {
             0xf0 => self.utf8(3, 0x90, 0xbf),
             0xf4 => self.utf8(3, 0x80, 0x8f),
             0xf1..=0xf3 => self.utf8(3, 0x80, 0xbf),
-            // 0x80-0xc1, 0xf5-0xff: no character starts with them.
+            // 0xa0-0xc1, 0xf5-0xff: no character starts with them.
             _ => {}
         }
     }
@@ -509,22 +543,28 @@ impl KeyReader {
         self.state = State::Utf8 { need, lo, hi };
     }
 
-    /// The byte after an ESC that came at `at`, before `ESC_WAIT` passed.
-    fn after_esc(&mut self, b: u8, at: Duration, now: Duration, found: &mut Found) {
+    /// The byte after an ESC that came at `at`, before `ESC_WAIT` passed;
+    /// `true` when it must be read again from Ground.
+    fn after_esc(&mut self, b: u8, at: Duration, now: Duration, found: &mut Found) -> bool {
         if let Some(state) = introduce(b, at, false) {
             self.state = state;
-            return;
+            return false;
         }
         // 이것을 실패시키는 것: ESC ESC의 둘째로 새로 시작하지 않는 것(`ESC ESC [ A`의 `[`, `A`가 키가 됨).
         if b == ESC {
             found.key(Some(Key::Esc));
             self.state = State::Esc { at: now };
-            return;
+            return false;
         }
-        // An Alt key, which the editor does not bind. After a byte outside
-        // ASCII the rest of its character is invalid on its own: dropped.
-        found.key(None);
         self.state = State::Ground;
+        // 이것을 실패시키는 것: ESC 뒤 아스키 밖 바이트를 함께 버리는 것(`ESC 0x9f \r 0x9c`의 Enter가 키가 됨).
+        if b >= 0x80 {
+            // The ESC is dropped; the byte is a C1 control or a character.
+            return true;
+        }
+        // An Alt key, which the editor does not bind.
+        found.key(None);
+        false
     }
 
     /// The next byte of a Csi or Ss3 sequence.
@@ -559,6 +599,7 @@ impl KeyReader {
                             since: now,
                             len: 0,
                             matched: 0,
+                            cont: 0,
                         };
                         return false;
                     }
@@ -582,6 +623,27 @@ impl KeyReader {
     }
 }
 
+/// `b` continues a UTF-8 character of a payload that needs `cont` more
+/// bytes.
+fn continues(cont: u8, b: u8) -> bool {
+    cont > 0 && (0x80..=0xbf).contains(&b)
+}
+
+/// How many continuation bytes of a UTF-8 character of a payload are still
+/// to come after `b`. Only the count: a payload is dropped, so the exact
+/// ranges of the lead bytes do not matter here.
+fn next_cont(cont: u8, b: u8) -> u8 {
+    if continues(cont, b) {
+        return cont - 1;
+    }
+    match b {
+        0xc2..=0xdf => 1,
+        0xe0..=0xef => 2,
+        0xf0..=0xf4 => 3,
+        _ => 0,
+    }
+}
+
 /// The state that `b` begins after an ESC (at `since`), when it introduces
 /// a sequence. `late`: the ESC was already the Esc key.
 fn introduce(b: u8, since: Duration, late: bool) -> Option<State> {
@@ -601,6 +663,7 @@ fn introduce(b: u8, since: Duration, late: bool) -> Option<State> {
             since,
             len: 0,
             esc: false,
+            cont: 0,
         }),
         _ => None,
     }
