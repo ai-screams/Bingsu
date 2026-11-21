@@ -1099,10 +1099,7 @@ impl Tty {
     /// while another guard in this process is alive (the signal flag and
     /// handlers are process-wide).
     pub fn raw(&self) -> std::io::Result<RawGuard<'_>> {
-        if !foreground(self.file.as_raw_fd()) {
-            return Err(std::io::Error::other("not the terminal's foreground job"));
-        }
-        let slot = Slot::take()?;
+        let slot = self.claim()?;
         let raw = Raw::enter(self.file.as_raw_fd())?;
         Ok(RawGuard {
             tty: self,
@@ -1110,6 +1107,14 @@ impl Tty {
             _slot: slot,
             spent: None,
         })
+    }
+
+    /// The one guard's place, for the terminal's foreground job only.
+    fn claim(&self) -> std::io::Result<Slot> {
+        if !foreground(self.file.as_raw_fd()) {
+            return Err(std::io::Error::other("not the terminal's foreground job"));
+        }
+        Slot::take()
     }
 
     /// Sends `OSC 11 ; ?` and waits up to `REPLY_TIMEOUT` for the answer.

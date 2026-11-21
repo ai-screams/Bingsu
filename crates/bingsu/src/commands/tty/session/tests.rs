@@ -773,6 +773,10 @@ fn job_shell(scenario: &str) -> (Vec<String>, Vec<u8>) {
     );
     t.expect(b"REDRAW 1");
     match scenario {
+        "rawstop" => {
+            t.expect(b"REDRAW 2");
+            t.send(b"q");
+        }
         "stop" => {
             t.send(b"\x1a");
             t.expect(b"SHELL bg");
@@ -871,8 +875,69 @@ fn a_background_session_ends_when_its_terminal_goes_away() {
     assert!(has(&lines, "job: Hangup"), "{lines:?}");
 }
 
-/// The scenario's shell (`BINGSU_TEST_SCENARIO`): `stop`, `taken`, `winch`,
-/// `hangup`; see the parent tests. The job's lines come through a pipe,
+// A SIGTSTP right after the raw switch, before the modes go on: it is the
+// session's to handle (the job control handlers are in before the switch),
+// so the terminal is put back before the job stops, and `fg` takes it
+// again. 이것을 실패시키는 것: 처리기를 raw 전환 뒤에 거는 것(기본 동작으로 raw인 채 멈춤: 멈춘 때의 모드가 다름).
+#[test]
+fn a_stop_right_after_the_raw_switch_puts_the_terminal_back() {
+    let (lines, all) = job_shell("rawstop");
+    for want in [
+        "stopped by TSTP true",
+        "restored at the stop true",
+        "job: resumed 1",
+        "job ended true",
+        "restored at the end true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    let want = cat(&[
+        ENTER_ALL,
+        b"\x1b[H\x1b[2JREDRAW 1",
+        LEAVE_ALL,
+        ENTER_ALL,
+        b"\x1b[H\x1b[2JREDRAW 2",
+        LEAVE_ALL,
+    ]);
+    assert_eq!(shown(&all), shown(&want));
+}
+
+// The raw switch fails once the job control handlers are in: they go back.
+// 이것을 실패시키는 것: 실패한 진입에서 처리기를 되돌리지 않는 것.
+#[test]
+fn a_failed_raw_switch_puts_the_handlers_back() {
+    let t = start("failed_raw_child", &[]);
+    let (lines, all) = t.mode_restored_after();
+    assert_eq!(lines, ["refused true", "handlers back true"]);
+    assert_eq!(shown(&all), "");
+}
+
+#[test]
+#[ignore = "child: a session on a pseudo-terminal"]
+fn failed_raw_child() {
+    let tty = take_terminal();
+    let handlers = || JOB_SIGNALS.map(disposition);
+    let before = handlers();
+    test_session::FAIL_RAW.set(true);
+    say(&format!("refused {}", tty.full_screen().is_err()));
+    say(&format!("handlers back {}", handlers() == before));
+}
+
+/// Kills the job's process group when dropped (`None`: the job is meant to
+/// outlive the shell).
+struct KillJob(Option<libc::pid_t>);
+
+impl Drop for KillJob {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // SAFETY: sends SIGKILL to the job's process group; one that
+            // ended already is not there (ESRCH).
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
+}
+
+/// The scenario's shell (`BINGSU_TEST_SCENARIO`); see the parent tests. The job's lines come through a pipe,
 /// which also tells the shell when the job is ready or back from a stop.
 #[test]
 #[ignore = "child: a job control shell on a pseudo-terminal"]
@@ -902,6 +967,14 @@ fn job_shell_child() {
         .spawn()
         .unwrap();
     let pid = libc::pid_t::try_from(job.id()).unwrap();
+    // A job a broken build leaves stopped or waiting is killed: when this
+    // shell fails, and in any case after 20 s.
+    let mut killer = KillJob(Some(pid));
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        // SAFETY: sends SIGKILL to the job's process group.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    });
     let (tell, told) = std::sync::mpsc::channel();
     let out = job.stdout.take().unwrap();
     std::thread::spawn(move || {
@@ -938,7 +1011,8 @@ fn job_shell_child() {
         ));
         return;
     }
-    // Ctrl-Z stops it.
+    // Ctrl-Z stops it (or, in `rawstop`, the SIGTSTP that came right after
+    // the raw switch).
     let (_, status) = wait_for(pid, libc::WUNTRACED);
     give_terminal(own);
     say(&format!(
@@ -946,6 +1020,20 @@ fn job_shell_child() {
         libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTSTP
     ));
     say(&format!("restored at the stop {}", mode() == before));
+    if scenario == "rawstop" {
+        // `fg`.
+        give_terminal(pid);
+        // SAFETY: continues the job's process group.
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        give_terminal(own);
+        say(&format!(
+            "job ended {}",
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+        ));
+        say(&format!("restored at the end {}", mode() == before));
+        return;
+    }
     if let Some(sibling) = &sibling {
         // The group's stop reaches the sibling on its own time.
         let stopped = || {
@@ -984,6 +1072,7 @@ fn job_shell_child() {
         }
         "hangup" => {
             // The shell ends; the job reports through its file.
+            killer.0 = None;
             print(b"SHELL bg\n");
             return;
         }
@@ -1017,7 +1106,7 @@ fn job_shell_child() {
 fn job_child() {
     let scenario = param("BINGSU_TEST_SCENARIO");
     // Only a signal brings the session back here, not the once-a-second look.
-    if scenario == "stop" || scenario == "winch" {
+    if matches!(scenario.as_str(), "stop" | "winch" | "rawstop") {
         test_session::BACKGROUND_CHECK.set(Some(Duration::from_secs(60)));
     }
     if scenario == "hangup" {
@@ -1049,6 +1138,9 @@ fn job_child() {
     });
     if let Some(sibling) = &sibling {
         say(&format!("job: sibling {}", sibling.id()));
+    }
+    if scenario == "rawstop" {
+        test_session::AFTER_RAW.set(Some(libc::SIGTSTP));
     }
     let tty = Tty::open().unwrap();
     let mut s = tty.full_screen().unwrap();

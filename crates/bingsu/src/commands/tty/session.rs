@@ -79,7 +79,7 @@
 //! and the wake pipe. One guard at a time per process ([`Tty::raw`] or a
 //! session): the flags and handlers are process-wide.
 use super::{
-    CAUGHT, RawGuard, SIGNALS, STOP, Size, Tty, WAKE, WRITE_TIMEOUT, cancel_half_escape,
+    CAUGHT, Raw, RawGuard, SIGNALS, STOP, Size, Tty, WAKE, WRITE_TIMEOUT, cancel_half_escape,
     fits_select, flush_input, foreground, ready, window_size, write_once,
 };
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
@@ -104,6 +104,9 @@ fn background_check() -> Duration {
     }
     BACKGROUND_CHECK
 }
+
+/// How long a stop waits for the flag of the SIGCONT that ended it.
+const LATE_CONTINUE: Duration = Duration::from_millis(100);
 
 /// The most one read takes.
 const INPUT_CHUNK: usize = 1024;
@@ -231,6 +234,54 @@ fn plain_action(handler: libc::sighandler_t) -> libc::sigaction {
     // SAFETY: `act.sa_mask` is a valid signal set to empty.
     unsafe { libc::sigemptyset(&mut act.sa_mask) };
     act
+}
+
+/// The session's handlers of SIGTSTP, SIGCONT and SIGWINCH, from before the
+/// terminal mode changes until after it is back: a SIGTSTP in between is
+/// the session's to handle, so it never stops the process with the
+/// terminal raw. Putting the old actions back is `Drop`.
+struct JobSignals {
+    /// The actions they had, in `JOB_SIGNALS` order (`None`: not replaced;
+    /// SIGTSTP is left alone when it was ignored).
+    old: [Option<libc::sigaction>; 3],
+}
+
+impl JobSignals {
+    fn install() -> Self {
+        // A signal an earlier session took and never handled; cleared before
+        // the handlers go in, so one that comes after is kept.
+        // 이것을 실패시키는 것: 이 깃발을 지우지 않는 것(앞 세션 끝에 온 SIGTSTP로 새 세션이 멈춤; a_new_session_starts_with_no_signal_seen).
+        for seen in [&TSTP_SEEN, &CONT_SEEN, &WINCH_SEEN] {
+            seen.store(false, Ordering::SeqCst);
+        }
+        let ours = job_action();
+        let mut old = [None; 3];
+        for (slot, sig) in old.iter_mut().zip(JOB_SIGNALS) {
+            // 이것을 실패시키는 것: 무시하던 SIGTSTP에도 처리기를 거는 것(an_ignored_stop_stays_ignored).
+            if sig == libc::SIGTSTP && action(sig).sa_sigaction == libc::SIG_IGN {
+                continue;
+            }
+            *slot = set_action(sig, &ours);
+        }
+        Self { old }
+    }
+
+    /// Whether SIGTSTP is the session's (it was not ignored).
+    fn stops(&self) -> bool {
+        self.old[0].is_some()
+    }
+}
+
+impl Drop for JobSignals {
+    fn drop(&mut self) {
+        // 이것을 실패시키는 것: 처리기를 되돌리지 않는 것(entering_and_leaving_put_every_mode_back_in_order의 handlers back,
+        // a_failed_raw_switch_puts_the_handlers_back).
+        for (old, sig) in self.old.iter().zip(JOB_SIGNALS) {
+            if let Some(old) = old {
+                set_action(sig, old);
+            }
+        }
+    }
 }
 
 /// The wake pipe (read end, write end), made once per process and never
@@ -393,8 +444,12 @@ fn select(tty: Option<RawFd>, wake: RawFd, write: bool, until: Option<Instant>) 
 /// The terminal in full-screen use, from `Tty::full_screen` until it is
 /// dropped. See the module comment.
 pub struct Session<'a> {
-    /// Dropped after `Session::drop`: the mode, then the handlers of
-    /// SIGINT, SIGTERM and SIGHUP go back, then a signal taken is raised.
+    /// Dropped after `Session::drop` and before `guard`: the job control
+    /// handlers go back once the terminal is, and before the one guard's
+    /// place is given back.
+    jobs: JobSignals,
+    /// Dropped after `jobs`: the handlers of SIGINT, SIGTERM and SIGHUP go
+    /// back, a signal taken is raised again, then the place is given back.
     guard: RawGuard<'a>,
     fd: RawFd,
     /// The wake pipe's read end.
@@ -407,9 +462,6 @@ pub struct Session<'a> {
     /// `Resumed` is due.
     resumed: bool,
     size: Size,
-    /// The actions SIGTSTP, SIGCONT and SIGWINCH had (`None`: not
-    /// replaced; SIGTSTP is left alone when it was ignored).
-    old: [Option<libc::sigaction>; 3],
     input: [u8; INPUT_CHUNK],
 }
 
@@ -423,10 +475,28 @@ impl Tty {
     pub fn full_screen(&self) -> std::io::Result<Session<'_>> {
         // First, so that a failure leaves the terminal alone.
         let wake = wake_pipe()?;
-        let guard = self.raw()?;
         let fd = self.file.as_raw_fd();
+        // The place first (the handlers are process-wide), then the job
+        // control handlers, then the mode. An early return drops them in
+        // the other order: the handlers go back before the place does.
+        let slot = self.claim()?;
+        // 이것을 실패시키는 것: 처리기를 raw 전환 뒤에 거는 것(그 사이 SIGTSTP가 raw인 채 멈춤; a_stop_right_after_the_raw_switch_puts_the_terminal_back).
+        let jobs = JobSignals::install();
+        #[cfg(test)]
+        if test_session::FAIL_RAW.take() {
+            return Err(std::io::Error::other("the test's raw switch failed"));
+        }
+        let raw = Raw::enter(fd)?;
+        #[cfg(test)]
+        test_session::after_raw();
         let mut session = Session {
-            guard,
+            jobs,
+            guard: RawGuard {
+                tty: self,
+                raw,
+                _slot: slot,
+                spent: None,
+            },
             fd,
             wake,
             state: State::Running,
@@ -434,22 +504,8 @@ impl Tty {
             cut: false,
             resumed: false,
             size: Size::default(),
-            old: [None; 3],
             input: [0; INPUT_CHUNK],
         };
-        // A signal an earlier session took and never handled.
-        // 이것을 실패시키는 것: 이 깃발을 지우지 않는 것(앞 세션 끝에 온 SIGTSTP로 새 세션이 멈춤; a_new_session_starts_with_no_signal_seen).
-        for seen in [&TSTP_SEEN, &CONT_SEEN, &WINCH_SEEN] {
-            seen.store(false, Ordering::SeqCst);
-        }
-        let ours = job_action();
-        for (slot, sig) in session.old.iter_mut().zip(JOB_SIGNALS) {
-            // 이것을 실패시키는 것: 무시하던 SIGTSTP에도 처리기를 거는 것(an_ignored_stop_stays_ignored).
-            if sig == libc::SIGTSTP && action(sig).sa_sigaction == libc::SIG_IGN {
-                continue;
-            }
-            *slot = set_action(sig, &ours);
-        }
         session.enter()?;
         session.size = window_size(self.file.as_fd()).unwrap_or_default();
         Ok(session)
@@ -609,7 +665,7 @@ impl Session<'_> {
     /// Nothing when SIGTSTP was ignored when the session began.
     pub fn suspend(&mut self) {
         // 이것을 실패시키는 것: 무시하던 SIGTSTP인데도 멈추는 것(an_ignored_stop_stays_ignored).
-        if self.old[0].is_some() && self.state == State::Running {
+        if self.jobs.stops() && self.state == State::Running {
             self.stop(true);
         }
     }
@@ -700,9 +756,27 @@ impl Session<'_> {
         // SAFETY: raises SIGTSTP in this thread.
         unsafe { libc::raise(libc::SIGTSTP) };
         set_action(libc::SIGTSTP, &job_action());
+        // The SIGCONT that ended the stop may be handled on another thread a
+        // moment after this one goes on: wait a little for its flag, so it is
+        // not taken for a second continue (which would put the terminal back
+        // and take it again). In an orphaned process group no continue comes
+        // and the wait ends at its limit.
+        // 이것을 실패시키는 것: 이 기다림을 빼는 것(늦게 처리된 SIGCONT로 한 번 더 되돌리고 다시 잡음;
+        // a_stop_right_after_the_raw_switch_puts_the_terminal_back, 스레드에 따라 가끔).
+        self.wait_for_continue(Instant::now() + LATE_CONTINUE);
         // This continue is the one `check` handles now.
         CONT_SEEN.store(false, Ordering::SeqCst);
         self.check();
+    }
+
+    /// Waits on the wake pipe until SIGCONT's flag is set or `until` passes.
+    fn wait_for_continue(&self, until: Instant) {
+        while !CONT_SEEN.load(Ordering::SeqCst) {
+            match select(None, self.wake, false, Some(until)) {
+                Some(r) if r.wake => drain(self.wake),
+                _ => return,
+            }
+        }
     }
 
     /// After a continue (or a window change, or a quiet second, in the
@@ -751,12 +825,7 @@ impl Drop for Session<'_> {
         if !self.leave() {
             self.guard.raw.on = false;
         }
-        // 이것을 실패시키는 것: 처리기를 되돌리지 않는 것(entering_and_leaving_put_every_mode_back_in_order의 handlers back).
-        for (old, sig) in self.old.iter().zip(JOB_SIGNALS) {
-            if let Some(old) = old {
-                set_action(sig, old);
-            }
-        }
+        // `jobs`, then `guard`, drop next.
     }
 }
 
@@ -772,6 +841,17 @@ mod test_session {
         pub(super) static BEFORE_SELECT: Cell<Option<libc::c_int>> = const { Cell::new(None) };
         /// How often the background session looks at the terminal.
         pub(super) static BACKGROUND_CHECK: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
+        /// `full_screen` fails once its job control handlers are in, before
+        /// the raw switch.
+        pub(super) static FAIL_RAW: Cell<bool> = const { Cell::new(false) };
+        /// Raised once, right after the raw switch.
+        pub(super) static AFTER_RAW: Cell<Option<libc::c_int>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn after_raw() {
+        if let Some(sig) = AFTER_RAW.take() {
+            raise(sig);
+        }
     }
 
     /// One of `put`'s writes on a terminal that takes only part of it
