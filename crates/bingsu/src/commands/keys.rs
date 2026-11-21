@@ -315,7 +315,7 @@ mod pty {
     }
 
     // 이것을 실패시키는 것: 실제 raw 터미널에서 나뉜 화살표의 `[`·`A`나 늦은 나머지가 키가 되는 것, 표지 있는 붙여
-    // 넣기나 표지 없는 묶음의 키가 나오는 것, Enter가 ICRNL로 LF가 되어 오는데 Enter로 읽지 않는 것, Ctrl-D를 입력의
+    // 넣기나 표지 없는 묶음의 키가 나오는 것, 묶음 안의 Ctrl-C를 버리는 것, Enter가 ICRNL로 LF가 되어 오는데 Enter로 읽지 않는 것, Ctrl-D를 입력의
     // 끝으로 보는 것, 끊긴 터미널을 입력의 끝으로 알리지 않는 것.
     #[test]
     fn keys_on_a_pseudo_terminal() {
@@ -364,8 +364,12 @@ mod pty {
         t.send(b"1~");
         t.nothing_more();
 
-        // Four keys in one read without the marks: nothing.
+        // Four keys in one read without the marks: nothing, but for a
+        // Ctrl-C in them.
         t.send(b"qqqq");
+        t.nothing_more();
+        t.send(b"qq\x03q");
+        assert_eq!(t.next_keys(), "[Ctrl(99)]");
         t.nothing_more();
 
         // Three keys in one read are typed keys, reported together.

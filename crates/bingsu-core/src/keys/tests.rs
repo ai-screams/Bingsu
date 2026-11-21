@@ -317,7 +317,8 @@ fn a_late_rest_of_a_sequence_is_dropped() {
 }
 
 // 이것을 실패시키는 것: 키 넷의 읽기를 버리지 않는 것, 셋을 버리는 것, 시퀀스를 바이트 수로 세는 것, 아스키 밖 글자를
-// 세지 않는 것, 묶음 앞에 시간이 끝낸 Esc를 함께 버리는 것.
+// 세지 않는 것, 묶음 앞에 시간이 끝낸 Esc를 함께 버리는 것, 묶음 안의 Ctrl-C를 버리는 것, Ctrl-C 말고 다른 키를
+// 남기는 것.
 #[test]
 fn a_burst_of_four_keys_is_dropped() {
     assert_eq!(one(b"qqqq"), []);
@@ -335,18 +336,40 @@ fn a_burst_of_four_keys_is_dropped() {
         r.feed(b"abc", ms(40)).as_slice(),
         [Esc, Char(b'a'), Char(b'b'), Char(b'c')]
     );
+    // A Ctrl-C in a burst still cancels; nothing else of the burst comes.
+    assert_eq!(one(b"qq\x03q"), [Ctrl(b'c')]);
+    assert_eq!(one(b"qqqqqq\x03\x03\r"), [Ctrl(b'c')]);
+    assert_eq!(one(b"\x1a\x1a\x1a\x1a"), []);
+    let mut r = KeyReader::new();
+    r.feed(b"\x1b", Duration::ZERO);
+    assert_eq!(r.feed(b"qq\x03q", ms(40)).as_slice(), [Esc, Ctrl(b'c')]);
+    // In a paste or a string 0x03 stays payload, also next to a burst.
+    assert_eq!(one(b"qqqq\x1b[200~\x03\x1b[201~"), []);
+    assert_eq!(one(b"qqqq\x1b]\x03\x07"), []);
 }
 
-// 이것을 실패시키는 것: 묶음 뒤 Drain으로 가지 않는 것(다음 읽기의 키가 들어옴), Drain이 끝나지 않는 것, 붙여 넣기
-// 안에서 끝난 묶음 뒤 Drain으로 바꾸는 것(5 s 상한 대신 100 ms).
+// 이것을 실패시키는 것: 한 읽기의 `\r\n`을 Enter 하나로 합치는 것, 두 Enter를 다른 호출에서 내는 것(편집판이 Enter
+// 하나로 쓰기를 확인함).
 #[test]
-fn a_burst_drains_what_follows() {
+fn crlf_in_one_read_is_two_enters_of_one_call() {
+    let mut r = KeyReader::new();
+    assert_eq!(r.feed(b"\r\n", Duration::ZERO).as_slice(), [Enter, Enter]);
+    assert_eq!(r.feed(b"\n\n", ms(1)).as_slice(), [Enter, Enter]);
+    assert_eq!(r.deadline(), None);
+}
+
+// 이것을 실패시키는 것: 묶음 뒤 Drain으로 가는 것(느린 ssh에서 이어 친 키를 잃음), 묶음이 시작한 시퀀스를 끊는 것,
+// 묶음 뒤 붙여 넣기를 끝내는 것(5 s 상한 대신 100 ms).
+#[test]
+fn a_burst_leaves_the_next_read_alone() {
     let mut r = KeyReader::new();
     assert_eq!(r.feed(b"qqqq", Duration::ZERO).as_slice(), []);
-    assert_eq!(r.feed(b"q", ms(99)).as_slice(), []);
-    assert_eq!(r.deadline(), Some(ms(199)));
-    assert_eq!(r.tick(ms(199)).as_slice(), []);
-    assert_eq!(r.feed(b"q", ms(200)).as_slice(), [Char(b'q')]);
+    assert_eq!(r.deadline(), None);
+    assert_eq!(r.feed(b"q", ms(1)).as_slice(), [Char(b'q')]);
+    // A sequence a burst began goes on in the next read.
+    let mut r = KeyReader::new();
+    assert_eq!(r.feed(b"qqqq\x1b[", Duration::ZERO).as_slice(), []);
+    assert_eq!(r.feed(b"A", ms(1)).as_slice(), [Up]);
 
     // A burst that ends inside a paste: the paste goes on to its end mark.
     let mut r = KeyReader::new();
@@ -475,7 +498,7 @@ fn times_saturate() {
     r.feed(b"\x1b", Duration::MAX);
     assert_eq!(r.deadline(), Some(Duration::MAX));
     assert_eq!(r.tick(Duration::MAX).as_slice(), [Esc]);
-    for start in [&b"\x1b["[..], b"\x1b]", b"\x1b[200~", b"qqqq"] {
+    for start in [&b"\x1b["[..], b"\x1b]", b"\x1b[200~", b"\x1b]\x07"] {
         let mut r = KeyReader::new();
         r.feed(start, Duration::MAX);
         assert_eq!(r.deadline(), Some(Duration::MAX));

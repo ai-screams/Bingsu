@@ -20,7 +20,7 @@
 //! | Str | `ESC ]`, `ESC P`, `ESC _`, `ESC ^`, `ESC X` | BEL, or ST (`ESC \`) | `STR_MAX` (4,096) bytes, `STR_TIME` (500 ms) | Drain |
 //! | Paste | `ESC [ 200 ~` | `ESC [ 201 ~` | `PASTE_MAX` (1 MiB), `PASTE_TIME` (5 s) | Drain |
 //! | Utf8 | 0xC2-0xF4 | the last continuation byte | 3 more bytes | |
-//! | Drain | a bound passed, a string or paste ended, a burst | `DRAIN_QUIET` (100 ms) with no input | | |
+//! | Drain | a bound passed, a string or a paste ended | `DRAIN_QUIET` (100 ms) with no input | | |
 //!
 //! Every state keeps a few counters, never the payload, so a 1 MiB paste
 //! costs no memory. A sequence ends where its own grammar says, never
@@ -31,10 +31,9 @@
 //! Drain drops everything until the input stays quiet for `DRAIN_QUIET`.
 //! Going back to Ground as soon as a bound passed would read the rest of
 //! that sequence (`q`, `s`, Enter) as keys. Draining after a string or a
-//! paste ends, and after a burst, has the same reason: a BEL inside text a
-//! terminal reflects back ends a string early, a paste can carry a fake
-//! end mark, and the last read of a long paste can hold fewer than
-//! `BURST` keys.
+//! paste ends has the same reason: both are sent by the terminal, not
+//! typed, and a BEL inside text a terminal reflects back ends a string
+//! early, and a paste can carry a fake end mark.
 //!
 //! Decided byte by byte:
 //!
@@ -48,7 +47,7 @@
 //!   late replies), ESC with a byte that starts no sequence (an Alt key),
 //!   characters outside ASCII, invalid UTF-8, and everything inside Str,
 //!   Paste and Drain, 0x03 and 0x1a included (a payload never cancels or
-//!   stops the editor).
+//!   stops the editor), and every key of a burst but Ctrl-C (below).
 //! - Read again from Ground: the byte that breaks a UTF-8 character, and
 //!   an ESC inside Csi or Ss3 (a new sequence begins). Otherwise
 //!   `0xE2 ESC [ A` would lose the arrow, or the ESC of `ESC [ 200 ~`
@@ -68,13 +67,20 @@
 //! paste with `ESC [ 200 ~` and `ESC [ 201 ~`) the whole paste is dropped.
 //! Without the marks, pasting and typing cannot be told apart for sure; a
 //! guess stands in: a read with `BURST` (4) or more keys (a sequence is one
-//! key) counts as pasted and is dropped whole. That is a weak guarantee: a
-//! paste of up to three keys gets through. So a key that loses something
-//! (`q` with changes, Enter on the save screen) must be taken twice, the
-//! second time from a later read (a later `feed`): two keys in one read
-//! (`qq`, or `\r\n` from a terminal in newline mode) are no confirmation.
-//! That check belongs to the editor; this reader only reports which keys
-//! came in one read.
+//! key) counts as pasted and its keys are dropped, all but a Ctrl-C in it:
+//! cancelling writes nothing, and with `ISIG` off the 0x03 byte is the
+//! user's only quick way out, also when fast typing comes in one read (a
+//! slow ssh link). After a burst the next read is read as usual, with no
+//! drain: a paste longer than one read can leave one to three keys in its
+//! last read, which costs less than dropping what is typed next over a
+//! slow link. That is a weak guarantee, and a paste of up to three keys
+//! gets through. So a key that loses something (`q` with changes, Enter on
+//! the save screen) must be taken twice, and only a second press from a
+//! later read (a later `feed` call) confirms: all keys of one `Keys` came
+//! in one read. Two keys in one read are no confirmation: `qq`, or `\r\n`,
+//! which a terminal in newline mode (LNM) sends for one Enter (`\n\n` after
+//! `ICRNL`) and which comes out as two Enter keys. That check belongs to
+//! the editor.
 use core::time::Duration;
 
 /// How long an ESC waits for the rest of a sequence before it is the Esc
@@ -103,6 +109,8 @@ pub const BURST: usize = 4;
 
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
+/// Ctrl-C, the one key a burst keeps.
+const CANCEL: Key = Key::Ctrl(b'c');
 /// The paste end mark.
 const PASTE_END: &[u8] = b"\x1b[201~";
 /// The parameter bytes of the paste start mark, `ESC [ 200 ~`.
@@ -136,7 +144,11 @@ pub enum Key {
 }
 
 /// The keys of one call: at most `BURST`, the Esc key that time ended
-/// before the read first. Two are equal when their keys are.
+/// before the read first. The other keys came in that one read, so a
+/// confirmation (a second press of a key that loses something) must come
+/// from the keys of a later call: `\r\n` in one read, as a terminal in
+/// newline mode sends for one Enter, is two Enter keys here. Two are equal
+/// when their keys are.
 #[derive(Clone, Copy, Debug)]
 pub struct Keys {
     list: [Key; BURST],
@@ -243,6 +255,8 @@ struct Found {
     len: usize,
     /// Keys in this read, kept or dropped.
     count: usize,
+    /// A Ctrl-C key in this read.
+    cancel: bool,
 }
 
 impl Found {
@@ -252,6 +266,7 @@ impl Found {
             keys: [Key::Esc; BURST - 1],
             len: 0,
             count: 0,
+            cancel: false,
         }
     }
 
@@ -259,6 +274,7 @@ impl Found {
     /// dropped but counts towards a burst.
     fn key(&mut self, key: Option<Key>) {
         self.count = self.count.saturating_add(1);
+        self.cancel |= key == Some(CANCEL);
         if let Some(key) = key {
             if let Some(slot) = self.keys.get_mut(self.len) {
                 *slot = key;
@@ -267,7 +283,7 @@ impl Found {
         }
     }
 
-    /// The read's keys; none from a burst.
+    /// The read's keys; from a burst only Ctrl-C.
     fn keys(&self) -> Keys {
         let mut out = Keys::NONE;
         if let Some(key) = self.before {
@@ -277,6 +293,9 @@ impl Found {
             for &key in self.keys.get(..self.len).unwrap_or(&[]) {
                 out.push(key);
             }
+        } else if self.cancel {
+            // 이것을 실패시키는 것: 묶음 안의 Ctrl-C까지 버리는 것(빠른 타이핑이 한 읽기에 묶이면 취소할 수 없음).
+            out.push(CANCEL);
         }
         out
     }
@@ -306,7 +325,8 @@ impl KeyReader {
     }
 
     /// The keys of one read, `bytes`, which came at `now`. A time bound
-    /// that passed by `now` is applied first.
+    /// that passed by `now` is applied first. Call it once per read: the
+    /// burst guess and confirmations (see `Keys`) count on it.
     pub fn feed(&mut self, bytes: &[u8], now: Duration) -> Keys {
         let mut found = Found::new();
         found.before = self.expire(now);
@@ -318,11 +338,6 @@ impl KeyReader {
                     break;
                 }
             }
-        }
-        // 이것을 실패시키는 것: 묶음을 버린 뒤 Drain으로 가지 않는 것(긴 붙여 넣기의 마지막 읽기에 남은 키가 들어옴),
-        // 붙여 넣기·문자열 안에서도 Drain으로 바꾸는 것(느린 붙여 넣기의 나머지가 끝 표지 없이 읽힘).
-        if found.count >= BURST && !self.drops_to_its_end() {
-            self.state = State::Drain { quiet_from: now };
         }
         found.keys()
     }
@@ -352,14 +367,6 @@ impl KeyReader {
     /// and taken again (a stop and a resume): what comes next is new input.
     pub fn reset(&mut self) {
         *self = Self::new();
-    }
-
-    /// A state that drops everything to its own end.
-    fn drops_to_its_end(&self) -> bool {
-        matches!(
-            self.state,
-            State::Str { .. } | State::Paste { .. } | State::Drain { .. }
-        )
     }
 
     /// Applies a time bound that passed by `now`: the Esc key when an ESC

@@ -1,6 +1,7 @@
 //! Layer 1 properties of the key reader (`bingsu_core::keys`): keys come
-//! out the same wherever the reads split the input, and the payload of a
-//! string, a paste, a burst or a late sequence never becomes a key.
+//! out the same wherever the reads split the input, the payload of a
+//! string, a paste or a late sequence never becomes a key, and a burst
+//! gives only its Ctrl-C.
 use bingsu_core::keys::{
     BURST, DRAIN_QUIET, ESC_WAIT, Key, KeyReader, LATE_WAIT, PASTE_TIME, SEQ_TIME, STR_TIME,
 };
@@ -145,13 +146,16 @@ proptest! {
         prop_assert_eq!(run(&bytes, &cuts, &gaps), want);
     }
 
-    // 이것을 실패시키는 것: 키 넷 이상의 읽기에서 키를 하나라도 내는 것, 그 뒤 Drain으로 가지 않는 것.
+    // 이것을 실패시키는 것: 키 넷 이상의 읽기에서 Ctrl-C 말고 키를 내는 것, 그 안의 Ctrl-C를 버리는 것, 다음 읽기를
+    // 버리는 것.
     #[test]
-    fn a_read_of_four_keys_or_more_gives_none(picked in atoms(4..24), gap in 0u64..100) {
+    fn a_read_of_four_keys_or_more_gives_only_a_cancel(picked in atoms(4..24), gap in 0u64..100) {
         let (bytes, _, _) = joined(&picked);
+        let cancel = picked.iter().any(|&i| ATOMS[i].0 == b"\x03");
+        let want = if cancel { vec![Key::Ctrl(b'c')] } else { vec![] };
         let mut r = KeyReader::new();
-        prop_assert_eq!(r.feed(&bytes, Duration::ZERO).as_slice().to_vec(), vec![]);
-        prop_assert_eq!(r.feed(b"q", ms(gap)).as_slice().to_vec(), vec![]);
+        prop_assert_eq!(r.feed(&bytes, Duration::ZERO).as_slice().to_vec(), want);
+        prop_assert_eq!(r.feed(b"q", ms(gap)).as_slice().to_vec(), vec![Key::Char(b'q')]);
     }
 
     // 이것을 실패시키는 것: 문자열 내용이나 끝난 뒤 같은 흐름의 바이트를 키로 내는 것, 시간 상한을 넘긴 뒤 Ground로
