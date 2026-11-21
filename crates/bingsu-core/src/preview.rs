@@ -1,7 +1,9 @@
-//! One preview line per built-in preset for `bingsu list presets --preview`
-//! . It draws the default theme's upper line with the preset
-//! through the same renderer as the prompt. Nothing is collected: the folder
-//! is the caller's, every other value is a fixed sample.
+//! Previews drawn through the prompt's renderer. `preview_line` is one line
+//! per built-in preset for `bingsu list presets --preview`: the default
+//! theme's upper line with the preset. `lines` lays out every line of a
+//! compiled config as runs, for the setup editor's cell grid. Nothing is
+//! collected: the folder (and for `lines` the host) is the caller's, every
+//! other value is a fixed sample.
 use crate::color::palette::Mode;
 use crate::color::sgr::ColorDepth;
 use crate::default_theme::{DefaultTheme, DefaultThemeError};
@@ -15,6 +17,13 @@ use crate::shell_word::Shell;
 use crate::width::WidthProfile;
 use alloc::vec;
 use alloc::vec::Vec;
+
+/// Every line of a compiled config as runs (the setup editor's preview).
+mod lines;
+pub use lines::{
+    PreviewCell, PreviewCells, PreviewLine, PreviewRun, PreviewSide, Request, SAMPLE_BRANCH,
+    SAMPLE_DURATION_MS, SAMPLE_JOBS, Sample, lines,
+};
 
 /// Narrower than the default theme's `narrow` band (59), every preset
 /// would draw the same lean line.
