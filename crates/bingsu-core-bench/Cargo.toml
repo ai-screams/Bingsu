@@ -132,3 +132,9 @@ test = false
 name = "language"
 harness = false
 test = false
+
+[[bench]]
+# M7 setup editor: every line of a compiled config as runs (`preview::lines`).
+name = "preview_render"
+harness = false
+test = false

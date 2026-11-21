@@ -88,6 +88,98 @@ pub fn write_sgr(style: Style, p: &ResolvedPalette, depth: ColorDepth, out: &mut
 
 pub const RESET: &[u8] = b"\x1b[0m";
 
+/// One color as the SGR of one depth names it: what `write_sgr` writes for a
+/// `Color`, with the palette and the depth already applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Ink {
+    /// The terminal's own color: no parameter. A token whose ANSI slot is the
+    /// terminal default (`AnsiSlot::Default`) resolves here too, so a
+    /// default background reads as default whatever drew it.
+    #[default]
+    Default,
+    /// `38;2;r;g;b` (or `48;2;…` for a background).
+    Rgb(u8, u8, u8),
+    /// An xterm 256-color index: `38;5;n` (`48;5;n`).
+    Indexed(u8),
+    /// An ANSI slot 0–15 of the terminal scheme: `30+n` or `90+n−8`
+    /// (`40+n`, `100+n−8`).
+    Ansi(u8),
+}
+
+/// A `Style` resolved against one palette at one depth: the colors and
+/// attributes a cell shows. Two cells look alike exactly when their paints
+/// are equal, so a cell grid can compare them across a mode or depth switch,
+/// which a token `Style` (the same in dark and light) cannot tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Paint {
+    pub fg: Ink,
+    pub bg: Ink,
+    /// `BOLD`, `DIM`, `ITALIC`, `UNDERLINE`, as in `Style`.
+    pub attrs: u8,
+}
+
+/// The ink `color` would write; kept apart from it so the prompt path
+/// (`write_sgr`) stays as it is. Test `paint_writes_what_write_sgr_writes`
+/// holds the two to the same bytes for every token, kind, depth and mode.
+fn ink(c: Color, p: &ResolvedPalette, depth: ColorDepth) -> Ink {
+    let i = match c {
+        Color::Default => return Ink::Default,
+        Color::Text(i) | Color::Block(i) | Color::OnBlock(i) => i,
+    };
+    // A token outside the palette writes nothing, as in `color`.
+    let Some(t) = p.tokens.get(usize::from(i)) else {
+        return Ink::Default;
+    };
+    let (s, s256, ansi) = match c {
+        Color::Block(_) => (t.bg, t.bg256, t.ansi),
+        Color::OnBlock(_) => (t.on_block, t.on_block256, t.on_block_ansi),
+        _ => (t.fg, t.fg256, t.ansi),
+    };
+    match depth {
+        ColorDepth::TrueColor => Ink::Rgb(s.r, s.g, s.b),
+        ColorDepth::Ansi256 => Ink::Indexed(s256),
+        ColorDepth::Ansi16 => match ansi {
+            AnsiSlot::Default => Ink::Default,
+            AnsiSlot::Slot(n) => Ink::Ansi(n),
+        },
+    }
+}
+
+/// `style` resolved against `p` at `depth`.
+pub fn paint(style: Style, p: &ResolvedPalette, depth: ColorDepth) -> Paint {
+    Paint {
+        fg: ink(style.fg, p, depth),
+        bg: ink(style.bg, p, depth),
+        attrs: style.attrs,
+    }
+}
+
+fn write_ink(ink: Ink, bg: bool, w: &mut Buf<'_>) {
+    let base = if bg { 40 } else { 30 };
+    let _ = match ink {
+        Ink::Default => Ok(()),
+        Ink::Rgb(r, g, b) => write!(w, ";{};2;{r};{g};{b}", base + 8),
+        Ink::Indexed(n) => write!(w, ";{};5;{n}", base + 8),
+        Ink::Ansi(n) if n < 8 => write!(w, ";{}", base + u32::from(n)),
+        Ink::Ansi(n) => write!(w, ";{}", base + 60 + u32::from(n - 8)),
+    };
+}
+
+/// Appends one SGR that sets `paint` from scratch: the bytes `write_sgr`
+/// writes for the style `paint` was resolved from.
+pub fn write_paint(paint: Paint, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\x1b[0");
+    let mut w = Buf(out);
+    for (bit, code) in [(BOLD, 1), (DIM, 2), (ITALIC, 3), (UNDERLINE, 4)] {
+        if paint.attrs & bit != 0 {
+            let _ = write!(w, ";{code}");
+        }
+    }
+    write_ink(paint.fg, false, &mut w);
+    write_ink(paint.bg, true, &mut w);
+    out.push(b'm');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +397,95 @@ mod tests {
     fn reset_bytes() {
         assert_eq!(RESET, b"\x1b[0m");
         assert_eq!(sgr(Style::default(), ColorDepth::TrueColor), RESET);
+    }
+
+    // 이것을 실패시키는 것: `ink`가 `color`와 다른 색을 고르는 것(Block에 fg를, OnBlock에 bg를 쓰는 것,
+    // 256에 fg256 대신 bg256, 16색 밝은 슬롯의 90·100 접두, 기본 슬롯에 코드를 쓰는 것), 속성 번호가 어긋나는 것.
+    // 두 모드의 모든 token × 네 종류(글자·배경 둘 다) × 세 깊이 × 속성 16가지를 write_sgr 바이트와 맞춘다.
+    #[test]
+    fn paint_writes_what_write_sgr_writes() {
+        let n = crate::color::palette::TOKENS.len() as u16;
+        let kinds = |i| {
+            [
+                Color::Default,
+                Color::Text(i),
+                Color::Block(i),
+                Color::OnBlock(i),
+            ]
+        };
+        for mode in [Mode::Dark, Mode::Light] {
+            let p = resolve_palette(&PaletteInput {
+                mode,
+                knobs: Knobs::default(),
+                overrides: &[],
+                roles: &[],
+            })
+            .unwrap();
+            for i in 0..n {
+                // The background token is another one, so fg and bg differ.
+                let j = (i + 1) % n;
+                for depth in [
+                    ColorDepth::TrueColor,
+                    ColorDepth::Ansi256,
+                    ColorDepth::Ansi16,
+                ] {
+                    for fg in kinds(i) {
+                        for bg in kinds(j) {
+                            for attrs in 0..16u8 {
+                                let s = Style { fg, bg, attrs };
+                                let (mut want, mut got) = (Vec::new(), Vec::new());
+                                write_sgr(s, &p, depth, &mut want);
+                                write_paint(paint(s, &p, depth), &mut got);
+                                assert_eq!(got, want, "{mode:?} {s:?} {depth:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 이것을 실패시키는 것: 색 없음과 기본 슬롯 token을 다른 값으로 푸는 것(기본 배경이 기본으로 읽히지 않는다),
+    // 모드를 바꿔도 같은 paint가 나오는 것(칸 비교가 다시 그리기를 놓친다), 깊이를 무시하는 것.
+    #[test]
+    fn paint_tells_modes_and_depths_apart() {
+        let pal = |mode| {
+            resolve_palette(&PaletteInput {
+                mode,
+                knobs: Knobs::default(),
+                overrides: &[],
+                roles: &[],
+            })
+            .unwrap()
+        };
+        let (dark, light) = (pal(Mode::Dark), pal(Mode::Light));
+        let path = token_index("path").unwrap() as u16;
+        let s = Style {
+            fg: Color::OnBlock(path),
+            bg: Color::Block(path),
+            attrs: BOLD,
+        };
+        assert_ne!(
+            paint(s, &dark, ColorDepth::TrueColor),
+            paint(s, &light, ColorDepth::TrueColor)
+        );
+        assert_ne!(
+            paint(s, &dark, ColorDepth::TrueColor),
+            paint(s, &dark, ColorDepth::Ansi256)
+        );
+        assert_eq!(
+            paint(Style::default(), &dark, ColorDepth::TrueColor),
+            Paint::default()
+        );
+        // light block.text is the terminal's own color in 16 colors.
+        let bt = token_index("block.text").unwrap() as u16;
+        let on_default = Style {
+            fg: Color::Text(bt),
+            ..Style::default()
+        };
+        assert_eq!(
+            paint(on_default, &light, ColorDepth::Ansi16).fg,
+            Ink::Default
+        );
     }
 }
