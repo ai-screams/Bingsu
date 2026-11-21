@@ -225,9 +225,12 @@ fn stage_child() {
     match param("BINGSU_TEST_STAGE").as_str() {
         "entering" => {
             test_session::AFTER_STEP.set(Some((0, sig)));
-            // The failed entry's drop raises the signal again: no line.
-            let _ = tty.full_screen();
-            say("survived");
+            // SIGINT, SIGTERM, SIGHUP: the failed entry's drop raises the
+            // signal again, so no line. SIGTSTP: the entry goes on, and the
+            // first wait stops.
+            if let Ok(mut s) = tty.full_screen() {
+                say(&format!("{:?}", s.wait(false, Some(Instant::now() + WAIT))));
+            }
         }
         "idle" => {
             let mut s = tty.full_screen().unwrap();
@@ -420,17 +423,18 @@ fn continued_child() {
 
 // A stop in an orphaned process group (this child is a session leader whose
 // parent is in another session): the kernel drops SIGTSTP, the call returns
-// at once, and the session comes back. 이것을 실패시키는 것: 멈추기 전에 터미널을 되돌리지 않는 것, 멈춘 뒤
+// at once, and the session comes back; at the entry too (the job handlers are
+// in before the modes). 이것을 실패시키는 것: 멈추기 전에 터미널을 되돌리지 않는 것, 멈춘 뒤
 // 신호(SIGCONT)를 기다리는 것(여기서는 오지 않아 멈춤), 돌아와서 모드를 다시 켜지 않는 것, Resumed를 알리지 않는 것,
-// 끊긴 프레임을 끊지 않는 것.
+// 끊긴 프레임을 끊지 않는 것, 들어가는 중에 온 SIGTSTP를 보지 않는 것.
 #[test]
 fn a_stop_the_kernel_drops_comes_back_at_once() {
-    for stage in ["idle", "writing"] {
+    for stage in ["entering", "idle", "writing"] {
         let mut t = start(
             "stage_child",
             &[("BINGSU_TEST_STAGE", stage), ("BINGSU_TEST_SIGNAL", "TSTP")],
         );
-        let want = if stage == "idle" {
+        let want = if stage != "writing" {
             cat(&[ENTER_ALL, LEAVE_ALL, ENTER_ALL, LEAVE_ALL])
         } else {
             t.expect(&cat(&[ENTER_ALL, b"\x1b[?"]));
@@ -943,15 +947,23 @@ fn job_shell_child() {
     ));
     say(&format!("restored at the stop {}", mode() == before));
     if let Some(sibling) = &sibling {
-        let state = std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", sibling])
-            .output()
-            .unwrap();
-        say(&format!(
-            "the job's other process stopped too {}",
+        // The group's stop reaches the sibling on its own time.
+        let stopped = || {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", sibling])
+                .output()
+                .unwrap();
             String::from_utf8_lossy(&state.stdout)
                 .trim()
                 .starts_with('T')
+        };
+        let until = Instant::now() + Duration::from_secs(1);
+        while !stopped() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        say(&format!(
+            "the job's other process stopped too {}",
+            stopped()
         ));
     }
     // The mode changes meanwhile (and with no line editing and no echo,
