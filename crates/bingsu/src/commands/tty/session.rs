@@ -25,36 +25,47 @@
 //!   signal (status 130, 143 or 129 in a shell). A signal the process
 //!   ignored (SIGHUP under `nohup`) stays ignored.
 //! - `Hangup`: the terminal went away (a read gave 0 or EIO, or the
-//!   terminal is gone while the session waits in the background). End
-//!   without saving.
+//!   terminal is gone while the session waits in the background), or it did
+//!   not take the modes when the session took it again after a stop (what
+//!   went out was put back). End without saving. A caught SIGINT, SIGTERM
+//!   or SIGHUP is reported as `Signal` first.
 //! - `Timeout`: `until` passed, for the caller's timers. Never while the
 //!   session is in the background: nothing can be drawn then, and
 //!   `Resumed` follows.
 //!
 //! Frames. `write_some(rest)` is one non-blocking write of the rest of the
-//! frame being written: it returns how much the terminal took (0 when it
-//! takes nothing now). A frame the terminal took only in part is cut: a
+//! frame being written: it returns how much the terminal took. It returns
+//! 0 when the terminal takes nothing now, and also, writing nothing, when
+//! the session does not own the terminal at that moment (it gave it back,
+//! a continue waits to be handled, or it is no longer the foreground job);
+//! the caller then calls `wait` before it writes again (a loop of writes
+//! alone would spin). A frame the terminal took only in part is cut: a
 //! stop or the end drops what is still queued and ends the escape sequence
 //! the terminal is in (`CAN ESC \`) before anything else. A frame that
 //! uses synchronized output calls `mark_synced(true)` before it writes
 //! `CSI ? 2026 h` and `mark_synced(false)` once its `CSI ? 2026 l` was
 //! taken, so the end turns it off when a frame was cut inside it.
 //!
-//! Stop and continue. Ctrl-Z (`suspend`) and SIGTSTP put the terminal back
-//! (as on the way out, below) and stop: Ctrl-Z stops the whole process
-//! group, as the terminal's own Ctrl-Z would; a SIGTSTP from outside stops
-//! this process. When the process goes on (`fg`, `bg`, or at once in an
-//! orphaned process group, where the kernel drops the stop), it looks
-//! whether it is the terminal's foreground job. If so it takes the terminal
-//! again (reading its mode anew), drops the input typed meanwhile, turns the
-//! modes on and reports `Resumed`. If not (`bg`) it touches nothing (no
-//! read, no write, no mode change: a background job would get SIGTTIN or,
-//! with `tostop`, SIGTTOU) and waits for the next SIGCONT or SIGWINCH,
-//! looking once a second whether the terminal is still there. A continue
-//! without a stop of the session's own (SIGSTOP, a stray SIGCONT) is taken
-//! the same way: the terminal is put back first and then taken again.
-//! SIGTSTP ignored when the session began stays ignored, and `suspend` then
-//! does nothing.
+//! Stop and continue. The handlers of SIGTSTP, SIGCONT and SIGWINCH are in
+//! from before the raw switch to after the mode is back. Ctrl-Z (`suspend`)
+//! and SIGTSTP put the terminal back (as on the way out, below) and stop:
+//! Ctrl-Z stops the whole process group, as the terminal's own Ctrl-Z would;
+//! a SIGTSTP from outside stops this process. An exit signal or a SIGCONT
+//! that came while the terminal was put back goes first: nothing stops (a
+//! SIGCONT drops a SIGTSTP not taken yet, as the kernel drops a pending
+//! stop). An exit sent while stopped ends the session when it goes on,
+//! without taking the terminal again. When the process goes on (`fg`, `bg`,
+//! or at once in an orphaned process group, where the kernel drops the
+//! stop), it looks whether it is the terminal's foreground job. If so it
+//! takes the terminal again (reading its mode anew), drops the input typed
+//! meanwhile, turns the modes on and, once they are on, reports `Resumed`.
+//! If not (`bg`) it touches nothing (no read, no write, no mode change: a
+//! background job would get SIGTTIN or, with `tostop`, SIGTTOU) and waits
+//! for the next SIGCONT or SIGWINCH, looking once a second whether the
+//! terminal is still there. A continue without a stop of the session's own
+//! (SIGSTOP, a stray SIGCONT) is taken the same way: the terminal is put
+//! back first and then taken again. SIGTSTP ignored when the session began
+//! stays ignored, and `suspend` then does nothing.
 //!
 //! The way out (drop, after `Signal`, `Hangup` or the caller's end), with
 //! what was turned on only, each mode recorded as on before its bytes are
