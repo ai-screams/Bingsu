@@ -506,6 +506,57 @@ fn time_bounds() {
     assert_eq!(r.feed(b";5A", SEQ_TIME).as_slice(), []);
 }
 
+// 이것을 실패시키는 것: 늦게 알아챈 상한에서 Drain을 알아챈 때부터 세는 것(제때 tick했으면 키가 되었을 `q`를 잃음),
+// 이미 끝난 Drain을 끝내지 않는 것, Esc의 늦은 창을 알아챈 때부터 세는 것.
+#[test]
+fn a_late_tick_or_feed_ends_where_ticks_on_time_would() {
+    let starts: [&[u8]; 7] = [
+        b"\x1b",
+        b"\x1b[1",
+        b"\x1bO",
+        b"\x1b]11;",
+        b"\x9d11;",
+        b"\x1b[200~",
+        b"\x1b]\x07",
+    ];
+    for start in starts {
+        for probe in [&b"q"[..], b"[A", b"OA"] {
+            for t in 0..=6000u64 {
+                let at = ms(t);
+                // On time: a tick at each deadline up to `at`.
+                let mut r = KeyReader::new();
+                let mut on_time = r.feed(start, Duration::ZERO).as_slice().to_vec();
+                for _ in 0..8 {
+                    match r.deadline() {
+                        Some(d) if d <= at => on_time.extend_from_slice(r.tick(d).as_slice()),
+                        _ => break,
+                    }
+                }
+                on_time.extend_from_slice(r.feed(probe, at).as_slice());
+                // One late tick at `at`, or none before the read.
+                let mut r = KeyReader::new();
+                let mut late = r.feed(start, Duration::ZERO).as_slice().to_vec();
+                late.extend_from_slice(r.tick(at).as_slice());
+                late.extend_from_slice(r.feed(probe, at).as_slice());
+                let mut r = KeyReader::new();
+                let mut read_only = r.feed(start, Duration::ZERO).as_slice().to_vec();
+                read_only.extend_from_slice(r.feed(probe, at).as_slice());
+                assert_eq!(late, on_time, "{start:?} {probe:?} at {t} ms, late tick");
+                assert_eq!(
+                    read_only, on_time,
+                    "{start:?} {probe:?} at {t} ms, read only"
+                );
+            }
+        }
+    }
+    // The reported case: a sequence cut at 0 ms is over at 300 ms.
+    let mut r = KeyReader::new();
+    r.feed(b"\x1b[1", Duration::ZERO);
+    assert_eq!(r.tick(ms(350)).as_slice(), []);
+    assert_eq!(r.deadline(), None);
+    assert_eq!(r.feed(b"q", ms(351)).as_slice(), [Char(b'q')]);
+}
+
 // 이것을 실패시키는 것: 상태별 기한을 잘못 내는 것(Ground·Utf8에 기한, Esc에 다른 상한).
 #[test]
 fn the_deadline_of_each_state() {

@@ -386,25 +386,34 @@ impl KeyReader {
         *self = Self::new();
     }
 
-    /// Applies a time bound that passed by `now`: the Esc key when an ESC
-    /// waited long enough.
+    /// Applies the time bounds that passed by `now`, as if each had been
+    /// seen when it passed: the Esc key when an ESC waited long enough; a
+    /// sequence past its bound drains from that bound, not from `now`, and
+    /// a drain that ended by `now` (that one included) is over. At most two
+    /// steps, so a late `tick` or `feed` ends where ticks on time would
+    /// have.
     fn expire(&mut self, now: Duration) -> Option<Key> {
         // 이것을 실패시키는 것: 상한 비교를 `>`로 바꾸는 것(정확히 상한인 때에 넘기지 않음), 상한을 보지 않는 것(잘린
-        // 시퀀스나 홀로 된 Esc가 끝나지 않음).
+        // 시퀀스나 홀로 된 Esc가 끝나지 않음), Drain을 알아챈 때부터 세는 것(늦은 tick 뒤 친 키를 잃음).
         let past = |since: Duration, bound: Duration| now >= since.saturating_add(bound);
-        match self.state {
+        let bound = match self.state {
             State::Esc { at } if past(at, ESC_WAIT) => {
                 self.state = State::Ground;
                 self.late_until = Some(at.saturating_add(ESC_WAIT).saturating_add(LATE_WAIT));
                 return Some(Key::Esc);
             }
-            State::Seq(InSeq { since, .. }) if past(since, SEQ_TIME) => self.drain(now),
-            State::Str { since, .. } if past(since, STR_TIME) => self.drain(now),
-            State::Paste { since, .. } if past(since, PASTE_TIME) => self.drain(now),
-            State::Drain { quiet_from } if past(quiet_from, DRAIN_QUIET) => {
+            State::Seq(InSeq { since, .. }) => Some((since, SEQ_TIME)),
+            State::Str { since, .. } => Some((since, STR_TIME)),
+            State::Paste { since, .. } => Some((since, PASTE_TIME)),
+            _ => None,
+        };
+        if let Some((since, bound)) = bound.filter(|&(since, bound)| past(since, bound)) {
+            self.drain(since.saturating_add(bound));
+        }
+        if let State::Drain { quiet_from } = self.state {
+            if past(quiet_from, DRAIN_QUIET) {
                 self.state = State::Ground;
             }
-            _ => {}
         }
         None
     }
