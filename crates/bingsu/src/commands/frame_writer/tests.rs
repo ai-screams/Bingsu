@@ -10,8 +10,9 @@ enum Step {
 }
 
 /// A terminal that follows `script` (and takes everything once it ran
-/// out), checks that each write is handed all that is left of the frame,
-/// and records what it took and was told.
+/// out), checks that each write is handed all that is left of the frame
+/// and comes after the frame's begin mark, and that the end mark comes
+/// once the whole frame was taken; it records what it took and was told.
 #[derive(Default)]
 struct Fake {
     script: VecDeque<Step>,
@@ -19,6 +20,8 @@ struct Fake {
     whole: Vec<u8>,
     got: Vec<u8>,
     marks: Vec<bool>,
+    /// The last mark was `true`.
+    synced: bool,
     calls: usize,
 }
 
@@ -38,6 +41,8 @@ impl Fake {
 impl Sink for Fake {
     fn write_some(&mut self, rest: &[u8]) -> std::io::Result<usize> {
         self.calls += 1;
+        // 이것을 실패시키는 것: 시작 알림 전에 쓰는 것(첫 쓰기에서 끊긴 프레임의 2026을 세션이 모름).
+        assert!(self.synced, "a write before the frame's begin mark");
         // 이것을 실패시키는 것: 남은 것 일부만 넘기는 것(세션이 반쪽 프레임을 끊김으로 보지 못함).
         assert_eq!(rest, &self.whole[self.got.len()..], "not all that is left");
         let n = match self.script.pop_front() {
@@ -50,6 +55,15 @@ impl Sink for Fake {
     }
 
     fn mark_synced(&mut self, on: bool) {
+        // 이것을 실패시키는 것: 프레임을 다 받기 전에 끝을 알리는 것(쓰다 만 2026 h가 나갈 때 꺼지지 않음).
+        if !on {
+            assert_eq!(
+                self.got.len(),
+                self.whole.len(),
+                "the end mark before the whole frame was taken"
+            );
+        }
+        self.synced = on;
         self.marks.push(on);
     }
 }
