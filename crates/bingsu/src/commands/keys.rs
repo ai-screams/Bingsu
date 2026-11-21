@@ -322,9 +322,12 @@ mod pty {
         let mut t = start("keys_child");
         t.expect(b"READY\r\n");
 
-        // An arrow key split 5 ms apart: Up. A busy machine may read the
-        // ESC alone for 30 ms (then the Esc key, and the rest is late);
-        // either way no `[` or `A`.
+        // An arrow key split 5 ms apart: Up. A child that reads the ESC and
+        // then does not read for 30 ms makes it the Esc key and drops the
+        // rest as late; either way no `[` or `A`. Not covered: a child
+        // stalled for about 125 ms or more between the two reads sees the
+        // rest past the late window, and this test fails (the window's
+        // limit, the same on a real terminal).
         t.send(b"\x1b");
         std::thread::sleep(Duration::from_millis(5));
         t.send(b"[A");
@@ -333,7 +336,8 @@ mod pty {
         t.nothing_more();
 
         // Split 50 ms apart: the Esc key, and the late rest is dropped (a
-        // machine too busy to read the ESC alone reads Up).
+        // child that reads both at once reads Up). A stall of about 80 ms
+        // or more between the reads fails, as above.
         t.send(b"\x1b");
         std::thread::sleep(Duration::from_millis(50));
         t.send(b"OA");

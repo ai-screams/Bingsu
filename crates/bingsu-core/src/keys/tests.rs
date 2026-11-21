@@ -484,3 +484,16 @@ fn times_saturate() {
         r.tick(Duration::ZERO);
     }
 }
+
+// 이것을 실패시키는 것: 쓰지 않은 칸까지 비교하는 것.
+#[test]
+fn keys_compare_by_their_keys() {
+    let stale = Keys {
+        list: [Up; BURST],
+        len: 1,
+    };
+    let mut fresh = Keys::NONE;
+    fresh.push(Up);
+    assert_eq!(stale, fresh);
+    assert_ne!(stale, Keys::NONE);
+}

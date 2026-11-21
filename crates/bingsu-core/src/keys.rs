@@ -136,8 +136,8 @@ pub enum Key {
 }
 
 /// The keys of one call: at most `BURST`, the Esc key that time ended
-/// before the read first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// before the read first. Two are equal when their keys are.
+#[derive(Clone, Copy, Debug)]
 pub struct Keys {
     list: [Key; BURST],
     len: usize,
@@ -164,6 +164,15 @@ impl Keys {
         }
     }
 }
+
+impl PartialEq for Keys {
+    fn eq(&self, other: &Self) -> bool {
+        // 이것을 실패시키는 것: 배열 전체를 비교하는 것(쓰지 않은 칸의 값이 비교에 들어감).
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for Keys {}
 
 impl<'a> IntoIterator for &'a Keys {
     type Item = &'a Key;
