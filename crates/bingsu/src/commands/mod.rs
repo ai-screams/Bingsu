@@ -80,6 +80,15 @@ mod explain;
 #[cfg(unix)]
 mod explain_builtin;
 #[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the setup editor writes its frames with it from a later change"
+    )
+)]
+mod frame_writer;
+#[cfg(unix)]
 mod git_global;
 #[cfg(unix)]
 mod group_policy;
@@ -97,6 +106,15 @@ pub(crate) mod helper_limits;
 mod init;
 #[cfg(unix)]
 pub(crate) mod io_meter;
+#[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the setup editor reads its keys with it from a later change"
+    )
+)]
+mod keys;
 #[cfg(unix)]
 mod list;
 #[cfg(unix)]
