@@ -664,19 +664,28 @@ fn resize_child() {
 
 // A SIGTERM from outside while the session waits with no time limit. In
 // this test process it often lands on another thread than the waiting one,
-// whose select then sees only the wake byte. 이것을 실패시키는 것: 처리기가 깨우기 pipe에 쓰지 않는 것
-// (다른 스레드가 신호를 받으면 select가 깨지 않아 자식이 끝나지 않음).
+// whose select then sees only the wake byte. The signal is sent once the
+// child drew after `full_screen` returned: from then on a SIGTERM reaches
+// `wait` as `Signal`, whenever it comes. (A SIGTERM during the entry is the
+// entering cells of a_signal_at_any_stage_puts_the_terminal_back.)
+// 이것을 실패시키는 것: 처리기가 깨우기 pipe에 쓰지 않는 것(다른 스레드가 신호를 받으면 select가 깨지 않아 자식이
+// 끝나지 않음).
 #[test]
 fn a_signal_from_outside_wakes_a_wait_with_no_time_limit() {
     let mut t = start("wait_forever_child", &[]);
-    t.expect(ENTER_ALL);
+    t.expect(b"WAITING");
+    // Most likely in the select by now; a signal before it is the same case.
+    t.idle(Duration::from_millis(50));
     // SAFETY: sends SIGTERM to the child this test started.
     assert_eq!(unsafe { libc::kill(t.pid(), libc::SIGTERM) }, 0);
     let (lines, status, out, err) = t.end();
     assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
     assert_eq!(lines, [format!("Signal({})", libc::SIGTERM)]);
     assert!(t.mode_restored());
-    assert_eq!(shown(&t.all), shown(&cat(&[ENTER_ALL, LEAVE_ALL])));
+    assert_eq!(
+        shown(&t.all),
+        shown(&cat(&[ENTER_ALL, b"\x1b[H\x1b[2JWAITING", LEAVE_ALL]))
+    );
 }
 
 #[test]
@@ -684,6 +693,7 @@ fn a_signal_from_outside_wakes_a_wait_with_no_time_limit() {
 fn wait_forever_child() {
     let tty = take_terminal();
     let mut s = tty.full_screen().unwrap();
+    draw(&mut s, b"WAITING");
     say(&format!("{:?}", s.wait(false, None)));
 }
 
