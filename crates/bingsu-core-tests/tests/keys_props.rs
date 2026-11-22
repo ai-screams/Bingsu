@@ -165,7 +165,7 @@ proptest! {
     fn a_string_gives_no_keys(
         intro in prop::sample::select(vec![
             &b"\x1b]"[..], b"\x1bP", b"\x1b_", b"\x1b^", b"\x1bX",
-            b"\x9d", b"\x90", b"\x9f", b"\x9e", b"\x98",
+            b"\x9d", b"\x90", b"\x9f", b"\x9e", b"\x98", b"\xc2\x9d", b"\xc2\x9f",
         ]),
         end in prop::sample::select(vec![&b"\x07"[..], b"\x1b\\", b"\x9c"]),
         payload in prop::collection::vec(any::<u8>(), 0..300),

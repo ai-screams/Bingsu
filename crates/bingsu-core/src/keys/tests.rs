@@ -224,6 +224,30 @@ fn c1_controls_are_their_esc_forms() {
     assert_eq!(r.deadline(), Some(DRAIN_QUIET));
 }
 
+// 이것을 실패시키는 것: UTF-8로 쓴 C1(U+0080–U+009F)을 보통 글자로 읽는 것(나뉜 OSC 답의 `11;rgb:`가 키가 됨), 0xC2
+// 뒤의 다른 글자(`©`)를 C1으로 읽는 것, 도입 바이트가 아닌 C1을 묶음에 세지 않는 것.
+#[test]
+fn c1_controls_in_utf8_are_c1_controls() {
+    let reply = b"\xc2\x9d11;rgb:0000/0000/0000\xc2\x9c";
+    for size in 1..=4 {
+        let parts: Vec<&[u8]> = reply.chunks(size).collect();
+        assert_eq!(run(&parts, ms(1)), [], "reads of {size}");
+    }
+    assert!(back_in_ground(reply));
+    assert_eq!(one(b"\xc2\x9bA"), [Up]);
+    assert_eq!(one(b"\xc2\x8fB"), [Down]);
+    assert_eq!(one(b"\xc2\x9f\r\r\x9c"), []);
+    // Inside a string, U+009C ends nothing: its time bound does.
+    let mut r = KeyReader::new();
+    r.feed(b"\x1b]\xc2\x9c", Duration::ZERO);
+    assert_eq!(r.deadline(), Some(STR_TIME));
+    // Other C1 controls and other characters after 0xC2 are dropped units.
+    assert_eq!(one(b"q\xc2\x85q"), [Char(b'q'); 2]);
+    assert_eq!(one(b"qq\xc2\x85q"), []);
+    assert_eq!(one(b"q\xc2\xa9q"), [Char(b'q'); 2]);
+    assert_eq!(one(b"\xc2\xa9[A"), [Char(b'['), Char(b'A')]);
+}
+
 // 이것을 실패시키는 것: X10 마우스 보고(`ESC [ M` 뒤 날것 세 바이트)를 키로 읽는 것, 0x98 같은 C1 바이트로 문자열을
 // 여는 것, 세 바이트가 아닌 수를 먹는 것, 보고를 묶음의 키 하나로 세지 않는 것, 세 바이트가 오지 않을 때 끝나지 않는
 // 것.
@@ -291,6 +315,8 @@ const SAMPLES: &[(&[u8], &[Key])] = &[
     (b"\x1b[200~q\xc4\x9b201~\x9b201~", &[]),
     (b"\x1b]\xc5\x9cq\x07", &[]),
     (b"\x1b[M \x981", &[]),
+    (b"\xc2\x9d11;rgb:0000/0000/0000\x07", &[]),
+    (b"\xc2\x9bB", &[Down]),
     (b"\x1b[M#\x98rj", &[Char(b'j')]),
 ];
 

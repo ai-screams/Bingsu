@@ -58,18 +58,21 @@
 //!   0x90 DCS, 0x9f APC, 0x9e PM, 0x98 SOS) that is no part of a UTF-8
 //!   character begins the same state as its `ESC` form (a C1 introducer
 //!   counts as two bytes towards `SEQ_MAX`), and 0x9c ends a string as ST
-//!   does; other C1 bytes are dropped. Inside a string or a paste a byte
-//!   0x80-0xbf that continues a UTF-8 character of the payload is payload,
-//!   never 0x9c or the 0x9b of an 8-bit end mark (`Ŝ` is `C5 9C`). Without
-//!   this, `0x9f`, a pause, Enter and `0x9c` would give an Enter key from a
-//!   string. After ESC a byte outside ASCII is read again from Ground (the
-//!   ESC is dropped), so `ESC 0x9d` cannot hide an OSC either.
+//!   does; other C1 bytes are dropped. U+0080 to U+009F written in UTF-8
+//!   (`C2 9D` for OSC) are the same C1 controls in Ground; inside a string
+//!   they are payload (`C2 9C` ends nothing, and the string ends at its
+//!   time bound). Inside a string or a paste a byte 0x80-0xbf that
+//!   continues a UTF-8 character of the payload is payload, never 0x9c or
+//!   the 0x9b of an 8-bit end mark (`Ŝ` is `C5 9C`). Without this, `0x9f`,
+//!   a pause, Enter and `0x9c` would give an Enter key from a string. After
+//!   ESC a byte outside ASCII is read again from Ground (the ESC is
+//!   dropped), so `ESC 0x9d` cannot hide an OSC either.
 //! - An X10 mouse report (`ESC [ M Cb Cx Cy`, left on by another program)
 //!   takes three raw bytes after its `M`: they can be any byte (a column
 //!   past 95 is 0x80 or above), and as keys `ESC [ M`, Space, `1` would
 //!   step a value. A terminal that sends `ESC [ M` for F1 (SCO keys) loses
-//!   the next three keys or, typed more than 200 ms later, those of the
-//!   drain.
+//!   the three keys typed next (or, when they come after the report's time
+//!   bound, the keys of the drain that follows).
 //! - Ss3 takes parameter bytes as Csi does: some terminals send
 //!   `ESC O 5 A`, and the `5` would otherwise pick a value.
 //! - ESC ESC: the first is the Esc key, the second begins again.
@@ -270,10 +273,13 @@ enum State {
         cont: u8,
     },
     /// `need` continuation bytes to come, the next one in `lo..=hi`.
+    /// `c1`: the lead was 0xC2, so the character is U+0080 to U+00BF and a
+    /// C1 control below U+00A0.
     Utf8 {
         need: u8,
         lo: u8,
         hi: u8,
+        c1: bool,
     },
     /// The `left` raw bytes of an X10 mouse report (`ESC [ M` and three
     /// bytes) still to come; `since` as for the Csi it began as.
@@ -509,7 +515,7 @@ impl KeyReader {
                 }
                 false
             }
-            State::Utf8 { need, lo, hi } => {
+            State::Utf8 { need, lo, hi, c1 } => {
                 // 이것을 실패시키는 것: 이어지는 바이트의 범위를 보지 않는 것(과장 부호화·대리 쌍·U+10FFFF 너머를 받음),
                 // 깨는 바이트를 다시 읽지 않는 것(`0xE2 ESC [ A`의 ESC를 삼킴).
                 if !(lo..=hi).contains(&b) {
@@ -519,16 +525,23 @@ impl KeyReader {
                     found.key(None);
                     return true;
                 }
-                if need <= 1 {
-                    self.state = State::Ground;
-                    // A character outside ASCII: no key of the editor.
-                    found.key(None);
-                } else {
+                if need > 1 {
                     self.state = State::Utf8 {
                         need: need - 1,
                         lo: 0x80,
                         hi: 0xbf,
+                        c1: false,
                     };
+                } else if c1 {
+                    // U+0080 to U+00BF: a C1 control below U+00A0; any other
+                    // is no introducer and drops as a character would.
+                    // 이것을 실패시키는 것: UTF-8로 쓴 C1(`C2 9D`)을 보통 글자로 읽는 것(나뉜 OSC 답의 `11;rgb`가 키가 됨).
+                    self.state = State::Ground;
+                    self.c1(b, now, found);
+                } else {
+                    self.state = State::Ground;
+                    // A character outside ASCII: no key of the editor.
+                    found.key(None);
                 }
                 false
             }
@@ -572,15 +585,16 @@ impl KeyReader {
             // A C1 control (no character continues here): an introducer
             // begins its sequence as its ESC form does, others are dropped.
             // 이것을 실패시키는 것: C1 도입 바이트를 홀로 버리는 것(`0x9f \r 0x9c`의 Enter가 키가 됨).
-            0x80..=0x9f => {
-                if let Some(state) = introduce(b - 0x40, now, false) {
-                    self.state = state;
-                } else {
-                    // 이것을 실패시키는 것: 도입 바이트가 아닌 C1을 묶음에 세지 않는 것.
-                    found.key(None);
-                }
+            0x80..=0x9f => self.c1(b, now, found),
+            0xc2 => {
+                self.state = State::Utf8 {
+                    need: 1,
+                    lo: 0x80,
+                    hi: 0xbf,
+                    c1: true,
+                };
             }
-            0xc2..=0xdf => self.utf8(1, 0x80, 0xbf),
+            0xc3..=0xdf => self.utf8(1, 0x80, 0xbf),
             0xe0 => self.utf8(2, 0xa0, 0xbf),
             0xed => self.utf8(2, 0x80, 0x9f),
             0xe1..=0xec | 0xee..=0xef => self.utf8(2, 0x80, 0xbf),
@@ -594,7 +608,25 @@ impl KeyReader {
     }
 
     fn utf8(&mut self, need: u8, lo: u8, hi: u8) {
-        self.state = State::Utf8 { need, lo, hi };
+        self.state = State::Utf8 {
+            need,
+            lo,
+            hi,
+            c1: false,
+        };
+    }
+
+    /// The C1 control `b` (0x80-0x9f), as a raw byte or as U+0080 to U+009F
+    /// in UTF-8 (`b` up to 0xbf then, U+00A0 and above being no introducer):
+    /// an introducer begins its sequence as its ESC form does, others are a
+    /// dropped unit.
+    fn c1(&mut self, b: u8, now: Duration, found: &mut Found) {
+        if let Some(state) = introduce(b.wrapping_sub(0x40), now, false) {
+            self.state = state;
+        } else {
+            // 이것을 실패시키는 것: 도입 바이트가 아닌 C1을 묶음에 세지 않는 것.
+            found.key(None);
+        }
     }
 
     /// The byte after an ESC that came at `at`, before `ESC_WAIT` passed;
