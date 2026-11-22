@@ -22,14 +22,14 @@ use bingsu_core::color::osc11::{is_light, parse_osc11};
 use bingsu_core::config::starter::{Choices, Icons, Mode, differences, starter};
 use bingsu_core::fs_trust::Last;
 use bingsu_core::icons::{IconSet, lookup};
+use bingsu_core::setup_editor::screen::too_small;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "usage: bingsu setup [--yes] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]";
+const USAGE: &str = "usage: bingsu setup [--yes] [--plain] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]";
 const FILE: &str = "config.toml";
 /// The names of the one place `setup` writes: the file it makes, and the
 /// JSON name that stands in the same place.
@@ -39,6 +39,8 @@ const CANCELLED: u8 = 130;
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Args {
     yes: bool,
+    /// The line questions even where the editor could be drawn.
+    plain: bool,
     icons: Option<Icons>,
     mode: Option<Mode>,
 }
@@ -49,6 +51,7 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
     while let Some(word) = it.next() {
         match word {
             Some("--yes") => out.yes = true,
+            Some("--plain") => out.plain = true,
             Some("--icons") => {
                 let v = it.next().flatten().and_then(Icons::parse);
                 out.icons = Some(v.ok_or("--icons takes nerd, light, unicode or ascii")?);
@@ -83,6 +86,33 @@ fn complete(a: &Args) -> Result<Choices, String> {
             "bingsu setup: there is no terminal to ask, so it needs {} too\n{USAGE}",
             missing.join(", ")
         )),
+    }
+}
+
+/// How the choices are made when there is a terminal.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "the editor connects it"))]
+enum Way {
+    /// All three given: nothing is asked.
+    Given,
+    /// The line questions: asked for, or a terminal the editor cannot draw
+    /// on (no name, `dumb`, smaller than the editor, or of unknown size).
+    Lines,
+    /// The one-screen editor.
+    Editor,
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "the editor connects it"))]
+fn way(a: &Args, term: Option<&OsStr>, size: Option<(u16, u16)>) -> Way {
+    if a.yes && a.icons.is_some() && a.mode.is_some() {
+        return Way::Given;
+    }
+    let named = term.is_some_and(|t| !t.is_empty() && t != "dumb");
+    let fits = size.is_some_and(|(cols, rows)| !too_small(cols, rows));
+    if a.plain || !named || !fits {
+        Way::Lines
+    } else {
+        Way::Editor
     }
 }
 
@@ -157,8 +187,12 @@ fn startup_lines(shell: Option<&OsStr>) -> String {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Created {
     Wrote,
+    /// The file is there, but the folder could not be flushed: the name may
+    /// not survive a crash.
+    Unflushed,
     /// `config.toml` appeared between the check and the link.
     Exists,
 }
@@ -187,7 +221,8 @@ fn sync_folder(chain: &Chain, dir: &Path) -> std::io::Result<()> {
     folder.sync_all()
 }
 
-/// Temporary file, data and folder flushed, then `linkat`.
+/// Temporary file, data flushed, `linkat`, then the folder flushed. An error
+/// means no file was made.
 fn create(chain: &Chain, dir_path: &Path, text: &str) -> std::io::Result<Created> {
     let dir = chain.last();
     let tmp = unique_name();
@@ -205,7 +240,9 @@ fn create(chain: &Chain, dir_path: &Path, text: &str) -> std::io::Result<Created
     })();
     let _ = sys::unlink_at(dir.as_fd(), &tmp);
     let made = made?;
-    sync_folder(chain, dir_path)?;
+    if made == Created::Wrote && sync_folder(chain, dir_path).is_err() {
+        return Ok(Created::Unflushed);
+    }
     Ok(made)
 }
 
@@ -392,6 +429,10 @@ pub fn run(args: &[OsString]) -> ExitCode {
     };
     match create(&chain, &dir, &starter(choices)) {
         Ok(Created::Wrote) => eprintln!("bingsu: wrote {}", ctx::show(&path)),
+        Ok(Created::Unflushed) => eprintln!(
+            "bingsu: wrote {}, but the folder could not be flushed; it may not survive a crash",
+            ctx::show(&path)
+        ),
         Ok(Created::Exists) => report_existing(&dir, existing(&chain), choices),
         Err(_) => return refuse(&format!("{} could not be written", ctx::show(&path))),
     }
@@ -403,10 +444,20 @@ fn cancelled() -> ExitCode {
     ExitCode::from(CANCELLED)
 }
 
+/// What the startup line is for: a shell `init` already ran in has the
+/// roots it pinned.
+fn startup_note(runs_here: bool) -> &'static str {
+    if runs_here {
+        "bingsu already runs in this shell; this line is only for a new setup:"
+    } else {
+        "Add this to your shell's startup file to start bingsu:"
+    }
+}
+
 /// The startup line on stdout, and a word on stderr about what it is.
 fn finish() -> ExitCode {
     let shell = TrustedEnv::login_shell();
-    eprintln!("Add this to your shell's startup file to start bingsu:");
+    eprintln!("{}", startup_note(TrustedEnv::pinned_roots().is_some()));
     if ctx::print(&startup_lines(shell.as_deref())) {
         ExitCode::SUCCESS
     } else {
@@ -442,10 +493,12 @@ mod tests {
             a,
             Args {
                 yes: true,
+                plain: false,
                 icons: Some(Icons::Nerd),
                 mode: Some(Mode::Light)
             }
         );
+        assert!(parse(&args(&["--plain"])).unwrap().plain);
         for bad in [
             &["--icons", "emoji"][..],
             &["--icons", "Light"],
@@ -462,6 +515,35 @@ mod tests {
         }
     }
 
+    // 이것을 실패시키는 것: `--plain`, 이름 없는 TERM, 빈 TERM, `dumb`, 편집판보다 작은 창(가로 또는 세로), 크기를 모르는
+    // 창 가운데 하나라도 편집판으로 보내는 것, 세 값과 `--yes`가 다 있는데 묻는 것, 셋 중 하나가 빠졌는데 묻지 않는 것.
+    #[test]
+    fn plain_terminals_get_the_line_questions() {
+        let a = |w: &[&str]| parse(&args(w)).unwrap();
+        let fit = Some((80, 24));
+        let xterm = Some(OsStr::new("xterm-256color"));
+        assert_eq!(way(&a(&[]), xterm, fit), Way::Editor);
+        assert_eq!(way(&a(&["--icons", "nerd"]), xterm, fit), Way::Editor);
+        assert_eq!(way(&a(&["--yes"]), xterm, Some((40, 16))), Way::Editor);
+        assert_eq!(way(&a(&["--plain"]), xterm, fit), Way::Lines);
+        for term in [None, Some(OsStr::new("")), Some(OsStr::new("dumb"))] {
+            assert_eq!(way(&a(&[]), term, fit), Way::Lines, "{term:?}");
+        }
+        for size in [None, Some((39, 24)), Some((80, 15)), Some((0, 0))] {
+            assert_eq!(way(&a(&[]), xterm, size), Way::Lines, "{size:?}");
+        }
+        let all = ["--yes", "--icons", "ascii", "--mode", "dark"];
+        assert_eq!(way(&a(&all), xterm, fit), Way::Given);
+        assert_eq!(way(&a(&all), None, None), Way::Given);
+        assert_eq!(way(&a(&all[..3]), xterm, fit), Way::Editor);
+        assert_eq!(way(&a(&all[1..]), xterm, fit), Way::Editor);
+        assert_eq!(
+            way(&a(&["--yes", "--mode", "dark"]), xterm, fit),
+            Way::Editor
+        );
+        assert!(USAGE.contains(" [--plain] "), "{USAGE}");
+    }
+
     // 이것을 실패시키는 것: 터미널 없이 기본값을 조용히 고르는 것, 빠진 인자를 이름으로 알리지 않는 것,
     // `--yes` 없이 쓰기로 넘어가는 것.
     #[test]
@@ -470,6 +552,7 @@ mod tests {
             yes: true,
             icons: Some(Icons::Unicode),
             mode: Some(Mode::Auto),
+            ..Args::default()
         };
         assert_eq!(
             complete(&all),
@@ -504,6 +587,19 @@ mod tests {
         assert_eq!(yes(None, true), None);
     }
 
+    // 이것을 실패시키는 것: init이 고정한 값이 있는 셸과 없는 셸의 안내를 바꾸는 것.
+    #[test]
+    fn the_startup_note_says_whether_bingsu_runs_here() {
+        assert_eq!(
+            startup_note(true),
+            "bingsu already runs in this shell; this line is only for a new setup:"
+        );
+        assert_eq!(
+            startup_note(false),
+            "Add this to your shell's startup file to start bingsu:"
+        );
+    }
+
     // 이것을 실패시키는 것: 셸 이름 → 시작 줄 대응(fish만 다른 형식), 모르는 셸에서 한 줄만 내는 것.
     #[test]
     fn the_startup_line_follows_the_shell() {
@@ -532,8 +628,9 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 이름 넣기를 `renameat`으로 바꾸는 것(먼저 만들어진 파일을 덮어씀: 검사와 생성 사이
-    // 경쟁), 만든 파일의 권한이 0600이 아닌 것, 임시 파일을 남기는 것, 폴더에 `fsync`하지 않는 것은
-    // 시험할 수 없어 제외.
+    // 경쟁), 만든 파일의 권한이 0600이 아닌 것, 임시 파일을 남기는 것, 이름을 넣은 뒤 폴더 flush 실패를 "쓰지
+    // 못함"(오류)이나 "썼음"으로 알리는 것, 남의 파일이 있을 때 폴더를 flush하는 것. 폴더에 `fsync`하지 않는
+    // 것은 시험할 수 없어 제외.
     #[test]
     fn a_file_that_appeared_first_is_never_replaced() {
         let dir = scratch("race");
@@ -541,7 +638,11 @@ mod tests {
         // The fixture makes the file after the caller's check, before the link.
         std::fs::write(dir.join(FILE), b"theirs\n").unwrap();
         let got = create(&chain, &dir, "ours\n").unwrap();
-        assert!(matches!(got, Created::Exists));
+        assert_eq!(got, Created::Exists);
+        // Someone else's file is not flushed: a folder that would fail it
+        // changes nothing.
+        let other = scratch("race-other");
+        assert_eq!(create(&chain, &other, "ours\n").unwrap(), Created::Exists);
         assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"theirs\n");
         let names: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
@@ -550,15 +651,21 @@ mod tests {
         assert_eq!(names, [OsString::from(FILE)], "a temporary file was left");
         // Without a rival the file is made, private, and no temporary stays.
         std::fs::remove_file(dir.join(FILE)).unwrap();
-        assert!(matches!(
-            create(&chain, &dir, "ours\n").unwrap(),
-            Created::Wrote
-        ));
+        assert_eq!(create(&chain, &dir, "ours\n").unwrap(), Created::Wrote);
         let meta = std::fs::metadata(dir.join(FILE)).unwrap();
         assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
         assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"ours\n");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        // The folder named is not the one written in, so its flush fails
+        // after the link: the file is there and says so.
+        std::fs::remove_file(dir.join(FILE)).unwrap();
+        assert_eq!(
+            create(&chain, &other, "ours\n").unwrap(),
+            Created::Unflushed
+        );
+        assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"ours\n");
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     // 이것을 실패시키는 것: 파일이 없을 때 `None`이 아닌 것, 링크를 따라가 읽는 것(`O_NOFOLLOW`),

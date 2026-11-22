@@ -6,6 +6,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "support/user_env.rs"]
+mod user_env;
+
 /// A new session has no controlling terminal, so `/dev/tty` cannot be opened
 /// and `setup` takes its no-terminal path even when the test runs in one.
 fn detach() -> std::io::Result<()> {
@@ -268,5 +271,38 @@ fn a_json_config_is_the_settings_file_already_there() {
     assert!(
         out.contains("result: valid") && !out.contains("E308"),
         "{out}"
+    );
+}
+
+// 이것을 실패시키는 것: init이 고정한 값이 있는 셸에서 시작 줄을 새로 넣으라고 하는 것, 없는 셸에서 이미 돈다고
+// 하는 것, 고정한 설정 폴더가 아닌 곳(지금의 XDG_CONFIG_HOME)에 쓰는 것, 시작 줄을 stdout 밖에 내는 것.
+#[test]
+fn the_startup_line_says_whether_bingsu_already_runs_here() {
+    let e = user_env::Env::new("cli_setup", "runs-here");
+    let var = user_env::frame(&e.pinned_words());
+    let args = ["setup", "--yes", "--icons", "nerd", "--mode", "dark"];
+    let mut c = e.cmd_pinned(&args, &var);
+    c.env("SHELL", "/bin/zsh");
+    // SAFETY: `detach` only calls setsid, which is async-signal-safe.
+    unsafe { c.pre_exec(detach) };
+    let o = c.output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let err = text(&o.stderr);
+    assert!(
+        err.contains("bingsu already runs in this shell; this line is only for a new setup:\n"),
+        "{err}"
+    );
+    assert!(!err.contains("Add this"), "{err}");
+    assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
+    assert!(e.config_dir().join("config.toml").exists());
+    assert!(!e.base.join("elsewhere").exists());
+
+    let h = Home::new("runs-not");
+    let o = h.run(&args[1..]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    assert!(
+        text(&o.stderr).contains("Add this to your shell's startup file to start bingsu:\n"),
+        "{}",
+        text(&o.stderr)
     );
 }
