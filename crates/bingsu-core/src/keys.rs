@@ -68,11 +68,16 @@
 //!   ESC a byte outside ASCII is read again from Ground (the ESC is
 //!   dropped), so `ESC 0x9d` cannot hide an OSC either.
 //! - An X10 mouse report (`ESC [ M Cb Cx Cy`, left on by another program)
-//!   takes three raw bytes after its `M`: they can be any byte (a column
-//!   past 95 is 0x80 or above), and as keys `ESC [ M`, Space, `1` would
-//!   step a value. A terminal that sends `ESC [ M` for F1 (SCO keys) loses
-//!   the three keys typed next (or, when they come after the report's time
-//!   bound, the keys of the drain that follows).
+//!   takes three raw bytes after its `M`: they can be any byte from 0x20
+//!   up (a column past 95 is 0x80 or above), and as keys `ESC [ M`, Space,
+//!   `1` would step a value. Each is 32 plus a value, so a byte below 0x20
+//!   ends the report and is read again: a lone `ESC [ M` cannot swallow the
+//!   `ESC [ 2` of a paste mark that follows, nor a Ctrl-C. A terminal that
+//!   sends `ESC [ M` for F1 (SCO keys) loses the three keys typed next (or,
+//!   when they come after the report's time bound, the keys of the drain
+//!   that follows). With UTF-8 coordinates (mode 1005) a value from 96 up
+//!   takes two bytes and the last one would be read as a key: the session
+//!   that uses this reader turns the mouse modes off.
 //! - Ss3 takes parameter bytes as Csi does: some terminals send
 //!   `ESC O 5 A`, and the `5` would otherwise pick a value.
 //! - ESC ESC: the first is the Esc key, the second begins again.
@@ -546,8 +551,16 @@ impl KeyReader {
                 false
             }
             State::Mouse { since, left } => {
-                // Any byte: the report's three bytes are raw (a column past
-                // 95 is a byte 0x80 or above, a C1 introducer included).
+                // A report's bytes are 32 plus a value, never a C0 control:
+                // such a byte (ESC, Ctrl-C) ends it and is read again.
+                // 이것을 실패시키는 것: C0 제어 바이트까지 보고로 먹는 것(홀로 된 `ESC [ M` 뒤 붙여 넣기 시작 표지의
+                // `ESC [ 2`가 먹혀 붙여 넣은 글이 키가 됨, Ctrl-C가 사라짐).
+                if b < 0x20 {
+                    self.state = State::Ground;
+                    return true;
+                }
+                // Any other byte: the report's three bytes are raw (a column
+                // past 95 is a byte 0x80 or above, a C1 introducer included).
                 self.state = if left <= 1 {
                     State::Ground
                 } else {

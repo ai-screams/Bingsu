@@ -278,6 +278,22 @@ fn an_x10_mouse_report_is_one_dropped_unit() {
     assert_eq!(one(b"\x1b[<0;10;5Mq"), [Char(b'q')]);
 }
 
+// 이것을 실패시키는 것: 기다리는 마우스 보고가 C0 제어 바이트까지 먹는 것(홀로 된 `ESC [ M` 뒤의 붙여 넣기 시작 표지를
+// 먹어 붙여 넣은 `q`, Enter가 키가 됨, 뒤이은 Ctrl-C를 잃음).
+#[test]
+fn a_control_byte_ends_a_mouse_report() {
+    let paste: [&[u8]; 4] = [b"\x1b[M", b"\x1b[200~", b"q\n", b"\x1b[201~"];
+    assert_eq!(run(&paste, ms(1)), []);
+    assert_eq!(run(&[b"\x1b[M", b"\x1b[200~q\n\x1b[201~"], ms(1)), []);
+    assert_eq!(one(b"\x1b[M\x1b[200~q\n\x1b[201~"), []);
+    for start in [&b"\x1b[M"[..], b"\x1b[M ", b"\x1b[M !"] {
+        let mut r = KeyReader::new();
+        r.feed(start, Duration::ZERO);
+        assert_eq!(r.feed(b"\x03", ms(1)).as_slice(), [Ctrl(b'c')], "{start:?}");
+    }
+    assert_eq!(one(b"\x1b[M\x1b[A"), [Up]);
+}
+
 // 이것을 실패시키는 것: ESC ESC의 둘째를 다시 읽지 않는 것.
 #[test]
 fn esc_esc_is_an_esc_and_a_new_start() {
