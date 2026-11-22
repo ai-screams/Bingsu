@@ -209,6 +209,18 @@ pub fn preset(name: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.name == name)
 }
 
+/// Whether `style.gap` changes anything under `o` (the options laid over
+/// a preset): only between blocks that have ends of their own (`caps`),
+/// or between touching segments without a background (`none` on a preset
+/// that draws no blocks). `config check` and the setup editor ask this.
+pub fn gap_applies(o: &StyleOptions) -> bool {
+    match o.joining {
+        Some(Joining::Capped) => true,
+        Some(Joining::Adjacent) => o.body != Some(Body::Block),
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StyleError {
     /// The generated template is longer than `MAX_TEMPLATE_BYTES`.

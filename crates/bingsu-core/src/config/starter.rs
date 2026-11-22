@@ -123,7 +123,7 @@ fn text<'a>(t: &'a Table, path: &[&str]) -> Option<&'a str> {
 /// A value from the file as the terminal will show it: quoted, without
 /// control, bidi or invisible characters (`sanitize`), at most 64
 /// characters.
-fn shown(value: &str) -> String {
+pub(crate) fn shown(value: &str) -> String {
     let clean = crate::sanitize::sanitize(value.as_bytes());
     let mut out = String::from("\"");
     out.extend(clean.chars().take(64));

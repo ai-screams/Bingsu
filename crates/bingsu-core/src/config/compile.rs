@@ -489,12 +489,7 @@ fn compile_variant(
             {
                 involved.extend(get(r, &["style", "separator"]));
             }
-            let gapped = match o.joining {
-                Some(Joining::Capped) => true,
-                Some(Joining::Adjacent) => !block,
-                _ => false,
-            };
-            if gapped {
+            if crate::style::gap_applies(&o) {
                 involved.extend(get(r, &["style", "gap"]));
             }
         }
