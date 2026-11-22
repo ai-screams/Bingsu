@@ -248,13 +248,13 @@ static WINCH_SEEN: AtomicBool = AtomicBool::new(false);
 const JOB_SIGNALS: [libc::c_int; 3] = [libc::SIGTSTP, libc::SIGCONT, libc::SIGWINCH];
 
 extern "C" fn on_job_signal(sig: libc::c_int) {
+    #[cfg(test)]
+    test_session::in_handler(sig);
     let seen = match sig {
         libc::SIGTSTP => &TSTP_SEEN,
         libc::SIGCONT => {
             // A continue drops a stop not taken yet, as the kernel drops a
-            // pending SIGTSTP when SIGCONT is sent. Cleared before the
-            // continue is set: a SIGTSTP whose handler runs in between (the
-            // handlers can nest) is then kept, not lost.
+            // pending SIGTSTP when SIGCONT is sent.
             // 이것을 실패시키는 것: 지우지 않는 것(재개 뒤 남은 SIGTSTP로 한 번 더 멈춤; a_continue_during_the_way_out_cancels_the_stop).
             TSTP_SEEN.store(false, Ordering::SeqCst);
             &CONT_SEEN
@@ -265,15 +265,44 @@ extern "C" fn on_job_signal(sig: libc::c_int) {
     super::wake();
 }
 
+/// Takes the stop request (SIGTSTP) that `wait` saw: whether it still
+/// stands. A continue handled before the stop goes with it; one handled
+/// after it cancelled it (its handler cleared the request), and stays for
+/// `check`; one that comes later is `stop`'s to see. The continue goes
+/// first: a continue whose handler runs between the two lines cleared the
+/// request already, and the swap sees that.
+/// 이것을 실패시키는 것: 앞선 재개를 지우지 않는 것(그 재개가 정지를 취소함), 정지를 취소한 재개를 되살리지 않는 것(다시
+/// 잡지 않음), 재개를 나중에 지우는 것(그 사이 재개를 잃고 멈춤; a_stop_and_a_continue_count_in_the_order_they_came).
+fn take_stop() -> bool {
+    CONT_SEEN.store(false, Ordering::SeqCst);
+    #[cfg(test)]
+    test_session::taking_stop(1);
+    let stands = TSTP_SEEN.swap(false, Ordering::SeqCst);
+    if !stands {
+        CONT_SEEN.store(true, Ordering::SeqCst);
+    }
+    stands
+}
+
 /// The action that sends `sig` to `on_job_signal`. SA_RESTART: the session
-/// wakes on the pipe, so other calls need not end early.
+/// wakes on the pipe, so other calls need not end early. SIGTSTP and SIGCONT
+/// wait while either handler runs: nested, a continue that came after a
+/// stop would run before the stop's handler set the request, which would
+/// then stand (and a stop inside a continue's handler would be cleared).
+/// 이것을 실패시키는 것: 둘 중 하나를 막지 않는 것(a_stop_and_a_continue_count_in_the_order_they_came의 nested, nestedcont 칸).
 fn job_action() -> libc::sigaction {
     // SAFETY: an all-zero `sigaction` is a valid starting value.
     let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
     act.sa_sigaction = on_job_signal as extern "C" fn(libc::c_int) as usize;
     act.sa_flags = libc::SA_RESTART;
-    // SAFETY: `act.sa_mask` is a valid signal set to empty.
-    unsafe { libc::sigemptyset(&mut act.sa_mask) };
+    // SAFETY: `act.sa_mask` is a valid signal set to empty, then to fill.
+    unsafe {
+        libc::sigemptyset(&mut act.sa_mask);
+    }
+    for sig in [libc::SIGTSTP, libc::SIGCONT] {
+        // SAFETY: as above; `sig` is a valid signal number.
+        unsafe { libc::sigaddset(&mut act.sa_mask, sig) };
+    }
     act
 }
 
@@ -649,7 +678,11 @@ impl Session<'_> {
                 return Event::Signal(sig);
             }
             if TSTP_SEEN.load(Ordering::SeqCst) {
-                self.stop(false);
+                #[cfg(test)]
+                test_session::taking_stop(0);
+                if take_stop() {
+                    self.stop(false);
+                }
             }
             let winch = WINCH_SEEN.swap(false, Ordering::SeqCst);
             // 이것을 실패시키는 것: SIGCONT 뒤 전경 작업인지 다시 보지 않는 것(bg로 이어 간 작업이 터미널을 다시 잡음).
@@ -854,6 +887,9 @@ impl Session<'_> {
     pub fn suspend(&mut self) {
         // 이것을 실패시키는 것: 무시하던 SIGTSTP인데도 멈추는 것(an_ignored_stop_stays_ignored).
         if self.jobs.stops() && self.state == State::Running {
+            // A stop request or a continue seen so far goes with this stop.
+            TSTP_SEEN.store(false, Ordering::SeqCst);
+            CONT_SEEN.store(false, Ordering::SeqCst);
             self.stop(true);
         }
     }
@@ -978,9 +1014,8 @@ impl Session<'_> {
 
     /// Puts the terminal back and stops: the process group (`whole_group`,
     /// Ctrl-Z) or this process (a SIGTSTP from outside). Then `check`.
+    /// The caller took the stop request and the continues seen before it.
     fn stop(&mut self, whole_group: bool) {
-        TSTP_SEEN.store(false, Ordering::SeqCst);
-        CONT_SEEN.store(false, Ordering::SeqCst);
         let left = self.state == State::Running && self.leave();
         // Putting the terminal back can take a while (a terminal slow to
         // take output). What came meanwhile goes first, before anything of
@@ -1014,6 +1049,8 @@ impl Session<'_> {
         // A signal raised for this thread is taken before the call returns:
         // the default action stops the process here. In an orphaned process
         // group the kernel drops the stop, and the call returns at once.
+        #[cfg(test)]
+        test_session::STOPS.set(test_session::STOPS.get() + 1);
         set_action(libc::SIGTSTP, &default_action());
         // SAFETY: raises SIGTSTP in this thread.
         unsafe { libc::raise(libc::SIGTSTP) };
@@ -1137,6 +1174,11 @@ mod test_session {
         /// The errno the next zero-length write after a read of nothing
         /// fails with.
         pub(super) static PROBE: Cell<Option<i32>> = const { Cell::new(None) };
+        /// Stops of the session that went as far as the raise.
+        pub(super) static STOPS: Cell<usize> = const { Cell::new(0) };
+        /// A SIGCONT comes once as the session takes a stop request: before
+        /// (0) or between the two lines of `take_stop` (1).
+        pub(super) static CONT_AT_TAKE: Cell<Option<u8>> = const { Cell::new(None) };
         /// Raised once, right after the raw switch.
         pub(super) static AFTER_RAW: Cell<Option<libc::c_int>> = const { Cell::new(None) };
         /// Raised once, in order, once `leave` wrote the way out (0: none).
@@ -1252,6 +1294,31 @@ mod test_session {
             room.set(None);
             Some(whole - buf.len())
         })
+    }
+
+    /// The signal in whose next handler the other of SIGTSTP and SIGCONT is
+    /// raised, first thing (a static: read in the handler).
+    pub(super) static NEST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+    pub(super) fn in_handler(sig: libc::c_int) {
+        use std::sync::atomic::Ordering;
+        if NEST
+            .compare_exchange(sig, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            raise(if sig == libc::SIGTSTP {
+                libc::SIGCONT
+            } else {
+                libc::SIGTSTP
+            });
+        }
+    }
+
+    pub(super) fn taking_stop(at: u8) {
+        if CONT_AT_TAKE.get() == Some(at) {
+            CONT_AT_TAKE.set(None);
+            raise(libc::SIGCONT);
+        }
     }
 
     fn raise(sig: libc::c_int) {

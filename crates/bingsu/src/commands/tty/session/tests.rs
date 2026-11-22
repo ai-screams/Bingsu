@@ -441,6 +441,91 @@ fn a_continue_after_a_sigstop_takes_the_terminal_again() {
     continued(t);
 }
 
+// SIGTSTP and SIGCONT in the order they came, also when one comes inside the
+// other's handler (`nested`: a continue raised first thing in the stop's
+// handler; `nestedcont`: a stop raised first thing in the continue's) or
+// while the session takes the request (`taking`, and `inside` between the
+// two lines of the take): a later continue cancels
+// the stop (the terminal is taken again without one), and a later stop
+// stands (`before`: a continue, then a stop). A suspend takes what came
+// before it: a continue does not cancel it (`suspend`), and a stop request
+// goes with it (`suspendstop`). 이것을 실패시키는 것: 두 핸들러가 서로 끼어들게 두는 것(nested, nestedcont), 정지
+// 요청을 가져가는 순서가 틀린 것(taking, inside, before), suspend가 앞선 재개나 정지 요청을 지우지 않는 것(suspend,
+// suspendstop).
+#[test]
+fn a_stop_and_a_continue_count_in_the_order_they_came() {
+    for (order, flags, stops) in [
+        ("nested", "stop false continue true", 0),
+        ("nestedcont", "stop true continue true", 1),
+        ("taking", "stop true continue false", 0),
+        ("inside", "stop true continue false", 0),
+        ("before", "stop true continue true", 1),
+        ("suspend", "stop false continue false", 1),
+        ("suspendstop", "stop false continue false", 1),
+    ] {
+        let t = start("signal_order_child", &[("BINGSU_TEST_ORDER", order)]);
+        let (lines, _) = t.mode_restored_after();
+        assert_eq!(
+            lines,
+            [
+                flags.to_owned(),
+                "Resumed(Size { cols: 80, rows: 24 })".to_owned(),
+                format!("stops {stops}")
+            ],
+            "{order}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "child: a session on a pseudo-terminal"]
+fn signal_order_child() {
+    use std::sync::atomic::Ordering;
+    take_signals();
+    let tty = take_terminal();
+    let mut s = tty.full_screen().unwrap();
+    let raise = |sig| {
+        // SAFETY: raises `sig` in this thread; the session's handler takes it.
+        unsafe { libc::raise(sig) };
+    };
+    match param("BINGSU_TEST_ORDER").as_str() {
+        "nested" => {
+            test_session::NEST.store(libc::SIGTSTP, Ordering::SeqCst);
+            raise(libc::SIGTSTP);
+        }
+        "nestedcont" => {
+            test_session::NEST.store(libc::SIGCONT, Ordering::SeqCst);
+            raise(libc::SIGCONT);
+        }
+        "taking" | "inside" => {
+            let at = u8::from(param("BINGSU_TEST_ORDER") == "inside");
+            test_session::CONT_AT_TAKE.set(Some(at));
+            raise(libc::SIGTSTP);
+        }
+        "suspend" => {
+            raise(libc::SIGCONT);
+            s.suspend();
+        }
+        "suspendstop" => {
+            raise(libc::SIGTSTP);
+            s.suspend();
+        }
+        _ => {
+            raise(libc::SIGCONT);
+            raise(libc::SIGTSTP);
+        }
+    }
+    say(&format!(
+        "stop {} continue {}",
+        TSTP_SEEN.load(Ordering::SeqCst),
+        CONT_SEEN.load(Ordering::SeqCst)
+    ));
+    // In this orphaned process group the raise of a stop returns at once;
+    // the session then takes the terminal again either way.
+    say(&format!("{:?}", s.wait(false, Some(Instant::now() + WAIT))));
+    say(&format!("stops {}", test_session::STOPS.get()));
+}
+
 // A SIGCONT with no stop at all is taken the same way: the session cannot
 // tell it from the end of a stop it did not see.
 // 이것을 실패시키는 것: 제 정지가 아닌 재개에서 먼저 되돌리지 않는 것, 다시 잡지 않는 것.
