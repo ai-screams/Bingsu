@@ -107,7 +107,12 @@ impl Grid {
             .is_some_and(|e| e <= end.min(u32::from(self.cols)));
         // The one writer of cells: a control, bidi or invisible character
         // never reaches a frame, whatever the caller forgot to clean.
-        let removed = text.chars().any(crate::sanitize::is_removed);
+        // A closure: the purity gate refuses a function item passed on.
+        let removed = text
+            .chars()
+            .filter(|&c| crate::sanitize::is_removed(c))
+            .count()
+            > 0;
         if w == 0 || !fits || y >= self.rows || removed {
             return false;
         }
