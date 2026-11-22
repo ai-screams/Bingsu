@@ -344,3 +344,114 @@ fn answers_come_back_in_the_order_they_were_given() {
         Trust::Executable
     );
 }
+
+/// The existing settings file's sources: the start's reading with the
+/// settings place's root as the target.
+fn existing_sources(fx: &Fx) -> Sources {
+    let (tape, _) = fx.read();
+    let (key, _, why) = tape
+        .settings_root(&fx.root.join("config.toml"))
+        .expect("a settings file");
+    assert_eq!(why, None);
+    Sources::existing(tape, key, VERSION).expect("read at the start")
+}
+
+// 이것을 실패시키는 것: 있는 파일의 미리보기가 그 파일 자리에 후보 바이트를 두지 않는 것(시작 때 바이트로 그림), 그
+// 파일을 가리키는 `extends` 답에 후보를 주지 않는 것, 신뢰·이름을 바꾸는 것, 다른 파일의 바이트를 바꾸는 것. 후보를 실제로
+// 쓴 뒤 읽은 결과와 같아야 한다.
+#[test]
+fn an_existing_file_previews_as_the_reader_reads_it_changed() {
+    let fx = Fx::new("existing");
+    let original = "# mine\n[style]\npreset = \"lean\"\n";
+    let path = fx.root.join("config.toml");
+    fx.put(&path, original);
+    layered(&fx);
+    // A conf.d file that extends the settings file too.
+    fx.put(
+        &fx.root.join("conf.d/20-b.toml"),
+        &format!("extends = [\"{}\"]\n", path.display()),
+    );
+    let sources = existing_sources(&fx);
+    assert_eq!(sources.original(), original.as_bytes());
+    let changed = "# mine\n[style]\npreset = \"pill\"\nouter_end = \"round\"\n";
+    let preview = report::from_loaded(sources.load(changed.as_bytes()), Mode::Dark);
+    assert!(sources.target(&preview.files).is_some());
+    fx.put(&path, changed);
+    let real = report::from_loaded(fx.read().1, Mode::Dark);
+    assert_eq!(applied(&preview), applied(&real));
+    assert!(preview.snapshot.is_some(), "{:?}", preview.diagnostics);
+    assert_eq!(preview.snapshot, real.snapshot);
+    assert_eq!(preview.diagnostics, real.diagnostics);
+}
+
+// 이것을 실패시키는 것: 설정 파일의 뿌리를 읽은 답이 아닌 `extends` 답이 catalog의 그 자리를 가질 때(core는 더 강한 신뢰로
+// 같은 FileKey를 연 답에 자리를 넘긴다) 그 답에 후보 바이트를 주지 않는 것(미리보기가 시작 때 바이트로 그림). 시작
+// 기록의 뿌리 답을 모양만 신뢰로 바꿔 그 경우를 만든다. 실제 loader로 같은 파일에 더 강한 신뢰의 별칭을 만들지는 못했다
+// (모양만 폴더의 링크와 믿는 폴더의 하드 링크는 별칭도 Unsafe로 읽혔다).
+#[test]
+fn every_answer_that_opened_the_settings_file_gets_the_changed_bytes() {
+    let fx = Fx::new("existing-alias");
+    let path = fx.root.join("config.toml");
+    fx.put(&path, "[style]\npreset = \"lean\"\n");
+    fx.put(
+        &fx.root.join("conf.d/20-b.toml"),
+        &format!("extends = [\"{}\"]\n", path.display()),
+    );
+    let (mut tape, _) = fx.read();
+    let settings = |display: &[u8]| display == path.as_os_str().as_bytes();
+    for r in &mut tape.roots {
+        if let Root::File(m) = r
+            && settings(&m.display)
+        {
+            m.trust = Trust::ShapeOnly;
+        }
+    }
+    for c in &mut tape.calls {
+        if let Call::Root(_, Ok(o)) = c
+            && settings(&o.display)
+        {
+            o.trust = Trust::ShapeOnly;
+        }
+    }
+    let (key, _, _) = tape.settings_root(&path).expect("the settings file");
+    let sources = Sources::existing(tape, key, VERSION).unwrap();
+    let changed = "[style]\npreset = \"pill\"\n";
+    let r = report::from_loaded(sources.load(changed.as_bytes()), Mode::Dark);
+    let f = r.files.iter().find(|f| f.opened.key == key).unwrap();
+    assert_eq!(
+        f.trust,
+        Trust::Executable,
+        "the trusted answer took the place"
+    );
+    assert_eq!(f.opened.bytes, changed.as_bytes());
+}
+
+// 이것을 실패시키는 것: 설정 자리의 파일을 읽지 못했는데 읽었다고 하는 것(그 파일로 편집판을 엶), 읽은 파일을 읽지
+// 못했다고 하는 것, 설정 자리에 파일이 없을 때 다른 뿌리(conf.d)를 설정 파일로 보는 것.
+#[test]
+fn the_settings_root_says_whether_it_was_read() {
+    let fx = Fx::new("settings-root");
+    layered(&fx);
+    let path = fx.root.join("config.toml");
+    let (tape, _) = fx.read();
+    assert!(
+        tape.settings_root(&path).is_none(),
+        "conf.d is not the settings file"
+    );
+    fx.put(&path, "[style]\npreset = \"lean\"\n");
+    let (tape, _) = fx.read();
+    let (key, name, why) = tape.settings_root(&path).unwrap();
+    assert!(name.ends_with(b"config.toml"));
+    assert_eq!(why, None);
+    assert!(Sources::existing(tape, key, VERSION).is_some());
+    // Root reads a file whatever its mode.
+    if sys::current_uid() == 0 {
+        return;
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (tape, _) = fx.read();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (key, _, why) = tape.settings_root(&path).unwrap();
+    assert!(why.is_some(), "a file the reader cannot open is not read");
+    assert!(Sources::existing(tape, key, VERSION).is_none());
+}

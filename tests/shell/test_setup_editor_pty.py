@@ -51,13 +51,16 @@ def home():
     shutil.rmtree(root, ignore_errors=True)
 
 
-def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None, background=False):
+def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None, background=False,
+          out=None):
     env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "PWD": str(home)}
     if term is not None:
         env["TERM"] = term
     env.update(extra or {})
     run = f'"{real_bin()}" setup {" ".join(args)}'
+    # Standard output apart from the terminal: the startup line only.
+    run = f'{run} > "{out}"' if out else run
     # In the background `$!` names bingsu itself, for a signal; without job
     # control the job stays in the terminal's foreground group.
     run = f"{run} & echo BPID=$!; wait $!" if background else run

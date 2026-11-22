@@ -3,6 +3,7 @@
 //! Every value comes from the rows' fixed lists; the file text is ASCII.
 use super::model::{Model, Target};
 use super::rows::{self, Row};
+use crate::config::edit::{self, EditError};
 use crate::config::starter::SCHEMA_URL;
 use crate::config::tree::Format;
 use alloc::format;
@@ -139,6 +140,9 @@ pub struct Change {
     pub key: &'static str,
     /// The file's value now, shown (quoted, sanitized), or `not set`.
     pub now: String,
+    /// The value to set, as TOML writes it (`"round"`, `true`); `None`:
+    /// delete the file's key.
+    pub value: Option<String>,
     /// The value picked, or `not set` when the file's own value goes.
     pub chosen: String,
     /// What to do in the file: the line to put in under its table (TOML),
@@ -184,6 +188,7 @@ pub fn changes(m: &Model) -> Vec<Change> {
             };
             out.push(Change {
                 key,
+                value: value(&set),
                 now: shown_now,
                 chosen: value(&set).unwrap_or_else(|| "not set".into()),
                 line,
@@ -192,4 +197,21 @@ pub fn changes(m: &Model) -> Vec<Change> {
         }
     }
     out
+}
+
+/// The existing TOML file `original` with every change of `changes(m)`
+/// made in place (`config::edit`: the rest of the file, its comments and
+/// order kept): the bytes the preview loads in the file's place. A change
+/// the local edit refuses (an inline or dotted table, a shape it does not
+/// edit) refuses the whole candidate.
+pub fn candidate_toml(m: &Model, original: &[u8]) -> Result<Vec<u8>, EditError> {
+    let mut bytes = original.to_vec();
+    for c in changes(m) {
+        let path: Vec<&str> = c.key.split('.').collect();
+        bytes = match &c.value {
+            Some(v) => edit::set(&bytes, &path, v)?,
+            None => edit::remove(&bytes, &path)?,
+        };
+    }
+    Ok(bytes)
 }
