@@ -273,3 +273,28 @@ fn ten_missed_frames_in_a_row_end_the_opening() {
     o.drawn(ms(233));
     assert!(o.ended());
 }
+
+// 이것을 실패시키는 것: 시계 끝에서 지금보다 늦지 않은 기한을 내는 것(포화 덧셈), 그 시각에 끝 프레임이 아닌 것, 바로
+// 앞의 시각까지 끝으로 보는 것.
+#[test]
+fn a_clock_at_its_end_draws_the_end_frame_once_and_stops() {
+    // Began at the clock's end: the one frame drawn is the end frame.
+    let mut o = Opening::new(Duration::MAX);
+    assert_eq!(o.at(Duration::MAX), LENGTH);
+    o.drawn(Duration::MAX);
+    assert!(o.ended());
+    assert_eq!(o.next(Duration::MAX), None);
+    // A frame missed less than one FRAME before the clock's end: no
+    // deadline, and the next redraw draws the end frame.
+    let near = Duration::MAX - Duration::from_nanos(1);
+    let mut o = Opening::new(Duration::ZERO);
+    o.missed();
+    assert!(!o.ended());
+    assert_eq!(o.next(near), None);
+    assert_eq!(o.at(near), LENGTH);
+    // One FRAME before the end still has a deadline ahead.
+    let last = Duration::MAX - FRAME;
+    let o = Opening::new(last);
+    assert_eq!(o.next(last), Some(Duration::MAX));
+    assert_eq!(o.at(last), Duration::ZERO);
+}

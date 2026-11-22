@@ -694,9 +694,11 @@ impl Opening {
     }
 
     /// The time into the opening to draw at `now`: `LENGTH` once it is
-    /// over or its time ran out.
+    /// over or its time ran out, and at a clock so near its end that no
+    /// later frame could be timed (see `next`).
     pub fn at(&self, now: Duration) -> Duration {
-        if self.over {
+        // 이것을 실패시키는 것: 다음 프레임을 잡을 수 없는 시각에 끝 프레임이 아닌 것(타이머가 끝난 뒤 중간 프레임이 남음).
+        if self.over || now.checked_add(FRAME).is_none() {
             return LENGTH;
         }
         now.saturating_sub(self.start).min(LENGTH)
@@ -704,10 +706,18 @@ impl Opening {
 
     /// When the next frame is due after one drawn or missed at `now`: one
     /// `FRAME` later (at most 30 a second, also for the end frame after a
-    /// skip, so a busy writer is not asked in a loop); `None` once the end
-    /// frame was drawn.
+    /// skip, so a busy writer is not asked in a loop). `None` once the end
+    /// frame was drawn, and when one `FRAME` past `now` is past the clock's
+    /// end: a deadline that is not ahead of `now` would make the caller's
+    /// wait return at once, again and again. The frame drawn there is the
+    /// end frame (`at`); one that could not be drawn comes with the next
+    /// redraw, which draws the end frame too.
     pub fn next(&self, now: Duration) -> Option<Duration> {
-        (!self.ended).then(|| now.saturating_add(FRAME))
+        // 이것을 실패시키는 것: 포화 덧셈으로 지금보다 늦지 않은 기한을 내는 것(호출자가 쉬지 않고 깨어남).
+        if self.ended {
+            return None;
+        }
+        now.checked_add(FRAME)
     }
 
     /// The frame of `now` was drawn.
