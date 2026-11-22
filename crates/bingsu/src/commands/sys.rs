@@ -169,6 +169,45 @@ pub fn fd_is_tty(fd: i32) -> bool {
     unsafe { libc::isatty(fd) == 1 }
 }
 
+/// A pipe (read end, write end) whose two ends are non-blocking and closed
+/// on exec. On Linux `pipe2` sets both flags in the call; macOS has no
+/// `pipe2`, so a child that another thread starts between `pipe` and the
+/// `fcntl` calls there could inherit the ends.
+pub fn nonblocking_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [-1 as libc::c_int; 2];
+    #[cfg(target_os = "linux")]
+    // SAFETY: `fds` is writable for the two descriptors pipe2 returns.
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: `fds` is writable for the two descriptors pipe returns.
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: pipe returned a new descriptor, owned from here on (closed on
+    // every return below).
+    let read = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) };
+    // SAFETY: as above, the other end.
+    let write = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
+    let ends = (read, write);
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        // SAFETY: `fd` is open (owned above); F_SETFD sets only its flags.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: as above; F_GETFL only reads the status flags.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        // SAFETY: as above; F_SETFL adds O_NONBLOCK to the flags just read.
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(ends)
+}
+
 pub struct Passwd {
     pub name: Vec<u8>,
     pub home: PathBuf,
@@ -323,14 +362,16 @@ pub fn computed_member(gid: u32) -> MemberQuestion {
     }
 }
 
+/// This thread's errno slot (also read and put back by signal handlers).
 #[cfg(target_os = "linux")]
-fn errno_location() -> *mut libc::c_int {
+pub(crate) fn errno_location() -> *mut libc::c_int {
     // SAFETY: returns this thread's errno slot.
     unsafe { libc::__errno_location() }
 }
 
+/// This thread's errno slot (also read and put back by signal handlers).
 #[cfg(target_os = "macos")]
-fn errno_location() -> *mut libc::c_int {
+pub(crate) fn errno_location() -> *mut libc::c_int {
     // SAFETY: returns this thread's errno slot.
     unsafe { libc::__error() }
 }
