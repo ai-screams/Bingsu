@@ -146,21 +146,22 @@ fn move_to(x: u16, y: u16, out: &mut Vec<u8>) {
 }
 
 /// The bytes that turn the screen `prev` showed into `next`: cursor moves,
-/// SGR and the cells' text, no other escape (no string, no mode). `None`,
-/// or a grid of another size or with another last column: the whole
-/// screen, first cleared in the last column's paint. Otherwise only the
-/// cells that changed, from the first one of each run. The last column is
-/// never written (a cell there leaves the cursor waiting to wrap, and on
-/// the last row a terminal can scroll): the clear paints it. Each frame
-/// sets its first paint whole, so it needs nothing of the terminal's state.
+/// SGR, erase to the line's end and the cells' text, no other escape (no
+/// string, no mode). `None`, or a grid of another size: the whole screen,
+/// first cleared. Otherwise only the cells that changed, from the first one
+/// of each run, and a paint only where it changes. The last column gets
+/// no glyph (one there leaves the cursor waiting to wrap, and on the last
+/// row a terminal can scroll): its paint comes from erasing from it to the
+/// line's end in that paint (the terminal's background-color erase). Each
+/// frame sets its first paint whole, so it needs nothing of the terminal's
+/// state.
 pub fn frame(prev: Option<&Grid>, next: &Grid, out: &mut Vec<u8>) {
     let (cols, rows) = (next.cols, next.rows);
     if cols == 0 || rows == 0 {
         return;
     }
     let last = cols - 1;
-    let edge = |g: &Grid| (0..rows).map(|y| g.cell(last, y).paint).collect::<Vec<_>>();
-    let prev = prev.filter(|p| p.cols == cols && p.rows == rows && edge(p) == edge(next));
+    let prev = prev.filter(|p| p.cols == cols && p.rows == rows);
     if prev.is_none() {
         write_paint(next.cell(last, 0).paint, out);
         out.extend_from_slice(b"\x1b[2J");
@@ -188,6 +189,15 @@ pub fn frame(prev: Option<&Grid>, next: &Grid, out: &mut Vec<u8>) {
             }
             out.extend_from_slice(cell.text.as_bytes());
             at = Some(x + if wide { 2 } else { 1 });
+        }
+        let edge = next.cell(last, y).paint;
+        if prev.is_none_or(|p| p.cell(last, y).paint != edge) {
+            move_to(last, y, out);
+            if paint != Some(edge) {
+                write_paint(edge, out);
+                paint = Some(edge);
+            }
+            out.extend_from_slice(b"\x1b[K");
         }
     }
 }
@@ -275,7 +285,10 @@ fn ink(c: Option<Srgb8>, depth: ColorDepth) -> Ink {
 
 /// The UI colors of `mode`, as names of the palette (text
 /// `neutral.text` and `neutral.subtext` on `neutral.base`; a picked value
-/// on the accent, one that changes nothing on `neutral.surface1`).
+/// on the accent, one that changes nothing in `neutral.base` on
+/// `bright.overlay`). Both boxes are marks: 3:1 on the screen in both
+/// modes, their text 4.5:1 on them (`neutral.overlay` reaches 3:1 too, but
+/// no neutral reaches 4.5:1 on it in both modes).
 fn ui(mode: Mode, depth: ColorDepth, mono: bool) -> Ui {
     if mono {
         let text = Paint::default();
@@ -320,8 +333,8 @@ fn ui(mode: Mode, depth: ColorDepth, mono: bool) -> Ui {
             attrs: BOLD,
         },
         idle: Paint {
-            fg: c("neutral.text", true),
-            bg: c("neutral.surface1", false),
+            fg: c("neutral.base", false),
+            bg: c("bright.overlay", false),
             attrs: BOLD,
         },
         base,
@@ -520,7 +533,7 @@ fn preview(g: &mut Grid, v: &View<'_>, u: &Ui, y: u16, i: usize) {
 }
 
 /// The note at the end of a setting row, and whether the picked value
-/// changes nothing (then drawn on `neutral.surface1`).
+/// changes nothing (then drawn on `bright.overlay`).
 fn row_note(m: &Model, v: &View<'_>, row: Row) -> (String, bool) {
     let name = |i: usize| clean(m.layers().names.get(i).map_or(&[][..], |n| n.as_slice()));
     if Row::TEMPLATED.contains(&row) {

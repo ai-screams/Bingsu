@@ -829,7 +829,7 @@ fn without_color_the_pick_is_reversed_and_only_the_preview_keeps_color() {
 }
 
 // 이것을 실패시키는 것: 줄 끝 알림의 차례(템플릿 > 덮음 > 효과 없음 > 같은 모양 > 터미널 색)나 문구가 다른 것,
-// 효과 없는 고른 값을 `neutral.surface1`이 아닌 강조색으로 칠하는 것, 미리보기 빈 바탕을 모드의 `neutral.base`로
+// 효과 없는 고른 값을 `bright.overlay`가 아닌 강조색으로 칠하는 것, 미리보기 빈 바탕을 모드의 `neutral.base`로
 // 칠하지 않는 것, 다른 폭의 미리보기를 받으면 넘치는 것, 아이콘 안내가 nerd·light 밖에서나 아이콘을 바꾼 뒤에도
 // 보이는 것, 좁은 폭 안내의 긴 꼴과 짧은 꼴, 키 안내의 긴 꼴(79칸)과 짧은 꼴(70칸), 제목의 상태 글.
 #[test]
@@ -847,7 +847,7 @@ fn row_notes_paints_and_hints() {
     let pick = g.cell(15, 12).paint;
     assert_ne!(idle.bg, pick.bg);
     let surface1 =
-        bingsu_core::color::palette::named_color("neutral.surface1", Mode::Dark, false).unwrap();
+        bingsu_core::color::palette::named_color("bright.overlay", Mode::Dark, false).unwrap();
     assert_eq!(
         idle.bg,
         bingsu_core::color::sgr::Ink::Rgb(surface1.r, surface1.g, surface1.b)
@@ -1084,43 +1084,6 @@ fn cutting_by_cells() {
     assert_eq!(cut_end("\u{6f22}\u{5b57}x", 4), "...");
     assert_eq!(cut_middle("abcdefghij", 7), "ab...ij");
     assert_eq!(cut_middle("abcdefghij", 4), "a...");
-}
-
-// 이것을 실패시키는 것: 편집판이 그린 칸에서 글자·제목·보조 글이 바탕과, 고른 값이 강조색 바탕과, 효과 없는 고른
-// 값이 `neutral.surface1` 바탕과 4.5:1에 못 미치는 것(두 모드), 팔레트 이름이 아닌 이름에 색을 주는 것.
-#[test]
-fn ui_text_contrasts() {
-    use bingsu_core::color::math::{Srgb8, contrast_milli};
-    use bingsu_core::color::palette::named_color;
-    use bingsu_core::color::sgr::Ink;
-    let rgb = |i: Ink| match i {
-        Ink::Rgb(r, g, b) => Srgb8 { r, g, b },
-        other => panic!("{other:?}"),
-    };
-    let c = compiled(load("", &[], &[]));
-    let lines = view_lines(&c, 80);
-    let mut m = fresh();
-    m.pick(Row::Style, 0);
-    for mode in [Mode::Dark, Mode::Light] {
-        let mut v = view(&m, &c, &lines, 80, 24);
-        v.mode = mode;
-        let g = draw(&m, &v);
-        // Title, a row letter, the preview label, lean (picked), outer's
-        // none (picked, changes nothing on lean).
-        for (x, y, what) in [
-            (1, 0, "title"),
-            (3, 12, "text"),
-            (1, 8, "subtext"),
-            (15, 12, "picked"),
-            (15, 13, "idle"),
-        ] {
-            let p = g.cell(x, y).paint;
-            let m = contrast_milli(rgb(p.fg), rgb(p.bg));
-            assert!(m >= 4_500, "{mode:?} {what}: {m}");
-        }
-        assert_ne!(g.cell(15, 12).paint.bg, g.cell(15, 13).paint.bg);
-    }
-    assert_eq!(named_color("neutral.nope", Mode::Dark, true), None);
 }
 
 // 이것을 실패시키는 것: 터미널 드라이버가 주는 창 크기(0–65535)를 그대로 칸 격자 크기로 쓰는 것(65535×65535면
@@ -1717,12 +1680,17 @@ fn the_built_in_narrow_band_is_told_from_its_width_and_source() {
     assert!(at(&moved, 49) && !at(&moved, 50));
 }
 
-/// Plays `bytes` onto `screen` (cell texts by row) as a terminal places
-/// them, with `g` telling each cell's width. Only cursor moves, SGR, a
-/// whole clear and cell texts may come. Returns the cursor moves and the
-/// last column written.
-fn play(bytes: &[u8], screen: &mut [Vec<String>], g: &Grid) -> (usize, u16) {
+/// One cell as a terminal holds it: its text and the SGR it was drawn or
+/// erased with.
+type Shown = (String, Vec<u8>);
+
+/// Plays `bytes` onto `screen` as a terminal places them, with `g` telling
+/// each cell's width. Only cursor moves, SGR, a whole clear, an erase to
+/// the line's end and cell texts may come. Returns the cursor moves and the
+/// last column a glyph went to.
+fn play(bytes: &[u8], screen: &mut [Vec<Shown>], g: &Grid) -> (usize, u16) {
     let (mut i, mut x, mut y, mut moves, mut far) = (0, 0u16, 0u16, 0, 0);
+    let mut sgr: Vec<u8> = Vec::new();
     while i < bytes.len() {
         if bytes[i] == 0x1b {
             assert_eq!(bytes.get(i + 1), Some(&b'['), "only CSI at {i}");
@@ -1740,11 +1708,17 @@ fn play(bytes: &[u8], screen: &mut [Vec<String>], g: &Grid) -> (usize, u16) {
                     x = c.parse::<u16>().unwrap() - 1;
                     moves += 1;
                 }
-                b'm' => {}
+                b'm' => sgr = bytes[i..=end].to_vec(),
                 b'J' => {
                     assert_eq!(params, "2");
                     for row in screen.iter_mut() {
-                        row.fill(String::from(" "));
+                        row.fill((String::from(" "), sgr.clone()));
+                    }
+                }
+                b'K' => {
+                    assert_eq!(params, "");
+                    for cell in &mut screen[usize::from(y)][usize::from(x)..] {
+                        *cell = (String::from(" "), sgr.clone());
                     }
                 }
                 f => panic!("final byte {f}"),
@@ -1764,9 +1738,9 @@ fn play(bytes: &[u8], screen: &mut [Vec<String>], g: &Grid) -> (usize, u16) {
         } else {
             1
         };
-        screen[usize::from(y)][usize::from(x)] = want.clone();
+        screen[usize::from(y)][usize::from(x)] = (want.clone(), sgr.clone());
         if w == 2 {
-            screen[usize::from(y)][usize::from(x) + 1] = String::new();
+            screen[usize::from(y)][usize::from(x) + 1] = (String::new(), sgr.clone());
         }
         far = far.max(x + w - 1);
         x += w;
@@ -1775,14 +1749,27 @@ fn play(bytes: &[u8], screen: &mut [Vec<String>], g: &Grid) -> (usize, u16) {
     (moves, far)
 }
 
-fn shows(screen: &[Vec<String>], g: &Grid) -> bool {
+/// The screen shows `g`: every cell's text and paint, the last column's
+/// paint too.
+fn shows(screen: &[Vec<Shown>], g: &Grid) -> bool {
     (0..g.rows()).all(|y| {
-        (0..g.cols() - 1).all(|x| screen[usize::from(y)][usize::from(x)] == g.cell(x, y).text)
+        (0..g.cols()).all(|x| {
+            let cell = g.cell(x, y);
+            let mut sgr = Vec::new();
+            bingsu_core::color::sgr::write_paint(cell.paint, &mut sgr);
+            let (text, got) = &screen[usize::from(y)][usize::from(x)];
+            *text == cell.text && *got == sgr
+        })
     })
 }
 
-// 이것을 실패시키는 것: 마지막 칸에 쓰는 것, 처음 프레임에서 화면을 지우지 않는 것, 칸을 엉뚱한 자리에 쓰는 것, 두 칸
-// 글자 뒤 커서를 한 칸만 옮긴 것으로 보는 것(줄마다 이동이 더 늘어남), 바뀐 칸만이 아니라 다 쓰는 것, 크기나 마지막 칸이
+fn unknown(cols: usize, rows: usize) -> Vec<Vec<Shown>> {
+    vec![vec![(String::from("?"), Vec::new()); cols]; rows]
+}
+
+// 이것을 실패시키는 것: 마지막 칸에 글자를 쓰는 것, 처음 프레임에서 화면을 지우지 않는 것, 칸을 엉뚱한 자리나 다른
+// 색으로 쓰는 것, 줄마다 마지막 칸의 바탕을 그 칸의 색으로 지우지 않는 것(미리보기 줄의 끝이 다른 색으로 남음), 두 칸
+// 글자 뒤 커서를 한 칸만 옮긴 것으로 보는 것(줄마다 이동이 더 늘어남), 바뀐 칸만이 아니라 다 쓰는 것, 크기가
 // 바뀌었는데 차이만 쓰는 것, 0칸 격자에서 넘치는 것, CSI 밖의 escape(문자열)를 쓰는 것.
 #[test]
 fn frames_draw_the_grid_and_then_only_what_changed() {
@@ -1807,41 +1794,40 @@ fn frames_draw_the_grid_and_then_only_what_changed() {
         (0..24).any(|y| (0..79).any(|x| g1.cell(x, y).text.is_empty())),
         "the grid has a 2-cell cluster"
     );
+    assert!(
+        (0..24).any(|y| g1.cell(79, y).paint != g1.cell(79, 0).paint),
+        "the last column has more than one paint"
+    );
     let mut full = Vec::new();
     frame(None, &g1, &mut full);
     assert!(full.starts_with(b"\x1b[0") && full.windows(4).any(|w| w == b"\x1b[2J"));
-    let mut screen = vec![vec![String::from("?"); 80]; 24];
+    let mut screen = unknown(80, 24);
     let (moves, far) = play(&full, &mut screen, &g1);
     assert!(shows(&screen, &g1));
-    assert!(far < 79, "the last column is never written");
+    assert!(far < 79, "no glyph in the last column");
     assert_eq!(
-        moves, 24,
-        "one move a row: a 2-cell cluster moves the cursor by 2"
+        moves, 48,
+        "two moves a row (its cells, its last column): a 2-cell cluster moves the cursor by 2"
     );
-    // An SGR where the paint changes from the cell written before, each
-    // the paint's own bytes.
-    let mut want = Vec::new();
+    // An SGR where the paint changes from the cell drawn before, the last
+    // column of each row included.
+    let mut want = 0;
     let mut last = None;
     for y in 0..24 {
-        for x in 0..79 {
+        for x in 0..80 {
             let cell = g1.cell(x, y);
-            if !cell.text.is_empty() && last != Some(cell.paint) {
+            if (x == 79 || !cell.text.is_empty()) && last != Some(cell.paint) {
                 last = Some(cell.paint);
-                want.push(cell.paint);
+                want += 1;
             }
         }
     }
     let escapes = full.iter().filter(|&&b| b == 0x1b).count();
     assert_eq!(
-        escapes - moves - 1,
-        want.len() + 1,
+        escapes - moves - 1 - 24,
+        want + 1,
         "the clear's paint, then each change"
     );
-    for p in &want {
-        let mut b = Vec::new();
-        bingsu_core::color::sgr::write_paint(*p, &mut b);
-        assert!(full.windows(b.len()).any(|w| w == b.as_slice()));
-    }
     // One key: only what changed.
     m.pick(Row::Style, 0);
     let g2 = draw(&m, &view(&m, &c, &wide, 80, 24));
@@ -1859,22 +1845,23 @@ fn frames_draw_the_grid_and_then_only_what_changed() {
     let mut same = Vec::new();
     frame(Some(&g2), &g2, &mut same);
     assert!(same.is_empty());
-    // Another size, or another last column (the light palette): the whole screen.
+    // Another size: the whole screen.
     for (cols, rows) in [(79, 24), (81, 24), (80, 25)] {
         let g3 = draw(&m, &view(&m, &c, &wide, cols, rows));
         let mut again = Vec::new();
         frame(Some(&g2), &g3, &mut again);
         assert!(again.windows(4).any(|w| w == b"\x1b[2J"), "{cols}x{rows}");
     }
+    // Every paint changes (the light palette): every cell and every last
+    // column again.
     let mut v = view(&m, &c, &wide, 80, 24);
     v.mode = Mode::Light;
+    v.palette = &c.light_palette;
     let g4 = draw(&m, &v);
     let mut light = Vec::new();
     frame(Some(&g2), &g4, &mut light);
-    assert!(light.windows(4).any(|w| w == b"\x1b[2J"));
-    let mut screen4 = vec![vec![String::from("?"); 80]; 24];
-    play(&light, &mut screen4, &g4);
-    assert!(shows(&screen4, &g4));
+    play(&light, &mut screen, &g4);
+    assert!(shows(&screen, &g4));
     // No cells, no bytes.
     let none = draw(&m, &view(&m, &c, &wide, 0, 0));
     let mut empty = Vec::new();
@@ -1883,7 +1870,8 @@ fn frames_draw_the_grid_and_then_only_what_changed() {
 }
 
 // 이것을 실패시키는 것: 편집판의 글(제목, 줄 이름, 값, 고른 값, 효과 없는 값, 안내, 키 안내, 저장 화면)을 바탕과
-// 4.5:1 아래로 칠하는 것, 고른 값의 바탕(표시)을 화면 바탕과 3:1 아래로 칠하는 것(두 모드, 24비트와 256색).
+// 4.5:1 아래로 칠하는 것, 고른 값과 효과 없는 고른 값의 상자(표시)를 화면 바탕과 3:1 아래로 칠하는 것(두 모드,
+// 24비트와 256색), 팔레트에 없는 이름에 색을 주는 것.
 // 미리보기 줄은 사용자 테마의 색이고, 그릇 줄(1-7)은 장식이라 이 기준 밖이다.
 #[test]
 fn every_editor_text_cell_meets_4_5_to_1() {
@@ -1894,11 +1882,12 @@ fn every_editor_text_cell_meets_4_5_to_1() {
         Ink::Indexed(n) => Some(xterm(n)),
         _ => None,
     };
+    // Lean picked: outer's none then changes nothing (the idle box).
     let mut m = fresh();
-    m.pick(Row::Outer, 0);
+    m.pick(Row::Style, 0);
     let c = compiled(load(&new_file_text(&m).unwrap(), &[], &[]));
     let lines = view_lines(&c, 80);
-    let (mut checked, mut picks) = (0, 0);
+    let (mut checked, mut picks, mut idles) = (0, 0, 0);
     for mode in [Mode::Dark, Mode::Light] {
         for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
             for screen in ["main", "keys", "save"] {
@@ -1925,20 +1914,31 @@ fn every_editor_text_cell_meets_4_5_to_1() {
                         || label.is_some_and(|l| y == l + 1 || y == l + 2)
                 };
                 let base = rgb(g.cell(79, 0).paint.bg).unwrap();
-                let accent =
-                    bingsu_core::color::palette::named_color("accent.blue", mode, false).unwrap();
-                let accent = match depth {
-                    ColorDepth::Ansi256 => xterm(bingsu_core::color::math::nearest_256(accent)),
-                    _ => accent,
+                let shown = |name: &str| {
+                    let c = bingsu_core::color::palette::named_color(name, mode, false).unwrap();
+                    match depth {
+                        ColorDepth::Ansi256 => xterm(bingsu_core::color::math::nearest_256(c)),
+                        _ => c,
+                    }
                 };
+                let (accent, idle) = (shown("accent.blue"), shown("bright.overlay"));
                 for y in (0..24).filter(|&y| !exempt(y)) {
                     for x in 0..79 {
                         let cell = g.cell(x, y);
-                        // The picked value's own background (the accent)
-                        // marks it: 3:1 on the screen's.
-                        if let Some(bg) = rgb(cell.paint.bg).filter(|&b| b == accent) {
-                            assert!(contrast_milli(bg, base) >= 3000, "{mode:?} {depth:?} pick");
-                            picks += 1;
+                        // The boxes of a picked value (the accent) and of
+                        // one that changes nothing mark them: 3:1 on the
+                        // screen's background.
+                        if let Some(bg) = rgb(cell.paint.bg).filter(|&b| b == accent || b == idle) {
+                            assert!(
+                                contrast_milli(bg, base) >= 3000,
+                                "{mode:?} {depth:?} {x},{y}: box {}",
+                                contrast_milli(bg, base)
+                            );
+                            if bg == accent {
+                                picks += 1;
+                            } else {
+                                idles += 1;
+                            }
                         }
                         if cell.text.trim().is_empty() {
                             continue;
@@ -1959,5 +1959,9 @@ fn every_editor_text_cell_meets_4_5_to_1() {
         }
     }
     assert!(checked > 1000, "{checked}");
-    assert!(picks > 0, "a picked value was checked");
+    assert!(picks > 0 && idles > 0, "both boxes were checked");
+    assert_eq!(
+        bingsu_core::color::palette::named_color("neutral.nope", Mode::Dark, true),
+        None
+    );
 }
