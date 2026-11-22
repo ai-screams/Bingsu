@@ -85,6 +85,21 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Static musl binary: the runner's glibc is newer than the images'.
       - run: cargo build -p bingsu -p bingsu-prompt -p bingsu-collect --target x86_64-unknown-linux-musl
+      # init reads a sibling's build markers only up to 64 MiB, and a debug
+      # binary keeps its DWARF in .dwo files to stay far below that
+      # (Cargo.toml [profile.dev]). The sizes and the headroom go to the log;
+      # a binary over the cap is a warning here, and the PTY tests fail on it.
+      - name: Debug binary sizes against the sibling cap
+        run: |
+          cap=$((64 * 1024 * 1024))
+          for name in bingsu bingsu-prompt bingsu-collect; do
+            size=$(stat -c %s "target/x86_64-unknown-linux-musl/debug/$name") || continue
+            if [ "$size" -gt "$cap" ]; then
+              echo "::warning::$name is $size bytes, $((size - cap)) over the $cap-byte sibling cap"
+            else
+              echo "$name: $size bytes, $((cap - size)) under the $cap-byte sibling cap"
+            fi
+          done
       # K60 must round-trip through the minimum shells without Cargo in
       # their images. Check the root on the host, but embed the /w mount.
       - name: Generate shape-only init fixture
