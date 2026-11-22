@@ -1697,10 +1697,8 @@ mod tests {
                 // SAFETY: `err` is the open pipe end; F_GETFL only reads flags.
                 let flags = unsafe { libc::fcntl(err, libc::F_GETFL) };
                 // SAFETY: as above; F_SETFL adds O_NONBLOCK for the polling here.
-                assert_eq!(
-                    unsafe { libc::fcntl(err, libc::F_SETFL, flags | libc::O_NONBLOCK) },
-                    0
-                );
+                let set = unsafe { libc::fcntl(err, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+                assert_eq!(set, 0);
                 let mut seen = Vec::new();
                 let until = Instant::now() + WAIT;
                 while !String::from_utf8_lossy(&seen).contains(want) {
@@ -1712,7 +1710,8 @@ mod tests {
                     }
                 }
                 // SAFETY: as above; the flags F_GETFL read.
-                assert_eq!(unsafe { libc::fcntl(err, libc::F_SETFL, flags) }, 0);
+                let set = unsafe { libc::fcntl(err, libc::F_SETFL, flags) };
+                assert_eq!(set, 0);
             }
 
             /// Writes as the terminal would: typed keys, replies.
