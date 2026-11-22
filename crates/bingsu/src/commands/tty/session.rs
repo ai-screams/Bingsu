@@ -89,6 +89,18 @@
 //! No file is read or written while a session waits: only the terminal
 //! and the wake pipe. One guard at a time per process ([`Tty::raw`] or a
 //! session): the flags and handlers are process-wide.
+//!
+//! One thread takes the signals. While a session is alive no other thread
+//! may take SIGINT, SIGTERM, SIGHUP, SIGTSTP, SIGCONT or SIGWINCH: block
+//! them in any thread started meanwhile, or start none (`bingsu setup`
+//! starts none; arm a command deadline, whose watchdog is a thread, only
+//! after the session is dropped). A process-directed signal goes to any
+//! thread that does not block it, and the handlers on two threads run in
+//! no fixed order: the session could see the SIGCONT that ended a stop
+//! before the SIGTERM sent while stopped, and take the terminal again; or
+//! see that SIGCONT only after it took the terminal, and take it a second
+//! time. On the session's own thread the kernel runs the handlers of the
+//! signals pending at a continue before the stopped call returns.
 use super::{
     CAUGHT, Raw, RawGuard, SIGNALS, STOP, Size, Tty, WAKE, WRITE_TIMEOUT, cancel_half_escape,
     fits_select, flush_input, foreground, ready, window_size, write_once,
@@ -115,9 +127,6 @@ fn background_check() -> Duration {
     }
     BACKGROUND_CHECK
 }
-
-/// How long a stop waits for the flag of the SIGCONT that ended it.
-const LATE_CONTINUE: Duration = Duration::from_millis(100);
 
 /// The most one read takes.
 const INPUT_CHUNK: usize = 1024;
@@ -853,14 +862,9 @@ impl Session<'_> {
         // SAFETY: raises SIGTSTP in this thread.
         unsafe { libc::raise(libc::SIGTSTP) };
         set_action(libc::SIGTSTP, &job_action());
-        // The SIGCONT that ended the stop may be handled on another thread a
-        // moment after this one goes on: wait a little for its flag, so it is
-        // not taken for a second continue (which would put the terminal back
-        // and take it again). In an orphaned process group no continue comes
-        // and the wait ends at its limit.
-        // 이것을 실패시키는 것: 이 기다림을 빼는 것(늦게 처리된 SIGCONT로 한 번 더 되돌리고 다시 잡음;
-        // a_stop_right_after_the_raw_switch_puts_the_terminal_back, 스레드에 따라 가끔).
-        self.wait_for_continue(Instant::now() + LATE_CONTINUE);
+        // On this thread the SIGCONT that ended the stop, and an exit sent
+        // while stopped, were handled before `raise` returned (the module
+        // comment says why no other thread takes them).
         // This continue is the one `check` handles now.
         CONT_SEEN.store(false, Ordering::SeqCst);
         // An exit sent while the process was stopped comes with the
@@ -870,16 +874,6 @@ impl Session<'_> {
             return;
         }
         self.check();
-    }
-
-    /// Waits on the wake pipe until SIGCONT's flag is set or `until` passes.
-    fn wait_for_continue(&self, until: Instant) {
-        while !CONT_SEEN.load(Ordering::SeqCst) {
-            match select(None, self.wake, false, Some(until)) {
-                Some(r) if r.wake => drain(self.wake),
-                _ => return,
-            }
-        }
     }
 
     /// After a continue (or a window change, or a quiet second, in the

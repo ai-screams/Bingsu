@@ -25,6 +25,14 @@ pytestmark = pytest.mark.skipif("zsh" not in os.environ.get("BINGSU_TEST_SHELLS"
                                 reason="zsh not under test")
 
 CHILD = "commands::tty::session::tests::screen_child"
+# Starts the child with the session's signals blocked (the mask is kept across
+# exec, and the zsh job keeps its pid and process group): libtest's other
+# threads never take them, and the child lets them through on its own thread,
+# as a bingsu with one thread takes them (see the session module comment).
+MASKED = ("import os,signal,sys;"
+          "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM,signal.SIGHUP,"
+          "signal.SIGTSTP,signal.SIGCONT,signal.SIGWINCH});"
+          "os.execv(sys.argv[1],sys.argv[1:])")
 ENTER = b"\x1b[?1049h\x1b[?25l\x1b[?2004h"
 LEAVE = b"\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l"
 
@@ -73,7 +81,8 @@ def test_ctrl_z_bg_fg_and_resize_under_zsh(session_binary, tmp_path):
     with Session("zsh", env, cols=80, rows=24) as sh:
         screen = ScreenSession(sh, 24, 80)
         sh.run(f"cd '{tmp_path}' && stty -g > before")
-        sh.p.sendline(f"'{session_binary}' --exact {CHILD} --ignored --nocapture --test-threads=1 > report 2>&1")
+        sh.p.sendline(f"'{sys.executable}' -c '{MASKED}' '{session_binary}' --exact {CHILD} --ignored --nocapture "
+                      "--test-threads=1 > report 2>&1")
         assert screen.wait(lambda v: on_alternate(v, "SCREEN 1 80x24"), stable=True), screen.lines()
 
         sh.p.send(b"\x1a")

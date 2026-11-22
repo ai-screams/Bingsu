@@ -1,6 +1,6 @@
 use super::*;
 use crate::commands::tty::tests::pty::{
-    Pty, disposition, mode, say, start_test, take_terminal, wait_queued,
+    Pty, SESSION_SIGNALS, disposition, masked, mode, say, start_test, take_terminal, wait_queued,
 };
 use crate::commands::tty::{CANCEL, test_terminal};
 use std::os::unix::process::ExitStatusExt;
@@ -18,14 +18,50 @@ fn shown(bytes: &[u8]) -> String {
     bytes.escape_ascii().to_string()
 }
 
-/// The child test `name` of this module on a new pseudo-terminal.
+/// The child test `name` of this module on a new pseudo-terminal, started
+/// with the session's signals blocked (`masked`): the child lets them
+/// through on its own thread (`take_signals`), so libtest's other threads
+/// never take them, as in a bingsu with one thread.
 fn start(name: &str, env: &[(&str, &str)]) -> Pty {
     start_test(
         &format!("commands::tty::session::tests::{name}"),
         80,
         24,
         env,
+        true,
     )
+}
+
+/// In a child started masked: the session's signals came blocked to this
+/// thread, and are let through on it.
+/// 이것을 실패시키는 것: 자식을 masked 없이 띄우는 것(다른 스레드가 신호를 받아 순서가 흔들림; 이 assert).
+fn take_signals() {
+    // SAFETY: an all-zero `sigset_t` is valid storage for the call to fill.
+    let mut now: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new set only reads this thread's mask into `now`.
+    assert_eq!(
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now) },
+        0
+    );
+    // SAFETY: an all-zero `sigset_t` is valid storage for sigemptyset.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is a valid set.
+    unsafe { libc::sigemptyset(&mut set) };
+    for sig in SESSION_SIGNALS {
+        // SAFETY: `now` was filled by pthread_sigmask.
+        assert_eq!(
+            unsafe { libc::sigismember(&now, sig) },
+            1,
+            "signal {sig} was not blocked"
+        );
+        // SAFETY: `set` is a valid set.
+        unsafe { libc::sigaddset(&mut set, sig) };
+    }
+    // SAFETY: `set` is valid; this thread's mask only.
+    assert_eq!(
+        unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()) },
+        0
+    );
 }
 
 /// A parameter the parent test gave the child.
@@ -186,6 +222,7 @@ fn entering_and_leaving_put_every_mode_back_in_order() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn enter_leave_child() {
+    take_signals();
     let tty = take_terminal();
     let before = mode();
     let flags = fd_flag(tty.file.as_raw_fd(), libc::F_GETFL) & libc::O_NONBLOCK;
@@ -220,6 +257,7 @@ impl Pty {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn stage_child() {
+    take_signals();
     let sig = signal_named(&param("BINGSU_TEST_SIGNAL"));
     let tty = take_terminal();
     match param("BINGSU_TEST_STAGE").as_str() {
@@ -345,6 +383,7 @@ fn an_entry_the_terminal_stopped_taking_is_put_back() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn partial_entry_child() {
+    take_signals();
     let tty = take_terminal();
     let before = mode();
     test_terminal::ROOM.set(Some((3, test_terminal::Then::Stall)));
@@ -369,6 +408,7 @@ fn a_frame_waits_for_room_and_goes_on() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn slow_terminal_child() {
+    take_signals();
     let tty = take_terminal();
     let mut s = tty.full_screen().unwrap();
     crate::commands::tty::tests::pty::fill_output();
@@ -432,6 +472,7 @@ fn continued(mut t: Pty) {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn continued_child() {
+    take_signals();
     let tty = take_terminal();
     let mut s = tty.full_screen().unwrap();
     draw(&mut s, b"READY");
@@ -521,9 +562,10 @@ fn a_failed_reentry_ends_the_session() {
         }
         // The timeout waits out the write limit; the failed write does not.
         let took: u128 = lines[1].strip_prefix("took ").unwrap().parse().unwrap();
+        let limit = WRITE_TIMEOUT.as_millis();
         match case {
-            "timeout" => assert!(took >= 300, "{took} ms"),
-            "eio" => assert!(took < 280, "{took} ms"),
+            "timeout" => assert!(took >= limit, "{took} ms"),
+            "eio" => assert!(took < limit / 2, "{took} ms"),
             _ => {}
         }
     }
@@ -532,6 +574,7 @@ fn a_failed_reentry_ends_the_session() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn reentry_child() {
+    take_signals();
     use test_terminal::Then;
     let tty = take_terminal();
     let mut s = tty.full_screen().unwrap();
@@ -580,6 +623,7 @@ fn ctrl_z_puts_the_terminal_back_and_takes_it_again() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn ctrl_z_child() {
+    take_signals();
     let tty = take_terminal();
     let mut s = tty.full_screen().unwrap();
     loop {
@@ -616,6 +660,7 @@ fn an_ignored_stop_stays_ignored() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn ignored_stop_child() {
+    take_signals();
     // SAFETY: sets this process's SIGTSTP disposition to ignore.
     unsafe { libc::signal(libc::SIGTSTP, libc::SIG_IGN) };
     let tty = take_terminal();
@@ -666,6 +711,7 @@ fn a_resize_under_the_alternate_screen_is_reported_with_rows() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn resize_child() {
+    take_signals();
     let tty = take_terminal();
     let mut s = tty.full_screen().unwrap();
     // A window change signal with no change is no event.
@@ -698,7 +744,14 @@ fn resize_child() {
 // 끝나지 않음).
 #[test]
 fn a_signal_from_outside_wakes_a_wait_with_no_time_limit() {
-    let mut t = start("wait_forever_child", &[]);
+    // Not masked: this test is about a handler that runs on another thread.
+    let mut t = start_test(
+        "commands::tty::session::tests::wait_forever_child",
+        80,
+        24,
+        &[],
+        false,
+    );
     t.expect(b"WAITING");
     // Most likely in the select by now; a signal before it is the same case.
     t.idle(Duration::from_millis(50));
@@ -757,6 +810,7 @@ fn a_hang_up_ends_the_session() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn hang_up_child() {
+    take_signals();
     if param("BINGSU_TEST_IGNORE_HUP") == "yes" {
         // SAFETY: sets this process's SIGHUP disposition to ignore.
         unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
@@ -777,6 +831,7 @@ fn a_wake_pipe_above_fd_setsize_is_refused() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn high_pipe_child() {
+    take_signals();
     let size = RawFd::try_from(libc::FD_SETSIZE).unwrap();
     // SAFETY: an all-zero rlimit is valid storage for getrlimit to fill.
     let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
@@ -1203,6 +1258,7 @@ fn a_failed_raw_switch_puts_the_handlers_back() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn failed_raw_child() {
+    take_signals();
     let tty = take_terminal();
     let handlers = || JOB_SIGNALS.map(disposition);
     let before = handlers();
@@ -1242,18 +1298,20 @@ fn job_shell_child() {
         clippy::zombie_processes,
         reason = "reaped by waitpid below, which also reports a stop"
     )]
-    let mut job = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "commands::tty::session::tests::job_child",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .process_group(0)
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut job = masked(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::tty::session::tests::job_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped()),
+    )
+    .spawn()
+    .unwrap();
     let pid = libc::pid_t::try_from(job.id()).unwrap();
     // A job a broken build leaves stopped or waiting is killed: when this
     // shell fails, and in any case after 20 s.
@@ -1527,6 +1585,7 @@ fn job_shell_child() {
 #[test]
 #[ignore = "child: a job of job_shell_child"]
 fn job_child() {
+    take_signals();
     let scenario = param("BINGSU_TEST_SCENARIO");
     // Only a signal brings the session back here, not the once-a-second look.
     if matches!(
@@ -1588,15 +1647,6 @@ fn job_child() {
             assert_eq!(s.wait(true, Some(Instant::now() + WAIT)), Event::Writable);
             // SAFETY: stops this process, as a SIGSTOP from outside would.
             unsafe { libc::raise(libc::SIGSTOP) };
-            if scenario == "writestopfg" {
-                // In this process another thread may handle the SIGCONT a
-                // moment later; the write is made once its flag is set.
-                let until = Instant::now() + WAIT;
-                while !CONT_SEEN.load(Ordering::SeqCst) {
-                    assert!(Instant::now() < until, "no continue");
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            }
             let wrote = s.write_some(b"FRAME").unwrap_or(0);
             say(&format!("job: wrote {wrote}"));
         }
@@ -1668,6 +1718,7 @@ fn a_way_out_the_terminal_stopped_taking_is_ended() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn partial_leave_child() {
+    take_signals();
     let tty = take_terminal();
     let before = mode();
     let s = tty.full_screen().unwrap();
@@ -1692,6 +1743,7 @@ fn a_new_session_starts_with_no_signal_seen() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn two_sessions_child() {
+    take_signals();
     let tty = take_terminal();
     let s = tty.full_screen().unwrap();
     // SAFETY: raises SIGTSTP in this thread; the session's handler takes it.
@@ -1715,6 +1767,7 @@ fn an_interrupted_wait_goes_on() {
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn interrupted_child() {
+    take_signals();
     let tty = take_terminal();
     let mut s = tty.full_screen().unwrap();
     // SAFETY: pthread_self takes no arguments and cannot fail.
@@ -1735,6 +1788,7 @@ fn interrupted_child() {
 #[test]
 #[ignore = "child: run by tests/shell/test_tty_session.py"]
 fn screen_child() {
+    take_signals();
     let tty = Tty::open().unwrap();
     let mut s = tty.full_screen().unwrap();
     let mut n = 1;
