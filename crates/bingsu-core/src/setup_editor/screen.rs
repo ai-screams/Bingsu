@@ -98,10 +98,11 @@ impl Grid {
     /// Puts one cluster of `width` cells at `x` on row `y`; a 2-cell
     /// cluster also covers the cell after it. Puts nothing, and says so, for
     /// a cluster of no cells (a mark with no base, which a terminal would
-    /// put on the cell before) or one that does not fit in the row.
-    fn set(&mut self, x: u32, y: u16, text: &str, width: u8, paint: Paint) -> bool {
+    /// put on the cell before) or one that does not end by column `end`
+    /// (exclusive) inside the row.
+    fn set(&mut self, x: u32, y: u16, text: &str, width: u8, paint: Paint, end: u32) -> bool {
         let w = u32::from(width);
-        if w == 0 || x + w > u32::from(self.cols) || y >= self.rows {
+        if w == 0 || x + w > end.min(u32::from(self.cols)) || y >= self.rows {
             return false;
         }
         let x = x as u16;
@@ -128,7 +129,7 @@ impl Grid {
             if at + u16::from(w) > end {
                 break;
             }
-            if self.set(u32::from(at), y, g, w, paint) {
+            if self.set(u32::from(at), y, g, w, paint, u32::from(end)) {
                 at += u16::from(w);
             }
         }
@@ -175,8 +176,10 @@ pub struct View<'a> {
     /// The settings file the editor is for, as the loader names it.
     pub path: &'a [u8],
     /// `preview::lines` of the settings as the model has them, at `cols`
-    /// bounded by `MAX_COLS`. Lines of another width (made before a resize)
-    /// are cut at the grid's edge.
+    /// bounded by `MAX_COLS`. The last column stays empty: a config with
+    /// `layout.use_last_column` is laid out one column narrower, so its
+    /// right side ends on the last cell drawn. Lines of another width (made
+    /// before a resize) are cut there.
     pub lines: &'a [PreviewLine],
     /// The palette the preview drew with (its `background` is the mode's
     /// `neutral.base`, the preview's own background).
@@ -420,13 +423,16 @@ fn preview(g: &mut Grid, v: &View<'_>, u: &Ui, y: u16, i: usize) {
     let Some(line) = v.lines.get(i) else {
         return;
     };
+    // The last column stays empty here too, also for lines laid out at an
+    // older, wider width (before a resize).
+    let end = u32::from(v.cols.saturating_sub(1));
     for (side, from) in [(&line.left, 0u32), (&line.right, line.right_at)] {
         for c in side.cells() {
             let mut paint = c.paint;
             if paint.bg == Ink::Default {
                 paint.bg = base;
             }
-            g.set(from + c.at, y, c.text, c.width, paint);
+            g.set(from + c.at, y, c.text, c.width, paint, end);
         }
     }
 }
@@ -653,17 +659,20 @@ mod tests {
     fn a_cell_takes_only_clusters_that_fit() {
         let p = Paint::default();
         let mut g = Grid::new(4, 2, p);
-        assert!(!g.set(0, 0, "\u{301}", 0, p));
+        assert!(!g.set(0, 0, "\u{301}", 0, p, 4));
         assert_eq!(g.row_text(0), "    ");
-        assert!(!g.set(3, 0, "\u{6f22}", 2, p));
+        assert!(!g.set(3, 0, "\u{6f22}", 2, p, 4));
         assert_eq!(
             (g.row_text(0), g.row_text(1)),
             ("    ".into(), "    ".into())
         );
-        assert!(g.set(2, 0, "\u{6f22}", 2, p));
+        assert!(g.set(2, 0, "\u{6f22}", 2, p, 4));
         assert_eq!(g.row_text(0), "  \u{6f22}");
         assert_eq!(g.cell(3, 0).text, "");
-        assert!(!g.set(0, 2, "x", 1, p));
+        assert!(!g.set(0, 2, "x", 1, p, 4));
+        assert!(!g.set(3, 1, "x", 1, p, 3));
+        // An end past the row is the row's end.
+        assert!(!g.set(4, 1, "x", 1, p, 9));
         assert_eq!(g.put(0, 1, "\u{301}ab", p, 4), 2);
         assert_eq!(g.row_text(1), "ab  ");
     }

@@ -1272,3 +1272,37 @@ fn an_override_is_stated_not_handed_over() {
     );
     assert!(!t.contains("change it there"), "{t}");
 }
+
+// 이것을 실패시키는 것: 크기 변경 전의 더 넓은 폭으로 만든 미리보기가 마지막 칸(비워 두는 칸)을 채우는 것. ASCII와 2칸
+// 글자 둘 다.
+#[test]
+fn a_stale_wide_preview_leaves_the_last_column() {
+    let m = fresh();
+    for (glyph, n) in [("x", 60), ("\u{6f22}", 30)] {
+        let text = glyph.repeat(n);
+        let c = compiled(load(
+            &format!(
+                "[style]\npreset = \"lean\"\n[segment.\"custom/w\"]\nkind = \"text\"\ntext = \"{text}\"\n[layout.line1]\nleft = [\"custom/w\", \"custom/w\"]\nright = []\n"
+            ),
+            &[],
+            &[],
+        ));
+        let lines = view_lines(&c, 120);
+        for cols in [80u16, 81] {
+            // The stale line reaches past the grid, so its edge is tried.
+            assert!(lines[0].left.width() > u32::from(cols), "{glyph}");
+            let g = draw(&m, &view(&m, &c, &lines, cols, 24));
+            assert_eq!(
+                g.cell(cols - 1, 9).text,
+                " ",
+                "{glyph} {cols}: {:?}",
+                g.row_text(9)
+            );
+            assert!(
+                g.cell(cols - 3, 9).text != " ",
+                "{glyph} {cols}: {:?}",
+                g.row_text(9)
+            );
+        }
+    }
+}
