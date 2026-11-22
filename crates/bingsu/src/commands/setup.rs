@@ -205,6 +205,9 @@ enum Created {
     /// The folder found at the start is not the one at its path any more
     /// (or could not be confirmed): the file was taken back out of it.
     Moved,
+    /// As `Moved`, but taking the file back failed (why): it is still in
+    /// the folder found at the start.
+    Left(String),
     /// `config.toml` appeared between the check and the link.
     Exists,
 }
@@ -241,6 +244,17 @@ fn sync_folder(chain: &Chain, dir: &Path) -> Result<(), Created> {
 /// Temporary file, data flushed, `linkat`, then the folder flushed. An error
 /// means no file was made.
 fn create(chain: &Chain, dir_path: &Path, text: &str) -> std::io::Result<Created> {
+    create_with(chain, dir_path, text, sys::unlink_at)
+}
+
+/// `create`, taking a mislaid name back with `take_back` (a test makes it
+/// fail).
+fn create_with(
+    chain: &Chain,
+    dir_path: &Path,
+    text: &str,
+    take_back: impl Fn(std::os::fd::BorrowedFd<'_>, &OsStr) -> std::io::Result<()>,
+) -> std::io::Result<Created> {
     let dir = chain.last();
     let tmp = unique_name();
     let file = sys::create_file_at(dir.as_fd(), &tmp, 0o600)?;
@@ -260,9 +274,13 @@ fn create(chain: &Chain, dir_path: &Path, text: &str) -> std::io::Result<Created
     match (made, sync_folder(chain, dir_path)) {
         // The name went into a folder no longer at its path: take it back,
         // so nothing setup wrote stays where the reader does not look.
+        // Taken back only when the name is gone: unlinked, or not there.
         (Created::Wrote, Err(Created::Moved)) => {
-            let _ = sys::unlink_at(dir.as_fd(), OsStr::new(FILE));
-            Ok(Created::Moved)
+            Ok(match take_back(dir.as_fd(), OsStr::new(FILE)) {
+                Ok(()) => Created::Moved,
+                Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Created::Moved,
+                Err(e) => Created::Left(e.to_string()),
+            })
         }
         (Created::Wrote, Err(other)) => Ok(other),
         (made, _) => Ok(made),
@@ -740,6 +758,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 ctx::show(&dir)
             ));
         }
+        Ok(Created::Left(why)) => {
+            return refuse(&format!(
+                "the settings folder {} changed while the file was written, and the file could not be taken back ({}); it is left as {FILE} in the folder that was at {} when setup started",
+                ctx::show(&dir),
+                bingsu_core::sanitize::sanitize(why.as_bytes()),
+                ctx::show(&dir)
+            ));
+        }
         Ok(Created::Exists) => {
             report_found(&dir, existing(&chain), choices);
             return finish(runs_here);
@@ -1122,8 +1148,8 @@ mod tests {
 
     // 이것을 실패시키는 것: 이름 넣기를 `renameat`으로 바꾸는 것(먼저 만들어진 파일을 덮어씀: 검사와 생성 사이
     // 경쟁), 만든 파일의 권한이 0600이 아닌 것, 임시 파일을 남기는 것, 이름을 넣은 뒤 그 경로의 폴더가 바뀐 것을
-    // "썼음"이나 flush 실패로 알리는 것, 그때 넣은 이름을 옛 폴더에 남기는 것, 남의 파일이 있을 때 폴더를 flush하는
-    // 것. 폴더에 `fsync`하지 않는 것과
+    // "썼음"이나 flush 실패로 알리는 것, 그때 넣은 이름을 옛 폴더에 남기는 것, 다시 지우지 못했는데 지웠다고 하는 것
+    // (지우기 실패를 넣어 시험), 이미 없는 이름을 남았다고 하는 것, 남의 파일이 있을 때 폴더를 flush하는 것. 폴더에 `fsync`하지 않는 것과
     // fsync 실패(`Unflushed`)는 시험할 수 없어 제외.
     #[test]
     fn a_file_that_appeared_first_is_never_replaced() {
@@ -1163,6 +1189,26 @@ mod tests {
         let gone = other.join("gone");
         assert_eq!(create(&chain, &gone, "ours\n").unwrap(), Created::Moved);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        // Taking back fails: the file is said to be left, with why. A name
+        // that is not there any more counts as taken back.
+        let denied = |_: std::os::fd::BorrowedFd<'_>, _: &OsStr| {
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        };
+        let left = create_with(&chain, &gone, "ours\n", denied).unwrap();
+        assert!(
+            matches!(&left, Created::Left(why) if why.contains("ermission denied")),
+            "{left:?}"
+        );
+        assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"ours\n");
+        std::fs::remove_file(dir.join(FILE)).unwrap();
+        let absent = |_: std::os::fd::BorrowedFd<'_>, _: &OsStr| {
+            Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+        };
+        assert_eq!(
+            create_with(&chain, &gone, "ours\n", absent).unwrap(),
+            Created::Moved
+        );
+        std::fs::remove_file(dir.join(FILE)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other);
     }
