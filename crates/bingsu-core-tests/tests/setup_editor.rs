@@ -1662,3 +1662,57 @@ fn kept_keys_and_covers_per_key() {
         ]
     );
 }
+
+// 이것을 실패시키는 것: 내장 narrow 구간을 폭으로 고르지 않는 것(경계 59·60칸), 다른 구간을 narrow로 보는 것, 사용자가
+// narrow 구간의 template을 쓴 때나 구간을 끈 때나 경계를 옮긴 때에도 내장 narrow라고 하는 것, 나중 출처가 아닌 처음
+// 출처의 template을 보는 것.
+#[test]
+fn the_built_in_narrow_band_is_told_from_its_width_and_source() {
+    use bingsu_core::setup_editor::layers::builtin_narrow;
+    let at = |r: &ConfigReport, w: u16| {
+        let c = r.snapshot.as_ref().expect("compiles");
+        builtin_narrow(&r.files, &r.order, &c.widths, w)
+    };
+    let plain = load("", &[], &[]);
+    assert!(at(&plain, 59) && at(&plain, 1));
+    assert!(!at(&plain, 60) && !at(&plain, 80));
+    let own = load(
+        "",
+        &[(
+            "conf.d/10.toml",
+            "[layout.when.narrow.style]\ntemplate = \"{dir}{@nl}{char}\"\n",
+        )],
+        &[],
+    );
+    assert!(!at(&own, 59), "a template a source wrote");
+    let back = load(
+        "",
+        &[
+            (
+                "conf.d/10.toml",
+                "[layout.when.narrow.style]\ntemplate = \"{dir}{@nl}{char}\"\n",
+            ),
+            (
+                "conf.d/20.toml",
+                &format!(
+                    "[layout.when.narrow.style]\ntemplate = \"{}\"\n",
+                    bingsu_core::default_theme::NARROW_TEMPLATE
+                ),
+            ),
+        ],
+        &[],
+    );
+    assert!(at(&back, 59), "the last source decides");
+    let off = load(
+        "",
+        &[("conf.d/10.toml", "[layout.when.narrow]\nenabled = false\n")],
+        &[],
+    );
+    assert!(!at(&off, 59));
+    let moved = load(
+        "",
+        &[("conf.d/10.toml", "[layout.when.narrow]\nmax_cols = 49\n")],
+        &[],
+    );
+    assert!(at(&moved, 49) && !at(&moved, 50));
+}
