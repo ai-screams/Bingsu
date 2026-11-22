@@ -419,6 +419,10 @@ struct Ready {
     reason = "`tv_usec` is 32 bits on macOS and 64 on Linux; one spelling for both"
 )]
 fn select(tty: Option<RawFd>, wake: RawFd, write: bool, until: Option<Instant>) -> Option<Ready> {
+    #[cfg(test)]
+    if test_session::FAIL_SELECT.take() {
+        return None;
+    }
     let mut tv = until.map(|until| {
         let left = until.saturating_duration_since(Instant::now());
         libc::timeval {
@@ -601,7 +605,12 @@ impl Session<'_> {
                     let until = Instant::now() + background_check();
                     match select(None, self.wake, false, Some(until)) {
                         Some(r) if r.wake => {}
-                        _ => self.check(),
+                        // A quiet second: is the terminal back, or gone?
+                        Some(_) => self.check(),
+                        // The wait itself failed: waiting again would spin.
+                        // 이것을 실패시키는 것: 이때도 check하고 다시 기다리는 것(끝나지 않음;
+                        // a_failed_wait_in_the_background_ends_the_session).
+                        None => self.state = State::Gone,
                     }
                     continue;
                 }
@@ -963,6 +972,8 @@ mod test_session {
         /// `full_screen` fails once its job control handlers are in, before
         /// the raw switch.
         pub(super) static FAIL_RAW: Cell<bool> = const { Cell::new(false) };
+        /// The next `select` fails.
+        pub(super) static FAIL_SELECT: Cell<bool> = const { Cell::new(false) };
         /// Raised once, right after the raw switch.
         pub(super) static AFTER_RAW: Cell<Option<libc::c_int>> = const { Cell::new(None) };
         /// Raised once, in order, once `leave` wrote the way out (0: none).

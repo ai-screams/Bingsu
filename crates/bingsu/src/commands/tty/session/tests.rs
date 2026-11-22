@@ -1695,6 +1695,42 @@ fn job_child() {
     }
 }
 
+// The session waits in the background (another process group has the
+// terminal) and its wait on the pipe fails: it ends with `Hangup` instead
+// of waiting again. 이것을 실패시키는 것: 실패한 기다림 뒤에도 다시 기다리는 것(끝나지 않음).
+#[test]
+fn a_failed_wait_in_the_background_ends_the_session() {
+    let t = start("background_failure_child", &[]);
+    let (lines, _) = t.mode_restored_after();
+    assert_eq!(lines, ["Hangup"]);
+}
+
+#[test]
+#[ignore = "child: a session on a pseudo-terminal"]
+fn background_failure_child() {
+    use std::os::unix::process::CommandExt;
+    take_signals();
+    let tty = take_terminal();
+    let mut s = tty.full_screen().unwrap();
+    let mut other = std::process::Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let group = libc::pid_t::try_from(other.id()).unwrap();
+    give_terminal(group);
+    // SAFETY: raises SIGCONT on this thread; the session's handler takes it.
+    unsafe { libc::raise(libc::SIGCONT) };
+    test_session::FAIL_SELECT.set(true);
+    say(&format!("{:?}", s.wait(false, Some(Instant::now() + WAIT))));
+    // SAFETY: getpgrp takes no arguments and cannot fail.
+    give_terminal(unsafe { libc::getpgrp() });
+    drop(s);
+    other.kill().unwrap();
+    other.wait().unwrap();
+}
+
 // The terminal takes the first 3 bytes of the way out and then nothing: the
 // sequence it is in is ended, and the mode goes back all the same.
 // 이것을 실패시키는 것: 반쯤 나간 복구 열을 끊지 않는 것, 그때 termios를 되돌리지 않는 것.
