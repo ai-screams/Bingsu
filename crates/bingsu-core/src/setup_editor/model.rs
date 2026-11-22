@@ -122,6 +122,10 @@ impl Note {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct State {
     written: [Option<u8>; 8],
+    /// The target's own keys of the row stay as they are: it has them, but
+    /// not as one of the row's values (`outer_end = "rounds"`, or only
+    /// `layout.line1.left`). Picking a value or Backspace ends that.
+    kept: [bool; 8],
     /// A shape row was changed: icons no longer pick the preset.
     shaped: bool,
 }
@@ -136,7 +140,7 @@ pub struct Model {
     start: State,
     /// What the target wrote when the editor opened (nothing for a new
     /// file): an existing file's changes are the difference from it.
-    original: [Option<u8>; 8],
+    original: State,
     undo: Option<State>,
     /// The icons row was changed once: the hint about boxes goes.
     icons_changed: bool,
@@ -171,18 +175,20 @@ impl Model {
             .and_then(|g| rows::MODES.iter().position(|w| *w == g.word()))
             .map(|i| i as u8);
         let original = core::array::from_fn(|i| layers.rows[i].written);
+        let kept = core::array::from_fn(|i| {
+            original[i].is_none() && layers.rows[i].written_raw.iter().any(Option::is_some)
+        });
+        let first = State {
+            written: original,
+            kept,
+            shaped: false,
+        };
         let mut m = Self {
             layers,
             target,
-            state: State {
-                written: original,
-                shaped: false,
-            },
-            start: State {
-                written: original,
-                shaped: false,
-            },
-            original,
+            state: first,
+            start: first,
+            original: first,
             undo: None,
             icons_changed: false,
             row: Row::Style,
@@ -251,7 +257,12 @@ impl Model {
     }
     /// What the target wrote when the editor opened.
     pub fn original(&self, row: Row) -> Option<u8> {
-        self.original[row.index()]
+        self.original.written[row.index()]
+    }
+    /// Whether the target's own keys of `row` were kept when the editor
+    /// opened (it had them, not as one of the row's values).
+    pub fn original_kept(&self, row: Row) -> bool {
+        self.original.kept[row.index()]
     }
 
     fn default_in(&self, s: &State, row: Row) -> u8 {
@@ -277,11 +288,20 @@ impl Model {
             // (`config check` refuses it): this file's value is covered all
             // the same, and the row shows the default.
             (None, Some(_)) => self.default_in(s, row),
-            (None, None) => s.written[row.index()].unwrap_or_else(|| self.inherited_in(s, row)),
+            (None, None) => self.chosen_in(s, row),
         }
     }
     fn chosen_in(&self, s: &State, row: Row) -> u8 {
-        s.written[row.index()].unwrap_or_else(|| self.inherited_in(s, row))
+        let i = row.index();
+        match s.written[i] {
+            Some(v) => v,
+            // The file's own value key holds a value outside the list: the
+            // row shows the default. Only its other keys: the inherited value.
+            None if s.kept[i] && self.layers.rows[i].written_raw[row.value_key()].is_some() => {
+                self.default_in(s, row)
+            }
+            None => self.inherited_in(s, row),
+        }
     }
 
     /// The value `row` has when the target writes nothing for it.
@@ -316,15 +336,25 @@ impl Model {
     /// (`style.preset` always); for an existing one, a key to
     /// change.
     pub fn marked(&self, row: Row) -> bool {
+        let i = row.index();
         match self.target {
             Target::New => row == Row::Style || self.written(row).is_some(),
-            Target::Existing(_) => self.written(row) != self.original(row),
+            Target::Existing(_) => {
+                (self.state.written[i], self.state.kept[i])
+                    != (self.original.written[i], self.original.kept[i])
+            }
         }
+    }
+
+    /// Whether the target's own keys of `row` stay as they are, though they
+    /// are not one of its values.
+    pub fn kept(&self, row: Row) -> bool {
+        self.state.kept[row.index()]
     }
 
     /// Something differs from how the editor opened.
     pub fn changed(&self) -> bool {
-        self.state.written != self.start.written
+        (self.state.written, self.state.kept) != (self.start.written, self.start.kept)
     }
 
     /// The style options the shape rows draw with (effective values).
@@ -346,6 +376,7 @@ impl Model {
         let mut n = s;
         let inherited = self.inherited_in(&n, row);
         n.written[row.index()] = (v != inherited).then_some(v);
+        n.kept[row.index()] = false;
         if Row::SHAPE.contains(&row) {
             n.shaped = true;
         }
@@ -370,7 +401,8 @@ impl Model {
         // preset: the part keys belong to the preset this file picks.
         if self.chosen_in(&next, Row::Style) != self.chosen(Row::Style) {
             for r in PARTS {
-                if next.written[r.index()].take().is_some() {
+                let kept = core::mem::take(&mut next.kept[r.index()]);
+                if next.written[r.index()].take().is_some() || kept {
                     note = Some(Note::PartsReset);
                 }
             }
@@ -408,6 +440,7 @@ impl Model {
     pub fn remove_override(&mut self, row: Row) -> Effect {
         let mut next = self.state;
         next.written[row.index()] = None;
+        next.kept[row.index()] = false;
         if Row::SHAPE.contains(&row) {
             next.shaped = true;
         }

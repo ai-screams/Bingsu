@@ -1487,3 +1487,70 @@ fn a_later_file_covers_key_by_key() {
     );
     assert_eq!(e.inherited(Row::Outer), 0);
 }
+
+// 이것을 실패시키는 것: 파일에 있는 키와 그 줄의 값을 가르지 않아, 줄 값으로 읽히지 않는 키(`layout.line1.left`만,
+// 목록 밖 `outer_end = "rounds"`)를 Backspace로 지울 수 없는 것, 파일에 없는 키까지 지우라고 하는 것, 그대로 둔 키를
+// 바뀐 것으로 치는 것, 프리셋을 바꿀 때 목록 밖 부분 키를 남기는 것.
+#[test]
+fn keys_the_file_has_can_be_removed() {
+    let target = "[layout.line1]\nleft = [\"dir\"]\n[style]\nouter_end = \"rounds\"\n";
+    let mut m = Model::new(
+        layers(&load(target, &[], &[])),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    assert!(m.kept(Row::Lines) && m.kept(Row::Outer));
+    assert!(!m.changed() && changes(&m).is_empty());
+    assert_eq!(m.chosen(Row::Lines), 0);
+    assert_eq!(m.chosen(Row::Outer), 0);
+    m.remove_override(Row::Lines);
+    let c: Vec<String> = changes(&m)
+        .iter()
+        .map(|c| format!("{}|{}|{}", c.key, c.now, c.line))
+        .collect();
+    assert_eq!(
+        c,
+        ["layout.line1.left|[\"dir\"]|delete left under [layout.line1]"]
+    );
+    m.remove_override(Row::Outer);
+    let c: Vec<String> = changes(&m).iter().map(|c| c.line.clone()).collect();
+    assert_eq!(
+        c,
+        [
+            "delete outer_end under [style]",
+            "delete left under [layout.line1]"
+        ]
+    );
+    m.restart();
+    assert!(m.kept(Row::Outer) && m.kept(Row::Lines) && !m.changed());
+    // A pick replaces the kept text.
+    m.pick(Row::Outer, 2);
+    let c: Vec<String> = changes(&m)
+        .iter()
+        .map(|c| format!("{}|{}", c.now, c.line))
+        .collect();
+    assert_eq!(c, ["\"rounds\"|under [style]: outer_end = \"round\""]);
+    // One line written over the kept array sets both keys; the input line
+    // key is not in the file, so a change back deletes only the array.
+    let mut l = Model::new(
+        layers(&load(target, &[], &[])),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    l.pick(Row::Lines, 1);
+    assert_eq!(changes(&l).len(), 2);
+    // A preset change takes a kept part key too.
+    let mut p = Model::new(
+        layers(&load(target, &[], &[])),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    p.pick(Row::Style, 2);
+    assert!(!p.kept(Row::Outer));
+    assert_eq!(p.note(), Some(Note::PartsReset));
+    assert!(
+        changes(&p)
+            .iter()
+            .any(|c| c.line == "delete outer_end under [style]")
+    );
+}

@@ -150,24 +150,28 @@ pub struct Change {
 }
 
 /// The keys to change in an existing file to get what the editor shows:
-/// every row whose value differs from what the file wrote. Empty for a new
-/// file.
+/// every row that differs from what the file wrote, by the keys the file
+/// has (a delete) or gets (a set). Empty for a new file.
 pub fn changes(m: &Model) -> Vec<Change> {
     let Target::Existing(format) = m.target() else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for row in Row::ALL {
-        let (now, chosen) = (m.original(row), m.written(row));
-        if now == chosen {
+        if !m.marked(row) {
             continue;
         }
         let raw = &m.layers().rows[row.index()].written_raw;
-        let set = chosen.map(|v| key_values(row, v));
+        let set = m.written(row).map(|v| key_values(row, v));
         for (i, key) in row.keys().iter().enumerate() {
             let value = |kv: &Option<Vec<KeyValue>>| kv.as_ref().map(|k| k[i].value.clone());
-            // The file's own text for the key: a file with a value for the
-            // row has that text.
+            // Without a value to set, only a key the file really has can be
+            // deleted (and kept keys stay as they are).
+            if set.is_none() && (m.kept(row) || raw[i].is_none()) {
+                continue;
+            }
+            // The file's own text for the key, also a value the row does not
+            // know.
             let shown_now = raw[i].clone().unwrap_or_else(|| "not set".into());
             let (table, name) = key.rsplit_once('.').unwrap_or(("", key));
             let line = match (value(&set), format) {
