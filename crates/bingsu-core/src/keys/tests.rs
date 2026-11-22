@@ -224,6 +224,36 @@ fn c1_controls_are_their_esc_forms() {
     assert_eq!(r.deadline(), Some(DRAIN_QUIET));
 }
 
+// 이것을 실패시키는 것: X10 마우스 보고(`ESC [ M` 뒤 날것 세 바이트)를 키로 읽는 것, 0x98 같은 C1 바이트로 문자열을
+// 여는 것, 세 바이트가 아닌 수를 먹는 것, 보고를 묶음의 키 하나로 세지 않는 것, 세 바이트가 오지 않을 때 끝나지 않는
+// 것.
+#[test]
+fn an_x10_mouse_report_is_one_dropped_unit() {
+    for report in [
+        &b"\x1b[M *%"[..],
+        b"\x1b[M \x841",
+        b"\x1b[M 1\x84",
+        b"\x1b[M \xe82",
+        b"\x1b[M#\x98r",
+        b"\x1b[M \x981\x1b[M#\x981",
+    ] {
+        let mut r = KeyReader::new();
+        assert_eq!(r.feed(report, Duration::ZERO).as_slice(), [], "{report:?}");
+        assert_eq!(r.deadline(), None, "{report:?}");
+        assert_eq!(r.feed(b"q", ms(1)).as_slice(), [Char(b'q')], "{report:?}");
+    }
+    assert_eq!(one(b"q\x1b[M !!q"), [Char(b'q'); 2]);
+    assert_eq!(one(b"qq\x1b[M !!q"), []);
+    // A report whose bytes do not come: its time bound, then a drain.
+    let mut r = KeyReader::new();
+    r.feed(b"\x1b[M ", Duration::ZERO);
+    assert_eq!(r.deadline(), Some(SEQ_TIME));
+    assert_eq!(r.tick(SEQ_TIME).as_slice(), []);
+    assert_eq!(r.deadline(), Some(SEQ_TIME + DRAIN_QUIET));
+    // With parameters it is another sequence (SGR mouse reports end in M).
+    assert_eq!(one(b"\x1b[<0;10;5Mq"), [Char(b'q')]);
+}
+
 // 이것을 실패시키는 것: ESC ESC의 둘째를 다시 읽지 않는 것.
 #[test]
 fn esc_esc_is_an_esc_and_a_new_start() {
@@ -260,6 +290,8 @@ const SAMPLES: &[(&[u8], &[Key])] = &[
     (b"\x9b200~q\x1b[201~", &[]),
     (b"\x1b[200~q\xc4\x9b201~\x9b201~", &[]),
     (b"\x1b]\xc5\x9cq\x07", &[]),
+    (b"\x1b[M \x981", &[]),
+    (b"\x1b[M#\x98rj", &[Char(b'j')]),
 ];
 
 // 이것을 실패시키는 것: 읽기 경계에서 시퀀스를 끊는 것(어느 분할 지점에서든 `[`, `A`, 내용의 `q`가 키가 됨),
@@ -533,9 +565,10 @@ fn time_bounds() {
 // 이미 끝난 Drain을 끝내지 않는 것, Esc의 늦은 창을 알아챈 때부터 세는 것.
 #[test]
 fn a_late_tick_or_feed_ends_where_ticks_on_time_would() {
-    let starts: [&[u8]; 7] = [
+    let starts: [&[u8]; 8] = [
         b"\x1b",
         b"\x1b[1",
+        b"\x1b[M ",
         b"\x1bO",
         b"\x1b]11;",
         b"\x9d11;",

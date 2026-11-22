@@ -19,6 +19,7 @@
 //! | Ss3 | `ESC O`, 0x8f | as Csi | as Csi | Drain |
 //! | Str | `ESC ]`, `ESC P`, `ESC _`, `ESC ^`, `ESC X`, 0x9d, 0x90, 0x9f, 0x9e, 0x98 | BEL, or ST (`ESC \`, 0x9c) | `STR_MAX` (4,096) bytes, `STR_TIME` (500 ms) | Drain |
 //! | Paste | `ESC [ 200 ~` (or with 0x9b) | `ESC [ 201 ~` (or with 0x9b) | `PASTE_MAX` (1 MiB), `PASTE_TIME` (5 s) | Drain |
+//! | Mouse | `ESC [ M` (no parameters) | three more bytes, whatever they are | `SEQ_TIME` from its ESC | Drain |
 //! | Utf8 | 0xC2-0xF4 | the last continuation byte | 3 more bytes | |
 //! | Drain | a bound passed, a string or a paste ended | `DRAIN_QUIET` (100 ms) with no input | | |
 //!
@@ -63,6 +64,12 @@
 //!   this, `0x9f`, a pause, Enter and `0x9c` would give an Enter key from a
 //!   string. After ESC a byte outside ASCII is read again from Ground (the
 //!   ESC is dropped), so `ESC 0x9d` cannot hide an OSC either.
+//! - An X10 mouse report (`ESC [ M Cb Cx Cy`, left on by another program)
+//!   takes three raw bytes after its `M`: they can be any byte (a column
+//!   past 95 is 0x80 or above), and as keys `ESC [ M`, Space, `1` would
+//!   step a value. A terminal that sends `ESC [ M` for F1 (SCO keys) loses
+//!   the next three keys or, typed more than 200 ms later, those of the
+//!   drain.
 //! - Ss3 takes parameter bytes as Csi does: some terminals send
 //!   `ESC O 5 A`, and the `5` would otherwise pick a value.
 //! - ESC ESC: the first is the Esc key, the second begins again.
@@ -78,9 +85,11 @@
 //! Without the marks, pasting and typing cannot be told apart for sure; a
 //! guess stands in: a read with `BURST` (4) or more keys counts as pasted
 //! and its keys are dropped, all but a Ctrl-C in it. Every unit the reader
-//! drops in Ground counts as a key here too: a sequence (one, however
-//! long), a sequence cut by a new ESC, a broken or a whole character
-//! outside ASCII, a stray byte, an ESC dropped before a byte outside ASCII.
+//! drops in Ground counts as a key here too: a Csi or Ss3 sequence or a
+//! mouse report (one, however long), a sequence cut by a new ESC, a broken
+//! or a whole character outside ASCII, a stray byte, an ESC dropped before
+//! a byte outside ASCII. Strings and pastes do not count: they drain once
+//! they end, and the drain drops what follows them.
 //! Otherwise a paste padded with such units (`ESC [` again and again, 0xff,
 //! Latin-1 text) would keep each read under `BURST` and let one key per
 //! read through, a second Enter from a later read included.
@@ -266,6 +275,12 @@ enum State {
         lo: u8,
         hi: u8,
     },
+    /// The `left` raw bytes of an X10 mouse report (`ESC [ M` and three
+    /// bytes) still to come; `since` as for the Csi it began as.
+    Mouse {
+        since: Duration,
+        left: u8,
+    },
     /// Dropping input until none comes for `DRAIN_QUIET` after `quiet_from`.
     Drain {
         quiet_from: Duration,
@@ -381,7 +396,9 @@ impl KeyReader {
         match self.state {
             State::Ground | State::Utf8 { .. } => None,
             State::Esc { at } => Some(at.saturating_add(ESC_WAIT)),
-            State::Seq(InSeq { since, .. }) => Some(since.saturating_add(SEQ_TIME)),
+            State::Seq(InSeq { since, .. }) | State::Mouse { since, .. } => {
+                Some(since.saturating_add(SEQ_TIME))
+            }
             State::Str { since, .. } => Some(since.saturating_add(STR_TIME)),
             State::Paste { since, .. } => Some(since.saturating_add(PASTE_TIME)),
             State::Drain { quiet_from } => Some(quiet_from.saturating_add(DRAIN_QUIET)),
@@ -410,7 +427,7 @@ impl KeyReader {
                 self.late_until = Some(at.saturating_add(ESC_WAIT).saturating_add(LATE_WAIT));
                 return Some(Key::Esc);
             }
-            State::Seq(InSeq { since, .. }) => Some((since, SEQ_TIME)),
+            State::Seq(InSeq { since, .. }) | State::Mouse { since, .. } => Some((since, SEQ_TIME)),
             State::Str { since, .. } => Some((since, STR_TIME)),
             State::Paste { since, .. } => Some((since, PASTE_TIME)),
             _ => None,
@@ -513,6 +530,19 @@ impl KeyReader {
                         hi: 0xbf,
                     };
                 }
+                false
+            }
+            State::Mouse { since, left } => {
+                // Any byte: the report's three bytes are raw (a column past
+                // 95 is a byte 0x80 or above, a C1 introducer included).
+                self.state = if left <= 1 {
+                    State::Ground
+                } else {
+                    State::Mouse {
+                        since,
+                        left: left - 1,
+                    }
+                };
                 false
             }
             State::Drain { .. } => {
@@ -621,6 +651,16 @@ impl KeyReader {
                     (_, 0, b'C') => Some(Key::Right),
                     (_, 0, b'D') => Some(Key::Left),
                     (Seq::Csi, 0, b'Z') => Some(Key::BackTab),
+                    // 이것을 실패시키는 것: X10 마우스 보고의 세 바이트를 키로 읽는 것(`ESC [ M` 뒤 Space, `1`이 샘, 0x98이
+                    // 문자열을 엶), 둘이나 넷을 먹는 것, 보고를 묶음에 세지 않는 것.
+                    (Seq::Csi, 0, b'M') => {
+                        self.state = State::Mouse {
+                            since: seq.since,
+                            left: 3,
+                        };
+                        found.key(None);
+                        return false;
+                    }
                     (Seq::Csi, 3, b'~') if seq.body == PASTE_START => {
                         self.state = State::Paste {
                             since: now,
