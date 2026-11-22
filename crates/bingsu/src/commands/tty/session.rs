@@ -128,6 +128,9 @@ fn background_check() -> Duration {
     BACKGROUND_CHECK
 }
 
+/// The longest time one `select` waits.
+const LONGEST_SELECT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// The most one read takes.
 const INPUT_CHUNK: usize = 1024;
 
@@ -424,7 +427,13 @@ fn select(tty: Option<RawFd>, wake: RawFd, write: bool, until: Option<Instant>) 
         return None;
     }
     let mut tv = until.map(|until| {
-        let left = until.saturating_duration_since(Instant::now());
+        // At most a day per call; the callers wait again until `until`.
+        // macOS refuses a time over 1e8 s (EINVAL), which would end the
+        // session as if the terminal were gone.
+        // 이것을 실패시키는 것: 남은 시간을 줄이지 않는 것(macOS: 먼 마감이 Hangup; a_wait_with_a_far_time_limit_goes_on).
+        let left = until
+            .saturating_duration_since(Instant::now())
+            .min(LONGEST_SELECT);
         libc::timeval {
             tv_sec: left.as_secs().try_into().unwrap_or(0),
             tv_usec: left.subsec_micros().try_into().unwrap_or(0),

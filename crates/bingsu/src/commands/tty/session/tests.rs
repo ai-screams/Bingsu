@@ -1731,6 +1731,29 @@ fn background_failure_child() {
     other.wait().unwrap();
 }
 
+// A time limit years away (macOS select refuses more than 1e8 s): the wait
+// still waits, and a key ends it. 이것을 실패시키는 것: select에 남은 시간을 그대로 넘기는 것(macOS에서 EINVAL로
+// Hangup; Linux에서는 살아남음).
+#[test]
+fn a_wait_with_a_far_time_limit_goes_on() {
+    let mut t = start("far_limit_child", &[]);
+    t.expect(b"READY");
+    t.send(b"k");
+    let (lines, _) = t.mode_restored_after();
+    assert_eq!(lines, ["Input([107])"]);
+}
+
+#[test]
+#[ignore = "child: a session on a pseudo-terminal"]
+fn far_limit_child() {
+    take_signals();
+    let tty = take_terminal();
+    let mut s = tty.full_screen().unwrap();
+    draw(&mut s, b"READY");
+    let years = Instant::now() + Duration::from_secs(4 * 365 * 24 * 60 * 60);
+    say(&format!("{:?}", s.wait(false, Some(years))));
+}
+
 // The terminal takes the first 3 bytes of the way out and then nothing: the
 // sequence it is in is ended, and the mode goes back all the same.
 // 이것을 실패시키는 것: 반쯤 나간 복구 열을 끊지 않는 것, 그때 termios를 되돌리지 않는 것.
