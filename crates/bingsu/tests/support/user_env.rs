@@ -148,7 +148,7 @@ pub fn quiet(stderr: &[u8]) -> String {
         .collect()
 }
 
-fn account_home() -> PathBuf {
+pub fn account_home() -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
     // SAFETY: getuid has no preconditions.
     let uid = unsafe { libc::getuid() };

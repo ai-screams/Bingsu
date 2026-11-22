@@ -17,7 +17,41 @@ fn detach() -> std::io::Result<()> {
     Ok(())
 }
 
-struct Home(PathBuf);
+/// The account's own bingsu state folders (named from its home, and from
+/// the run's XDG_STATE_HOME when it has one): names and metadata of what
+/// they hold, never the contents. A test must leave them as they were.
+type Listing = Vec<(PathBuf, Option<(std::ffi::OsString, u64, u64, i64)>)>;
+
+fn account_state() -> Listing {
+    use std::os::unix::fs::MetadataExt;
+    let mut folders = vec![user_env::account_home().join(".local/state/bingsu")];
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test run's own environment, read only"
+    )]
+    if let Some(x) = std::env::var_os("XDG_STATE_HOME") {
+        folders.push(PathBuf::from(x).join("bingsu"));
+    }
+    let mut out = Vec::new();
+    for folder in folders {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            out.push((folder, None));
+            continue;
+        };
+        let mut names: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let m = e.path().symlink_metadata().ok()?;
+                Some((e.file_name(), m.ino(), m.len(), m.mtime()))
+            })
+            .collect();
+        names.sort();
+        out.extend(names.into_iter().map(|n| (folder.clone(), Some(n))));
+    }
+    out
+}
+
+struct Home(PathBuf, Listing);
 
 impl Home {
     fn new(tag: &str) -> Self {
@@ -25,7 +59,7 @@ impl Home {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
-        Self(p.canonicalize().unwrap())
+        Self(p.canonicalize().unwrap(), account_state())
     }
     fn config(&self) -> PathBuf {
         self.0.join("cfg/bingsu/config.toml")
@@ -41,6 +75,8 @@ impl Home {
             // The choice record lives under the state folder: without this
             // one the account's own (from its home, not $HOME) is read.
             .env("XDG_STATE_HOME", self.0.join("state"))
+            .env("XDG_RUNTIME_DIR", self.0.join("run"))
+            .env("XDG_CACHE_HOME", self.0.join("cache"))
             .env("SHELL", "/bin/zsh");
         // `setup` unless the test names another command.
         if args.first() != Some(&"config") {
@@ -74,6 +110,15 @@ impl Home {
 impl Drop for Home {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        // 이것을 실패시키는 것: setup 시험이 계정의 실제 상태 폴더에 무언가를 남기거나 바꾸는 것(XDG_STATE_HOME 없이
+        // `config use`를 부름).
+        if !std::thread::panicking() {
+            assert_eq!(
+                account_state(),
+                self.1,
+                "a test changed the account's own bingsu state folder"
+            );
+        }
     }
 }
 

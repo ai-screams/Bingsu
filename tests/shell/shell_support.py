@@ -152,6 +152,43 @@ class Install:
         return out
 
 
+def setup_env(home: pathlib.Path):
+    """The environment of a `bingsu setup` test: every XDG folder under
+    `home`. Without XDG_STATE_HOME the account's own state folder (named
+    from the account's home, not $HOME) holds the settings choice setup
+    reads and `config use` writes."""
+    return {
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / "cfg"),
+        "XDG_STATE_HOME": str(home / "state"),
+        "XDG_RUNTIME_DIR": str(home / "run"),
+        "XDG_CACHE_HOME": str(home / "cache"),
+        "SHELL": "/bin/zsh",
+        "PATH": os.environ["PATH"],
+    }
+
+
+def account_state_listing():
+    """The names and metadata (never the contents) of what the account's own
+    bingsu state folders hold: the one named from the account's home and,
+    when the test run has one, XDG_STATE_HOME's."""
+    import pwd
+    folders = [pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/state/bingsu"]
+    if os.environ.get("XDG_STATE_HOME"):
+        folders.append(pathlib.Path(os.environ["XDG_STATE_HOME"]) / "bingsu")
+    listing = []
+    for folder in folders:
+        try:
+            entries = sorted(os.scandir(folder), key=lambda e: e.name)
+        except FileNotFoundError:
+            listing.append((str(folder), None))
+            continue
+        for e in entries:
+            st = e.stat(follow_symlinks=False)
+            listing.append((str(folder), e.name, st.st_ino, st.st_size, st.st_mtime_ns))
+    return listing
+
+
 def trusted_env(base: pathlib.Path, tag: str = "t"):
     return {
         "PATH": os.environ["PATH"],

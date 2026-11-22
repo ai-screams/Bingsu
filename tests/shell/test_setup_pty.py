@@ -24,6 +24,31 @@ import pexpect
 import pytest
 
 from conftest import real_bin
+from shell_support import account_state_listing, setup_env
+
+
+# Nothing a setup test runs may reach the account's own state folder (a
+# `config use` there once replaced the user's settings choice).
+@pytest.fixture(autouse=True, scope="module")
+def account_state_untouched():
+    before = account_state_listing()
+    yield
+    assert account_state_listing() == before, "a test changed the account's own bingsu state folder"
+
+
+
+# 이것을 실패시키는 것: 계정 상태 폴더 목록이 새 파일이나 바뀐 파일을 보지 못하는 것(지킴이가 아무것도 잡지 못함).
+def test_the_state_guard_sees_a_new_or_changed_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    (tmp_path / "bingsu").mkdir()
+    before = account_state_listing()
+    record = tmp_path / "bingsu" / "config-use"
+    record.write_text("x")
+    added = account_state_listing()
+    assert added != before
+    record.write_text("xy")
+    assert account_state_listing() != added
+
 
 QUERY = rb"\x1b\]11;\?\x1b\\"
 DARK = b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"
@@ -58,7 +83,7 @@ HIGH_DESCRIPTORS = (
 
 
 def spawn(home, *args, background=False, high_fds=False):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     run = f'"{real_bin()}" setup --plain {" ".join(args)}'
     if high_fds:
@@ -123,7 +148,7 @@ def test_a_settings_file_chosen_while_asking_stops_the_write(home):
     chosen.write_text("[style]\ngap = true\n")
     chosen.chmod(0o600)
     child = at_the_write_question(home)
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "PATH": os.environ["PATH"]}
+    env = {**setup_env(home), "PATH": os.environ["PATH"]}
     used = subprocess.run([str(real_bin()), "config", "use", str(chosen)], env=env, capture_output=True, timeout=10)
     assert used.returncode == 0, used.stderr
     child.send("\n")
@@ -332,7 +357,7 @@ class RawTerminal:
 
 
 def raw_terminal(home, after=""):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     script = (f'echo BEFORE=$(stty -g); "{real_bin()}" setup --plain --icons nerd; echo RC=$?; {after}'
               'echo AFTER=$(stty -g)')
@@ -467,7 +492,7 @@ BACKGROUND_JOB = (
 # 이것을 실패시키는 것: 전경 작업인지 확인하지 않는 것(SIGTTOU를 무시한 배경 작업이 전경 셸 밑에서 터미널 모드를
 # 바꾸고, 복구의 `tcflush`가 사용자가 미리 친 글자를 버림). 확인하면 터미널이 없는 것으로 보아 질문 없이 인자를 요구한다.
 def test_a_background_job_does_not_touch_the_terminal(home):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     script = (f"echo BEFORE=$(stty -g); '{sys.executable}' -c '{BACKGROUND_JOB}' \"{real_bin()}\" setup --plain --icons nerd; "
               "echo RC=$?; read -r LEFT; echo LEFT=[$LEFT]; echo AFTER=$(stty -g)")
@@ -488,7 +513,7 @@ def test_a_background_job_does_not_touch_the_terminal(home):
 # 시험(`reading_a_reply_ends_on_hang_up…`)이 잡는다: 끊김에는 SIGHUP이 먼저 와서 이 시험으로는 가려지지 않는다.
 def test_a_hung_up_terminal_ends_without_a_panic(home):
     err, rc = home / "stderr", home / "rc"
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     # The shell ignores SIGHUP so that it outlives the hang-up and records how bingsu ended.
     script = f'trap "" HUP; "{real_bin()}" setup --plain --icons nerd 2>"{err}"; echo $? > "{rc}"'

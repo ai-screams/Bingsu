@@ -24,7 +24,7 @@ import pytest
 from conftest import real_bin
 from pty_session import Session
 from screen_session import ScreenSession
-from shell_support import trusted_env
+from shell_support import account_state_listing, setup_env, trusted_env
 
 QUERY = rb"\x1b\]11;\?\x1b\\"
 DARK = b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"
@@ -32,6 +32,15 @@ TITLE = rb"bingsu setup"
 KEYS = rb"enter save"
 # The end of a frame: a key's frame draws only the cells that changed.
 FRAME = rb"\x1b\[\?2026l"
+
+
+# Nothing a setup test runs may reach the account's own state folder (a
+# `config use` there once replaced the user's settings choice).
+@pytest.fixture(autouse=True, scope="module")
+def account_state_untouched():
+    before = account_state_listing()
+    yield
+    assert account_state_listing() == before, "a test changed the account's own bingsu state folder"
 
 
 @pytest.fixture
@@ -43,7 +52,7 @@ def home():
 
 
 def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None, background=False):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "PWD": str(home)}
     if term is not None:
         env["TERM"] = term
@@ -421,7 +430,7 @@ def test_ctrl_c_while_the_terminal_is_asked_cancels(home):
 # 이것을 실패시키는 것: 편집판 도중 터미널이 끊길 때 panic으로 끝나는 것(101), 끝나지 않고 기다리는 것, 파일을 쓰는 것.
 def test_a_hung_up_terminal_ends_the_editor_without_a_panic(home):
     err, rc = home / "stderr", home / "rc"
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm-256color"}
     # The shell ignores SIGHUP so that it outlives the hang-up and records how bingsu ended.
     script = f'trap "" HUP; "{real_bin()}" setup 2>"{err}"; echo $? > "{rc}"'
