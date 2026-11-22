@@ -16,7 +16,7 @@ use super::rows::{self, Row};
 use super::write::{changes, written_keys};
 use crate::color::math::{Srgb8, nearest_256};
 use crate::color::palette::{Mode, ResolvedPalette, named_color};
-use crate::color::sgr::{BOLD, ColorDepth, Ink, Paint, REVERSE, UNDERLINE};
+use crate::color::sgr::{BOLD, ColorDepth, Ink, Paint, REVERSE, UNDERLINE, write_paint};
 use crate::preview::PreviewLine;
 use crate::width::{WidthProfile, fit_prefix, fit_suffix, grapheme_width, str_width};
 use alloc::format;
@@ -137,6 +137,58 @@ impl Grid {
             }
         }
         at
+    }
+}
+
+/// Cursor to column `x`, row `y` (0-based).
+fn move_to(x: u16, y: u16, out: &mut Vec<u8>) {
+    out.extend_from_slice(format!("\x1b[{};{}H", u32::from(y) + 1, u32::from(x) + 1).as_bytes());
+}
+
+/// The bytes that turn the screen `prev` showed into `next`: cursor moves,
+/// SGR and the cells' text, no other escape (no string, no mode). `None`,
+/// or a grid of another size or with another last column: the whole
+/// screen, first cleared in the last column's paint. Otherwise only the
+/// cells that changed, from the first one of each run. The last column is
+/// never written (a cell there would leave the cursor waiting to wrap, and
+/// on the last row some terminals scroll): the clear paints it. Each frame
+/// sets its first paint whole, so it needs nothing of the terminal's state.
+pub fn frame(prev: Option<&Grid>, next: &Grid, out: &mut Vec<u8>) {
+    let (cols, rows) = (next.cols, next.rows);
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    let last = cols - 1;
+    let edge = |g: &Grid| (0..rows).map(|y| g.cell(last, y).paint).collect::<Vec<_>>();
+    let prev = prev.filter(|p| p.cols == cols && p.rows == rows && edge(p) == edge(next));
+    if prev.is_none() {
+        write_paint(next.cell(last, 0).paint, out);
+        out.extend_from_slice(b"\x1b[2J");
+    }
+    let mut paint = None;
+    for y in 0..rows {
+        // Where the cursor is after the last cell written on this row.
+        let mut at = None;
+        for x in 0..last {
+            let cell = next.cell(x, y);
+            // A cell a 2-cell cluster covers comes with that cluster.
+            if cell.text.is_empty() {
+                continue;
+            }
+            let wide = x + 1 < last && next.cell(x + 1, y).text.is_empty();
+            if prev.is_some_and(|p| p.cell(x, y) == cell) {
+                continue;
+            }
+            if at != Some(x) {
+                move_to(x, y, out);
+            }
+            if paint != Some(cell.paint) {
+                write_paint(cell.paint, out);
+                paint = Some(cell.paint);
+            }
+            out.extend_from_slice(cell.text.as_bytes());
+            at = Some(x + if wide { 2 } else { 1 });
+        }
     }
 }
 

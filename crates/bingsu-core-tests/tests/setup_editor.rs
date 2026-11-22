@@ -16,7 +16,7 @@ use bingsu_core::preview::{PreviewLine, Request, Sample, lines};
 use bingsu_core::setup_editor::layers::Layers;
 use bingsu_core::setup_editor::model::{Effect, Given, Input, Model, Note, Screen, Target};
 use bingsu_core::setup_editor::rows::{self, ENDS, GAPS, ICONS, JOINTS, Row, STYLES};
-use bingsu_core::setup_editor::screen::{Grid, View, draw};
+use bingsu_core::setup_editor::screen::{Grid, View, draw, frame};
 use bingsu_core::setup_editor::write::{changes, new_file_text, written_keys};
 use bingsu_core::style::{PRESETS, generate, preset};
 use bingsu_core::template::compile::{CompiledLine, compile};
@@ -1715,4 +1715,169 @@ fn the_built_in_narrow_band_is_told_from_its_width_and_source() {
         &[],
     );
     assert!(at(&moved, 49) && !at(&moved, 50));
+}
+
+/// Plays `bytes` onto `screen` (cell texts by row) as a terminal places
+/// them, with `g` telling each cell's width. Only cursor moves, SGR, a
+/// whole clear and cell texts may come. Returns the cursor moves and the
+/// last column written.
+fn play(bytes: &[u8], screen: &mut [Vec<String>], g: &Grid) -> (usize, u16) {
+    let (mut i, mut x, mut y, mut moves, mut far) = (0, 0u16, 0u16, 0, 0);
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            assert_eq!(bytes.get(i + 1), Some(&b'['), "only CSI at {i}");
+            let end = i
+                + 2
+                + bytes[i + 2..]
+                    .iter()
+                    .position(|b| (0x40..=0x7e).contains(b))
+                    .unwrap();
+            let params = std::str::from_utf8(&bytes[i + 2..end]).unwrap();
+            match bytes[end] {
+                b'H' => {
+                    let (r, c) = params.split_once(';').unwrap();
+                    y = r.parse::<u16>().unwrap() - 1;
+                    x = c.parse::<u16>().unwrap() - 1;
+                    moves += 1;
+                }
+                b'm' => {}
+                b'J' => {
+                    assert_eq!(params, "2");
+                    for row in screen.iter_mut() {
+                        row.fill(String::from(" "));
+                    }
+                }
+                f => panic!("final byte {f}"),
+            }
+            i = end + 1;
+            continue;
+        }
+        let want = &g.cell(x, y).text;
+        assert!(!want.is_empty(), "a covered cell at {x},{y}");
+        assert!(
+            bytes[i..].starts_with(want.as_bytes()),
+            "{x},{y}: {want:?} vs {:?}",
+            String::from_utf8_lossy(&bytes[i..(i + 8).min(bytes.len())])
+        );
+        let w = if x + 1 < g.cols() && g.cell(x + 1, y).text.is_empty() {
+            2
+        } else {
+            1
+        };
+        screen[usize::from(y)][usize::from(x)] = want.clone();
+        if w == 2 {
+            screen[usize::from(y)][usize::from(x) + 1] = String::new();
+        }
+        far = far.max(x + w - 1);
+        x += w;
+        i += want.len();
+    }
+    (moves, far)
+}
+
+fn shows(screen: &[Vec<String>], g: &Grid) -> bool {
+    (0..g.rows()).all(|y| {
+        (0..g.cols() - 1).all(|x| screen[usize::from(y)][usize::from(x)] == g.cell(x, y).text)
+    })
+}
+
+// 이것을 실패시키는 것: 마지막 칸에 쓰는 것, 처음 프레임에서 화면을 지우지 않는 것, 칸을 엉뚱한 자리에 쓰는 것, 두 칸
+// 글자 뒤 커서를 한 칸만 옮긴 것으로 보는 것(줄마다 이동이 더 늘어남), 바뀐 칸만이 아니라 다 쓰는 것, 크기나 마지막 칸이
+// 바뀌었는데 차이만 쓰는 것, 0칸 격자에서 넘치는 것, CSI 밖의 escape(문자열)를 쓰는 것.
+#[test]
+fn frames_draw_the_grid_and_then_only_what_changed() {
+    let mut m = fresh();
+    let c = compiled(load(&new_file_text(&m).unwrap(), &[], &[]));
+    let wide = lines(
+        &c,
+        &Request {
+            mode: Mode::Dark,
+            icons: c.icons,
+            depth: ColorDepth::TrueColor,
+            width: 80,
+            sample: Sample {
+                pwd: "/home/u/\u{65e5}\u{672c}\u{8a9e}".as_bytes(),
+                home: Some(b"/home/u"),
+                host: Some(b"ice-box"),
+            },
+        },
+    );
+    let g1 = draw(&m, &view(&m, &c, &wide, 80, 24));
+    assert!(
+        (0..24).any(|y| (0..79).any(|x| g1.cell(x, y).text.is_empty())),
+        "the grid has a 2-cell cluster"
+    );
+    let mut full = Vec::new();
+    frame(None, &g1, &mut full);
+    assert!(full.starts_with(b"\x1b[0") && full.windows(4).any(|w| w == b"\x1b[2J"));
+    let mut screen = vec![vec![String::from("?"); 80]; 24];
+    let (moves, far) = play(&full, &mut screen, &g1);
+    assert!(shows(&screen, &g1));
+    assert!(far < 79, "the last column is never written");
+    assert_eq!(
+        moves, 24,
+        "one move a row: a 2-cell cluster moves the cursor by 2"
+    );
+    // An SGR where the paint changes from the cell written before, each
+    // the paint's own bytes.
+    let mut want = Vec::new();
+    let mut last = None;
+    for y in 0..24 {
+        for x in 0..79 {
+            let cell = g1.cell(x, y);
+            if !cell.text.is_empty() && last != Some(cell.paint) {
+                last = Some(cell.paint);
+                want.push(cell.paint);
+            }
+        }
+    }
+    let escapes = full.iter().filter(|&&b| b == 0x1b).count();
+    assert_eq!(
+        escapes - moves - 1,
+        want.len() + 1,
+        "the clear's paint, then each change"
+    );
+    for p in &want {
+        let mut b = Vec::new();
+        bingsu_core::color::sgr::write_paint(*p, &mut b);
+        assert!(full.windows(b.len()).any(|w| w == b.as_slice()));
+    }
+    // One key: only what changed.
+    m.pick(Row::Style, 0);
+    let g2 = draw(&m, &view(&m, &c, &wide, 80, 24));
+    let mut diff = Vec::new();
+    frame(Some(&g1), &g2, &mut diff);
+    assert!(!diff.windows(4).any(|w| w == b"\x1b[2J"));
+    assert!(
+        diff.len() * 4 < full.len(),
+        "{} vs {}",
+        diff.len(),
+        full.len()
+    );
+    play(&diff, &mut screen, &g2);
+    assert!(shows(&screen, &g2));
+    let mut same = Vec::new();
+    frame(Some(&g2), &g2, &mut same);
+    assert!(same.is_empty());
+    // Another size, or another last column (the light palette): the whole screen.
+    for (cols, rows) in [(79, 24), (81, 24), (80, 25)] {
+        let g3 = draw(&m, &view(&m, &c, &wide, cols, rows));
+        let mut again = Vec::new();
+        frame(Some(&g2), &g3, &mut again);
+        assert!(again.windows(4).any(|w| w == b"\x1b[2J"), "{cols}x{rows}");
+    }
+    let mut v = view(&m, &c, &wide, 80, 24);
+    v.mode = Mode::Light;
+    let g4 = draw(&m, &v);
+    let mut light = Vec::new();
+    frame(Some(&g2), &g4, &mut light);
+    assert!(light.windows(4).any(|w| w == b"\x1b[2J"));
+    let mut screen4 = vec![vec![String::from("?"); 80]; 24];
+    play(&light, &mut screen4, &g4);
+    assert!(shows(&screen4, &g4));
+    // No cells, no bytes.
+    let none = draw(&m, &view(&m, &c, &wide, 0, 0));
+    let mut empty = Vec::new();
+    frame(None, &none, &mut empty);
+    assert!(empty.is_empty());
 }
