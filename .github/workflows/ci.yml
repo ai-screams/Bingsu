@@ -1025,6 +1025,13 @@ jobs:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
         run: cargo test -p bingsu-core-tests --test snapshot_forge --target wasm32-wasip1
 
+      # 이것을 실패시키는 것: 여는 애니메이션 프레임의 native/WASM 바이트 차이(f64·libm 계산이 플랫폼마다 다른 것).
+      - name: Opening golden (wasm32-wasip1 under wasmtime)
+        env:
+          CARGO_BUILD_JOBS: 2
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+        run: cargo test --release -p bingsu-core-tests --test opening --target wasm32-wasip1
+
       # 이것을 실패시키는 것: snapshot codec의 native/WASM 바이트 차이.
       - name: Snapshot golden (native and wasm32-unknown-unknown)
         env:
