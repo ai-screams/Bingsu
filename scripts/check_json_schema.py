@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Validates JSON documents against crates/bingsu-core/schema/diag-output-v1.json.
+"""Validates JSON documents against a schema of crates/bingsu-core/schema.
 
-Reads {"def": null | "<name>", "documents": [<text>, ...]} from stdin. With a
-`def`, each document is checked against that entry of the schema's `$defs`
-instead of the root. Documents are given as text so that invalid JSON is a
+Reads {"schema": "<file>", "def": null | "<name>", "documents": [<text>, ...]}
+from stdin. The schema is that file of the folder, `diag-output-v1.json` when
+`schema` is left out. With a `def`, each document is checked against that entry
+of the schema's `$defs` instead of the root. Documents are given as text so that invalid JSON is a
 failure too. Exit 0 when all pass, 1 with the first problems on stderr.
 Needs the `jsonschema` package of scripts/schema-requirements.txt.
 """
@@ -13,12 +14,13 @@ import sys
 
 from jsonschema import Draft202012Validator
 
-SCHEMA = pathlib.Path(__file__).resolve().parents[1] / "crates/bingsu-core/schema/diag-output-v1.json"
+SCHEMA_DIR = pathlib.Path(__file__).resolve().parents[1] / "crates/bingsu-core/schema"
 
 
 def main() -> int:
     request = json.load(sys.stdin)
-    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    name = request.get("schema", "diag-output-v1.json")
+    schema = json.loads((SCHEMA_DIR / name).read_text(encoding="utf-8"))
     if request.get("def"):
         schema = {"$schema": schema["$schema"], "$defs": schema["$defs"], "$ref": "#/$defs/" + request["def"]}
     Draft202012Validator.check_schema(schema)

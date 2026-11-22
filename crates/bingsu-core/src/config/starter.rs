@@ -10,32 +10,42 @@ use alloc::vec::Vec;
 /// The schema of the published config, for editors (`#:schema`).
 pub const SCHEMA_URL: &str = "https://raw.githubusercontent.com/ai-screams/Bingsu/main/crates/bingsu-core/schema/config-v1.json";
 
+/// The icon sets `setup` can write: the four of `icons::IconSet`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icons {
     Nerd,
+    Light,
     Unicode,
+    Ascii,
 }
 
 impl Icons {
+    pub const ALL: [Self; 4] = [Self::Nerd, Self::Light, Self::Unicode, Self::Ascii];
+
     pub fn parse(word: &str) -> Option<Self> {
         match word {
             "nerd" => Some(Self::Nerd),
+            "light" => Some(Self::Light),
             "unicode" => Some(Self::Unicode),
+            "ascii" => Some(Self::Ascii),
             _ => None,
         }
     }
     pub const fn word(self) -> &'static str {
         match self {
             Self::Nerd => "nerd",
+            Self::Light => "light",
             Self::Unicode => "unicode",
+            Self::Ascii => "ascii",
         }
     }
-    /// Without Nerd Font glyphs the plainer `lean` preset reads better
-    /// (decision Q10).
+    /// The sets with the font's block separators (`nerd`, and `light`,
+    /// which keeps them and drops the other Nerd Font glyphs) start from
+    /// `triangle`; without them the plainer `lean` preset reads better.
     pub const fn preset(self) -> &'static str {
         match self {
-            Self::Nerd => "triangle",
-            Self::Unicode => "lean",
+            Self::Nerd | Self::Light => "triangle",
+            Self::Unicode | Self::Ascii => "lean",
         }
     }
 }
@@ -78,7 +88,8 @@ pub fn starter(c: Choices) -> String {
          # bingsu settings. Every line is optional: delete one to get the default.\n\
          # Check this file with `bingsu config check`; `bingsu list` shows the names.\n\
          \n\
-         # \"nerd\" draws Nerd Font glyphs; \"unicode\" needs no special font.\n\
+         # \"nerd\" draws Nerd Font glyphs, \"light\" only its block separators;\n\
+         # \"unicode\" needs no special font, \"ascii\" draws ASCII only.\n\
          icons = \"{icons}\"\n\
          \n\
          [style]\n\
@@ -152,25 +163,45 @@ pub fn differences(format: tree::Format, existing: &[u8], c: Choices) -> Option<
 mod tests {
     use super::*;
 
-    const ALL: [Choices; 6] = {
-        const fn c(icons: Icons, mode: Mode) -> Choices {
-            Choices { icons, mode }
+    /// Every icon set with every mode.
+    fn all() -> impl Iterator<Item = Choices> {
+        Icons::ALL.into_iter().flat_map(|icons| {
+            [Mode::Auto, Mode::Dark, Mode::Light]
+                .into_iter()
+                .map(move |mode| Choices { icons, mode })
+        })
+    }
+
+    // 이것을 실패시키는 것: 아이콘 낱말과 시작 프리셋의 짝(nerd·light → triangle, unicode·ascii → lean)이 바뀌는
+    // 것, 네 낱말 중 하나를 읽지 못하거나 다른 집합으로 읽는 것, 대소문자·다른 이름(`Nerd`, `emoji`, 빈 낱말)을
+    // 받는 것, `ALL`이 집합 하나를 빠뜨리는 것.
+    #[test]
+    fn each_icon_set_has_its_word_and_starter_preset() {
+        let table = [
+            (Icons::Nerd, "nerd", "triangle"),
+            (Icons::Light, "light", "triangle"),
+            (Icons::Unicode, "unicode", "lean"),
+            (Icons::Ascii, "ascii", "lean"),
+        ];
+        assert_eq!(table.map(|t| t.0), Icons::ALL);
+        for (icons, word, preset) in table {
+            assert_eq!(Icons::parse(word), Some(icons));
+            assert_eq!(icons.word(), word);
+            assert_eq!(icons.preset(), preset);
+            // The config key takes the same word (`config::keys`, `icons`).
+            assert!(crate::icons::IconSet::parse(word).is_some());
         }
-        [
-            c(Icons::Nerd, Mode::Auto),
-            c(Icons::Nerd, Mode::Dark),
-            c(Icons::Nerd, Mode::Light),
-            c(Icons::Unicode, Mode::Auto),
-            c(Icons::Unicode, Mode::Dark),
-            c(Icons::Unicode, Mode::Light),
-        ]
-    };
+        for bad in ["Nerd", "ASCII", "emoji", "", "nerd ", "powerline"] {
+            assert_eq!(Icons::parse(bad), None, "{bad:?}");
+        }
+    }
 
     // 이것을 실패시키는 것: 시작 설정이 TOML로 읽히지 않는 것, `colors.mode`가 한 번이 아닌 것,
-    // `#:schema` 줄이 첫 줄이 아닌 것, 고른 값이 파일에 없거나 `unicode`에 `lean`이 따라가지 않는 것.
+    // `#:schema` 줄이 첫 줄이 아닌 것, 고른 값이 파일에 없거나 고른 집합의 시작 프리셋이 따라가지 않는 것,
+    // 주석이 집합 넷을 다 설명하지 않는 것.
     #[test]
     fn the_starter_parses_and_writes_each_choice_once() {
-        for c in ALL {
+        for c in all() {
             let s = starter(c);
             assert!(s.starts_with("#:schema https://"), "{s}");
             let t = tree::parse(s.as_bytes()).unwrap();
@@ -188,6 +219,14 @@ mod tests {
             );
         }
         assert_eq!(Icons::Unicode.preset(), "lean");
+        let s = starter(Choices {
+            icons: Icons::Ascii,
+            mode: Mode::Auto,
+        });
+        let comments: String = s.lines().filter(|l| l.starts_with('#')).collect();
+        for word in Icons::ALL.map(Icons::word) {
+            assert!(comments.contains(&format!("\"{word}\"")), "{word}: {s}");
+        }
     }
 
     // 이것을 실패시키는 것: 다른 값·없는 키를 차이로 알리지 않는 것, 같은 값을 차이로 알리는 것,
