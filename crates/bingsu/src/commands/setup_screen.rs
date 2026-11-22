@@ -440,6 +440,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    // 이것을 실패시키는 것: 한 번 읽은 바이트의 두 Enter(`\r\r`, LNM 터미널의 `\r\n`)를 저장 확인으로 받는 것.
+    // 읽기 경계를 시험이 정한다: 키 해석기의 `feed` 한 번이 한 읽기다.
+    #[test]
+    fn two_enters_of_one_read_do_not_confirm_the_save() {
+        use bingsu_core::setup_editor::layers::Layers;
+        use bingsu_core::setup_editor::model::{Effect, Given, Input, Model, Screen, Target};
+        let t = Instant::now();
+        let mut keys = KeyInput::new(t);
+        let mut m = Model::new(Layers::default(), Target::New, Given::default());
+        let effects = |m: &mut Model, bytes: &[u8], read: u64, keys: &mut KeyInput| {
+            keys.feed(bytes, t)
+                .as_slice()
+                .iter()
+                .map(|&key| m.handle(Input { key, read }))
+                .collect::<Vec<_>>()
+        };
+        for one in [&b"\r\r"[..], b"\r\n"] {
+            let mut s = m.clone();
+            let got = effects(&mut s, one, 1, &mut keys);
+            assert!(!got.contains(&Effect::Write), "{one:?}: {got:?}");
+            assert!(matches!(s.screen(), Screen::Save { .. }));
+            assert_eq!(effects(&mut s, b"\r", 2, &mut keys), [Effect::Write]);
+        }
+        let got = effects(&mut m, b"\r", 1, &mut keys);
+        assert!(!got.contains(&Effect::Write));
+    }
+
     // 이것을 실패시키는 것: auto에서 COLORFGBG를 보지 않는 것, 읽을 수 없는 값을 근거로 적는 것, 정한 모드에 COLORFGBG를
     // 적용하는 것.
     #[test]

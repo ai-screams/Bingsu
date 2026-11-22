@@ -43,7 +43,7 @@ def home():
 
 
 def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None, background=False):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "PWD": str(home)}
     if term is not None:
         env["TERM"] = term
@@ -68,11 +68,28 @@ def finish(child):
     return int(re.search(r"RC=(\d+)", text).group(1)), before, after, text
 
 
-def opened(child):
+def opened(child, rows=24, cols=80):
     """Answers the background query and waits for the first whole frame."""
     child.expect(QUERY)
     child.send(DARK)
-    child.expect(KEYS)
+    until(child, lambda d: any("enter save" in line for line in d), rows, cols)
+
+
+def until(child, shown, rows=24, cols=80, timeout=10):
+    """Reads frames until the screen they draw satisfies `shown` (a test on
+    the screen's lines); returns those lines. A frame marker alone says
+    nothing about which key's frame it ends."""
+    end = time.monotonic() + timeout
+    while True:
+        display = screen_of(child, rows, cols)
+        if shown(display):
+            return display
+        left = end - time.monotonic()
+        assert left > 0, "\n".join(display)
+        try:
+            child.expect(FRAME, timeout=left)
+        except pexpect.TIMEOUT:
+            pass
 
 
 def config(home):
@@ -80,15 +97,18 @@ def config(home):
     return path if path.exists() else None
 
 
+def has(text):
+    return lambda display: any(text in line for line in display)
+
+
 # 이것을 실패시키는 것: 그릴 수 있는 터미널에서 편집판을 열지 않는 것, 기본 그대로 저장하면 파일을 만들지 않는 것,
-# 파일이 0600이 아닌 것, 저장 화면이 보인 키와 파일이 다른 것, 확인을 같은 읽기의 두 번째 Enter로 받는 것(한 번에
-# 두 Enter가 저장함), 나간 뒤 터미널 설정이 다른 것, 대체 화면을 나가지 않는 것, doctor 안내를 빼는 것.
+# 파일이 0600이 아닌 것, 저장 화면이 보인 키와 파일이 다른 것, 나간 뒤 터미널 설정이 다른 것, 대체 화면을 나가지
+# 않는 것, doctor 안내를 빼는 것. 같은 읽기의 두 번째 Enter는 단위 시험(`setup_screen`)이 읽기 경계를 정해 본다.
 def test_the_editor_saves_a_private_file_it_showed(home):
     child = spawn(home)
     opened(child)
-    child.send("\r\r")
-    child.expect(rb"enter write")
-    assert config(home) is None, "one read's second Enter is no confirmation"
+    child.send("\r")
+    until(child, has("enter write"))
     child.send("\r")
     code, before, after, text = finish(child)
     assert code == 0, text
@@ -109,9 +129,8 @@ def test_a_changed_value_is_written(home):
     child = spawn(home)
     opened(child)
     child.send("s")
-    child.expect(FRAME)
     child.send("\r")
-    child.expect(rb'style.preset = "pill"')
+    until(child, has('style.preset = "pill"'))
     child.send("\r")
     code, _, _, text = finish(child)
     assert code == 0, text
@@ -174,10 +193,11 @@ def test_nothing_a_config_names_runs_while_the_editor_previews(home):
     child = spawn(home)
     opened(child)
     for key in "soj":
+        before = screen_of(child)
         child.send(key)
-        child.expect(FRAME)
+        until(child, lambda d: d != before)
     child.send("q")
-    child.expect(FRAME)
+    until(child, has("press q again"))
     child.send("q")
     code, _, _, text = finish(child)
     assert code == 0, text
@@ -197,7 +217,7 @@ def test_settings_changed_while_editing_stop_the_save(home):
     (conf / "10-mine.toml").write_text("[style]\ngap = true\n")
     (conf / "10-mine.toml").chmod(0o600)
     child.send("\r")
-    child.expect(rb"enter write")
+    until(child, has("enter write"))
     child.send("\r")
     code, before, after, text = finish(child)
     assert code == 1, text
@@ -243,13 +263,11 @@ def screen_of(child, rows=24, cols=80):
 def test_the_preview_follows_each_key(home):
     child = spawn(home)
     opened(child)
-    child.expect(FRAME)
     before = screen_of(child)
     child.send("s")
-    child.expect(FRAME)
-    after = screen_of(child)
+    after = until(child, lambda d: d != before)
     child.send("u")
-    child.expect(FRAME)
+    until(child, has("undone"))
     child.send("q")
     finish(child)
     row = next(i for i, line in enumerate(before) if line.startswith(" preview"))
@@ -265,14 +283,12 @@ def test_the_terminal_background_is_asked_once(home):
     child = spawn(home)
     child.expect(QUERY)
     child.send(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\")
-    child.expect(KEYS)
-    child.expect(FRAME)
-    assert any("the terminal looks light; pick light" in line for line in screen_of(child))
+    until(child, has("the terminal looks light; pick light"))
     child.send("q")
     assert finish(child)[0] == 0
     child = spawn(home)
     child.expect(QUERY)
-    child.expect(KEYS, timeout=2)
+    until(child, has("enter save"), timeout=2)
     child.send("q")
     code, _, _, text = finish(child)
     assert code == 0, text
@@ -283,10 +299,9 @@ def test_the_terminal_background_is_asked_once(home):
 def test_ctrl_l_draws_everything_again(home):
     child = spawn(home)
     opened(child)
-    child.expect(FRAME)
     start = len(child.transcript.getvalue())
     child.send(b"\x0c")
-    child.expect(FRAME)
+    child.expect(rb"\x1b\[2J")
     assert b"\x1b[2J" in child.transcript.getvalue()[start:]
     child.send("q")
     finish(child)
@@ -338,27 +353,27 @@ def test_sizes_and_the_last_column(home):
     child = spawn(home)
     opened(child)
     child.setwinsize(10, 30)
-    child.expect(rb"Too small")
-    # While too small a value key changes nothing.
+    until(child, has("Too small"), 10, 30)
+    # While too small a value key changes nothing; Ctrl-L, which works
+    # then, draws a frame once the `s` was read.
     child.send("s")
-    child.expect(FRAME)
+    child.send(b"\x0c")
+    child.expect(rb"\x1b\[2J")
     child.setwinsize(24, 80)
-    child.expect(KEYS)
+    until(child, has("enter save"))
     child.send("\r")
-    child.expect(rb"enter write")
+    until(child, has("enter write"))
     child.send("\r")
     finish(child)
     assert 'preset = "triangle"' in config(home).read_text()
     config(home).unlink()
     child = spawn(home, cols=59)
-    opened(child)
-    child.expect(FRAME)
-    assert any("narrow layout under 60 columns" in line for line in screen_of(child, 24, 59))
+    opened(child, 24, 59)
+    until(child, has("narrow layout under 60 columns"), 24, 59)
     child.send("q")
     finish(child)
     child = spawn(home)
     opened(child)
-    child.expect(FRAME)
     plain = preview_row(child)
     child.send("q")
     finish(child)
@@ -370,7 +385,6 @@ def test_sizes_and_the_last_column(home):
     (conf / "10-last.toml").chmod(0o600)
     child = spawn(home)
     opened(child)
-    child.expect(FRAME)
     assert preview_row(child) == plain
     child.send("q")
     finish(child)
@@ -382,7 +396,6 @@ def test_sizes_and_the_last_column(home):
 def test_an_outside_signal_puts_the_terminal_back(home, sig):
     child = spawn(home, background=True)
     opened(child)
-    child.expect(FRAME)
     pid = int(re.search(rb"BPID=(\d+)", child.transcript.getvalue()).group(1))
     os.kill(pid, sig)
     code, before, after, text = finish(child)
@@ -408,14 +421,14 @@ def test_ctrl_c_while_the_terminal_is_asked_cancels(home):
 # 이것을 실패시키는 것: 편집판 도중 터미널이 끊길 때 panic으로 끝나는 것(101), 끝나지 않고 기다리는 것, 파일을 쓰는 것.
 def test_a_hung_up_terminal_ends_the_editor_without_a_panic(home):
     err, rc = home / "stderr", home / "rc"
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm-256color"}
     # The shell ignores SIGHUP so that it outlives the hang-up and records how bingsu ended.
     script = f'trap "" HUP; "{real_bin()}" setup 2>"{err}"; echo $? > "{rc}"'
     child = pexpect.spawn("/bin/sh", ["-c", script], env=env, timeout=10, dimensions=(24, 80))
-    child.expect(QUERY)
-    child.send(DARK)
-    child.expect(KEYS)
+    child.transcript = io.BytesIO()
+    child.logfile_read = child.transcript
+    opened(child)
     os.close(child.child_fd)
     end = time.monotonic() + 5
     while time.monotonic() < end and not rc.exists():
@@ -466,10 +479,11 @@ def test_nothing_a_config_names_runs_in_a_shell_that_runs_bingsu(tmp_path):
     child.logfile_read = child.transcript
     opened(child)
     for key in "soj":
+        before = screen_of(child)
         child.send(key)
-        child.expect(FRAME)
+        until(child, lambda d: d != before)
     child.send("\r")
-    child.expect(rb"enter write")
+    until(child, has("enter write"))
     child.send("\r")
     child.expect(pexpect.EOF)
     text = child.transcript.getvalue().decode("utf-8", "replace")
