@@ -422,7 +422,7 @@ impl Bowl {
         let behind_wall =
             |x: f64, py: f64| x.abs() < R && py > rim_row + sqrt(1.0 - x * x) * sa * sy - 0.2;
         // The top of the ice in each column: snow does not fall through it.
-        let mut top = vec![1e9_f32; w];
+        let mut top = [1e9_f32; MAX_COLS as usize];
         for p in &self.points {
             match *p {
                 Point::Ice {
@@ -501,7 +501,8 @@ impl Bowl {
             cells: vec![Cell::EMPTY; w * h],
         };
         for (i, cell) in band.cells.iter_mut().enumerate() {
-            let b = f64::from(acc.b[i]);
+            let slot = acc.at(i);
+            let b = f64::from(slot.b);
             if b <= 0.0 {
                 continue;
             }
@@ -509,11 +510,11 @@ impl Bowl {
             if density < 0.05 {
                 continue;
             }
-            let ww = f64::from(acc.ww[i]);
+            let ww = f64::from(slot.ww);
             let ink = [
-                f64::from(acc.wl[i]) / ww,
-                f64::from(acc.wa[i]) / ww,
-                f64::from(acc.wb[i]) / ww,
+                f64::from(slot.wl) / ww,
+                f64::from(slot.wa) / ww,
+                f64::from(slot.wb) / ww,
             ];
             let level = floor(density * 10.0).clamp(1.0, 9.0) as usize;
             *cell = Cell {
@@ -533,7 +534,7 @@ impl Bowl {
                     continue;
                 }
                 let i = (y as usize) * w + x;
-                if acc.b[i] > 0.02 {
+                if acc.at(i).b > 0.02 {
                     continue;
                 }
                 let ch = if f.v > 5.5 {
@@ -559,29 +560,45 @@ fn fade(base: [f64; 3], ink: [f64; 3], m: f64) -> Srgb8 {
     to_srgb8(lab_to_linear(mix(0), mix(1), mix(2)))
 }
 
-/// What the points left in each cell: their weight and their inks times
+/// The most cells a band has.
+const CELLS: usize = MAX_COLS as usize * ROWS as usize;
+
+/// What the points left in one cell: their weight, and their inks times
 /// weight and material. `f32` as the study kept them.
+#[derive(Clone, Copy)]
+struct Slot {
+    b: f32,
+    wl: f32,
+    wa: f32,
+    wb: f32,
+    ww: f32,
+}
+
+impl Slot {
+    const ZERO: Self = Self {
+        b: 0.0,
+        wl: 0.0,
+        wa: 0.0,
+        wb: 0.0,
+        ww: 0.0,
+    };
+}
+
+/// The cells' slots for one frame, on the stack (`CELLS` of them, about
+/// 70 KB): a frame allocates nothing but its band.
 struct Acc {
     cols: usize,
     rows: usize,
-    b: Vec<f32>,
-    wl: Vec<f32>,
-    wa: Vec<f32>,
-    wb: Vec<f32>,
-    ww: Vec<f32>,
+    slots: [Slot; CELLS],
 }
 
 impl Acc {
+    /// `cols` up to `MAX_COLS`, `rows` up to `ROWS`.
     fn new(cols: usize, rows: usize) -> Self {
-        let n = cols * rows;
         Self {
             cols,
             rows,
-            b: vec![0.0; n],
-            wl: vec![0.0; n],
-            wa: vec![0.0; n],
-            wb: vec![0.0; n],
-            ww: vec![0.0; n],
+            slots: [Slot::ZERO; CELLS],
         }
     }
 
@@ -600,13 +617,20 @@ impl Acc {
         if x < 0.0 || y < 0.0 || x >= self.cols as f64 || y >= self.rows as f64 || w <= 0.0 {
             return;
         }
-        let i = y as usize * self.cols + x as usize;
+        let Some(s) = self.slots.get_mut(y as usize * self.cols + x as usize) else {
+            return;
+        };
         let put = |v: &mut f32, d: f64| *v = (f64::from(*v) + d) as f32;
-        put(&mut self.b[i], w);
-        put(&mut self.wl[i], w * mat * ink[0]);
-        put(&mut self.wa[i], w * mat * ink[1]);
-        put(&mut self.wb[i], w * mat * ink[2]);
-        put(&mut self.ww[i], w * mat);
+        put(&mut s.b, w);
+        put(&mut s.wl, w * mat * ink[0]);
+        put(&mut s.wa, w * mat * ink[1]);
+        put(&mut s.wb, w * mat * ink[2]);
+        put(&mut s.ww, w * mat);
+    }
+
+    /// Cell `i`'s slot; empty past the band.
+    fn at(&self, i: usize) -> Slot {
+        self.slots.get(i).copied().unwrap_or(Slot::ZERO)
     }
 }
 
