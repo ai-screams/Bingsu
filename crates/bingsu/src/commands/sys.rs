@@ -29,6 +29,24 @@ pub enum WriteOutcome {
 /// signals (no other thread runs then).
 pub struct HeldSignals {
     old: libc::sigset_t,
+    /// Neither `Send` nor `Sync`: the mask belongs to the thread that held
+    /// it, and only that thread may put it back.
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+/// Whether one of `HELD_SIGNALS` waits for this thread (or the process)
+/// while the guard holds it back.
+pub fn held_pending() -> bool {
+    // SAFETY: all-zero storage; sigpending fills it.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is writable.
+    if unsafe { libc::sigpending(&mut set) } != 0 {
+        return false;
+    }
+    // SAFETY: `set` is initialized and each is a valid signal.
+    HELD_SIGNALS
+        .iter()
+        .any(|&s| unsafe { libc::sigismember(&set, s) } == 1)
 }
 
 pub const HELD_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
@@ -49,7 +67,10 @@ pub fn hold_signals() -> std::io::Result<HeldSignals> {
     if rc != 0 {
         return Err(std::io::Error::from_raw_os_error(rc));
     }
-    Ok(HeldSignals { old })
+    Ok(HeldSignals {
+        old,
+        _thread: std::marker::PhantomData,
+    })
 }
 
 impl Drop for HeldSignals {
@@ -925,7 +946,8 @@ mod held_tests {
             .collect()
     }
 
-    // 이것을 실패시키는 것: 셋 가운데 하나(INT, TERM, HUP)를 막지 않는 것, 끝난 뒤 원래 마스크로 돌려놓지 않는 것.
+    // 이것을 실패시키는 것: 셋 가운데 하나(INT, TERM, HUP)를 막지 않는 것, 끝난 뒤 원래 마스크로 돌려놓지 않는 것,
+    // 막아 둔 신호가 기다리는지 셋 가운데 하나라도 보지 못하는 것.
     #[test]
     fn the_three_end_signals_wait_while_held() {
         std::thread::spawn(|| {
@@ -944,6 +966,27 @@ mod held_tests {
             assert_eq!(blocked(), [false; 3]);
             let held = hold_signals().unwrap();
             assert_eq!(blocked(), [true; 3]);
+            // A held signal waits; taking it here keeps it from ending the
+            // test once the mask goes back.
+            for sig in HELD_SIGNALS {
+                assert!(!held_pending());
+                // SAFETY: pthread_self has no preconditions.
+                let me = unsafe { libc::pthread_self() };
+                // SAFETY: a valid signal to this very thread, which holds it.
+                assert_eq!(unsafe { libc::pthread_kill(me, sig) }, 0);
+                assert!(held_pending(), "{sig}");
+                // SAFETY: all-zero storage, emptied below.
+                let mut one: libc::sigset_t = unsafe { std::mem::zeroed() };
+                // SAFETY: `one` is writable.
+                unsafe { libc::sigemptyset(&mut one) };
+                // SAFETY: `one` is initialized and `sig` is valid.
+                unsafe { libc::sigaddset(&mut one, sig) };
+                let mut got = 0;
+                // SAFETY: `one` holds a pending, blocked signal: no wait.
+                assert_eq!(unsafe { libc::sigwait(&one, &mut got) }, 0);
+                assert_eq!(got, sig);
+            }
+            assert!(!held_pending());
             drop(held);
             assert_eq!(blocked(), [false; 3]);
         })

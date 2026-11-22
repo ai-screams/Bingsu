@@ -175,8 +175,7 @@ def test_a_settings_folder_replaced_while_asking_stops_the_write(home):
     assert code == 1, text
     assert before == after
     assert "changed while you edited, so nothing was written" in text, text
-    assert config(home) is None
-    assert not (home / "cfg/bingsu.old/config.toml").exists()
+    assert os.listdir(folder) == [] and os.listdir(home / "cfg/bingsu.old") == [], "both folders stay empty"
 
 
 # 이것을 실패시키는 것: 묻는 동안 바뀐 설정(새 conf.d 파일)을 보지 않고 쓰는 것, 그때 쓰려던 키를 알리지 않는

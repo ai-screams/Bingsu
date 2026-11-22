@@ -202,8 +202,8 @@ enum Created {
     /// The file is there, but the folder could not be flushed: the name may
     /// not survive a crash.
     Unflushed,
-    /// The file went into the folder found at the start, but another folder
-    /// stands at its path now: the path has no new file.
+    /// The folder found at the start is not the one at its path any more
+    /// (or could not be confirmed): the file was taken back out of it.
     Moved,
     /// `config.toml` appeared between the check and the link.
     Exists,
@@ -222,16 +222,15 @@ fn unique_name() -> OsString {
 /// (EBADF). The folder found must be the one in the chain.
 fn sync_folder(chain: &Chain, dir: &Path) -> Result<(), Created> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    // A folder that cannot be confirmed as the chain's counts as another:
+    // only a failed `fsync` is a flush failure.
     let folder = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(dir)
-        .map_err(|e| match e.raw_os_error() {
-            Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP) => Created::Moved,
-            _ => Created::Unflushed,
-        })?;
+        .map_err(|_| Created::Moved)?;
     let (Ok(a), Ok(b)) = (folder.metadata(), chain.last().metadata()) else {
-        return Err(Created::Unflushed);
+        return Err(Created::Moved);
     };
     if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
         return Err(Created::Moved);
@@ -258,12 +257,16 @@ fn create(chain: &Chain, dir_path: &Path, text: &str) -> std::io::Result<Created
     })();
     let _ = sys::unlink_at(dir.as_fd(), &tmp);
     let made = made?;
-    if made == Created::Wrote
-        && let Err(other) = sync_folder(chain, dir_path)
-    {
-        return Ok(other);
+    match (made, sync_folder(chain, dir_path)) {
+        // The name went into a folder no longer at its path: take it back,
+        // so nothing setup wrote stays where the reader does not look.
+        (Created::Wrote, Err(Created::Moved)) => {
+            let _ = sys::unlink_at(dir.as_fd(), OsStr::new(FILE));
+            Ok(Created::Moved)
+        }
+        (Created::Wrote, Err(other)) => Ok(other),
+        (made, _) => Ok(made),
     }
-    Ok(made)
 }
 
 /// The settings file already in the place, under either of its names
@@ -392,6 +395,29 @@ fn applied_words(a: &Applied) -> String {
     }
 }
 
+const UNREAD_CHOICE: &str =
+    "the settings choice could not be read, so nothing was written. Run: bingsu config path";
+
+/// What the second reading says of the first.
+#[derive(Debug, PartialEq, Eq)]
+enum Reread {
+    Same,
+    /// A source or the settings choice changed (another kind, another file).
+    Changed,
+    /// The settings choice could not be read: refused as at the start.
+    Unreadable,
+}
+
+fn reread(start: &Selection, now: &Selection, same_sources: bool) -> Reread {
+    if *now == Selection::Incomplete {
+        Reread::Unreadable
+    } else if same_sources && now == start {
+        Reread::Same
+    } else {
+        Reread::Changed
+    }
+}
+
 const NOT_APPLIED: &str = "bingsu: not applied; the prompt keeps the last valid settings\n";
 const LOADS_LATER: &str = "bingsu: the new look shows once your shell loads bingsu\n";
 const DOCTOR: &str = "Line ends look off? `bingsu doctor` checks the character widths.";
@@ -511,11 +537,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // With a `config use` record the reader reads the chosen file in the
     // place of the folder's own: that is the settings file.
     let chosen = match &opening.selection {
-        Selection::Incomplete => {
-            return refuse(
-                "the settings choice could not be read, so nothing was written. Run: bingsu config path",
-            );
-        }
+        Selection::Incomplete => return refuse(UNREAD_CHOICE),
         Selection::Chosen(r) if !name_present(&r.path) => {
             eprintln!(
                 "bingsu: your chosen settings file {} is missing; run bingsu config use again",
@@ -606,6 +628,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 },
             };
             match setup_screen::edit(t, &start) {
+                // The editor saves nothing in a folder setup may not
+                // write; should it ever say to, the write is refused here.
+                Ended::Write { .. } if !may_write(mine) => return not_mine(),
                 Ended::Write { text, choices } => (text, choices),
                 Ended::Quit => {
                     eprintln!("bingsu: nothing written.");
@@ -648,11 +673,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // The choice of settings file is part of what was read: `config use`
     // can move the reader to a file already read, with the same sources.
     match read_sources(&user, &env, runs_here) {
-        Ok((again, now)) if sources.unchanged(&now) && again.selection == selection => {}
-        Ok(_) => {
-            eprint!("{}", changed_words(&text));
-            return ctx::code(EXIT_FAILED);
-        }
+        Ok((again, now)) => match reread(&selection, &again.selection, sources.unchanged(&now)) {
+            Reread::Same => {}
+            Reread::Unreadable => return refuse(UNREAD_CHOICE),
+            Reread::Changed => {
+                eprint!("{}", changed_words(&text));
+                return ctx::code(EXIT_FAILED);
+            }
+        },
         Err(why) => {
             eprintln!("{why}");
             return refuse("the settings could not be read again, so nothing was written");
@@ -682,18 +710,34 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         return refuse("the interrupt signals could not be held, so nothing was written");
     };
     let made = create(&chain, &dir, &text);
-    drop(held);
-    match made {
-        Ok(Created::Wrote) => eprintln!("bingsu: wrote {}", ctx::show(&path)),
-        Ok(Created::Unflushed) => eprintln!(
+    let said = |made: &Created| match made {
+        Created::Unflushed => format!(
             "bingsu: wrote {}, but the folder could not be flushed; it may not survive a crash",
             ctx::show(&path)
         ),
+        _ => format!("bingsu: wrote {}", ctx::show(&path)),
+    };
+    // A signal that came while the file was made ends the process once the
+    // mask goes back, with its usual status: the file and its startup line
+    // go out first, so what was written is said.
+    let early = match &made {
+        Ok(m @ (Created::Wrote | Created::Unflushed)) if sys::held_pending() => {
+            eprintln!("{}", said(m));
+            Some(finish_after(runs_here, Some(&path)))
+        }
+        _ => None,
+    };
+    drop(held);
+    match made {
+        Ok(m @ (Created::Wrote | Created::Unflushed)) => {
+            if early.is_none() {
+                eprintln!("{}", said(&m));
+            }
+        }
         Ok(Created::Moved) => {
             return refuse(&format!(
-                "the settings folder {} was replaced while the file was written; the file went to the folder that stood there, and {} has no new file",
-                ctx::show(&dir),
-                ctx::show(&path)
+                "the settings folder {} changed while the file was written, so it was taken back; nothing was written",
+                ctx::show(&dir)
             ));
         }
         Ok(Created::Exists) => {
@@ -704,7 +748,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     }
     // The startup line goes out first: the deadline below may end the
     // process.
-    let code = finish_after(runs_here, Some(&path));
+    let code = early.unwrap_or_else(|| finish_after(runs_here, Some(&path)));
     apply_written(exe, &user, &env, runs_here);
     if asked {
         eprintln!("{DOCTOR}");
@@ -743,6 +787,12 @@ fn new_file_trust(shape_only: bool) -> Trust {
 /// could not all be confirmed) read-only.
 fn refuses_folder(mine: bool, way: Way) -> bool {
     !mine && way != Way::Editor
+}
+
+/// Whether setup may write into the settings folder: only one nobody but
+/// the user (and root) can change.
+fn may_write(mine: bool) -> bool {
+    mine
 }
 
 /// The two choices: all given, or the line questions for what is not.
@@ -986,6 +1036,40 @@ mod tests {
         assert_eq!(new_file_trust(false), Trust::Executable);
     }
 
+    // 이것을 실패시키는 것: 두 번째 읽기에서 선택 기록을 읽지 못한 것을 "바뀜"이나 "같음"으로 보는 것(시작 때와 같은
+    // 거부여야 함), 선택의 종류나 경로가 바뀐 것, 출처가 바뀐 것을 같다고 보는 것.
+    #[test]
+    fn the_second_reading_is_judged_with_the_choice() {
+        use super::super::trust_record::Record;
+        use std::path::PathBuf;
+        let chosen = |p: &str| {
+            Selection::Chosen(Record {
+                dev: 1,
+                ino: 2,
+                path: PathBuf::from(p),
+            })
+        };
+        let none = Selection::None;
+        assert_eq!(reread(&none, &none, true), Reread::Same);
+        assert_eq!(reread(&none, &none, false), Reread::Changed);
+        assert_eq!(
+            reread(&none, &Selection::Incomplete, true),
+            Reread::Unreadable
+        );
+        assert_eq!(reread(&none, &chosen("/a"), true), Reread::Changed);
+        assert_eq!(reread(&chosen("/a"), &chosen("/b"), true), Reread::Changed);
+        assert_eq!(reread(&chosen("/a"), &chosen("/a"), true), Reread::Same);
+        let unusable = Selection::Unusable(String::from("x"));
+        assert_eq!(reread(&none, &unusable, true), Reread::Changed);
+    }
+
+    // 이것을 실패시키는 것: 다른 사람이 바꿀 수 있는 폴더에 쓰도록 하는 것(편집판이 저장을 말해도 거부해야 함).
+    #[test]
+    fn only_a_folder_of_the_user_alone_is_written() {
+        assert!(may_write(true));
+        assert!(!may_write(false));
+    }
+
     // 이것을 실패시키는 것: 쓸 수 없는 폴더를 편집판에서도 거부하는 것(읽기 전용으로 보여야 함), 다른 길에서 받아
     // 쓰는 것, 쓸 수 있는 폴더를 거부하는 것.
     #[test]
@@ -1038,7 +1122,8 @@ mod tests {
 
     // 이것을 실패시키는 것: 이름 넣기를 `renameat`으로 바꾸는 것(먼저 만들어진 파일을 덮어씀: 검사와 생성 사이
     // 경쟁), 만든 파일의 권한이 0600이 아닌 것, 임시 파일을 남기는 것, 이름을 넣은 뒤 그 경로의 폴더가 바뀐 것을
-    // "썼음"이나 flush 실패로 알리는 것, 남의 파일이 있을 때 폴더를 flush하는 것. 폴더에 `fsync`하지 않는 것과
+    // "썼음"이나 flush 실패로 알리는 것, 그때 넣은 이름을 옛 폴더에 남기는 것, 남의 파일이 있을 때 폴더를 flush하는
+    // 것. 폴더에 `fsync`하지 않는 것과
     // fsync 실패(`Unflushed`)는 시험할 수 없어 제외.
     #[test]
     fn a_file_that_appeared_first_is_never_replaced() {
@@ -1069,11 +1154,15 @@ mod tests {
         // replaced): the file is in the folder of the chain, and says so.
         std::fs::remove_file(dir.join(FILE)).unwrap();
         assert_eq!(create(&chain, &other, "ours\n").unwrap(), Created::Moved);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "taken back, no temporary left"
+        );
         // No folder at the path any more: the same.
-        std::fs::remove_file(dir.join(FILE)).unwrap();
         let gone = other.join("gone");
         assert_eq!(create(&chain, &gone, "ours\n").unwrap(), Created::Moved);
-        assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"ours\n");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other);
     }
