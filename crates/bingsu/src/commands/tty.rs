@@ -53,10 +53,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the setup editor calls it from a later change")
-)]
 pub mod session;
 
 /// How long the terminal gets to answer. A hypothesis (200 ms): the setup

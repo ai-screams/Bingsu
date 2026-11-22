@@ -9,7 +9,7 @@
 //! key's preview loads from memory. The session is dropped before the
 //! caller writes, checks or publishes anything (the deadline's watchdog is
 //! a thread and ends the process without putting the terminal back).
-use super::frame_writer::{Flushed, FrameWriter, Sink};
+use super::frame_writer::{Flushed, FrameWriter};
 use super::keys::KeyInput;
 use super::setup_sources::Sources;
 use super::tty::Tty;
@@ -66,18 +66,6 @@ pub(crate) struct Start<'a> {
     /// The folder is not one only the user can change: nothing is saved.
     pub read_only: bool,
     pub given: Given,
-}
-
-/// The frames go to the session.
-struct Term<'s, 't>(&'s mut Session<'t>);
-
-impl Sink for Term<'_, '_> {
-    fn write_some(&mut self, rest: &[u8]) -> std::io::Result<usize> {
-        self.0.write_some(rest)
-    }
-    fn mark_synced(&mut self, on: bool) {
-        self.0.mark_synced(on);
-    }
 }
 
 /// The preview of one state at one width.
@@ -149,6 +137,24 @@ impl Preview {
             narrow: builtin_narrow(&r.files, &r.order, &c.widths, width),
         })
     }
+}
+
+/// The opening in rows 1-7 of a full-size main screen. A seam until the
+/// opening is connected: it draws nothing and asks for no frame, so the
+/// loop around it already keeps the opening's call pattern.
+struct Band;
+
+impl Band {
+    /// When the next frame of the band is due; `None`: no timer.
+    fn next(&self) -> Option<Instant> {
+        None
+    }
+    /// A frame is built at `now`: the band's cells go into `grid`.
+    fn draw(&mut self, _grid: &mut Grid, _now: Instant) {}
+    /// A frame came due while the writer still held the last one.
+    fn missed(&mut self) {}
+    /// A key: the end frame from now on.
+    fn skip(&mut self) {}
 }
 
 /// Asks the terminal for its background once, right after the session
@@ -238,6 +244,7 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
     // and the preview is laid out at most `MAX_COLS` wide.
     let (mut cols, mut rows) = (size.cols, size.rows);
     let mut shown: Option<Grid> = None;
+    let mut band = Band;
     let Some(mut preview) = Preview::new(s, &m, cols) else {
         return Ended::Lost(String::from("the default colors could not be made"));
     };
@@ -254,7 +261,7 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
                     }
                 }
             }
-            let grid = draw(
+            let mut grid = draw(
                 &m,
                 &View {
                     cols,
@@ -270,6 +277,7 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
                     mono: s.mono,
                 },
             );
+            band.draw(&mut grid, Instant::now());
             let mut bytes = Vec::new();
             frame(shown.as_ref(), &grid, &mut bytes);
             if writer.begin(&bytes, Instant::now()).is_err() {
@@ -277,18 +285,20 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
             }
             shown = Some(grid);
         }
-        match writer.flush(&mut Term(&mut session), Instant::now()) {
-            Flushed::Gone(_) => return gone(),
+        match writer.flush(&mut session, Instant::now()) {
+            Flushed::Gone(e) => {
+                return Ended::Lost(format!("the terminal went away ({e})"));
+            }
             // Decided only on a timeout, which never comes while the session
             // is in the background: after a stop (`suspend` returns once the
             // process goes on, before `Resumed`) the frame is pending with
             // no progress, and `Resumed` drops it first.
             Flushed::Done | Flushed::Pending | Flushed::Stalled => {}
         }
-        let until = match (keys.deadline(), writer.deadline()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let until = [keys.deadline(), writer.deadline(), band.next()]
+            .into_iter()
+            .flatten()
+            .min();
         let pressed = match session.wait(writer.wants_write(), until) {
             Event::Input(bytes) => {
                 read += 1;
@@ -315,10 +325,20 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
                 if writer.stalled(now) {
                     return Ended::Lost(String::from("the terminal took no output for 2 s"));
                 }
+                if band.next().is_some_and(|due| due <= now) {
+                    if writer.idle() {
+                        writer.request();
+                    } else {
+                        band.missed();
+                    }
+                }
                 read += 1;
                 keys.tick(now)
             }
         };
+        if !pressed.is_empty() {
+            band.skip();
+        }
         for &key in pressed.as_slice() {
             match m.handle(Input { key, read }) {
                 Effect::None => {}
