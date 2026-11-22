@@ -93,6 +93,23 @@
 //! and the wake pipe. One guard at a time per process ([`Tty::raw`] or a
 //! session): the flags and handlers are process-wide.
 //!
+//! What the caller must keep to (the editor that opens a session):
+//!
+//! - The sizes of `Resized` and `Resumed` are TIOCGWINSZ's raw `u16`s: 0,
+//!   or 65535 by 65535, are possible (any process of the user can set
+//!   them). Bound columns and rows before making a cell grid.
+//! - `Input` is raw bytes (pastes, late replies): never written back to the
+//!   screen unsanitized.
+//! - No `std::process::exit` (or `_exit`) while a session lives: its drop
+//!   puts the terminal back. Drop it before any way out that exits, a
+//!   command deadline's watchdog included.
+//! - No descriptor closed or `dup2`ed by number, and no closefrom-like
+//!   call, in a process that opened a session: the wake pipe stays open
+//!   for the rest of the process.
+//! - No child started on another thread while a session is open: a group
+//!   stop ignores SIGTSTP for a moment, and on macOS the wake pipe's ends
+//!   are made close-on-exec only after `pipe`.
+//!
 //! One thread takes the signals. While a session is alive no other thread
 //! may take SIGINT, SIGTERM, SIGHUP, SIGTSTP, SIGCONT or SIGWINCH: block
 //! them in any thread started meanwhile, or start none (`bingsu setup`
