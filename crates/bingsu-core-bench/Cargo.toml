@@ -138,3 +138,9 @@ test = false
 name = "preview_render"
 harness = false
 test = false
+
+[[bench]]
+# M7 setup editor: one frame of the shaved-ice opening and its points.
+name = "opening"
+harness = false
+test = false

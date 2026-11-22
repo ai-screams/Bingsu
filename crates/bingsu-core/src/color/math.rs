@@ -49,7 +49,7 @@ pub fn oklch_to_linear(c: Oklch) -> [f64; 3] {
     lab_to_linear(c.l, c.c * cos(h), c.c * sin(h))
 }
 
-fn lab_to_linear(l: f64, a: f64, b: f64) -> [f64; 3] {
+pub fn lab_to_linear(l: f64, a: f64, b: f64) -> [f64; 3] {
     let l_ = l + 0.396_337_777_4 * a + 0.215_803_757_3 * b;
     let m_ = l - 0.105_561_345_8 * a - 0.063_854_172_8 * b;
     let s_ = l - 0.089_484_177_5 * a - 1.291_485_548_0 * b;
