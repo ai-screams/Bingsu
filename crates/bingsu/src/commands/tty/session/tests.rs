@@ -527,7 +527,7 @@ fn a_stop_the_kernel_drops_comes_back_at_once() {
 // as it put things back (`failsignal`). A SIGTERM while taking it again
 // (`signal`) ends it with that signal, with no `Resumed`.
 // 이것을 실패시키는 것: 실패해도 Resumed를 알리는 것, 반쯤 켠 모드를 되돌리지 않는 것, 끝내지 않는 것, 받은 종료 신호보다
-// Hangup을 먼저 알리는 것, 들어가는 중 온 종료 신호에도 Resumed를 알리는 것.
+// Hangup을 먼저 알리는 것, 들어가는 중 온 종료 신호에도 Resumed를 알리는 것, 쓰기 오류에도 자리를 기다리는 것(eio의 waits).
 #[test]
 fn a_failed_reentry_ends_the_session() {
     let again = cat(&[ENTER_ALL, LEAVE_ALL]);
@@ -554,12 +554,12 @@ fn a_failed_reentry_ends_the_session() {
             assert!(status.success(), "{case}: {out}\n{err}");
             assert_eq!(event, "Hangup", "{case}");
         }
-        // The timeout waits out the write limit; the failed write does not.
-        let took: u128 = lines[1].strip_prefix("took ").unwrap().parse().unwrap();
-        let limit = WRITE_TIMEOUT.as_millis();
+        // The timeout waits for room (to the write limit); the failed write
+        // ends without a wait. (`end` bounds the whole run.)
+        let waits: usize = lines[1].strip_prefix("waits ").unwrap().parse().unwrap();
         match case {
-            "timeout" => assert!(took >= limit, "{took} ms"),
-            "eio" => assert!(took < limit / 2, "{took} ms"),
+            "timeout" => assert!(waits >= 1, "{waits}"),
+            "eio" => assert_eq!(waits, 0),
             _ => {}
         }
     }
@@ -584,10 +584,10 @@ fn reentry_child() {
         case => panic!("{case}"),
     }
     test_session::BEFORE_SELECT.set(Some(libc::SIGTSTP));
-    let start = Instant::now();
+    test_session::ROOM_WAITS.set(0);
     let event = format!("{:?}", s.wait(false, Some(Instant::now() + WAIT)));
     say(&event);
-    say(&format!("took {}", start.elapsed().as_millis()));
+    say(&format!("waits {}", test_session::ROOM_WAITS.get()));
 }
 
 // Ctrl-Z as the key (0x1a, ISIG is off): `suspend` stops the process group;
