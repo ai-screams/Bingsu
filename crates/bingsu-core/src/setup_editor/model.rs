@@ -15,27 +15,11 @@ use super::layers::Layers;
 use super::rows::{self, Row};
 use crate::config::starter::{Icons as StarterIcons, Mode as StarterMode};
 use crate::config::tree::Format;
+use crate::keys::Key;
 
-/// One key, as the key reader gives it (the variants of `keys::Key`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Key {
-    /// Printable ASCII, Space to `~`.
-    Char(u8),
-    Enter,
-    Tab,
-    BackTab,
-    Backspace,
-    Esc,
-    Up,
-    Down,
-    Right,
-    Left,
-    /// Another C0 control byte by its letter: `Ctrl(b'c')` is 0x03.
-    Ctrl(u8),
-}
-
-/// A key and the read it came in. Keys of one read share the id; a later
-/// read has a larger one.
+/// A key and the read it came in: `read` numbers the `KeyReader::feed`
+/// calls, so the keys of one `Keys` value share it and a later call has a
+/// larger one. A confirmation counts only from a later read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Input {
     pub key: Key,
