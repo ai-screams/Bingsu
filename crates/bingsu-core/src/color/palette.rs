@@ -298,6 +298,15 @@ pub fn ansi_color(slot: u8, mode: Mode, k: Knobs) -> Srgb8 {
     from_oklch(c).0
 }
 
+/// Flavor A palette color `name` (`neutral.base`, `accent.blue`, ...) in
+/// `mode` with the default knobs, as sRGB: the read tier for text when
+/// `read`, else the display tier (backgrounds). For screens of bingsu's
+/// own (the setup editor), which draw with palette names that no token
+/// names. `None` for a name that is not a palette color.
+pub fn named_color(name: &str, mode: Mode, read: bool) -> Option<Srgb8> {
+    flavor_a(name, mode, Knobs::default(), read).map(|c| from_oklch(c).0)
+}
+
 /// A color as shown: sRGB, its OKLCH and whether chroma was lowered.
 type Shown = (Srgb8, OklchQ, bool);
 

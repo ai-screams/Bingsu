@@ -46,6 +46,7 @@ pub mod recorder;
 pub mod render;
 pub mod root_arg;
 pub mod sanitize;
+pub mod setup_editor;
 pub mod shell_values;
 pub mod shell_word;
 pub mod shorten;
