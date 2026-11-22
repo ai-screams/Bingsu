@@ -16,7 +16,7 @@ use super::rows::{self, Row};
 use super::write::{changes, written_keys};
 use crate::color::math::{Srgb8, nearest_256};
 use crate::color::palette::{Mode, ResolvedPalette, named_color};
-use crate::color::sgr::{BOLD, ColorDepth, Ink, Paint};
+use crate::color::sgr::{BOLD, ColorDepth, Ink, Paint, REVERSE, UNDERLINE};
 use crate::preview::PreviewLine;
 use crate::width::{WidthProfile, fit_prefix, fit_suffix, grapheme_width, str_width};
 use alloc::format;
@@ -197,6 +197,9 @@ pub struct View<'a> {
     /// The width picks the built-in `narrow` band with its built-in
     /// template: the preview cannot show the shape rows.
     pub narrow: bool,
+    /// `NO_COLOR`: bingsu's own text in the terminal's colors, the picked
+    /// value reversed and bold; the preview keeps its colors.
+    pub mono: bool,
 }
 
 /// The paints of bingsu's own text.
@@ -221,7 +224,27 @@ fn ink(c: Option<Srgb8>, depth: ColorDepth) -> Ink {
 /// The UI colors of `mode`, as names of the palette (text
 /// `neutral.text` and `neutral.subtext` on `neutral.base`; a picked value
 /// on the accent, one that changes nothing on `neutral.surface1`).
-fn ui(mode: Mode, depth: ColorDepth) -> Ui {
+fn ui(mode: Mode, depth: ColorDepth, mono: bool) -> Ui {
+    if mono {
+        let text = Paint::default();
+        return Ui {
+            text,
+            sub: text,
+            title: Paint {
+                attrs: BOLD,
+                ..text
+            },
+            pick: Paint {
+                attrs: BOLD | REVERSE,
+                ..text
+            },
+            idle: Paint {
+                attrs: UNDERLINE,
+                ..text
+            },
+            base: Ink::Default,
+        };
+    }
     let c = |name: &str, read: bool| ink(named_color(name, mode, read), depth);
     let base = c("neutral.base", false);
     let text = Paint {
@@ -283,7 +306,7 @@ pub fn draw(m: &Model, v: &View<'_>) -> Grid {
         rows: v.rows.min(MAX_ROWS),
         ..*v
     };
-    let u = ui(v.mode, v.depth);
+    let u = ui(v.mode, v.depth, v.mono);
     let mut g = Grid::new(
         v.cols,
         v.rows,

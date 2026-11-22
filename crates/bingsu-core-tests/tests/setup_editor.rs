@@ -471,6 +471,7 @@ fn screen(m: &Model, path: &[u8], cols: u16, rows: u16) -> Grid {
             mode_note: "auto: dark (no COLORFGBG)",
             terminal: None,
             narrow: cols < 60,
+            mono: false,
         },
     )
 }
@@ -763,7 +764,68 @@ fn view<'a>(
         mode_note: "dark",
         terminal: None,
         narrow: cols < 60,
+        mono: false,
     }
+}
+
+// 이것을 실패시키는 것: NO_COLOR에서 편집판 글에 색을 쓰는 것, 고른 값을 반전·굵게로 표시하지 않는 것(색만 신호가
+// 됨), 효과 없는 고른 값을 고른 값과 같게 그리는 것, 미리보기의 색까지 지우는 것, 반전을 SGR 7로 쓰지 않는 것.
+#[test]
+fn without_color_the_pick_is_reversed_and_only_the_preview_keeps_color() {
+    use bingsu_core::color::sgr::{BOLD, Ink, Paint, REVERSE, write_paint};
+    let mut m = fresh();
+    m.pick(Row::Style, 0);
+    let c = compiled(load(&new_file_text(&m).unwrap(), &[], &[]));
+    let lines = view_lines(&c, 80);
+    let colored = draw(&m, &view(&m, &c, &lines, 80, 24));
+    let base = c.palette.background;
+    let base = Ink::Rgb(base.r, base.g, base.b);
+    let preview: Vec<u16> = (0..24)
+        .filter(|&y| colored.cell(78, y).paint.bg == base)
+        .collect();
+    assert!(!preview.is_empty());
+    let mut v = view(&m, &c, &lines, 80, 24);
+    v.mono = true;
+    let g = draw(&m, &v);
+    let pick = g.cell(15, 12).paint;
+    assert_eq!(
+        pick,
+        Paint {
+            fg: Ink::Default,
+            bg: Ink::Default,
+            attrs: BOLD | REVERSE,
+        }
+    );
+    let idle = g.cell(15, 13).paint;
+    assert_eq!(idle.attrs & REVERSE, 0);
+    assert_ne!(idle, Paint::default());
+    let mut painted = Vec::new();
+    for y in 0..24 {
+        for x in 0..80 {
+            let p = g.cell(x, y).paint;
+            if (p.fg != Ink::Default || p.bg != Ink::Default) && !painted.contains(&y) {
+                painted.push(y);
+            }
+        }
+    }
+    assert!(!painted.is_empty(), "the preview keeps its colors");
+    assert!(
+        painted.iter().all(|y| preview.contains(y)),
+        "{painted:?} {preview:?}"
+    );
+    // Too small: no preview, and nothing of bingsu's own has a color.
+    v.cols = 30;
+    v.rows = 10;
+    let g = draw(&m, &v);
+    for y in 0..10 {
+        for x in 0..30 {
+            let p = g.cell(x, y).paint;
+            assert_eq!((p.fg, p.bg), (Ink::Default, Ink::Default), "{x},{y}");
+        }
+    }
+    let mut out = Vec::new();
+    write_paint(pick, &mut out);
+    assert!(out.starts_with(b"\x1b[0;1;7"), "{out:?}");
 }
 
 // 이것을 실패시키는 것: 줄 끝 알림의 차례(템플릿 > 덮음 > 효과 없음 > 같은 모양 > 터미널 색)나 문구가 다른 것,
