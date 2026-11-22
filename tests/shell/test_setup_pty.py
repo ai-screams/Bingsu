@@ -82,9 +82,9 @@ HIGH_DESCRIPTORS = (
 )
 
 
-def spawn(home, *args, background=False, high_fds=False):
+def spawn(home, *args, background=False, high_fds=False, extra=None):
     env = {**setup_env(home), "SHELL": "/bin/zsh",
-           "PATH": os.environ["PATH"], "TERM": "xterm"}
+           "PATH": os.environ["PATH"], "TERM": "xterm", **(extra or {})}
     run = f'"{real_bin()}" setup --plain {" ".join(args)}'
     if high_fds:
         run = f"'{sys.executable}' -c '{HIGH_DESCRIPTORS}' {run}"
@@ -130,11 +130,32 @@ def test_reply_restores_the_terminal_and_is_not_echoed(home):
     assert 'mode = "dark"' in config(home)
 
 
-def at_the_write_question(home):
+def at_the_write_question(home, extra=None):
     """Setup with both choices given, stopped at its write question."""
-    child = spawn(home, "--icons", "nerd", "--mode", "dark")
+    child = spawn(home, "--icons", "nerd", "--mode", "dark", extra=extra)
     child.expect(rb"\[Y/n\] ")
     return child
+
+
+# 이것을 실패시키는 것: 묻는 동안 설정 경로(XDG_CONFIG_HOME)의 링크가 다른 빈 폴더를 가리키게 바뀐 것을 보지 않고
+# 처음 폴더에 쓰는 것. 두 읽기의 출처와 선택은 같고, 처음 폴더도 그대로라 그 폴더만 다시 열면 통과한다; 읽는 쪽은 새
+# 폴더를 읽는다.
+def test_a_settings_path_pointed_elsewhere_while_asking_stops_the_write(home):
+    for name in ["A", "B"]:
+        (home / name / "bingsu").mkdir(parents=True)
+        (home / name).chmod(0o700)
+        (home / name / "bingsu").chmod(0o700)
+    link = home / "cfglink"
+    link.symlink_to(home / "A")
+    child = at_the_write_question(home, extra={"XDG_CONFIG_HOME": str(link)})
+    link.unlink()
+    link.symlink_to(home / "B")
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 1, text
+    assert before == after
+    assert "changed while you edited, so nothing was written" in text, text
+    assert os.listdir(home / "A/bingsu") == [] and os.listdir(home / "B/bingsu") == []
 
 
 # 이것을 실패시키는 것: 묻는 동안 `config use`로 고른 파일이 바뀐 것을 보지 않고 쓰는 것. 고른 파일이 이미 읽던

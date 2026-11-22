@@ -612,6 +612,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         trust: new_file_trust(opening.shape_only),
     };
     let selection = opening.selection.clone();
+    let root_at_start = opening.root.clone();
     drop(opening);
     let sources = Sources::new(start, file, ctx::version());
 
@@ -690,9 +691,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // still be what the reader reads.
     // The choice of settings file is part of what was read: `config use`
     // can move the reader to a file already read, with the same sources.
-    match read_sources(&user, &env, runs_here) {
+    let root_now = match read_sources(&user, &env, runs_here) {
         Ok((again, now)) => match reread(&selection, &again.selection, sources.unchanged(&now)) {
-            Reread::Same => {}
+            Reread::Same => again.root,
             Reread::Unreadable => return refuse(UNREAD_CHOICE),
             Reread::Changed => {
                 eprint!("{}", changed_words(&text));
@@ -703,6 +704,19 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             eprintln!("{why}");
             return refuse("the settings could not be read again, so nothing was written");
         }
+    };
+    let folder_changed = || {
+        refuse(&format!(
+            "the settings folder {} changed while you edited, so nothing was written",
+            ctx::show(&dir)
+        ))
+    };
+    // The folder the reader reads now must be the one setup found, and the
+    // path the settings folder was named by must lead there now: a link on
+    // that path pointed elsewhere meanwhile moves the reader, not the folder
+    // setup holds.
+    if root_now != root_at_start || roots::canonical_lenient(&written).as_ref() != Some(&dir) {
+        return folder_changed();
     }
     let chain = match chain {
         // The folder found at the start must still be the one at its path,
@@ -710,12 +724,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         // take the file that the reader then does not read.
         Some(c) => match runtime_root::open_chain(&dir) {
             Ok(now) if same_folder(&c, &now) && folder_is_mine(&now, &user, &mut groups) => c,
-            _ => {
-                return refuse(&format!(
-                    "the settings folder {} changed while you edited, so nothing was written",
-                    ctx::show(&dir)
-                ));
-            }
+            _ => return folder_changed(),
         },
         None => match runtime_root::ensure_root(&dir, user.me, &mut groups, Last::Mine) {
             Ok(c) => c,
