@@ -713,13 +713,32 @@ impl Session<'_> {
                     // read gives 0 when another reader of the foreground
                     // group took the bytes since the select. A write of no
                     // bytes tells: it fails (EIO) on a terminal that hung up,
-                    // on Linux and macOS alike.
+                    // on Linux and macOS alike. An interrupted one, or one
+                    // that would wait, tells nothing (Linux takes the
+                    // terminal's write lock for no bytes as well, and another
+                    // writer of the group can hold it): back to the loop,
+                    // where a hang-up shows again.
                     // 이것을 실패시키는 것: 0바이트 읽기를 늘 끝으로 보는 것(a_read_of_nothing_is_no_hang_up), 끊긴
-                    // 터미널을 보지 않는 것(a_hang_up_ends_the_session의 SIGHUP 무시 칸).
+                    // 터미널을 보지 않는 것(a_hang_up_ends_the_session의 SIGHUP 무시 칸), 일시적인 오류를 끊김으로
+                    // 보는 것(a_probe_that_would_wait_is_no_hang_up).
                     Ok(0) => {
-                        if write_once(self.fd, &[]).is_err() {
-                            self.state = State::Gone;
-                            return ended();
+                        #[cfg(test)]
+                        let probe =
+                            test_session::probe().unwrap_or_else(|| write_once(self.fd, &[]));
+                        #[cfg(not(test))]
+                        let probe = write_once(self.fd, &[]);
+                        match probe {
+                            Ok(_) => {}
+                            Err(e)
+                                if matches!(
+                                    e.kind(),
+                                    std::io::ErrorKind::Interrupted
+                                        | std::io::ErrorKind::WouldBlock
+                                ) => {}
+                            Err(_) => {
+                                self.state = State::Gone;
+                                return ended();
+                            }
                         }
                         #[cfg(test)]
                         test_session::read_nothing();
@@ -1115,6 +1134,9 @@ mod test_session {
         /// The waiting input is read away once, as another reader of the
         /// foreground group would between the select and the read.
         pub(super) static STEAL: Cell<bool> = const { Cell::new(false) };
+        /// The errno the next zero-length write after a read of nothing
+        /// fails with.
+        pub(super) static PROBE: Cell<Option<i32>> = const { Cell::new(None) };
         /// Raised once, right after the raw switch.
         pub(super) static AFTER_RAW: Cell<Option<libc::c_int>> = const { Cell::new(None) };
         /// Raised once, in order, once `leave` wrote the way out (0: none).
@@ -1184,6 +1206,14 @@ mod test_session {
             // SAFETY: `fd` is the open terminal; `chunk` is writable.
             while unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) } > 0 {}
         }
+    }
+
+    /// The zero-length write after a read of nothing fails once with
+    /// `PROBE`'s errno. `None`: the real write.
+    pub(super) fn probe() -> Option<std::io::Result<usize>> {
+        PROBE
+            .take()
+            .map(|errno| Err(std::io::Error::from_raw_os_error(errno)))
     }
 
     /// Said from the branch of a read that gave 0 and was no hang-up, on

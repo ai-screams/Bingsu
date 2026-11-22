@@ -67,6 +67,15 @@ fn param(name: &str) -> String {
     std::env::var(name).unwrap()
 }
 
+/// A parameter the parent test may have given the child.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test parameter from the parent test, never production input"
+)]
+fn param_if_given(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 fn signal_named(name: &str) -> libc::c_int {
     match name {
         "INT" => libc::SIGINT,
@@ -1977,6 +1986,25 @@ fn a_read_of_nothing_is_no_hang_up() {
     );
 }
 
+// The write of no bytes after a read of nothing is interrupted, or would
+// wait (on Linux another writer of the group can hold the terminal's write
+// lock): that tells nothing of a hang-up, and the next key comes.
+// 이것을 실패시키는 것: 일시적인 오류를 끊김으로 보는 것(Hangup; READ NOTHING이 오지 않음), 둘 중 하나만 일시적으로
+// 보는 것(그 칸).
+#[test]
+fn a_probe_that_would_wait_is_no_hang_up() {
+    for errno in [libc::EAGAIN, libc::EINTR] {
+        let errno = errno.to_string();
+        let mut t = start("stolen_input_child", &[("BINGSU_TEST_PROBE", &errno)]);
+        t.expect(b"READY");
+        t.send(b"x");
+        t.expect_stderr("READ NOTHING");
+        t.send(b"q");
+        let (lines, _) = t.mode_restored_after();
+        assert_eq!(lines, ["Input([113])"], "errno {errno}");
+    }
+}
+
 #[test]
 #[ignore = "child: a session on a pseudo-terminal"]
 fn stolen_input_child() {
@@ -1985,6 +2013,9 @@ fn stolen_input_child() {
     let mut s = tty.full_screen().unwrap();
     draw(&mut s, b"READY");
     test_session::STEAL.set(true);
+    if let Some(errno) = param_if_given("BINGSU_TEST_PROBE") {
+        test_session::PROBE.set(Some(errno.parse().unwrap()));
+    }
     say(&format!("{:?}", s.wait(false, Some(Instant::now() + WAIT))));
 }
 
