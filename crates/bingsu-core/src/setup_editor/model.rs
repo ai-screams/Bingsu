@@ -271,9 +271,13 @@ impl Model {
     }
     fn effective_in(&self, s: &State, row: Row) -> u8 {
         let l = &self.layers.rows[row.index()];
-        match l.later {
-            Some((v, _)) => v,
-            None => s.written[row.index()].unwrap_or_else(|| self.inherited_in(s, row)),
+        match (l.later, l.later_keys[row.value_key()]) {
+            (Some((v, _)), _) => v,
+            // A later source sets the key to a value outside the row's list
+            // (`config check` refuses it): this file's value is covered all
+            // the same, and the row shows the default.
+            (None, Some(_)) => self.default_in(s, row),
+            (None, None) => s.written[row.index()].unwrap_or_else(|| self.inherited_in(s, row)),
         }
     }
     fn chosen_in(&self, s: &State, row: Row) -> u8 {
@@ -295,7 +299,17 @@ impl Model {
     }
     /// The later source that covers `row`, by its index in `Layers::names`.
     pub fn covered_by(&self, row: Row) -> Option<usize> {
-        self.layers.rows[row.index()].later.map(|(_, n)| n)
+        let keys = self.layers.rows[row.index()].later_keys;
+        keys[row.value_key()].or(keys.into_iter().flatten().next())
+    }
+    /// The later source that covers key number `key` of `row`
+    /// (`Row::keys`), by its place in `Layers::names`.
+    pub fn covered_key(&self, row: Row, key: usize) -> Option<usize> {
+        self.layers.rows[row.index()]
+            .later_keys
+            .get(key)
+            .copied()
+            .flatten()
     }
 
     /// Whether `row` is marked: for a new file, a key it will write

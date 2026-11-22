@@ -144,7 +144,7 @@ pub struct Change {
     /// What to do in the file: the line to put in under its table (TOML),
     /// or the key path and value (JSON, YAML), or what to delete.
     pub line: String,
-    /// The later source that sets the key too, by its index in
+    /// The later source that sets this key too, by its place in
     /// `Layers::names`.
     pub covered_by: Option<usize>,
 }
@@ -183,7 +183,7 @@ pub fn changes(m: &Model) -> Vec<Change> {
                 now: shown_now,
                 chosen: value(&set).unwrap_or_else(|| "not set".into()),
                 line,
-                covered_by: m.covered_by(row),
+                covered_by: m.covered_key(row, i),
             });
         }
     }

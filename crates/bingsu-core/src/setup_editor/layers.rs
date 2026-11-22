@@ -16,16 +16,23 @@ use alloc::vec::Vec;
 /// One row as the sources give it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Layer {
-    /// The last source before the target with a value for the row.
+    /// The value the sources before the target give the row: that of the
+    /// last of them that sets its value key (`Row::value_key`), `None`
+    /// when none sets it or that value is not one of the row's (`config
+    /// check` refuses it, whatever came before).
     pub earlier: Option<u8>,
     /// What the target itself writes.
     pub written: Option<u8>,
     /// The target's own text for each of the row's keys (`Row::keys`),
     /// shown (quoted, sanitized): also a value the row does not know.
     pub written_raw: [Option<String>; 2],
-    /// The last source after the target with a value, and its place in
-    /// `Layers::names`: it covers whatever the target writes.
+    /// The value the last source after the target that sets the value key
+    /// gives, and its place in `Layers::names`; `None` also when that
+    /// value is not one of the row's (`later_keys` still names it).
     pub later: Option<(u8, usize)>,
+    /// For each of the row's keys, the last source after the target that
+    /// sets it, whatever the value: it covers what the target writes there.
+    pub later_keys: [Option<usize>; 2],
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -73,13 +80,23 @@ impl Layers {
                 if k == split {
                     layer.written_raw = [row.raw(tree, 0), row.raw(tree, 1)];
                 }
-                let Some(v) = row.read(tree) else {
+                if k > split {
+                    for (i, slot) in layer.later_keys.iter_mut().enumerate() {
+                        if row.has(tree, i) {
+                            *slot = Some(k);
+                        }
+                    }
+                }
+                // The last source that sets the value key decides, also with
+                // a value outside the list.
+                if !row.has(tree, row.value_key()) {
                     continue;
-                };
+                }
+                let v = row.read(tree);
                 match k.cmp(&split) {
-                    core::cmp::Ordering::Less => layer.earlier = Some(v),
-                    core::cmp::Ordering::Equal => layer.written = Some(v),
-                    core::cmp::Ordering::Greater => layer.later = Some((v, k)),
+                    core::cmp::Ordering::Less => layer.earlier = v,
+                    core::cmp::Ordering::Equal => layer.written = v,
+                    core::cmp::Ordering::Greater => layer.later = v.map(|v| (v, k)),
                 }
             }
         }

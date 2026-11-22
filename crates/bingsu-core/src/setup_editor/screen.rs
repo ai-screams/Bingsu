@@ -532,11 +532,12 @@ fn status(m: &Model) -> String {
     match Row::ALL
         .into_iter()
         .filter(|r| m.marked(*r))
-        .find_map(|r| m.covered_by(r).map(|n| (r, n)))
+        .flat_map(|r| (0..r.keys().len()).map(move |i| (r, i)))
+        .find_map(|(r, i)| m.covered_key(r, i).map(|n| (r.keys()[i], n)))
     {
-        Some((row, n)) => {
+        Some((key, n)) => {
             let name = clean(m.layers().names.get(n).map_or(&[][..], |x| x.as_slice()));
-            format!("{} covered by {name}; {summary}", row.keys()[0])
+            format!("{key} covered by {name}; {summary}")
         }
         None => summary,
     }
@@ -590,15 +591,19 @@ fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
         Target::New => {
             lines.push((format!("Write {}?", cut_middle(&path, end - 8)), true));
             lines.push((String::new(), false));
-            for kv in written_keys(m) {
+            let keys = written_keys(m);
+            for kv in &keys {
                 lines.push((format!("  {} = {}", kv.key, kv.value), false));
             }
-            for row in Row::ALL {
-                if let (true, Some(n)) = (m.marked(row), m.covered_by(row)) {
-                    lines.push((
-                        format!("{} sets {} too, and wins.", name(n), row.keys()[0]),
-                        false,
-                    ));
+            // Per key: a later file may set one key of a row and not the
+            // other (`layout.line1.left` alone).
+            for kv in &keys {
+                let covered = Row::ALL.into_iter().find_map(|r| {
+                    let i = r.keys().iter().position(|k| *k == kv.key)?;
+                    m.covered_key(r, i)
+                });
+                if let Some(n) = covered {
+                    lines.push((format!("{} sets {} too, and wins.", name(n), kv.key), false));
                 }
             }
             lines.extend(template_line(m, |r| m.marked(r)));

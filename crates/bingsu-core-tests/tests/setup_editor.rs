@@ -1432,3 +1432,58 @@ fn a_template_replaces_the_lines_too() {
     let save = text(&draw(&e, &view(&e, &c, &lines, 80, 24))).concat();
     assert!(!save.contains("A template in"), "{save}");
 }
+
+// 이것을 실패시키는 것: lines 줄의 두 키 가운데 `layout.line2.enabled`만 보고 뒤 출처가 `layout.line1.left`만 덮는 것을
+// 놓치는 것(저장한 배열이 말없이 바뀌어 입력 표시가 사라진다), 저장 화면·상태 줄의 덮음 안내를 줄 단위로 만들어 덮지
+// 않은 키까지 덮는다고 하는 것, 뒤 출처의 목록 밖 값이 이 파일의 키를 덮는다는 것을 놓치는 것, 앞 출처의 목록 밖 값을
+// 건너뛰고 그 앞의 값을 물려받는 것.
+#[test]
+fn a_later_file_covers_key_by_key() {
+    let later = [("conf.d/a.toml", "[layout.line1]\nleft = [\"dir\"]\n")];
+    let c = compiled(load("", &[], &[]));
+    let lines = view_lines(&c, 80);
+    let mut m = Model::new(
+        layers(&load("", &later, &[])),
+        Target::New,
+        Given::default(),
+    );
+    assert_eq!(m.covered_by(Row::Lines), Some(2));
+    assert_eq!(
+        (m.covered_key(Row::Lines, 0), m.covered_key(Row::Lines, 1)),
+        (Some(2), None)
+    );
+    m.pick(Row::Lines, 1);
+    let t = text(&draw(&m, &view(&m, &c, &lines, 80, 24)));
+    assert!(t[19].contains("overridden by conf.d/a.toml"), "{:?}", t[19]);
+    assert!(
+        t[21].starts_with(" layout.line1.left covered by conf.d/a.toml;"),
+        "{:?}",
+        t[21]
+    );
+    key(&mut m, Key::Enter, 1);
+    let save = text(&draw(&m, &view(&m, &c, &lines, 80, 24))).concat();
+    assert!(
+        save.contains("conf.d/a.toml sets layout.line1.left too, and wins."),
+        "{save}"
+    );
+    assert!(!save.contains("sets layout.line2.enabled"), "{save}");
+    // A later value outside the list still covers this file's key (`config
+    // check` refuses that value; the key is no longer this file's).
+    let bad = [("conf.d/a.toml", "[style]\nouter_end = \"rounds\"\n")];
+    let mut b = Model::new(layers(&load("", &bad, &[])), Target::New, Given::default());
+    b.pick(Row::Outer, 2);
+    assert_eq!(b.chosen(Row::Outer), 2);
+    assert_eq!(b.effective(Row::Outer), 0);
+    assert!(b.covered_by(Row::Outer).is_some());
+    // An earlier unknown value hides the one before it.
+    let parts = [
+        ("a", "[style]\nouter_end = \"round\"\n"),
+        ("b", "[style]\nouter_end = \"rounds\"\n"),
+    ];
+    let e = Model::new(
+        layers(&load("extends = [\"a\", \"b\"]\n", &[], &parts)),
+        Target::New,
+        Given::default(),
+    );
+    assert_eq!(e.inherited(Row::Outer), 0);
+}

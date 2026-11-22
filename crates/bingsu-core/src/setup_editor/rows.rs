@@ -133,6 +133,24 @@ impl Row {
         }
     }
 
+    /// Which of `keys()` decides the row's value: `layout.line2.enabled`
+    /// for the lines (one line turns the input line off), else the one key.
+    pub const fn value_key(self) -> usize {
+        match self {
+            Row::Lines => 1,
+            _ => 0,
+        }
+    }
+
+    /// Whether source `t` sets key number `key` of the row, whatever its
+    /// value: merged later wins, so it covers what came before.
+    pub fn has(self, t: &Table, key: usize) -> bool {
+        self.keys().get(key).is_some_and(|path| {
+            let path: Vec<&str> = path.split('.').collect();
+            at(t, &path).is_some()
+        })
+    }
+
     /// What one source says for this row: its value of the row's key, when
     /// it is one of the row's values. Any other value is no opinion, as
     /// compile leaves a name it does not know unset (`style_options`).
