@@ -209,6 +209,10 @@ enum Entered {
     Signal,
     /// No longer the terminal's foreground job.
     Lost,
+    /// A continue is to be handled first (a SIGSTOP and `fg` while the
+    /// modes went out): the next `wait` puts back what went out and takes
+    /// the terminal again.
+    Resume,
     /// The terminal did not take the bytes in time, or the write failed.
     Failed,
 }
@@ -618,6 +622,7 @@ impl Tty {
                 return Err(std::io::Error::other("not the terminal's foreground job"));
             }
             Entered::Failed => return Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            Entered::Resume => {}
         }
         session.size = window_size(self.file.as_fd()).unwrap_or_default();
         Ok(session)
@@ -842,21 +847,72 @@ impl Session<'_> {
         write_bounded(self.fd, bytes, until)
     }
 
+    /// One mode's bytes for `enter`, written only while the session owns the
+    /// terminal: before every write, also the first and each one after a
+    /// wait for room, it must still be the foreground job with no continue
+    /// to handle (a SIGSTOP and `bg` or `fg` can come while it waits). The
+    /// bytes taken, and how it ended when not all of them were.
+    fn put_owned(&self, bytes: &[u8], until: Instant) -> (usize, Option<Entered>) {
+        #[cfg(test)]
+        let hooked = super::test_terminal::ROOM.get().is_some();
+        let mut taken = 0;
+        let ended = loop {
+            if taken == bytes.len() {
+                break None;
+            }
+            // 이것을 실패시키는 것: 쓰기 전에 전경인지 보지 않는 것(배경에서 모드를 씀: tostop과 SIGTTOU로 멈춤;
+            // an_entry_whose_terminal_was_taken_writes_no_more, an_entry_cut_when_the_shell_takes_the_terminal_writes_no_more).
+            if !foreground(self.fd) {
+                break Some(Entered::Lost);
+            }
+            // The next `wait` takes the terminal again from the start.
+            // 이것을 실패시키는 것: 쓰기 전에 처리하지 않은 재개를 보지 않는 것(an_entry_cut_by_sigstop_and_fg_starts_again).
+            if CONT_SEEN.load(Ordering::SeqCst) {
+                break Some(Entered::Resume);
+            }
+            match self.write_once(&bytes[taken..]) {
+                Ok(0) => break Some(Entered::Failed),
+                Ok(n) => taken += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    if Instant::now() >= until {
+                        break Some(Entered::Failed);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if !self.wait_for_room(until) {
+                        break Some(Entered::Failed);
+                    }
+                }
+                Err(_) => break Some(Entered::Failed),
+            }
+        };
+        #[cfg(test)]
+        if hooked {
+            super::test_terminal::ROOM.set(None);
+        }
+        (taken, ended)
+    }
+
+    /// Waits until the terminal takes output or `until` passes.
+    fn wait_for_room(&self, until: Instant) -> bool {
+        #[cfg(test)]
+        if let Some(room) = test_session::wait_for_room(self.fd, until) {
+            return room;
+        }
+        ready(self.fd, false, true)(until)
+    }
+
     /// Turns the modes on, each recorded before its bytes are written and
     /// each written only while this is the foreground job.
     fn enter(&mut self) -> Entered {
         for (step, (mode, bytes)) in ENTER.into_iter().enumerate() {
-            // 이것을 실패시키는 것: 쓰기 전에 전경인지 보지 않는 것(배경에서 모드를 씀: tostop과 SIGTTOU로 멈춤;
-            // an_entry_whose_terminal_was_taken_writes_no_more).
-            if !foreground(self.fd) {
-                return Entered::Lost;
-            }
             // 이것을 실패시키는 것: 쓴 뒤에 기록하는 것(반쯤 나간 1049h를 되돌리지 않음; an_entry_the_terminal_stopped_taking_is_put_back).
             self.modes |= mode;
-            let taken = self.put(bytes, Instant::now() + WRITE_TIMEOUT);
-            if taken < bytes.len() {
+            let (taken, ended) = self.put_owned(bytes, Instant::now() + WRITE_TIMEOUT);
+            if let Some(ended) = ended {
+                // The terminal is in the escape sequence the bytes began.
                 self.cut = taken > 0;
-                return Entered::Failed;
+                return ended;
             }
             #[cfg(test)]
             test_session::entered(step);
@@ -996,8 +1052,8 @@ impl Session<'_> {
                 self.resumed = true;
             }
             // An exit came: `wait` reports it next, and the drop puts back
-            // what is on.
-            Entered::Signal => {}
+            // what is on. A continue came: the next `wait` checks again.
+            Entered::Signal | Entered::Resume => {}
             // Taken away again meanwhile: the next continue takes it. (The
             // SIGCONT of a `bg` that took it is pending then and would move
             // the session to the background at the next `wait` as well, and
@@ -1032,6 +1088,12 @@ impl Drop for Session<'_> {
 mod test_session {
     use std::cell::Cell;
 
+    #[derive(Clone, Copy, Debug)]
+    pub(super) enum Pause {
+        Stop,
+        Taken,
+    }
+
     thread_local! {
         /// Raised once the given step of `enter` wrote its bytes.
         pub(super) static AFTER_STEP: Cell<Option<(usize, libc::c_int)>> = const { Cell::new(None) };
@@ -1042,6 +1104,10 @@ mod test_session {
         /// `full_screen` fails once its job control handlers are in, before
         /// the raw switch.
         pub(super) static FAIL_RAW: Cell<bool> = const { Cell::new(false) };
+        /// Waits for room in the entry's writes, counted.
+        pub(super) static ROOM_WAITS: Cell<usize> = const { Cell::new(0) };
+        /// What happens during the next wait for room of the entry.
+        pub(super) static PAUSE: Cell<Option<Pause>> = const { Cell::new(None) };
         /// The next `select` fails.
         pub(super) static FAIL_SELECT: Cell<bool> = const { Cell::new(false) };
         /// The waiting input is read away once, as another reader of the
@@ -1079,6 +1145,36 @@ mod test_session {
                 raise(sig);
             }
         }
+    }
+
+    /// A wait for room of the entry: counted (`ROOM_WAITS`), done as
+    /// `PAUSE` says once, or as `test_terminal::ROOM` says (a stall sleeps
+    /// to the limit). `None`: the real wait.
+    pub(super) fn wait_for_room(fd: std::os::fd::RawFd, until: std::time::Instant) -> Option<bool> {
+        use super::super::test_terminal;
+        ROOM_WAITS.set(ROOM_WAITS.get() + 1);
+        if let Some(pause) = PAUSE.take() {
+            match pause {
+                // Stopped meanwhile, as by a SIGSTOP from outside.
+                Pause::Stop => raise(libc::SIGSTOP),
+                // The shell takes the terminal meanwhile, without a stop.
+                Pause::Taken => {
+                    println!("ANSWER job: paused");
+                    // SAFETY: getpgrp takes no arguments and cannot fail.
+                    let own = unsafe { libc::getpgrp() };
+                    let limit = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    // SAFETY: `fd` is the terminal; the call reads its group.
+                    while unsafe { libc::tcgetpgrp(fd) } == own && std::time::Instant::now() < limit
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
+            }
+            // Room again from here on.
+            test_terminal::ROOM.set(None);
+            return Some(true);
+        }
+        test_terminal::ROOM.with(|room| test_terminal::wait(room, until))
     }
 
     pub(super) fn steal_input(fd: std::os::fd::RawFd) {
