@@ -1335,10 +1335,13 @@ fn public_inputs_out_of_range_are_dropped() {
     l.rows[Row::Outer.index()].earlier = Some(200);
     l.rows[Row::Joint.index()].written = Some(255);
     l.rows[Row::Gap.index()].later = Some((9, 0));
+    l.rows[Row::Gap.index()].later_keys[0] = Some(0);
     let m = Model::new(l.clone(), Target::New, Given::default());
     assert_eq!(m.inherited(Row::Outer), 0);
     assert_eq!(m.written(Row::Joint), None);
-    assert_eq!(m.covered_by(Row::Gap), None);
+    // Covered, by a value that is dropped: the default shows.
+    assert_eq!(m.covered_by(Row::Gap), Some(0));
+    assert_eq!(m.effective(Row::Gap), 0);
     let text = new_file_text(&m).unwrap();
     assert!(!text.contains("outer_end"), "{text}");
     let c = compiled(load("[layout.line2]\nright = [\"duration\"]\n", &[], &[]));
@@ -1504,6 +1507,7 @@ fn keys_the_file_has_can_be_removed() {
     assert_eq!(m.chosen(Row::Lines), 0);
     assert_eq!(m.chosen(Row::Outer), 0);
     m.remove_override(Row::Lines);
+    assert!(m.changed() && m.marked(Row::Lines));
     let c: Vec<String> = changes(&m)
         .iter()
         .map(|c| format!("{}|{}|{}", c.key, c.now, c.line))
@@ -1552,5 +1556,46 @@ fn keys_the_file_has_can_be_removed() {
         changes(&p)
             .iter()
             .any(|c| c.line == "delete outer_end under [style]")
+    );
+}
+
+// 이것을 실패시키는 것: 남겨 둔 키(목록 밖 값)가 있는 줄에서 물려받은 값을 고르면 파일의 그 키를 지우라고 하지 않는
+// 것, 남겨 둔 값 키가 보이는 값을 기본값이 아닌 물려받은 값으로 두는 것(그 파일 값이 앞 출처를 덮는다), 있는 파일의
+// 바꿀 줄에서 덮는 출처를 키가 아니라 줄 단위로 붙이는 것.
+#[test]
+fn kept_keys_and_covers_per_key() {
+    let parts = [("base", "[style]\nouter_end = \"round\"\n")];
+    let target = "extends = [\"base\"]\n[style]\nouter_end = \"rounds\"\n";
+    let mut m = Model::new(
+        layers(&load(target, &[], &parts)),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    let round = ENDS.iter().position(|e| *e == "round").unwrap() as u8;
+    assert!(m.kept(Row::Outer));
+    assert_eq!((m.inherited(Row::Outer), m.chosen(Row::Outer)), (round, 0));
+    m.pick(Row::Outer, round);
+    assert_eq!(m.written(Row::Outer), None);
+    let c: Vec<String> = changes(&m).iter().map(|c| c.line.clone()).collect();
+    assert_eq!(c, ["delete outer_end under [style]"]);
+    // Per key: a later file sets the array, not the input line key.
+    let later = [("conf.d/a.toml", "[layout.line1]\nleft = [\"dir\"]\n")];
+    let file = "[layout.line1]\nleft = [\"host\", \"dir\", \"git\", \"char\"]\n[layout.line2]\nenabled = false\n";
+    let mut l = Model::new(
+        layers(&load(file, &later, &[])),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    l.remove_override(Row::Lines);
+    let c: Vec<(String, bool)> = changes(&l)
+        .iter()
+        .map(|c| (c.key.to_string(), c.covered_by.is_some()))
+        .collect();
+    assert_eq!(
+        c,
+        [
+            ("layout.line1.left".to_string(), true),
+            ("layout.line2.enabled".to_string(), false)
+        ]
     );
 }

@@ -320,7 +320,7 @@ impl Model {
     /// The later source that covers `row`, by its index in `Layers::names`.
     pub fn covered_by(&self, row: Row) -> Option<usize> {
         let keys = self.layers.rows[row.index()].later_keys;
-        keys[row.value_key()].or(keys.into_iter().flatten().next())
+        keys.into_iter().flatten().next()
     }
     /// The later source that covers key number `key` of `row`
     /// (`Row::keys`), by its place in `Layers::names`.

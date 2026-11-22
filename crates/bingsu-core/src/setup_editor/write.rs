@@ -166,8 +166,8 @@ pub fn changes(m: &Model) -> Vec<Change> {
         for (i, key) in row.keys().iter().enumerate() {
             let value = |kv: &Option<Vec<KeyValue>>| kv.as_ref().map(|k| k[i].value.clone());
             // Without a value to set, only a key the file really has can be
-            // deleted (and kept keys stay as they are).
-            if set.is_none() && (m.kept(row) || raw[i].is_none()) {
+            // deleted. (A row that keeps its keys is not marked.)
+            if set.is_none() && raw[i].is_none() {
                 continue;
             }
             // The file's own text for the key, also a value the row does not
