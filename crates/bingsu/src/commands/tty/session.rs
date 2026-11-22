@@ -846,9 +846,7 @@ impl Session<'_> {
     fn stop(&mut self, whole_group: bool) {
         TSTP_SEEN.store(false, Ordering::SeqCst);
         CONT_SEEN.store(false, Ordering::SeqCst);
-        if self.state == State::Running {
-            self.leave();
-        }
+        let left = self.state == State::Running && self.leave();
         // Putting the terminal back can take a while (a terminal slow to
         // take output). What came meanwhile goes first, before anything of
         // the process group stops: an exit (`wait` reports it, and nothing
@@ -862,7 +860,12 @@ impl Session<'_> {
             self.check();
             return;
         }
-        if whole_group {
+        // A session that lost the terminal (the shell took it without a
+        // stop) stops alone: its process group is no longer the foreground
+        // job, and the terminal's Ctrl-Z would not reach it either.
+        // 이것을 실패시키는 것: 이때도 그룹에 보내는 것(같은 작업의 다른 프로세스가 멈춤;
+        // a_suspend_without_the_terminal_stops_only_the_session).
+        if whole_group && left {
             // The rest of the process group stops as on the terminal's own
             // Ctrl-Z. This process's copy is ignored, so dropped when sent:
             // otherwise it reaches the session's handler (at once, or later

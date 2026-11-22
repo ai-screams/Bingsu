@@ -1238,6 +1238,22 @@ fn a_reentry_whose_terminal_was_taken_waits_for_the_next_continue() {
     );
 }
 
+// The shell takes the terminal back without a stop, and the session is
+// then told to suspend: it stops alone, and the other process of its job
+// does not. 이것을 실패시키는 것: 터미널을 잃은 세션이 그룹 전체에 SIGTSTP를 보내는 것.
+#[test]
+fn a_suspend_without_the_terminal_stops_only_the_session() {
+    let (lines, _) = job_shell("suspendtaken");
+    for want in [
+        "stopped by TSTP true",
+        "the job's other process stopped too false",
+        "job: back from the suspend",
+        "ended by TERM true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+}
+
 // The raw switch fails once the job control handlers are in: they go back.
 // 이것을 실패시키는 것: 실패한 진입에서 처리기를 되돌리지 않는 것.
 #[test]
@@ -1330,7 +1346,7 @@ fn job_shell_child() {
         }
     };
     give_terminal(pid);
-    let sibling = (scenario == "stop").then(|| {
+    let sibling = (scenario == "stop" || scenario == "suspendtaken").then(|| {
         loop {
             let line = told.recv_timeout(WAIT).expect("the sibling");
             if let Some(n) = line.split("job: sibling ").nth(1) {
@@ -1382,6 +1398,46 @@ fn job_shell_child() {
         say(&format!(
             "job ended {}",
             libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+        ));
+        return;
+    }
+    if scenario == "suspendtaken" {
+        // The shell takes the terminal back without a stop; the job then
+        // suspends itself.
+        give_terminal(own);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        say(&format!(
+            "stopped by TSTP {}",
+            libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTSTP
+        ));
+        let sibling = sibling.as_deref().unwrap();
+        let stopped = || {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", sibling])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&state.stdout)
+                .trim()
+                .starts_with('T')
+        };
+        // A group stop would reach the sibling within this window.
+        let until = Instant::now() + Duration::from_millis(300);
+        let mut seen = false;
+        while Instant::now() < until && !seen {
+            seen = stopped();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        say(&format!("the job's other process stopped too {seen}"));
+        // `bg`, then the end.
+        // SAFETY: continues the job's process group.
+        assert_eq!(unsafe { libc::kill(-pid, libc::SIGCONT) }, 0);
+        wait_line("job: back from the suspend");
+        // SAFETY: sends SIGTERM to the job.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        let (_, status) = wait_for(pid, libc::WUNTRACED);
+        say(&format!(
+            "ended by TERM {}",
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGTERM
         ));
         return;
     }
@@ -1583,7 +1639,14 @@ fn job_child() {
     // Only a signal brings the session back here, not the once-a-second look.
     if matches!(
         scenario.as_str(),
-        "stop" | "winch" | "rawstop" | "writestop" | "writetaken" | "readtaken" | "reenterlost"
+        "stop"
+            | "winch"
+            | "rawstop"
+            | "writestop"
+            | "writetaken"
+            | "readtaken"
+            | "reenterlost"
+            | "suspendtaken"
     ) {
         test_session::BACKGROUND_CHECK.set(Some(Duration::from_secs(60)));
     }
@@ -1605,7 +1668,7 @@ fn job_child() {
     }
     // Another process of the job (as a shell pipeline has): Ctrl-Z stops it
     // too. Its descriptors are not the test's pipes.
-    let mut sibling = (scenario == "stop").then(|| {
+    let mut sibling = (scenario == "stop" || scenario == "suspendtaken").then(|| {
         std::process::Command::new("sleep")
             .arg("30")
             .stdin(std::process::Stdio::null())
@@ -1642,6 +1705,18 @@ fn job_child() {
             unsafe { libc::raise(libc::SIGSTOP) };
             let wrote = s.write_some(b"FRAME").unwrap_or(0);
             say(&format!("job: wrote {wrote}"));
+        }
+        "suspendtaken" => {
+            // SAFETY: getpgrp takes no arguments and cannot fail.
+            let own = unsafe { libc::getpgrp() };
+            let until = Instant::now() + WAIT;
+            // SAFETY: fd 0 is the terminal; the call reads its group.
+            while unsafe { libc::tcgetpgrp(0) } == own {
+                assert!(Instant::now() < until, "the shell never took the terminal");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            s.suspend();
+            say("job: back from the suspend");
         }
         "writetaken" => {
             // SAFETY: getpgrp takes no arguments and cannot fail.
