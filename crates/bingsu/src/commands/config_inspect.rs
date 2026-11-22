@@ -92,11 +92,27 @@ fn record_text(e: &RecordError) -> String {
     }
 }
 
-/// Reads the settings the way the helper does, writing nothing. `Err` is
-/// the fixed message and exit code of a root that cannot be used at all.
-pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (String, u8)> {
+/// A loader ready for one reading of the settings, with the file `config
+/// use` chose when its record can be used.
+pub(crate) struct Opening {
+    pub loader: Loader,
+    pub selection: Selection,
+    /// The settings folder, canonical, and as it was written.
+    pub root: PathBuf,
+    pub written: PathBuf,
+    pub notice: Option<[String; 2]>,
+}
+
+/// The loader for `pinned`, the roots `init` pinned (`None`: the folders
+/// come from the environment). The caller decides whether an unpinned run
+/// is worth a warning.
+pub(crate) fn open_loader(
+    user: &User,
+    env: &TrustedEnv,
+    pinned: Option<Roots>,
+) -> Result<Opening, (String, u8)> {
     let mut groups = SystemGroups::new(&user.pw.name);
-    let (pin, state, written) = match ctx::pinned_roots(user)? {
+    let (pin, state, written) = match pinned {
         Some(Roots {
             config: Some(pin),
             state,
@@ -122,7 +138,7 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
         me: user.me,
         user: user.pw.name.clone(),
     };
-    let (mut loader, selection) = match session {
+    let (loader, selection) = match session {
         Some(Ok(evidence)) => {
             let record = evidence.record.clone();
             (
@@ -139,6 +155,25 @@ pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (Stri
         Some(Err(e)) if e.incomplete() => (Loader::new(places), Selection::Incomplete),
         Some(Err(e)) => (Loader::new(places), Selection::Unusable(record_text(&e))),
     };
+    Ok(Opening {
+        loader,
+        selection,
+        root,
+        written,
+        notice: root_notice,
+    })
+}
+
+/// Reads the settings the way the helper does, writing nothing. `Err` is
+/// the fixed message and exit code of a root that cannot be used at all.
+pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (String, u8)> {
+    let Opening {
+        mut loader,
+        selection,
+        root,
+        written,
+        notice: root_notice,
+    } = open_loader(user, env, ctx::pinned_roots(user)?)?;
     let roots_in = loader.roots(BUILTIN_TOML.as_bytes());
     let loaded = load(roots_in, &mut loader, ctx::version());
     let mut report = report::from_loaded(loaded, Mode::Dark);

@@ -132,6 +132,12 @@ pub(crate) mod runtime_root;
 #[cfg(unix)]
 mod setup;
 #[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the setup editor connects the preview")
+)]
+mod setup_sources;
+#[cfg(unix)]
 #[allow(unsafe_code)]
 mod signal_guard;
 #[cfg(unix)]
