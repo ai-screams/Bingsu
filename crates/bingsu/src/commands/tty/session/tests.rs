@@ -1865,6 +1865,40 @@ fn far_limit_child() {
     say(&format!("{:?}", s.wait(false, Some(years))));
 }
 
+// Another reader of the foreground group takes the keys between the select
+// and the read, which then gives 0: no hang-up, and the next key comes.
+// 이것을 실패시키는 것: 0바이트 읽기를 끝난 터미널로 보는 것(Hangup).
+#[test]
+fn a_read_of_nothing_is_no_hang_up() {
+    let mut t = start("stolen_input_child", &[]);
+    t.expect(b"READY");
+    t.send(b"x");
+    t.expect(b"STOLEN");
+    t.send(b"q");
+    let (lines, all) = t.mode_restored_after();
+    assert_eq!(lines, ["Input([113])"]);
+    assert_eq!(
+        shown(&all),
+        shown(&cat(&[
+            ENTER_ALL,
+            b"\x1b[H\x1b[2JREADY",
+            b"STOLEN",
+            LEAVE_ALL
+        ]))
+    );
+}
+
+#[test]
+#[ignore = "child: a session on a pseudo-terminal"]
+fn stolen_input_child() {
+    take_signals();
+    let tty = take_terminal();
+    let mut s = tty.full_screen().unwrap();
+    draw(&mut s, b"READY");
+    test_session::STEAL.set(true);
+    say(&format!("{:?}", s.wait(false, Some(Instant::now() + WAIT))));
+}
+
 // The terminal takes the first 3 bytes of the way out and then nothing: the
 // sequence it is in is ended, and the mode goes back all the same.
 // 이것을 실패시키는 것: 반쯤 나간 복구 열을 끊지 않는 것, 그때 termios를 되돌리지 않는 것.

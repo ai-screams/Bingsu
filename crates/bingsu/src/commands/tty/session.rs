@@ -669,14 +669,26 @@ impl Session<'_> {
                 if !self.owns() {
                     continue;
                 }
+                #[cfg(test)]
+                test_session::steal_input(self.fd);
                 // SAFETY: `fd` is the open terminal; `input` is writable.
                 let n = unsafe {
                     libc::read(self.fd, self.input.as_mut_ptr().cast(), self.input.len())
                 };
                 match usize::try_from(n) {
+                    // Nothing is no end by itself: with VMIN and VTIME 0 a
+                    // read gives 0 when another reader of the foreground
+                    // group took the bytes since the select. A write of no
+                    // bytes tells: it fails (EIO) on a terminal that hung up,
+                    // on Linux and macOS alike.
+                    // 이것을 실패시키는 것: 0바이트 읽기를 늘 끝으로 보는 것(a_read_of_nothing_is_no_hang_up), 끊긴
+                    // 터미널을 보지 않는 것(a_hang_up_ends_the_session의 SIGHUP 무시 칸).
                     Ok(0) => {
-                        self.state = State::Gone;
-                        return ended();
+                        if write_once(self.fd, &[]).is_err() {
+                            self.state = State::Gone;
+                            return ended();
+                        }
+                        continue;
                     }
                     Ok(n) => return Event::Input(&self.input[..n]),
                     Err(_) => {
@@ -1004,6 +1016,10 @@ mod test_session {
         pub(super) static FAIL_RAW: Cell<bool> = const { Cell::new(false) };
         /// The next `select` fails.
         pub(super) static FAIL_SELECT: Cell<bool> = const { Cell::new(false) };
+        /// The waiting input is read away once, as another reader of the
+        /// foreground group would between the select and the read, and the
+        /// terminal is told (`STOLEN`).
+        pub(super) static STEAL: Cell<bool> = const { Cell::new(false) };
         /// Raised once, right after the raw switch.
         pub(super) static AFTER_RAW: Cell<Option<libc::c_int>> = const { Cell::new(None) };
         /// Raised once, in order, once `leave` wrote the way out (0: none).
@@ -1034,6 +1050,17 @@ mod test_session {
             if sig != 0 {
                 raise(sig);
             }
+        }
+    }
+
+    pub(super) fn steal_input(fd: std::os::fd::RawFd) {
+        if STEAL.take() {
+            let mut chunk = [0u8; 64];
+            // SAFETY: `fd` is the open terminal; `chunk` is writable.
+            while unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) } > 0 {}
+            let said = b"STOLEN";
+            // SAFETY: as above; `said` is readable.
+            let _ = unsafe { libc::write(fd, said.as_ptr().cast(), said.len()) };
         }
     }
 
