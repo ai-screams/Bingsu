@@ -721,6 +721,8 @@ impl Session<'_> {
                             self.state = State::Gone;
                             return ended();
                         }
+                        #[cfg(test)]
+                        test_session::read_nothing();
                         continue;
                     }
                     Ok(n) => return Event::Input(&self.input[..n]),
@@ -1111,8 +1113,7 @@ mod test_session {
         /// The next `select` fails.
         pub(super) static FAIL_SELECT: Cell<bool> = const { Cell::new(false) };
         /// The waiting input is read away once, as another reader of the
-        /// foreground group would between the select and the read, and the
-        /// terminal is told (`STOLEN`).
+        /// foreground group would between the select and the read.
         pub(super) static STEAL: Cell<bool> = const { Cell::new(false) };
         /// Raised once, right after the raw switch.
         pub(super) static AFTER_RAW: Cell<Option<libc::c_int>> = const { Cell::new(None) };
@@ -1182,10 +1183,13 @@ mod test_session {
             let mut chunk = [0u8; 64];
             // SAFETY: `fd` is the open terminal; `chunk` is writable.
             while unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) } > 0 {}
-            let said = b"STOLEN";
-            // SAFETY: as above; `said` is readable.
-            let _ = unsafe { libc::write(fd, said.as_ptr().cast(), said.len()) };
         }
+    }
+
+    /// Said from the branch of a read that gave 0 and was no hang-up, on
+    /// the standard error (not the terminal): the parent test waits for it.
+    pub(super) fn read_nothing() {
+        eprintln!("READ NOTHING");
     }
 
     pub(super) fn after_raw() {

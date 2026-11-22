@@ -1958,25 +1958,22 @@ fn far_limit_child() {
 }
 
 // Another reader of the foreground group takes the keys between the select
-// and the read, which then gives 0: no hang-up, and the next key comes.
-// 이것을 실패시키는 것: 0바이트 읽기를 끝난 터미널로 보는 것(Hangup).
+// and the read, which then gives 0: no hang-up, and the next key comes. The
+// child says so from the branch itself (on its standard error) before the
+// next key is sent, so the key cannot be what that read got.
+// 이것을 실패시키는 것: 0바이트 읽기를 끝난 터미널로 보는 것(Hangup; READ NOTHING이 오지 않음).
 #[test]
 fn a_read_of_nothing_is_no_hang_up() {
     let mut t = start("stolen_input_child", &[]);
     t.expect(b"READY");
     t.send(b"x");
-    t.expect(b"STOLEN");
+    t.expect_stderr("READ NOTHING");
     t.send(b"q");
     let (lines, all) = t.mode_restored_after();
     assert_eq!(lines, ["Input([113])"]);
     assert_eq!(
         shown(&all),
-        shown(&cat(&[
-            ENTER_ALL,
-            b"\x1b[H\x1b[2JREADY",
-            b"STOLEN",
-            LEAVE_ALL
-        ]))
+        shown(&cat(&[ENTER_ALL, b"\x1b[H\x1b[2JREADY", LEAVE_ALL]))
     );
 }
 

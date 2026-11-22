@@ -1689,6 +1689,32 @@ mod tests {
                 self.unread.drain(..at + want.len());
             }
 
+            /// Waits until the child wrote `want` to its standard error,
+            /// reading the terminal meanwhile; the error output read here is
+            /// not in `end`'s.
+            pub(in crate::commands::tty) fn expect_stderr(&mut self, want: &str) {
+                let err = self.child.stderr.as_ref().unwrap().as_raw_fd();
+                // SAFETY: `err` is the open pipe end; F_GETFL only reads flags.
+                let flags = unsafe { libc::fcntl(err, libc::F_GETFL) };
+                // SAFETY: as above; F_SETFL adds O_NONBLOCK for the polling here.
+                assert_eq!(
+                    unsafe { libc::fcntl(err, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+                    0
+                );
+                let mut seen = Vec::new();
+                let until = Instant::now() + WAIT;
+                while !String::from_utf8_lossy(&seen).contains(want) {
+                    assert!(Instant::now() < until, "no {want:?} on the standard error");
+                    let mut chunk = [0u8; 256];
+                    match self.child.stderr.as_mut().unwrap().read(&mut chunk) {
+                        Ok(n) if n > 0 => seen.extend_from_slice(&chunk[..n]),
+                        _ => self.idle(Duration::from_millis(5)),
+                    }
+                }
+                // SAFETY: as above; the flags F_GETFL read.
+                assert_eq!(unsafe { libc::fcntl(err, libc::F_SETFL, flags) }, 0);
+            }
+
             /// Writes as the terminal would: typed keys, replies.
             pub(in crate::commands::tty) fn send(&mut self, bytes: &[u8]) {
                 let fd = self.master.as_ref().unwrap().as_raw_fd();
