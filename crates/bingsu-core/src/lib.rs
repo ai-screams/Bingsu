@@ -34,6 +34,8 @@ pub mod handoff;
 pub mod helper;
 pub mod icons;
 pub mod ident;
+/// Keys from a terminal in raw mode (`bingsu setup`'s editor).
+pub mod keys;
 pub mod layout;
 /// What the prompt front reads from a compiled config (K63 selected band).
 pub mod layout_view;
