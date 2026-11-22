@@ -298,3 +298,12 @@ fn a_clock_at_its_end_draws_the_end_frame_once_and_stops() {
     assert_eq!(o.next(last), Some(Duration::MAX));
     assert_eq!(o.at(last), Duration::ZERO);
 }
+
+// 이것을 실패시키는 것: 띠의 줄 수나 최대 폭이 편집판 화면이 그릇에 두는 줄 수나 화면의 최대 폭과 갈리는 것(띠를 화면
+// 격자에 옮길 때 줄이 남거나 모자람).
+#[test]
+fn the_band_fits_the_editor_s_bowl_rows() {
+    use crate::setup_editor::screen;
+    assert_eq!(ROWS, screen::BOWL_ROWS);
+    assert_eq!(MAX_COLS, screen::MAX_COLS);
+}
