@@ -530,7 +530,7 @@ fn every_size_lays_out_inside_its_width() {
         t[12]
     );
     assert!(
-        t[13].starts_with("   o outer     none  triangle"),
+        t[13].starts_with("   o outer    [none] triangle"),
         "{:?}",
         t[13]
     );
@@ -796,9 +796,10 @@ fn without_color_the_pick_is_reversed_and_only_the_preview_keeps_color() {
             attrs: BOLD | REVERSE,
         }
     );
+    // A pick that changes nothing: brackets, no reverse, no color.
     let idle = g.cell(15, 13).paint;
-    assert_eq!(idle.attrs & REVERSE, 0);
-    assert_ne!(idle, Paint::default());
+    assert_eq!(idle, Paint::default());
+    assert!(g.row_text(13).starts_with("   o outer    [none] "));
     let mut painted = Vec::new();
     for y in 0..24 {
         for x in 0..80 {
@@ -829,7 +830,7 @@ fn without_color_the_pick_is_reversed_and_only_the_preview_keeps_color() {
 }
 
 // 이것을 실패시키는 것: 줄 끝 알림의 차례(템플릿 > 덮음 > 효과 없음 > 같은 모양 > 터미널 색)나 문구가 다른 것,
-// 효과 없는 고른 값을 `bright.overlay`가 아닌 강조색으로 칠하는 것, 미리보기 빈 바탕을 모드의 `neutral.base`로
+// 효과 없는 고른 값을 괄호 없이, 또는 상자(바탕색)나 보조 글색이 아닌 색으로 그리는 것, 미리보기 빈 바탕을 모드의 `neutral.base`로
 // 칠하지 않는 것, 다른 폭의 미리보기를 받으면 넘치는 것, 아이콘 안내가 nerd·light 밖에서나 아이콘을 바꾼 뒤에도
 // 보이는 것, 좁은 폭 안내의 긴 꼴과 짧은 꼴, 키 안내의 긴 꼴(79칸)과 짧은 꼴(70칸), 제목의 상태 글.
 #[test]
@@ -842,16 +843,25 @@ fn row_notes_paints_and_hints() {
     let t = text(&g);
     assert!(t[14].contains("one blank cell"), "{:?}", t[14]);
     assert!(t[16].contains("only with none or caps"), "{:?}", t[16]);
-    // The picked `none` of outer changes nothing; `lean` does.
+    // The picked `none` of outer changes nothing: `[none]` in the subtext
+    // color on the screen's background, weaker than `lean`'s accent box.
     let idle = g.cell(15, 13).paint;
     let pick = g.cell(15, 12).paint;
     assert_ne!(idle.bg, pick.bg);
-    let surface1 =
-        bingsu_core::color::palette::named_color("bright.overlay", Mode::Dark, false).unwrap();
-    assert_eq!(
-        idle.bg,
-        bingsu_core::color::sgr::Ink::Rgb(surface1.r, surface1.g, surface1.b)
-    );
+    let at = |name: &str| {
+        let c = bingsu_core::color::palette::named_color(name, Mode::Dark, true).unwrap();
+        bingsu_core::color::sgr::Ink::Rgb(c.r, c.g, c.b)
+    };
+    assert_eq!(idle.fg, at("neutral.subtext"));
+    assert_eq!(idle.bg, g.cell(79, 13).paint.bg);
+    assert_eq!(g.cell(14, 13).text, "[");
+    assert_eq!(g.cell(19, 13).text, "]");
+    assert_eq!(g.cell(14, 13).paint, idle);
+    // Under 80 columns the one value shown keeps its brackets.
+    let narrow = view_lines(&c, 70);
+    let t70 = text(&draw(&m, &view(&m, &c, &narrow, 70, 24)));
+    assert!(t70[13].contains("<[none]>"), "{:?}", t70[13]);
+    assert!(t70[12].contains("< lean >"), "{:?}", t70[12]);
     let base = c.palette.background;
     assert_eq!(
         g.cell(78, 9).paint.bg,
@@ -1870,8 +1880,8 @@ fn frames_draw_the_grid_and_then_only_what_changed() {
 }
 
 // 이것을 실패시키는 것: 편집판의 글(제목, 줄 이름, 값, 고른 값, 효과 없는 값, 안내, 키 안내, 저장 화면)을 바탕과
-// 4.5:1 아래로 칠하는 것, 고른 값과 효과 없는 고른 값의 상자(표시)를 화면 바탕과 3:1 아래로 칠하는 것(두 모드,
-// 24비트와 256색), 팔레트에 없는 이름에 색을 주는 것.
+// 4.5:1 아래로 칠하는 것, 고른 값의 상자(표시)를 화면 바탕과 3:1 아래로 칠하는 것, 효과 없는 고른 값에 상자를
+// 두는 것(두 모드, 24비트와 256색), 팔레트에 없는 이름에 색을 주는 것.
 // 미리보기 줄은 사용자 테마의 색이고, 그릇 줄(1-7)은 장식이라 이 기준 밖이다.
 #[test]
 fn every_editor_text_cell_meets_4_5_to_1() {
@@ -1921,24 +1931,26 @@ fn every_editor_text_cell_meets_4_5_to_1() {
                         _ => c,
                     }
                 };
-                let (accent, idle) = (shown("accent.blue"), shown("bright.overlay"));
+                let accent = shown("accent.blue");
                 for y in (0..24).filter(|&y| !exempt(y)) {
                     for x in 0..79 {
                         let cell = g.cell(x, y);
-                        // The boxes of a picked value (the accent) and of
-                        // one that changes nothing mark them: 3:1 on the
-                        // screen's background.
-                        if let Some(bg) = rgb(cell.paint.bg).filter(|&b| b == accent || b == idle) {
+                        // The box of an effective pick (the accent) marks
+                        // it: 3:1 on the screen's background. A pick that
+                        // changes nothing has no box: its brackets and
+                        // text are text cells, 4.5:1 below.
+                        if let Some(bg) = rgb(cell.paint.bg).filter(|&b| b == accent) {
                             assert!(
                                 contrast_milli(bg, base) >= 3000,
                                 "{mode:?} {depth:?} {x},{y}: box {}",
                                 contrast_milli(bg, base)
                             );
-                            if bg == accent {
-                                picks += 1;
-                            } else {
-                                idles += 1;
-                            }
+                            picks += 1;
+                        } else if cell.paint.bg != g.cell(79, 0).paint.bg {
+                            panic!("{mode:?} {depth:?} {x},{y}: a box of another color");
+                        }
+                        if cell.text == "[" {
+                            idles += 1;
                         }
                         if cell.text.trim().is_empty() {
                             continue;
@@ -1959,7 +1971,10 @@ fn every_editor_text_cell_meets_4_5_to_1() {
         }
     }
     assert!(checked > 1000, "{checked}");
-    assert!(picks > 0 && idles > 0, "both boxes were checked");
+    assert!(
+        picks > 0 && idles > 0,
+        "a box and a bracketed pick were checked"
+    );
     assert_eq!(
         bingsu_core::color::palette::named_color("neutral.nope", Mode::Dark, true),
         None

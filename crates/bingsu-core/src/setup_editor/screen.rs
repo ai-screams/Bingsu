@@ -16,7 +16,7 @@ use super::rows::{self, Row};
 use super::write::{changes, written_keys};
 use crate::color::math::{Srgb8, nearest_256};
 use crate::color::palette::{Mode, ResolvedPalette, named_color};
-use crate::color::sgr::{BOLD, ColorDepth, Ink, Paint, REVERSE, UNDERLINE, write_paint};
+use crate::color::sgr::{BOLD, ColorDepth, Ink, Paint, REVERSE, write_paint};
 use crate::preview::PreviewLine;
 use crate::width::{WidthProfile, fit_prefix, fit_suffix, grapheme_width, str_width};
 use alloc::format;
@@ -105,7 +105,10 @@ impl Grid {
         let fits = x
             .checked_add(w)
             .is_some_and(|e| e <= end.min(u32::from(self.cols)));
-        if w == 0 || !fits || y >= self.rows {
+        // The one writer of cells: a control, bidi or invisible character
+        // never reaches a frame, whatever the caller forgot to clean.
+        let removed = text.chars().any(crate::sanitize::is_removed);
+        if w == 0 || !fits || y >= self.rows || removed {
             return false;
         }
         let x = x as u16;
@@ -270,8 +273,6 @@ struct Ui {
     sub: Paint,
     title: Paint,
     pick: Paint,
-    /// A picked value that changes nothing.
-    idle: Paint,
     base: Ink,
 }
 
@@ -285,10 +286,9 @@ fn ink(c: Option<Srgb8>, depth: ColorDepth) -> Ink {
 
 /// The UI colors of `mode`, as names of the palette (text
 /// `neutral.text` and `neutral.subtext` on `neutral.base`; a picked value
-/// on the accent, one that changes nothing in `neutral.base` on
-/// `bright.overlay`). Both boxes are marks: 3:1 on the screen in both
-/// modes, their text 4.5:1 on them (`neutral.overlay` reaches 3:1 too, but
-/// no neutral reaches 4.5:1 on it in both modes).
+/// on the accent). A picked value that changes nothing has no box: it is
+/// `[value]` in the subtext color, so it never looks stronger than an
+/// effective pick, and the brackets mark it without color.
 fn ui(mode: Mode, depth: ColorDepth, mono: bool) -> Ui {
     if mono {
         let text = Paint::default();
@@ -301,10 +301,6 @@ fn ui(mode: Mode, depth: ColorDepth, mono: bool) -> Ui {
             },
             pick: Paint {
                 attrs: BOLD | REVERSE,
-                ..text
-            },
-            idle: Paint {
-                attrs: UNDERLINE,
                 ..text
             },
             base: Ink::Default,
@@ -330,11 +326,6 @@ fn ui(mode: Mode, depth: ColorDepth, mono: bool) -> Ui {
         pick: Paint {
             fg: c("neutral.ink", false),
             bg: c("accent.blue", false),
-            attrs: BOLD,
-        },
-        idle: Paint {
-            fg: c("neutral.base", false),
-            bg: c("bright.overlay", false),
             attrs: BOLD,
         },
         base,
@@ -533,7 +524,7 @@ fn preview(g: &mut Grid, v: &View<'_>, u: &Ui, y: u16, i: usize) {
 }
 
 /// The note at the end of a setting row, and whether the picked value
-/// changes nothing (then drawn on `bright.overlay`).
+/// changes nothing (then drawn as `[value]`).
 fn row_note(m: &Model, v: &View<'_>, row: Row) -> (String, bool) {
     let name = |i: usize| clean(m.layers().names.get(i).map_or(&[][..], |n| n.as_slice()));
     if Row::TEMPLATED.contains(&row) {
@@ -575,20 +566,30 @@ fn setting(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui, y: u16, row: Row) {
     g.put(0, y, &head, u.text, end);
     let (note, idle) = row_note(m, v, row);
     let picked = usize::from(m.chosen(row));
-    let pick = if idle { u.idle } else { u.pick };
+    // A pick that changes nothing: `[value]` in the subtext color, the
+    // brackets in the spaces around it (the row keeps its width).
+    let pick = if idle { u.sub } else { u.pick };
     let values = row.values();
     let mut x = VALUES_AT;
     if v.cols >= 80 {
         for (i, value) in values.iter().enumerate() {
             if i > 0 {
-                x = g.put(x, y, "  ", u.text, end);
+                let gap = if idle && i == picked + 1 { " " } else { "  " };
+                x = g.put(x, y, gap, u.text, end);
+            }
+            if idle && i == picked {
+                g.put(x - 1, y, "[", u.sub, end);
             }
             x = g.put(x, y, value, if i == picked { pick } else { u.text }, end);
+            if idle && i == picked {
+                x = g.put(x, y, "]", u.sub, end);
+            }
         }
     } else {
-        x = g.put(x, y, "< ", u.text, end);
+        let (open, close) = if idle { ("<[", "]>") } else { ("< ", " >") };
+        x = g.put(x, y, open, u.text, end);
         x = g.put(x, y, values[picked], pick, end);
-        x = g.put(x, y, " >", u.text, end);
+        x = g.put(x, y, close, u.text, end);
         let count = format!("  {}/{}", picked + 1, values.len());
         x = g.put(x, y, &count, u.sub, end);
     }
@@ -796,5 +797,18 @@ mod tests {
         assert!(!g.set(4, 1, "x", 1, p, 9));
         assert_eq!(g.put(0, 1, "\u{301}ab", p, 4), 2);
         assert_eq!(g.row_text(1), "ab  ");
+    }
+
+    // 이것을 실패시키는 것: 칸 쓰기가 제어 글자(ESC, BEL, 8비트 CSI)나 bidi 표지(U+202E)를 칸에 두는 것(호출하는 쪽이
+    // 정제를 빠뜨려도 프레임에 들어가지 않아야 한다).
+    #[test]
+    fn a_cell_never_takes_a_removed_character() {
+        let p = Paint::default();
+        let mut g = Grid::new(6, 1, p);
+        for bad in ["\u{1b}", "\u{7}", "\u{202e}", "\u{9b}", "a\u{1b}"] {
+            assert!(!g.set(0, 0, bad, 1, p, 6), "{bad:?}");
+        }
+        assert_eq!(g.put(0, 0, "a\u{1b}[2Jb\u{202e}c", p, 6), 6);
+        assert_eq!(g.row_text(0), "a[2Jbc");
     }
 }
