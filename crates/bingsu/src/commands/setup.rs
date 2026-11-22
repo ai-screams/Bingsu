@@ -202,6 +202,9 @@ enum Created {
     /// The file is there, but the folder could not be flushed: the name may
     /// not survive a crash.
     Unflushed,
+    /// The file went into the folder found at the start, but another folder
+    /// stands at its path now: the path has no new file.
+    Moved,
     /// `config.toml` appeared between the check and the link.
     Exists,
 }
@@ -217,17 +220,23 @@ fn unique_name() -> OsString {
 /// `O_RDONLY | O_DIRECTORY`: on Linux a folder kept open as a search-only
 /// (`O_PATH`) descriptor, as `open_chain` keeps it, cannot be synced
 /// (EBADF). The folder found must be the one in the chain.
-fn sync_folder(chain: &Chain, dir: &Path) -> std::io::Result<()> {
+fn sync_folder(chain: &Chain, dir: &Path) -> Result<(), Created> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let folder = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(dir)?;
-    let (a, b) = (folder.metadata()?, chain.last().metadata()?);
+        .open(dir)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP) => Created::Moved,
+            _ => Created::Unflushed,
+        })?;
+    let (Ok(a), Ok(b)) = (folder.metadata(), chain.last().metadata()) else {
+        return Err(Created::Unflushed);
+    };
     if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
-        return Err(std::io::Error::other("the settings folder changed"));
+        return Err(Created::Moved);
     }
-    folder.sync_all()
+    folder.sync_all().map_err(|_| Created::Unflushed)
 }
 
 /// Temporary file, data flushed, `linkat`, then the folder flushed. An error
@@ -249,8 +258,10 @@ fn create(chain: &Chain, dir_path: &Path, text: &str) -> std::io::Result<Created
     })();
     let _ = sys::unlink_at(dir.as_fd(), &tmp);
     let made = made?;
-    if made == Created::Wrote && sync_folder(chain, dir_path).is_err() {
-        return Ok(Created::Unflushed);
+    if made == Created::Wrote
+        && let Err(other) = sync_folder(chain, dir_path)
+    {
+        return Ok(other);
     }
     Ok(made)
 }
@@ -475,15 +486,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let mut groups = SystemGroups::new(&user.pw.name);
     let (chain, mine) = match runtime_root::open_chain(&dir) {
         Ok(chain) => {
-            let local = sys::fd_is_local(chain.last().as_raw_fd());
-            let mine = bingsu_core::fs_trust::walk_verdict(
-                &chain.facts,
-                user.me,
-                Last::Mine,
-                local,
-                &mut groups,
-            )
-            .is_ok();
+            let mine = folder_is_mine(&chain, &user, &mut groups);
             (Some(chain), mine)
         }
         Err(RootError::Open { errno, .. }) if errno == libc::ENOENT => (None, true),
@@ -568,6 +571,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             .into_encoded_bytes(),
         trust: new_file_trust(opening.shape_only),
     };
+    let selection = opening.selection.clone();
     drop(opening);
     let sources = Sources::new(start, file, ctx::version());
 
@@ -641,8 +645,10 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
 
     // The settings read again: what the choices were made against must
     // still be what the reader reads.
+    // The choice of settings file is part of what was read: `config use`
+    // can move the reader to a file already read, with the same sources.
     match read_sources(&user, &env, runs_here) {
-        Ok((_, now)) if sources.unchanged(&now) => {}
+        Ok((again, now)) if sources.unchanged(&now) && again.selection == selection => {}
         Ok(_) => {
             eprint!("{}", changed_words(&text));
             return ctx::code(EXIT_FAILED);
@@ -653,7 +659,18 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         }
     }
     let chain = match chain {
-        Some(c) => c,
+        // The folder found at the start must still be the one at its path,
+        // and still the user's alone: one put in its place meanwhile would
+        // take the file that the reader then does not read.
+        Some(c) => match runtime_root::open_chain(&dir) {
+            Ok(now) if same_folder(&c, &now) && folder_is_mine(&now, &user, &mut groups) => c,
+            _ => {
+                return refuse(&format!(
+                    "the settings folder {} changed while you edited, so nothing was written",
+                    ctx::show(&dir)
+                ));
+            }
+        },
         None => match runtime_root::ensure_root(&dir, user.me, &mut groups, Last::Mine) {
             Ok(c) => c,
             Err(_) => return refuse(&format!("{} cannot be made", ctx::show(&dir))),
@@ -661,7 +678,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     };
     // From the temporary file to its removal nothing ends the process: a
     // Ctrl-C or a TERM then comes after.
-    let held = sys::hold_signals();
+    let Ok(held) = sys::hold_signals() else {
+        return refuse("the interrupt signals could not be held, so nothing was written");
+    };
     let made = create(&chain, &dir, &text);
     drop(held);
     match made {
@@ -670,6 +689,13 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             "bingsu: wrote {}, but the folder could not be flushed; it may not survive a crash",
             ctx::show(&path)
         ),
+        Ok(Created::Moved) => {
+            return refuse(&format!(
+                "the settings folder {} was replaced while the file was written; the file went to the folder that stood there, and {} has no new file",
+                ctx::show(&dir),
+                ctx::show(&path)
+            ));
+        }
         Ok(Created::Exists) => {
             report_found(&dir, existing(&chain), choices);
             return finish(runs_here);
@@ -678,12 +704,28 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     }
     // The startup line goes out first: the deadline below may end the
     // process.
-    let code = finish(runs_here);
+    let code = finish_after(runs_here, Some(&path));
     apply_written(exe, &user, &env, runs_here);
     if asked {
         eprintln!("{DOCTOR}");
     }
     code
+}
+
+/// Whether nobody but the user (and root) can change the folder `chain`
+/// ends in or a folder above it.
+fn folder_is_mine(chain: &Chain, user: &User, groups: &mut SystemGroups) -> bool {
+    let local = sys::fd_is_local(chain.last().as_raw_fd());
+    bingsu_core::fs_trust::walk_verdict(&chain.facts, user.me, Last::Mine, local, groups).is_ok()
+}
+
+/// Whether two chains end in the same folder (device and inode).
+fn same_folder(a: &Chain, b: &Chain) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (a.last().metadata(), b.last().metadata()) {
+        (Ok(x), Ok(y)) => (x.dev(), x.ino()) == (y.dev(), y.ino()),
+        _ => false,
+    }
 }
 
 /// The trust the reader will give the new file: that of the pinned
@@ -738,14 +780,32 @@ fn startup_note(runs_here: bool) -> &'static str {
 }
 
 /// The startup line on stdout, and a word on stderr about what it is.
+/// Standard output is the command's product: when it does not take the
+/// line, setup ends with 1 even after writing the file (a script reading
+/// the line must learn it got none), and says on stderr what was written
+/// and what the line is.
 fn finish(runs_here: bool) -> ExitCode {
+    finish_after(runs_here, None)
+}
+
+/// `finish` once `wrote` was written.
+fn finish_after(runs_here: bool, wrote: Option<&Path>) -> ExitCode {
     let shell = TrustedEnv::login_shell();
     eprintln!("{}", startup_note(runs_here));
-    if ctx::print(&startup_lines(shell.as_deref())) {
+    let lines = startup_lines(shell.as_deref());
+    if ctx::print(&lines) {
         ExitCode::SUCCESS
     } else {
+        eprint!("{}", unprinted_words(wrote, &lines));
         ExitCode::from(1)
     }
+}
+
+fn unprinted_words(wrote: Option<&Path>, lines: &str) -> String {
+    let file = wrote.map_or_else(String::new, |p| {
+        format!("{} was written, but ", ctx::show(p))
+    });
+    format!("bingsu: {file}standard output did not take the startup line; it is:\n{lines}")
 }
 
 #[cfg(test)]
@@ -977,9 +1037,9 @@ mod tests {
     }
 
     // 이것을 실패시키는 것: 이름 넣기를 `renameat`으로 바꾸는 것(먼저 만들어진 파일을 덮어씀: 검사와 생성 사이
-    // 경쟁), 만든 파일의 권한이 0600이 아닌 것, 임시 파일을 남기는 것, 이름을 넣은 뒤 폴더 flush 실패를 "쓰지
-    // 못함"(오류)이나 "썼음"으로 알리는 것, 남의 파일이 있을 때 폴더를 flush하는 것. 폴더에 `fsync`하지 않는
-    // 것은 시험할 수 없어 제외.
+    // 경쟁), 만든 파일의 권한이 0600이 아닌 것, 임시 파일을 남기는 것, 이름을 넣은 뒤 그 경로의 폴더가 바뀐 것을
+    // "썼음"이나 flush 실패로 알리는 것, 남의 파일이 있을 때 폴더를 flush하는 것. 폴더에 `fsync`하지 않는 것과
+    // fsync 실패(`Unflushed`)는 시험할 수 없어 제외.
     #[test]
     fn a_file_that_appeared_first_is_never_replaced() {
         let dir = scratch("race");
@@ -1005,13 +1065,14 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
         assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"ours\n");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-        // The folder named is not the one written in, so its flush fails
-        // after the link: the file is there and says so.
+        // The folder at the path is not the one written in (it was
+        // replaced): the file is in the folder of the chain, and says so.
         std::fs::remove_file(dir.join(FILE)).unwrap();
-        assert_eq!(
-            create(&chain, &other, "ours\n").unwrap(),
-            Created::Unflushed
-        );
+        assert_eq!(create(&chain, &other, "ours\n").unwrap(), Created::Moved);
+        // No folder at the path any more: the same.
+        std::fs::remove_file(dir.join(FILE)).unwrap();
+        let gone = other.join("gone");
+        assert_eq!(create(&chain, &gone, "ours\n").unwrap(), Created::Moved);
         assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"ours\n");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other);

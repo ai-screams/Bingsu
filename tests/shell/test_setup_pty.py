@@ -14,6 +14,7 @@ import resource
 import select
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -57,7 +58,7 @@ HIGH_DESCRIPTORS = (
 
 
 def spawn(home, *args, background=False, high_fds=False):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     run = f'"{real_bin()}" setup --plain {" ".join(args)}'
     if high_fds:
@@ -102,6 +103,55 @@ def test_reply_restores_the_terminal_and_is_not_echoed(home):
     assert before == after, (before, after)
     assert "rgb:1e1e" not in text, "the answer must not be echoed"
     assert 'mode = "dark"' in config(home)
+
+
+def at_the_write_question(home):
+    """Setup with both choices given, stopped at its write question."""
+    child = spawn(home, "--icons", "nerd", "--mode", "dark")
+    child.expect(rb"\[Y/n\] ")
+    return child
+
+
+# 이것을 실패시키는 것: 묻는 동안 `config use`로 고른 파일이 바뀐 것을 보지 않고 쓰는 것. 고른 파일이 이미 읽던
+# conf.d 파일이면 읽는 쪽은 그것을 설정 자리로 옮기고 conf.d의 같은 파일을 빼므로, 출처와 바이트는 그대로다.
+def test_a_settings_file_chosen_while_asking_stops_the_write(home):
+    conf = home / "cfg/bingsu/conf.d"
+    conf.mkdir(parents=True)
+    for d in [home / "cfg", home / "cfg/bingsu", conf]:
+        d.chmod(0o700)
+    chosen = conf / "10.toml"
+    chosen.write_text("[style]\ngap = true\n")
+    chosen.chmod(0o600)
+    child = at_the_write_question(home)
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "PATH": os.environ["PATH"]}
+    used = subprocess.run([str(real_bin()), "config", "use", str(chosen)], env=env, capture_output=True, timeout=10)
+    assert used.returncode == 0, used.stderr
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 1, text
+    assert before == after
+    assert "settings changed while you edited; nothing written." in text, text
+    assert config(home) is None
+
+
+# 이것을 실패시키는 것: 묻는 동안 빈 설정 폴더가 다른 빈 폴더로 바뀐 것을 보지 않고, 처음 연 옛 폴더에 쓰고 새 경로에
+# 썼다고 하는 것. 두 읽기의 출처는 같다(둘 다 비었음).
+def test_a_settings_folder_replaced_while_asking_stops_the_write(home):
+    folder = home / "cfg/bingsu"
+    folder.mkdir(parents=True)
+    for d in [home / "cfg", folder]:
+        d.chmod(0o700)
+    child = at_the_write_question(home)
+    folder.rename(home / "cfg/bingsu.old")
+    folder.mkdir()
+    folder.chmod(0o700)
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 1, text
+    assert before == after
+    assert "changed while you edited, so nothing was written" in text, text
+    assert config(home) is None
+    assert not (home / "cfg/bingsu.old/config.toml").exists()
 
 
 # 이것을 실패시키는 것: 묻는 동안 바뀐 설정(새 conf.d 파일)을 보지 않고 쓰는 것, 그때 쓰려던 키를 알리지 않는
@@ -282,7 +332,7 @@ class RawTerminal:
 
 
 def raw_terminal(home, after=""):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     script = (f'echo BEFORE=$(stty -g); "{real_bin()}" setup --plain --icons nerd; echo RC=$?; {after}'
               'echo AFTER=$(stty -g)')
@@ -417,7 +467,7 @@ BACKGROUND_JOB = (
 # 이것을 실패시키는 것: 전경 작업인지 확인하지 않는 것(SIGTTOU를 무시한 배경 작업이 전경 셸 밑에서 터미널 모드를
 # 바꾸고, 복구의 `tcflush`가 사용자가 미리 친 글자를 버림). 확인하면 터미널이 없는 것으로 보아 질문 없이 인자를 요구한다.
 def test_a_background_job_does_not_touch_the_terminal(home):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     script = (f"echo BEFORE=$(stty -g); '{sys.executable}' -c '{BACKGROUND_JOB}' \"{real_bin()}\" setup --plain --icons nerd; "
               "echo RC=$?; read -r LEFT; echo LEFT=[$LEFT]; echo AFTER=$(stty -g)")
@@ -438,7 +488,7 @@ def test_a_background_job_does_not_touch_the_terminal(home):
 # 시험(`reading_a_reply_ends_on_hang_up…`)이 잡는다: 끊김에는 SIGHUP이 먼저 와서 이 시험으로는 가려지지 않는다.
 def test_a_hung_up_terminal_ends_without_a_panic(home):
     err, rc = home / "stderr", home / "rc"
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "XDG_STATE_HOME": str(home / "state"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     # The shell ignores SIGHUP so that it outlives the hang-up and records how bingsu ended.
     script = f'trap "" HUP; "{real_bin()}" setup --plain --icons nerd 2>"{err}"; echo $? > "{rc}"'

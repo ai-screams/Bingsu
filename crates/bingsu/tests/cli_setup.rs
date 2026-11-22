@@ -31,10 +31,16 @@ impl Home {
         self.0.join("cfg/bingsu/config.toml")
     }
     fn run(&self, args: &[&str]) -> Output {
+        self.cmd(args).output().unwrap()
+    }
+    fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_bingsu"));
         c.env_clear()
             .env("HOME", &self.0)
             .env("XDG_CONFIG_HOME", self.0.join("cfg"))
+            // The choice record lives under the state folder: without this
+            // one the account's own (from its home, not $HOME) is read.
+            .env("XDG_STATE_HOME", self.0.join("state"))
             .env("SHELL", "/bin/zsh");
         // `setup` unless the test names another command.
         if args.first() != Some(&"config") {
@@ -43,7 +49,7 @@ impl Home {
         c.args(args);
         // SAFETY: `detach` only calls setsid, which is async-signal-safe.
         unsafe { c.pre_exec(detach) };
-        c.output().unwrap()
+        c
     }
     /// Every path under the home with its mode, sorted.
     fn tree(&self) -> Vec<String> {
@@ -425,4 +431,34 @@ fn another_invalid_file_is_shown_and_nothing_claims_to_apply() {
     );
     assert!(!err.contains("new look"), "{err}");
     assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
+}
+
+// 이것을 실패시키는 것: 파일을 쓴 뒤 stdout이 시작 줄을 받지 못했는데 0으로 끝내는 것(시작 줄을 받는 스크립트가 빈 값을
+// 모름), 쓴 파일과 시작 줄을 stderr에 알리지 않는 것, 그 때문에 파일을 지우거나 쓰지 않는 것.
+#[test]
+fn a_startup_line_stdout_does_not_take_is_an_error_but_the_file_stays() {
+    use std::os::fd::FromRawFd;
+    let h = Home::new("stdout-gone");
+    let mut ends = [0; 2];
+    // SAFETY: `ends` has room for the two descriptors.
+    assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+    // SAFETY: the read end, owned here and closed at once: writes fail (EPIPE).
+    drop(unsafe { std::fs::File::from_raw_fd(ends[0]) });
+    // SAFETY: the write end, owned here from now on.
+    let write = unsafe { std::fs::File::from_raw_fd(ends[1]) };
+    let o = h
+        .cmd(&["--yes", "--icons", "nerd", "--mode", "dark"])
+        .stdout(write)
+        .output()
+        .unwrap();
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(h.config().exists());
+    assert!(
+        err.contains(&format!(
+            "bingsu: {} was written, but standard output did not take the startup line; it is:\neval \"$(bingsu init zsh)\"\n",
+            h.config().display()
+        )),
+        "{err}"
+    );
 }

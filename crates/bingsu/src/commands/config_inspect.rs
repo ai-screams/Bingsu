@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// Which file stands in `config.toml`'s place.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
     /// `config use` was never run.
     None,
