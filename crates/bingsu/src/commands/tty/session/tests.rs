@@ -677,6 +677,42 @@ fn ignored_stop_child() {
     ));
 }
 
+// SIGTSTP blocked in the thread's mask when the session began: taken as
+// ignored, so Ctrl-Z does nothing and no handler is put on it.
+// 이것을 실패시키는 것: 막아 둔 SIGTSTP에 처리기를 거는 것(suspend가 되돌리고 바로 다시 잡음).
+#[test]
+fn a_blocked_stop_counts_as_ignored() {
+    let t = start("blocked_stop_child", &[]);
+    let (lines, all) = t.mode_restored_after();
+    assert_eq!(lines, ["default during true", "Timeout"]);
+    assert_eq!(shown(&all), shown(&cat(&[ENTER_ALL, LEAVE_ALL])));
+}
+
+#[test]
+#[ignore = "child: a session on a pseudo-terminal"]
+fn blocked_stop_child() {
+    take_signals();
+    // SAFETY: an all-zero `sigset_t` is valid storage for sigemptyset.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is a valid set.
+    unsafe { libc::sigemptyset(&mut set) };
+    // SAFETY: as above.
+    unsafe { libc::sigaddset(&mut set, libc::SIGTSTP) };
+    // SAFETY: `set` is valid; this thread's mask only. It stays blocked: in
+    // this orphaned process group a stop let through would be dropped.
+    let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
+    assert_eq!(rc, 0);
+    let tty = take_terminal();
+    let mut s = tty.full_screen().unwrap();
+    say(&format!(
+        "default during {}",
+        disposition(libc::SIGTSTP) == libc::SIG_DFL
+    ));
+    s.suspend();
+    let short = Instant::now() + Duration::from_millis(100);
+    say(&format!("{:?}", s.wait(false, Some(short))));
+}
+
 // The window changes while the alternate screen is on: the new columns and
 // rows come as one event, and the screen stays alternate.
 // 이것을 실패시키는 것: SIGWINCH에 처리기를 걸지 않는 것(wait가 깨지 않음), 줄 수를 읽지 않는 것, 크기 변경에

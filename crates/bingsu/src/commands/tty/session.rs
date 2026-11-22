@@ -65,7 +65,10 @@
 //! terminal is still there. A continue without a stop of the session's own
 //! (SIGSTOP, a stray SIGCONT) is taken the same way: the terminal is put
 //! back first and then taken again. SIGTSTP ignored when the session began
-//! stays ignored, and `suspend` then does nothing.
+//! stays ignored, and `suspend` then does nothing; so does a SIGTSTP blocked
+//! in the signal mask of the thread that opens the session. The other
+//! signals reach the session only while that thread does not block them:
+//! one blocked stays pending until it is let through.
 //!
 //! The way out (drop, after `Signal`, `Hangup` or the caller's end), with
 //! what was turned on only, each mode recorded as on before its bytes are
@@ -251,6 +254,16 @@ fn set_action(sig: libc::c_int, act: &libc::sigaction) -> Option<libc::sigaction
     (unsafe { libc::sigaction(sig, act, &mut was) } == 0).then_some(was)
 }
 
+/// Whether `sig` is blocked in this thread's signal mask.
+fn blocked(sig: libc::c_int) -> bool {
+    // SAFETY: an all-zero `sigset_t` is valid storage for the call to fill.
+    let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new set only reads this thread's mask into `mask`.
+    let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask) };
+    // SAFETY: `mask` was filled by pthread_sigmask (or is still all zero).
+    rc == 0 && unsafe { libc::sigismember(&mask, sig) } == 1
+}
+
 /// `sig`'s action now.
 fn action(sig: libc::c_int) -> libc::sigaction {
     // SAFETY: an all-zero `sigaction` is a valid value for the call to fill.
@@ -300,8 +313,13 @@ impl JobSignals {
         let ours = job_action();
         let mut old = [None; 3];
         for (slot, sig) in old.iter_mut().zip(JOB_SIGNALS) {
-            // 이것을 실패시키는 것: 무시하던 SIGTSTP에도 처리기를 거는 것(an_ignored_stop_stays_ignored).
-            if sig == libc::SIGTSTP && action(sig).sa_sigaction == libc::SIG_IGN {
+            // An ignored SIGTSTP stays so. A blocked one (in the mask this
+            // thread came with) counts as ignored too: the raise of a stop
+            // would only stay pending, after the rest of the process group
+            // stopped, and the session would take the terminal again at once.
+            // 이것을 실패시키는 것: 무시하던 SIGTSTP에도 처리기를 거는 것(an_ignored_stop_stays_ignored),
+            // 막아 둔 SIGTSTP를 보지 않는 것(a_blocked_stop_counts_as_ignored).
+            if sig == libc::SIGTSTP && (action(sig).sa_sigaction == libc::SIG_IGN || blocked(sig)) {
                 continue;
             }
             *slot = set_action(sig, &ours);
