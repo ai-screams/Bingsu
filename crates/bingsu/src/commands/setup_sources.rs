@@ -14,13 +14,18 @@
 //! Before the file is written, `Tape::read` again with a fresh loader gives
 //! the tape the reader sees now; when it differs from the start's tape, the
 //! preview no longer says what the file will do, and nothing is written.
+use super::config_load::Loader;
 use super::config_yaml;
+use super::init::roots::canonical_lenient;
 use bingsu_core::config::source::{
     ExtendsRef, FileKey, Found, LoadError, LoadReport, OpenError, Opened, Resolver, Root, RootMeta,
     Trust, Version, load,
 };
 use bingsu_core::config::tree::{SyntaxError, Table};
 use bingsu_core::diag::SourceId;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 
 /// One answer of the loader at the start, in call order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +34,9 @@ enum Call {
     Edge {
         from: FileKey,
         text: String,
+        /// Where the entry led, canonical as far as it exists: an entry
+        /// that names the file setup makes reaches it once it is there.
+        to: Option<PathBuf>,
         got: Result<Opened, OpenError>,
     },
 }
@@ -43,7 +51,7 @@ pub(crate) struct Tape {
 
 /// Passes every call to the loader and keeps its answer.
 struct Recorder<'a> {
-    inner: &'a mut dyn Resolver,
+    inner: &'a mut Loader,
     calls: Vec<Call>,
 }
 
@@ -53,10 +61,15 @@ impl Resolver for Recorder<'_> {
     }
 
     fn open(&mut self, from: &Opened, r: &ExtendsRef) -> Result<Opened, OpenError> {
+        let to = self
+            .inner
+            .resolve_ref(from, &r.text)
+            .and_then(|p| canonical_lenient(&p));
         let got = self.inner.open(from, r);
         self.calls.push(Call::Edge {
             from: from.key,
             text: r.text.clone(),
+            to,
             got: got.clone(),
         });
         got
@@ -91,7 +104,7 @@ impl Tape {
     /// report is the start's own reading, without the new file.
     pub(crate) fn read(
         roots: Vec<Root>,
-        loader: &mut dyn Resolver,
+        loader: &mut Loader,
         version: Version,
     ) -> (Self, Result<LoadReport, LoadError>) {
         let mut recorder = Recorder {
@@ -110,11 +123,14 @@ impl Tape {
 struct Replay<'a> {
     calls: &'a [Call],
     used: Vec<bool>,
+    /// The new file and its path: an `extends` entry that led there opens
+    /// it, as it will once the file is written.
+    target: Option<(&'a Path, &'a Opened)>,
 }
 
-impl Replay<'_> {
+impl<'a> Replay<'a> {
     /// The first unused answer that fits, else the last one that fits.
-    fn take(&mut self, fits: impl Fn(&Call) -> bool) -> Option<&Call> {
+    fn take(&mut self, fits: impl Fn(&Call) -> bool) -> Option<&'a Call> {
         let mut last = None;
         for (i, c) in self.calls.iter().enumerate() {
             if !fits(c) {
@@ -139,10 +155,14 @@ fn not_read(trust: Trust) -> OpenError {
 
 impl Resolver for Replay<'_> {
     fn open(&mut self, from: &Opened, r: &ExtendsRef) -> Result<Opened, OpenError> {
-        match self.take(
+        let edge = self.take(
             |c| matches!(c, Call::Edge { from: f, text, .. } if *f == from.key && *text == r.text),
-        ) {
-            Some(Call::Edge { got, .. }) => got.clone(),
+        );
+        match (edge, self.target) {
+            (Some(Call::Edge { to: Some(to), .. }), Some((path, file))) if to == path => {
+                Ok(file.clone())
+            }
+            (Some(Call::Edge { got, .. }), _) => got.clone(),
             _ => Err(not_read(Trust::ShapeOnly)),
         }
     }
@@ -194,20 +214,20 @@ impl Sources {
     /// `Loader::roots` gives the built-in source, then that place
     /// (`config.toml` or `config.json`), then `conf.d` and `config.local`.
     pub(crate) fn load(&self, bytes: &[u8]) -> Result<LoadReport, LoadError> {
+        let file = Opened {
+            key: NEW_FILE_KEY,
+            bytes: bytes.to_vec(),
+            trust: self.file.trust,
+            display: self.file.display.clone(),
+        };
+        let path = PathBuf::from(OsString::from_vec(self.file.display.clone()));
         let mut roots = self.tape.roots.clone();
         let at = 1.min(roots.len());
-        roots.insert(
-            at,
-            Root::Read(Opened {
-                key: NEW_FILE_KEY,
-                bytes: bytes.to_vec(),
-                trust: self.file.trust,
-                display: self.file.display.clone(),
-            }),
-        );
+        roots.insert(at, Root::Read(file.clone()));
         let mut replay = Replay {
             calls: &self.tape.calls,
             used: vec![false; self.tape.calls.len()],
+            target: Some((&path, &file)),
         };
         load(roots, &mut replay, self.version)
     }

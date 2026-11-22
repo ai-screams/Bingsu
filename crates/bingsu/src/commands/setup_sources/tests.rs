@@ -157,6 +157,32 @@ fn a_root_gives_the_bytes_the_reading_got() {
     assert_eq!(tape.root_bytes(b"(built-in)"), None);
 }
 
+// 이것을 실패시키는 것: 다른 출처의 `extends`가 아직 없는 새 파일을 가리킬 때 미리보기가 시작 때의 "없음"을 그대로
+// 돌려주는 것(저장 뒤에는 그 파일을 거쳐 합쳐짐), 그 길을 기록하지 않는 것.
+#[test]
+fn an_extends_entry_that_names_the_new_file_reaches_it() {
+    let fx = Fx::new("ext-target");
+    let target = fx.root.join("config.toml");
+    fx.put(
+        &fx.home.join("shape.toml"),
+        &format!(
+            "extends = [\"{}\"]\n[style]\npreset = \"lean\"\n",
+            target.display()
+        ),
+    );
+    fx.put(
+        &fx.root.join("conf.d/10-a.toml"),
+        "extends = [\"~/shape.toml\"]\n[style]\ngap = true\n",
+    );
+    let sources = fx.sources();
+    let preview = report::from_loaded(sources.load(NEW.as_bytes()), Mode::Dark);
+    fx.put(&target, NEW);
+    let real = report::from_loaded(fx.read().1, Mode::Dark);
+    assert_eq!(applied(&preview), applied(&real));
+    assert_eq!(preview.snapshot, real.snapshot);
+    assert_eq!(preview.diagnostics, real.diagnostics);
+}
+
 // 이것을 실패시키는 것: 미리보기가 키마다 새 Loader로 디스크를 다시 읽는 것(시작 뒤 지운 파일이 빠짐).
 #[test]
 fn a_preview_opens_no_file() {
@@ -283,12 +309,14 @@ fn answers_come_back_in_the_order_they_were_given() {
     let edge = |got: &Result<Opened, OpenError>| Call::Edge {
         from: from.key,
         text: String::from("a.toml"),
+        to: None,
         got: got.clone(),
     };
     let calls = [edge(&first), edge(&second)];
     let mut replay = Replay {
         calls: &calls,
         used: vec![false; 2],
+        target: None,
     };
     let r = ExtendsRef {
         text: String::from("a.toml"),

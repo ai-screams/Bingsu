@@ -832,6 +832,12 @@ impl Loader {
         Verified::Publish { left_out }
     }
 
+    /// The path an `extends` entry of `from` names, before
+    /// canonicalization (`setup` records where each one led).
+    pub(crate) fn resolve_ref(&self, from: &Opened, text: &str) -> Option<PathBuf> {
+        self.resolve(from, text).ok()
+    }
+
     /// The path an `extends` entry names, before canonicalization.
     fn resolve(&self, from: &Opened, text: &str) -> Result<PathBuf, &'static str> {
         if text.contains("://") {
