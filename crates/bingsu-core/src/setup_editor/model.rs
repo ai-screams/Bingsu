@@ -339,7 +339,7 @@ impl Model {
     }
 
     /// Makes `next` the state, keeping the one before for `u`. A change of
-    /// the effective preset takes the part keys this file wrote; icons pick the preset of a new file until a shape row was
+    /// this file's preset takes the part keys this file wrote; icons pick the preset of a new file until a shape row was
     /// changed.
     fn change(&mut self, mut next: State) -> Effect {
         if self.target == Target::New
@@ -352,7 +352,9 @@ impl Model {
             next.shaped = shaped;
         }
         let mut note = None;
-        if self.effective_in(&next, Row::Style) != self.effective(Row::Style) {
+        // This file's own preset choice, also when a later file covers the
+        // preset: the part keys belong to the preset this file picks.
+        if self.chosen_in(&next, Row::Style) != self.chosen(Row::Style) {
             for r in PARTS {
                 if next.written[r.index()].take().is_some() {
                     note = Some(Note::PartsReset);

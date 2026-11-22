@@ -1361,3 +1361,33 @@ fn public_inputs_out_of_range_are_dropped() {
     );
     assert!(all.contains("style.outer_end: \"[2Jx\" now"), "{all}");
 }
+
+// 이것을 실패시키는 것: 프리셋 바꿈 규칙이 이 파일의 프리셋 선택이 아니라 최종 프리셋을 보는 것(뒤 `config.local`이
+// 프리셋을 덮으면 이 파일의 프리셋을 바꿔도 이 파일의 끝 키가 남는다), 지움과 프리셋 바꿈이 한 번의 `u`로 돌아오지
+// 않는 것.
+#[test]
+fn the_preset_reset_follows_this_files_choice() {
+    let later = [("config.local.toml", "[style]\npreset = \"pill\"\n")];
+    let target = "[style]\npreset = \"triangle\"\nouter_end = \"flat\"\n";
+    let mut m = Model::new(
+        layers(&load(target, &later, &[])),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    let flat = ENDS.iter().position(|e| *e == "flat").unwrap() as u8;
+    assert_eq!(m.written(Row::Outer), Some(flat));
+    assert_eq!(STYLES[usize::from(m.effective(Row::Style))], "pill");
+    let capsule = STYLES.iter().position(|s| *s == "capsule").unwrap() as u8;
+    m.pick(Row::Style, capsule);
+    assert_eq!(STYLES[usize::from(m.effective(Row::Style))], "pill");
+    assert_eq!(m.written(Row::Outer), None);
+    assert_eq!(m.note(), Some(Note::PartsReset));
+    m.undo();
+    assert_eq!(
+        (
+            m.written(Row::Outer),
+            STYLES[usize::from(m.chosen(Row::Style))]
+        ),
+        (Some(flat), "triangle")
+    );
+}
