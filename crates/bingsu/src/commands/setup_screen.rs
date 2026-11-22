@@ -177,6 +177,9 @@ fn ask_background(session: &mut Session<'_>) -> Result<Option<Mode>, Ended> {
     let mut answer = None;
     loop {
         match session.wait(false, Some(until)) {
+            // Ctrl-C while the terminal is asked cancels, as on the line
+            // questions; a reply never holds the byte.
+            Event::Input(b) if b.contains(&0x03) => return Err(Ended::Cancelled),
             Event::Input(b) if answer.is_none() && got.len() < REPLY_MAX * 4 => {
                 got.extend_from_slice(b);
                 if let Some(reply) = find_reply(&got) {
@@ -276,10 +279,11 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
         }
         match writer.flush(&mut Term(&mut session), Instant::now()) {
             Flushed::Gone(_) => return gone(),
-            Flushed::Stalled => {
-                return Ended::Lost(String::from("the terminal took no output for 2 s"));
-            }
-            Flushed::Done | Flushed::Pending => {}
+            // Decided only on a timeout, which never comes while the session
+            // is in the background: after a stop (`suspend` returns once the
+            // process goes on, before `Resumed`) the frame is pending with
+            // no progress, and `Resumed` drops it first.
+            Flushed::Done | Flushed::Pending | Flushed::Stalled => {}
         }
         let until = match (keys.deadline(), writer.deadline()) {
             (Some(a), Some(b)) => Some(a.min(b)),

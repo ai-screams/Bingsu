@@ -11,7 +11,9 @@ import io
 import os
 import re
 import shutil
+import signal
 import tempfile
+import time
 from pathlib import Path
 
 import pexpect
@@ -39,13 +41,16 @@ def home():
     shutil.rmtree(root, ignore_errors=True)
 
 
-def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None):
+def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None, background=False):
     env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "PWD": str(home)}
     if term is not None:
         env["TERM"] = term
     env.update(extra or {})
     run = f'"{real_bin()}" setup {" ".join(args)}'
+    # In the background `$!` names bingsu itself, for a signal; without job
+    # control the job stays in the terminal's foreground group.
+    run = f"{run} & echo BPID=$!; wait $!" if background else run
     script = f"echo BEFORE=$(stty -g); {run}; echo RC=$?; echo AFTER=$(stty -g)"
     child = pexpect.spawn("/bin/sh", ["-c", script], env=env, timeout=10, dimensions=(rows, cols),
                           cwd=str(home))
@@ -368,3 +373,54 @@ def test_sizes_and_the_last_column(home):
     assert preview_row(child) == plain
     child.send("q")
     finish(child)
+
+
+# 이것을 실패시키는 것: 편집판 도중 밖에서 온 TERM·HUP에 터미널을 되돌리지 않고 끝나는 것(대체 화면을 나가지 않음),
+# 그 신호로 끝나지 않는 것, 파일을 쓰는 것. INT는 시험하지 않는다: 작업 제어 없는 sh의 배경 작업은 INT를 무시한다.
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+def test_an_outside_signal_puts_the_terminal_back(home, sig):
+    child = spawn(home, background=True)
+    opened(child)
+    child.expect(FRAME)
+    pid = int(re.search(rb"BPID=(\d+)", child.transcript.getvalue()).group(1))
+    os.kill(pid, sig)
+    code, before, after, text = finish(child)
+    assert code == 128 + sig, text
+    assert before == after
+    log = child.transcript.getvalue()
+    assert log.rfind(b"\x1b[?1049l") > log.rfind(b"\x1b[?2026l")
+    assert config(home) is None
+
+
+# 이것을 실패시키는 것: 배경색을 묻는 동안 온 Ctrl-C를 버리는 것(줄 질문에서는 취소인데 편집판이 열림).
+def test_ctrl_c_while_the_terminal_is_asked_cancels(home):
+    child = spawn(home)
+    child.expect(QUERY)
+    child.send(b"\x03")
+    code, before, after, text = finish(child)
+    assert code == 130, text
+    assert before == after
+    assert "cancelled" in text, text
+    assert config(home) is None
+
+
+# 이것을 실패시키는 것: 편집판 도중 터미널이 끊길 때 panic으로 끝나는 것(101), 끝나지 않고 기다리는 것, 파일을 쓰는 것.
+def test_a_hung_up_terminal_ends_the_editor_without_a_panic(home):
+    err, rc = home / "stderr", home / "rc"
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+           "PATH": os.environ["PATH"], "TERM": "xterm-256color"}
+    # The shell ignores SIGHUP so that it outlives the hang-up and records how bingsu ended.
+    script = f'trap "" HUP; "{real_bin()}" setup 2>"{err}"; echo $? > "{rc}"'
+    child = pexpect.spawn("/bin/sh", ["-c", script], env=env, timeout=10, dimensions=(24, 80))
+    child.expect(QUERY)
+    child.send(DARK)
+    child.expect(KEYS)
+    os.close(child.child_fd)
+    end = time.monotonic() + 5
+    while time.monotonic() < end and not rc.exists():
+        time.sleep(0.05)
+    assert rc.exists(), "bingsu did not end after the terminal hung up"
+    text = err.read_text()
+    assert "panicked" not in text, text
+    assert int(rc.read_text()) != 101, text
+    assert config(home) is None

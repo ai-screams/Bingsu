@@ -566,11 +566,7 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             .join(FILE)
             .into_os_string()
             .into_encoded_bytes(),
-        trust: if opening.shape_only {
-            Trust::ShapeOnly
-        } else {
-            Trust::Executable
-        },
+        trust: new_file_trust(opening.shape_only),
     };
     drop(opening);
     let sources = Sources::new(start, file, ctx::version());
@@ -688,6 +684,16 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         eprintln!("{DOCTOR}");
     }
     code
+}
+
+/// The trust the reader will give the new file: that of the pinned
+/// settings folder, where nothing runs when it is kept for its shape only.
+fn new_file_trust(shape_only: bool) -> Trust {
+    if shape_only {
+        Trust::ShapeOnly
+    } else {
+        Trust::Executable
+    }
 }
 
 /// A settings folder setup may not write (`mine` false) is refused, except
@@ -910,6 +916,14 @@ mod tests {
         ] {
             assert_eq!(applied_words(&a), format!("{}\n", en(m)));
         }
+    }
+
+    // 이것을 실패시키는 것: 모양만 남긴 설정 폴더의 새 파일에 실행 신뢰를 주는 것(미리보기가 그 파일을 실행 가능하게
+    // 합침), 보통 폴더의 새 파일을 모양만으로 보는 것.
+    #[test]
+    fn the_new_file_takes_the_folder_trust() {
+        assert_eq!(new_file_trust(true), Trust::ShapeOnly);
+        assert_eq!(new_file_trust(false), Trust::Executable);
     }
 
     // 이것을 실패시키는 것: 쓸 수 없는 폴더를 편집판에서도 거부하는 것(읽기 전용으로 보여야 함), 다른 길에서 받아

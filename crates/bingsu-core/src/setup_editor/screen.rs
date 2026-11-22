@@ -150,8 +150,8 @@ fn move_to(x: u16, y: u16, out: &mut Vec<u8>) {
 /// or a grid of another size or with another last column: the whole
 /// screen, first cleared in the last column's paint. Otherwise only the
 /// cells that changed, from the first one of each run. The last column is
-/// never written (a cell there would leave the cursor waiting to wrap, and
-/// on the last row some terminals scroll): the clear paints it. Each frame
+/// never written (a cell there leaves the cursor waiting to wrap, and on
+/// the last row a terminal can scroll): the clear paints it. Each frame
 /// sets its first paint whole, so it needs nothing of the terminal's state.
 pub fn frame(prev: Option<&Grid>, next: &Grid, out: &mut Vec<u8>) {
     let (cols, rows) = (next.cols, next.rows);
