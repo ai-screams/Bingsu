@@ -1,6 +1,7 @@
-"""`bingsu setup` on a pseudo-terminal: the terminal is restored on every way
-out of the background query, and a late answer does not reach the command
-line.
+"""`bingsu setup --plain` (the line questions) on a pseudo-terminal: the
+terminal is restored on every way out of the background query, and a late
+answer does not reach the command line. The editor has its own tests
+(`test_setup_editor_pty.py`).
 
 The test plays the terminal. `sh` prints the terminal settings (`stty -g`)
 before and after `bingsu setup`, and the test answers (or does not answer) the
@@ -58,7 +59,7 @@ HIGH_DESCRIPTORS = (
 def spawn(home, *args, background=False, high_fds=False):
     env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
-    run = f'"{real_bin()}" setup {" ".join(args)}'
+    run = f'"{real_bin()}" setup --plain {" ".join(args)}'
     if high_fds:
         run = f"'{sys.executable}' -c '{HIGH_DESCRIPTORS}' {run}"
     # In the background `$!` names bingsu itself (not a shell around it), for a signal.
@@ -283,7 +284,7 @@ class RawTerminal:
 def raw_terminal(home, after=""):
     env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
-    script = (f'echo BEFORE=$(stty -g); "{real_bin()}" setup --icons nerd; echo RC=$?; {after}'
+    script = (f'echo BEFORE=$(stty -g); "{real_bin()}" setup --plain --icons nerd; echo RC=$?; {after}'
               'echo AFTER=$(stty -g)')
     return RawTerminal(script, env)
 
@@ -418,7 +419,7 @@ BACKGROUND_JOB = (
 def test_a_background_job_does_not_touch_the_terminal(home):
     env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
-    script = (f"echo BEFORE=$(stty -g); '{sys.executable}' -c '{BACKGROUND_JOB}' \"{real_bin()}\" setup --icons nerd; "
+    script = (f"echo BEFORE=$(stty -g); '{sys.executable}' -c '{BACKGROUND_JOB}' \"{real_bin()}\" setup --plain --icons nerd; "
               "echo RC=$?; read -r LEFT; echo LEFT=[$LEFT]; echo AFTER=$(stty -g)")
     t = RawTerminal(script, env)
     os.write(t.fd, b"typed\n")
@@ -440,7 +441,7 @@ def test_a_hung_up_terminal_ends_without_a_panic(home):
     env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     # The shell ignores SIGHUP so that it outlives the hang-up and records how bingsu ended.
-    script = f'trap "" HUP; "{real_bin()}" setup --icons nerd 2>"{err}"; echo $? > "{rc}"'
+    script = f'trap "" HUP; "{real_bin()}" setup --plain --icons nerd 2>"{err}"; echo $? > "{rc}"'
     t = RawTerminal(script, env)
     t.read_until(b"\x1b]11;?\x1b\\")
     os.close(t.fd)

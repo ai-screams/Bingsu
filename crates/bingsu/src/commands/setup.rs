@@ -20,16 +20,19 @@ use super::{
     messages::{MsgId, en},
     reload,
     runtime_root::{self, Chain, RootError},
+    setup_screen::{self, Ended},
     setup_sources::{NewFile, Sources, Tape},
     sys,
     tty::{Answer, Tty},
 };
 use bingsu_core::color::osc11::{is_light, parse_osc11};
+use bingsu_core::color::sgr::ColorDepth;
 use bingsu_core::config::compile::BUILTIN_TOML;
 use bingsu_core::config::source::Trust;
 use bingsu_core::config::starter::{Choices, Icons, Mode, differences, starter};
 use bingsu_core::fs_trust::Last;
 use bingsu_core::icons::{IconSet, lookup};
+use bingsu_core::setup_editor::model::Given;
 use bingsu_core::setup_editor::screen::too_small;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -98,8 +101,7 @@ fn complete(a: &Args) -> Result<Choices, String> {
 }
 
 /// How the choices are made when there is a terminal.
-#[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the editor connects it"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Way {
     /// All three given: nothing is asked.
     Given,
@@ -110,7 +112,6 @@ enum Way {
     Editor,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "the editor connects it"))]
 fn way(a: &Args, term: Option<&OsStr>, size: Option<(u16, u16)>) -> Way {
     if a.yes && a.icons.is_some() && a.mode.is_some() {
         return Way::Given;
@@ -471,9 +472,34 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let Some(dir) = roots::canonical_lenient(&written) else {
         return refuse("the settings folder cannot be placed (a `..` in its path?)");
     };
+    let mut groups = SystemGroups::new(&user.pw.name);
+    let (chain, mine) = match runtime_root::open_chain(&dir) {
+        Ok(chain) => {
+            let local = sys::fd_is_local(chain.last().as_raw_fd());
+            let mine = bingsu_core::fs_trust::walk_verdict(
+                &chain.facts,
+                user.me,
+                Last::Mine,
+                local,
+                &mut groups,
+            )
+            .is_ok();
+            (Some(chain), mine)
+        }
+        Err(RootError::Open { errno, .. }) if errno == libc::ENOENT => (None, true),
+        Err(_) => return refuse(&format!("{} cannot be used", ctx::show(&dir))),
+    };
+    let not_mine = || {
+        refuse(&format!(
+            "{} is not a folder only you can change; fix that first",
+            ctx::show(&dir)
+        ))
+    };
     // The settings as the reader reads them now, before anything is asked.
     let (opening, start) = match read_sources(&user, &env, runs_here) {
         Ok(r) => r,
+        // The reader leaves out a settings folder others can change.
+        Err(_) if !mine => return not_mine(),
         Err(text) => {
             eprintln!("{text}");
             return ctx::code(EXIT_FAILED);
@@ -498,87 +524,42 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         Selection::None | Selection::Unusable(_) => None,
     };
 
-    // Choices: asked on the terminal, or all given.
-    // Anything but all three choices with `--yes` asked on a terminal (no
-    // terminal needs all three).
-    let asked = !(args.yes && args.icons.is_some() && args.mode.is_some());
-    let choices = match (&tty, given) {
-        (_, Some(c)) => c,
-        (Some(t), None) => {
-            let icons = match args.icons {
-                Some(i) => i,
-                None => match ask_icons(t) {
-                    Some(i) => i,
-                    None => return cancelled(),
-                },
-            };
-            let mode = match args.mode {
-                Some(m) => m,
-                None => match ask_mode(t) {
-                    Some(m) => m,
-                    None => return cancelled(),
-                },
-            };
-            Choices { icons, mode }
-        }
-        (None, None) => return ctx::code(EXIT_USAGE),
+    let way = match &tty {
+        None => Way::Given,
+        Some(t) => way(
+            &args,
+            TrustedEnv::term().as_deref(),
+            t.size().map(|s| (s.cols, s.rows)),
+        ),
     };
     if let Some(file) = chosen {
         use std::os::unix::ffi::OsStrExt;
+        let choices = match choose(tty.as_ref(), given, &args) {
+            Ok(c) => c,
+            Err(code) => return code,
+        };
         let bytes = start.root_bytes(file.as_os_str().as_bytes());
         report_existing(&file, bytes, choices);
         return finish(runs_here);
     }
     let path = dir.join(FILE);
 
-    let mut groups = SystemGroups::new(&user.pw.name);
-    let chain = match runtime_root::open_chain(&dir) {
-        Ok(chain) => {
-            let local = sys::fd_is_local(chain.last().as_raw_fd());
-            if bingsu_core::fs_trust::walk_verdict(
-                &chain.facts,
-                user.me,
-                Last::Mine,
-                local,
-                &mut groups,
-            )
-            .is_err()
-            {
-                return refuse(&format!(
-                    "{} is not a folder only you can change; fix that first",
-                    ctx::show(&dir)
-                ));
-            }
-            Some(chain)
-        }
-        Err(RootError::Open { errno, .. }) if errno == libc::ENOENT => None,
-        Err(_) => return refuse(&format!("{} cannot be used", ctx::show(&dir))),
-    };
+    if refuses_folder(mine, way) {
+        return not_mine();
+    }
     if let Some(chain) = &chain {
         match existing(chain) {
             Ok(None) => {}
             other => {
+                let choices = match choose(tty.as_ref(), given, &args) {
+                    Ok(c) => c,
+                    Err(code) => return code,
+                };
                 report_found(&dir, other, choices);
                 return finish(runs_here);
             }
         }
     }
-
-    // Ask before the first write, unless told to go ahead.
-    if !args.yes
-        && let Some(t) = &tty
-    {
-        t.say(&format!("Write {}? [Y/n] ", ctx::show(&path)));
-        match yes(t.line(), true) {
-            Some(true) => {}
-            Some(false) => {
-                eprintln!("bingsu: nothing written.");
-                return finish(runs_here);
-            }
-            None => return cancelled(),
-        }
-    }
-    let text = starter(choices);
     let file = NewFile {
         display: opening
             .root
@@ -591,8 +572,77 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             Trust::Executable
         },
     };
-    let sources = Sources::new(start, file, ctx::version());
     drop(opening);
+    let sources = Sources::new(start, file, ctx::version());
+
+    // The choices: the editor, the line questions, or all given.
+    let (text, choices) = match (&tty, way) {
+        (Some(t), Way::Editor) => {
+            let (_, colorterm, no_color) = TrustedEnv::terminal();
+            let truecolor = colorterm
+                .as_deref()
+                .is_some_and(|v| matches!(v.as_encoded_bytes(), b"truecolor" | b"24bit"));
+            let here = std::env::current_dir().unwrap_or_default();
+            let folder = setup_screen::sample_folder(TrustedEnv::pwd().as_deref(), &here);
+            let host = sys::host_name();
+            let colorfgbg = TrustedEnv::terminal_hints().0;
+            let start = setup_screen::Start {
+                sources: &sources,
+                path: &sources.file().display,
+                folder: folder.as_os_str().as_encoded_bytes(),
+                home: user.pw.home.as_os_str().as_encoded_bytes(),
+                host: host.as_deref(),
+                colorfgbg: colorfgbg.as_deref(),
+                depth: if truecolor {
+                    ColorDepth::TrueColor
+                } else {
+                    ColorDepth::Ansi256
+                },
+                mono: no_color,
+                read_only: !mine,
+                given: Given {
+                    icons: args.icons,
+                    mode: args.mode,
+                },
+            };
+            match setup_screen::edit(t, &start) {
+                Ended::Write { text, choices } => (text, choices),
+                Ended::Quit => {
+                    eprintln!("bingsu: nothing written.");
+                    return finish(runs_here);
+                }
+                Ended::Cancelled => return cancelled(),
+                Ended::Lost(why) => {
+                    return refuse(&format!("{why}; nothing was written"));
+                }
+            }
+        }
+        _ => {
+            let choices = match choose(tty.as_ref(), given, &args) {
+                Ok(c) => c,
+                Err(code) => return code,
+            };
+            // Ask before the first write, unless told to go ahead.
+            if !args.yes
+                && let Some(t) = &tty
+            {
+                t.say(&format!("Write {}? [Y/n] ", ctx::show(&path)));
+                match yes(t.line(), true) {
+                    Some(true) => {}
+                    Some(false) => {
+                        eprintln!("bingsu: nothing written.");
+                        return finish(runs_here);
+                    }
+                    None => return cancelled(),
+                }
+            }
+            (starter(choices), choices)
+        }
+    };
+    // Anything but all three choices with `--yes` asked on a terminal (no
+    // terminal needs all three).
+    let asked = way != Way::Given;
+
     // The settings read again: what the choices were made against must
     // still be what the reader reads.
     match read_sources(&user, &env, runs_here) {
@@ -638,6 +688,32 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
         eprintln!("{DOCTOR}");
     }
     code
+}
+
+/// A settings folder setup may not write (`mine` false) is refused, except
+/// by the editor: it shows a folder the reader reads (its owner or members
+/// could not all be confirmed) read-only.
+fn refuses_folder(mine: bool, way: Way) -> bool {
+    !mine && way != Way::Editor
+}
+
+/// The two choices: all given, or the line questions for what is not.
+fn choose(tty: Option<&Tty>, given: Option<Choices>, args: &Args) -> Result<Choices, ExitCode> {
+    match (tty, given) {
+        (_, Some(c)) => Ok(c),
+        (Some(t), None) => {
+            let icons = match args.icons {
+                Some(i) => i,
+                None => ask_icons(t).ok_or_else(cancelled)?,
+            };
+            let mode = match args.mode {
+                Some(m) => m,
+                None => ask_mode(t).ok_or_else(cancelled)?,
+            };
+            Ok(Choices { icons, mode })
+        }
+        (None, None) => Err(ctx::code(EXIT_USAGE)),
+    }
 }
 
 fn cancelled() -> ExitCode {
@@ -834,6 +910,16 @@ mod tests {
         ] {
             assert_eq!(applied_words(&a), format!("{}\n", en(m)));
         }
+    }
+
+    // 이것을 실패시키는 것: 쓸 수 없는 폴더를 편집판에서도 거부하는 것(읽기 전용으로 보여야 함), 다른 길에서 받아
+    // 쓰는 것, 쓸 수 있는 폴더를 거부하는 것.
+    #[test]
+    fn only_the_editor_shows_a_folder_it_may_not_write() {
+        assert!(!refuses_folder(false, Way::Editor));
+        assert!(refuses_folder(false, Way::Lines));
+        assert!(refuses_folder(false, Way::Given));
+        assert!(!refuses_folder(true, Way::Lines));
     }
 
     // 이것을 실패시키는 것: init이 고정한 값이 있는 셸과 없는 셸의 안내를 바꾸는 것.

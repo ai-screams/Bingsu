@@ -1069,6 +1069,12 @@ impl Tty {
         foreground(file.as_raw_fd()).then_some(Self { file })
     }
 
+    /// The window's size now (`window_size`): 0 where the terminal does
+    /// not know.
+    pub fn size(&self) -> Option<Size> {
+        window_size(self.file.as_fd())
+    }
+
     pub fn say(&self, text: &str) {
         let _ = sys::write_fd(self.file.as_raw_fd(), text.as_bytes());
     }

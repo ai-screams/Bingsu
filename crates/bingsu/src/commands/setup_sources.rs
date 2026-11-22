@@ -193,7 +193,6 @@ impl Sources {
     /// file stands where the reader puts the settings folder's own file:
     /// `Loader::roots` gives the built-in source, then that place
     /// (`config.toml` or `config.json`), then `conf.d` and `config.local`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the editor previews with it"))]
     pub(crate) fn load(&self, bytes: &[u8]) -> Result<LoadReport, LoadError> {
         let mut roots = self.tape.roots.clone();
         let at = 1.min(roots.len());
@@ -213,8 +212,12 @@ impl Sources {
         load(roots, &mut replay, self.version)
     }
 
+    /// The file setup would make.
+    pub(crate) fn file(&self) -> &NewFile {
+        &self.file
+    }
+
     /// The new file's place in a catalog `load` returned.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the editor previews with it"))]
     pub(crate) fn target(&self, files: &[Found]) -> Option<SourceId> {
         files
             .iter()

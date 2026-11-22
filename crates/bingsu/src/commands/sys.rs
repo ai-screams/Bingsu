@@ -164,7 +164,6 @@ use std::path::PathBuf;
 /// This machine's short name: `gethostname` up to the first dot, `None`
 /// when it cannot be read. Not sanitized: the preview applies the prompt's
 /// own rules to it (an empty name draws no `host`).
-#[cfg_attr(not(test), expect(dead_code, reason = "the editor connects it"))]
 pub fn host_name() -> Option<Vec<u8>> {
     let mut buf = [0u8; 256];
     // SAFETY: `buf` is writable for the length given, which leaves its last
