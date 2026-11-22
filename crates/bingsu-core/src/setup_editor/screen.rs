@@ -614,7 +614,10 @@ fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
                 lines.push((format!("  {}", ch.line), false));
                 if let Some(n) = ch.covered_by {
                     lines.push((
-                        format!("  {} sets this too; change it there", name(n)),
+                        // Only the fact: whether that file can be edited
+                        // (a package's theme reached through `extends`) is
+                        // not known here.
+                        format!("  {} sets this too, and wins.", name(n)),
                         false,
                     ));
                 }

@@ -1243,3 +1243,32 @@ fn preset_mark_gap_rule_and_the_right_edge() {
         assert!(!first.contains('\u{6f22}'), "{cols}: {:?}", g.row_text(10));
     }
 }
+
+// 이것을 실패시키는 것: 덮는 출처가 고칠 수 있는 파일인지 모르면서(패키지 테마를 `extends`로 읽은 `conf.d` 등)
+// 저장 화면에서 그 파일을 고치라고 권하는 것. 덮는다는 사실만 말해야 한다.
+#[test]
+fn an_override_is_stated_not_handed_over() {
+    let parts = [(
+        "/usr/share/bingsu/theme.toml",
+        "[style]\nouter_end = \"round\"\n",
+    )];
+    let later = [(
+        "conf.d/a.toml",
+        "extends = [\"/usr/share/bingsu/theme.toml\"]\n",
+    )];
+    let mut m = Model::new(
+        layers(&load("[style]\nouter_end = \"slant\"\n", &later, &parts)),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    m.pick(Row::Outer, 4);
+    key(&mut m, Key::Enter, 1);
+    let c = compiled(load("", &[], &[]));
+    let lines = view_lines(&c, 80);
+    let t = text(&draw(&m, &view(&m, &c, &lines, 80, 24))).concat();
+    assert!(
+        t.contains("/usr/share/bingsu/theme.toml sets this too, and wins."),
+        "{t}"
+    );
+    assert!(!t.contains("change it there"), "{t}");
+}
