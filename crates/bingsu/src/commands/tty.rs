@@ -1535,26 +1535,25 @@ mod tests {
         /// lets them through on its own thread (a bingsu with one thread).
         pub(in crate::commands::tty) fn masked(cmd: &mut Command) -> &mut Command {
             use std::os::unix::process::CommandExt;
+            let block = || {
+                // SAFETY: an all-zero `sigset_t` is valid storage for sigemptyset.
+                let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+                // SAFETY: `set` is a valid set.
+                unsafe { libc::sigemptyset(&mut set) };
+                for sig in SESSION_SIGNALS {
+                    // SAFETY: as above.
+                    unsafe { libc::sigaddset(&mut set, sig) };
+                }
+                // SAFETY: `set` is valid; the old mask is not wanted. The mask
+                // is kept across exec.
+                if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            };
             // SAFETY: the closure runs in the child between fork and exec and
             // calls only async-signal-safe functions on its own memory.
-            unsafe {
-                cmd.pre_exec(|| {
-                    // SAFETY: an all-zero `sigset_t` is valid storage for sigemptyset.
-                    let mut set: libc::sigset_t = std::mem::zeroed();
-                    // SAFETY: `set` is a valid set.
-                    libc::sigemptyset(&mut set);
-                    for sig in SESSION_SIGNALS {
-                        // SAFETY: as above.
-                        libc::sigaddset(&mut set, sig);
-                    }
-                    // SAFETY: `set` is valid; the old mask is not wanted. The
-                    // mask is kept across exec.
-                    if libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                })
-            }
+            unsafe { cmd.pre_exec(block) }
         }
 
         /// Starts the child test at `path` on a new pseudo-terminal of

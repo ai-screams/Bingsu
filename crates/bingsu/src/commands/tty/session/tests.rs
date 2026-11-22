@@ -39,29 +39,22 @@ fn take_signals() {
     // SAFETY: an all-zero `sigset_t` is valid storage for the call to fill.
     let mut now: libc::sigset_t = unsafe { std::mem::zeroed() };
     // SAFETY: a null new set only reads this thread's mask into `now`.
-    assert_eq!(
-        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now) },
-        0
-    );
+    let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now) };
+    assert_eq!(rc, 0);
     // SAFETY: an all-zero `sigset_t` is valid storage for sigemptyset.
     let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
     // SAFETY: `set` is a valid set.
     unsafe { libc::sigemptyset(&mut set) };
     for sig in SESSION_SIGNALS {
         // SAFETY: `now` was filled by pthread_sigmask.
-        assert_eq!(
-            unsafe { libc::sigismember(&now, sig) },
-            1,
-            "signal {sig} was not blocked"
-        );
+        let blocked = unsafe { libc::sigismember(&now, sig) };
+        assert_eq!(blocked, 1, "signal {sig} was not blocked");
         // SAFETY: `set` is a valid set.
         unsafe { libc::sigaddset(&mut set, sig) };
     }
     // SAFETY: `set` is valid; this thread's mask only.
-    assert_eq!(
-        unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()) },
-        0
-    );
+    let rc = unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()) };
+    assert_eq!(rc, 0);
 }
 
 /// A parameter the parent test gave the child.
