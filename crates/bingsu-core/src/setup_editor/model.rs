@@ -176,7 +176,7 @@ impl Model {
             .map(|i| i as u8);
         let original = core::array::from_fn(|i| layers.rows[i].written);
         let kept = core::array::from_fn(|i| {
-            original[i].is_none() && layers.rows[i].written_raw.iter().any(Option::is_some)
+            original[i].is_none() && layers.rows[i].written_raw.iter().any(|r| r.is_some())
         });
         let first = State {
             written: original,
