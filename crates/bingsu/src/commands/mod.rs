@@ -132,6 +132,9 @@ pub(crate) mod runtime_root;
 #[cfg(unix)]
 mod setup;
 #[cfg(unix)]
+#[cfg_attr(not(test), expect(dead_code, reason = "the editor connects it"))]
+mod setup_screen;
+#[cfg(unix)]
 mod setup_sources;
 #[cfg(unix)]
 #[allow(unsafe_code)]

@@ -161,6 +161,27 @@ use std::ffi::{CStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
+/// This machine's short name: `gethostname` up to the first dot, `None`
+/// when it cannot be read. Not sanitized: the preview applies the prompt's
+/// own rules to it (an empty name draws no `host`).
+#[cfg_attr(not(test), expect(dead_code, reason = "the editor connects it"))]
+pub fn host_name() -> Option<Vec<u8>> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is writable for the length given, which leaves its last
+    // byte 0 whatever the call writes.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len() - 1) };
+    if rc != 0 {
+        return None;
+    }
+    let name = std::ffi::CStr::from_bytes_until_nul(&buf).ok()?.to_bytes();
+    Some(
+        name.split(|&b| b == b'.')
+            .next()
+            .unwrap_or_default()
+            .to_vec(),
+    )
+}
+
 pub fn current_uid() -> u32 {
     // SAFETY: getuid has no preconditions and cannot fail.
     unsafe { libc::getuid() }
@@ -863,6 +884,27 @@ mod linux_boundary_tests {
             assert_eq!(f_type_is_local(&st), want);
         }
         assert_eq!(fd_is_local(-1), None);
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    // 이것을 실패시키는 것: 이름을 첫 점에서 자르지 않는 것(이 Mac의 이름에는 점이 있다), 다른 이름을 내는 것.
+    #[test]
+    fn the_host_name_is_the_node_name_up_to_its_first_dot() {
+        let out = std::process::Command::new("uname")
+            .arg("-n")
+            .output()
+            .unwrap();
+        let node = String::from_utf8(out.stdout).unwrap();
+        let short = node
+            .trim_end()
+            .split('.')
+            .next()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        assert_eq!(super::host_name(), Some(short));
     }
 }
 
