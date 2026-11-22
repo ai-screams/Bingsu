@@ -1881,3 +1881,83 @@ fn frames_draw_the_grid_and_then_only_what_changed() {
     frame(None, &none, &mut empty);
     assert!(empty.is_empty());
 }
+
+// 이것을 실패시키는 것: 편집판의 글(제목, 줄 이름, 값, 고른 값, 효과 없는 값, 안내, 키 안내, 저장 화면)을 바탕과
+// 4.5:1 아래로 칠하는 것, 고른 값의 바탕(표시)을 화면 바탕과 3:1 아래로 칠하는 것(두 모드, 24비트와 256색).
+// 미리보기 줄은 사용자 테마의 색이고, 그릇 줄(1-7)은 장식이라 이 기준 밖이다.
+#[test]
+fn every_editor_text_cell_meets_4_5_to_1() {
+    use bingsu_core::color::math::{Srgb8, contrast_milli, xterm};
+    use bingsu_core::color::sgr::Ink;
+    let rgb = |i: Ink| match i {
+        Ink::Rgb(r, g, b) => Some(Srgb8 { r, g, b }),
+        Ink::Indexed(n) => Some(xterm(n)),
+        _ => None,
+    };
+    let mut m = fresh();
+    m.pick(Row::Outer, 0);
+    let c = compiled(load(&new_file_text(&m).unwrap(), &[], &[]));
+    let lines = view_lines(&c, 80);
+    let (mut checked, mut picks) = (0, 0);
+    for mode in [Mode::Dark, Mode::Light] {
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            for screen in ["main", "keys", "save"] {
+                let mut s = m.clone();
+                let key = match screen {
+                    "keys" => Some(Key::Char(b'?')),
+                    "save" => Some(Key::Enter),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    s.handle(Input { key, read: 1 });
+                }
+                let mut v = view(&s, &c, &lines, 80, 24);
+                v.mode = mode;
+                v.depth = depth;
+                v.palette = match mode {
+                    Mode::Dark => &c.palette,
+                    Mode::Light => &c.light_palette,
+                };
+                let g = draw(&s, &v);
+                let label = (0..24).find(|&y| g.row_text(y).starts_with(" preview"));
+                let exempt = |y: u16| {
+                    (screen == "main" && (1..=7).contains(&y))
+                        || label.is_some_and(|l| y == l + 1 || y == l + 2)
+                };
+                let base = rgb(g.cell(79, 0).paint.bg).unwrap();
+                let accent =
+                    bingsu_core::color::palette::named_color("accent.blue", mode, false).unwrap();
+                let accent = match depth {
+                    ColorDepth::Ansi256 => xterm(bingsu_core::color::math::nearest_256(accent)),
+                    _ => accent,
+                };
+                for y in (0..24).filter(|&y| !exempt(y)) {
+                    for x in 0..79 {
+                        let cell = g.cell(x, y);
+                        // The picked value's own background (the accent)
+                        // marks it: 3:1 on the screen's.
+                        if let Some(bg) = rgb(cell.paint.bg).filter(|&b| b == accent) {
+                            assert!(contrast_milli(bg, base) >= 3000, "{mode:?} {depth:?} pick");
+                            picks += 1;
+                        }
+                        if cell.text.trim().is_empty() {
+                            continue;
+                        }
+                        let (Some(fg), Some(bg)) = (rgb(cell.paint.fg), rgb(cell.paint.bg)) else {
+                            panic!("{mode:?} {depth:?} {screen} {x},{y}: {:?}", cell.paint);
+                        };
+                        let ratio = contrast_milli(fg, bg);
+                        assert!(
+                            ratio >= 4500,
+                            "{mode:?} {depth:?} {screen} {x},{y} {:?}: {ratio}",
+                            cell.text
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 1000, "{checked}");
+    assert!(picks > 0, "a picked value was checked");
+}

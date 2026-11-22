@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -424,3 +425,55 @@ def test_a_hung_up_terminal_ends_the_editor_without_a_panic(home):
     assert "panicked" not in text, text
     assert int(rc.read_text()) != 101, text
     assert config(home) is None
+
+
+def pinned(env, base):
+    """`BINGSU_ROOTS` as `bingsu init bash` exports it for `env`."""
+    init = subprocess.run([str(real_bin()), "init", "bash"], env=env, cwd=base, capture_output=True, timeout=10)
+    assert init.returncode == 0, init.stderr
+    script = init.stdout + b"\nprintf '%s\\0' \"$BINGSU_ROOTS\"\n"
+    out = subprocess.run(["bash", "--noprofile", "--norc"], input=script, env=env, cwd=base,
+                         capture_output=True, timeout=10)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.rstrip(b"\0").decode()
+
+
+# 이것을 실패시키는 것: bingsu가 도는 셸(init이 고정한 뿌리)에서 편집판의 미리보기나 저장, 발행이 설정의 명령을 돌리는 것.
+# 명령은 돌면 표지 파일을 만들고(시험이 먼저 확인), 편집판 없이 기다린 동안에는 아무것도 그것을 돌리지 않는다(대조).
+def test_nothing_a_config_names_runs_in_a_shell_that_runs_bingsu(tmp_path):
+    env = {**trusted_env(tmp_path), "HOME": str(tmp_path), "SHELL": "/bin/zsh",
+           "TERM": "xterm-256color", "PWD": str(tmp_path)}
+    env["BINGSU_ROOTS"] = pinned(env, tmp_path)
+    marker = tmp_path / "ran"
+    conf = Path(env["XDG_CONFIG_HOME"]) / "bingsu" / "conf.d"
+    conf.mkdir(parents=True, exist_ok=True)
+    for d in [conf.parent.parent, conf.parent, conf]:
+        d.chmod(0o700)
+    touch = shutil.which("touch")
+    (conf / "10-cmd.toml").write_text(
+        f'[segment."custom/mark"]\nkind = "command"\ncommand = ["{touch}", "{marker}"]\n\n'
+        '[layout.line1]\nleft = ["dir", "custom/mark"]\n')
+    (conf / "10-cmd.toml").chmod(0o600)
+    subprocess.run([touch, str(marker)], check=True)
+    assert marker.exists(), "the command leaves the marker"
+    marker.unlink()
+    time.sleep(1.0)
+    assert not marker.exists(), "something else ran the command"
+    child = pexpect.spawn("/bin/sh", ["-c", f'"{real_bin()}" setup; echo RC=$?'], env=env, timeout=10,
+                          dimensions=(24, 80), cwd=str(tmp_path))
+    child.delaybeforesend = None
+    child.transcript = io.BytesIO()
+    child.logfile_read = child.transcript
+    opened(child)
+    for key in "soj":
+        child.send(key)
+        child.expect(FRAME)
+    child.send("\r")
+    child.expect(rb"enter write")
+    child.send("\r")
+    child.expect(pexpect.EOF)
+    text = child.transcript.getvalue().decode("utf-8", "replace")
+    assert "RC=0" in text, text
+    assert "bingsu: applied; the next prompt shows it" in text, text
+    time.sleep(1.0)
+    assert not marker.exists(), "the editor, its save or the publication ran the command"
