@@ -593,7 +593,7 @@ struct Acc {
 }
 
 impl Acc {
-    /// `cols` up to `MAX_COLS`, `rows` up to `ROWS`.
+    /// `cols` up to `MAX_COLS`, `rows` up to `ROWS` (`draw` clamps them).
     fn new(cols: usize, rows: usize) -> Self {
         Self {
             cols,
@@ -617,9 +617,9 @@ impl Acc {
         if x < 0.0 || y < 0.0 || x >= self.cols as f64 || y >= self.rows as f64 || w <= 0.0 {
             return;
         }
-        let Some(s) = self.slots.get_mut(y as usize * self.cols + x as usize) else {
-            return;
-        };
+        // In range: `x < cols`, `y < rows`, and `new` took at most
+        // `MAX_COLS` by `ROWS`.
+        let s = &mut self.slots[y as usize * self.cols + x as usize];
         let put = |v: &mut f32, d: f64| *v = (f64::from(*v) + d) as f32;
         put(&mut s.b, w);
         put(&mut s.wl, w * mat * ink[0]);
@@ -628,9 +628,9 @@ impl Acc {
         put(&mut s.ww, w * mat);
     }
 
-    /// Cell `i`'s slot; empty past the band.
+    /// Cell `i`'s slot (`i` below `cols * rows`).
     fn at(&self, i: usize) -> Slot {
-        self.slots.get(i).copied().unwrap_or(Slot::ZERO)
+        self.slots[i]
     }
 }
 
