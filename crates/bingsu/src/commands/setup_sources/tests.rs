@@ -137,6 +137,26 @@ fn a_preview_is_what_the_reader_applies_once_the_file_is_there() {
     assert_eq!(preview.diagnostics, real.diagnostics);
 }
 
+// 이것을 실패시키는 것: 이름이 다른 뿌리의 바이트를 내는 것, 다른 뿌리를 읽은 답을 내는 것, 읽지 않은 뿌리에 바이트를
+// 지어내는 것.
+#[test]
+fn a_root_gives_the_bytes_the_reading_got() {
+    let fx = Fx::new("bytes");
+    layered(&fx);
+    let (tape, _) = fx.read();
+    let name = |p: PathBuf| p.into_os_string().into_encoded_bytes();
+    assert_eq!(
+        tape.root_bytes(&name(fx.root.join("config.local.toml"))),
+        Some(&b"[style]\ninner_end = \"flat\"\n"[..])
+    );
+    assert_eq!(
+        tape.root_bytes(&name(fx.root.join("conf.d/10-a.toml"))),
+        Some(&b"extends = [\"~/shape.yaml\"]\n[style]\ngap = true\n"[..])
+    );
+    assert_eq!(tape.root_bytes(&name(fx.root.join("config.toml"))), None);
+    assert_eq!(tape.root_bytes(b"(built-in)"), None);
+}
+
 // 이것을 실패시키는 것: 미리보기가 키마다 새 Loader로 디스크를 다시 읽는 것(시작 뒤 지운 파일이 빠짐).
 #[test]
 fn a_preview_opens_no_file() {
@@ -230,24 +250,25 @@ fn opened(key: FileKey) -> Opened {
     }
 }
 
-// 이것을 실패시키는 것: 새 파일의 열쇠를 테이프의 뿌리나 extends 답의 열쇠와 겹치게 고르는 것.
+// 이것을 실패시키는 것: 새 파일의 열쇠를 내장 출처의 것(0, 0)이나 실제 파일이 가질 수 있는 것으로 하는 것,
+// 미리보기가 그 열쇠를 Loader에 넘겨 다시 읽기에 남기는 것.
 #[test]
-fn the_new_file_gets_a_key_no_source_has() {
-    let k = |ino| FileKey { dev: 0, ino };
-    let tape = Tape {
-        roots: vec![Root::Read(opened(k(0))), Root::Read(opened(k(1)))],
-        calls: vec![Call::Edge {
-            from: k(1),
-            text: String::from("a"),
-            got: Ok(opened(k(2))),
-        }],
-    };
-    let file = NewFile {
-        display: b"/c/config.toml".to_vec(),
-        trust: Trust::Executable,
-    };
-    let s = Sources::new(tape, file, VERSION);
-    assert_eq!(s.key, k(3));
+fn the_new_file_key_is_reserved_and_never_reaches_the_loader() {
+    assert_eq!(NEW_FILE_KEY.ino, 0, "no file has inode 0");
+    assert_ne!(NEW_FILE_KEY, crate::commands::config_load::BUILTIN_KEY);
+    assert_ne!(NEW_FILE_KEY.dev, u64::MAX, "the loader's stand-ins");
+    let fx = Fx::new("key");
+    layered(&fx);
+    let sources = fx.sources();
+    for _ in 0..3 {
+        let r = report::from_loaded(sources.load(NEW.as_bytes()), Mode::Dark);
+        let keys = r.files.iter().filter(|f| f.opened.key == NEW_FILE_KEY);
+        assert_eq!(keys.count(), 1);
+    }
+    let (now, loaded) = fx.read();
+    assert!(sources.unchanged(&now));
+    let real = loaded.unwrap();
+    assert!(real.files.iter().all(|f| f.opened.key != NEW_FILE_KEY));
 }
 
 // 이것을 실패시키는 것: 같은 extends를 두 번 연 답을 늘 첫 답으로 내는 것, 테이프에 없는 부름에 답을 지어내는 것.

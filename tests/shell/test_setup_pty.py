@@ -103,6 +103,45 @@ def test_reply_restores_the_terminal_and_is_not_echoed(home):
     assert 'mode = "dark"' in config(home)
 
 
+# 이것을 실패시키는 것: 묻는 동안 바뀐 설정(새 conf.d 파일)을 보지 않고 쓰는 것, 그때 쓰려던 키를 알리지 않는
+# 것, 종료 코드가 1이 아닌 것, 바뀌지 않았을 때 쓴 뒤 doctor 안내 줄을 내지 않는 것.
+def test_settings_changed_while_asking_write_nothing(home):
+    child = spawn(home, "--icons", "nerd")
+    child.expect(QUERY)
+    conf = home / "cfg/bingsu/conf.d"
+    conf.mkdir(parents=True, mode=0o700)
+    (home / "cfg").chmod(0o700)
+    (home / "cfg/bingsu").chmod(0o700)
+    added = conf / "10-mine.toml"
+    added.write_text('[style]\ngap = true\n')
+    added.chmod(0o600)
+    child.send(DARK)
+    child.expect(rb"the terminal looks dark")
+    child.send("\n")
+    child.expect(rb"\[Y/n\] ")
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 1, text
+    assert before == after, (before, after)
+    assert "settings changed while you edited; nothing written." in text, text
+    assert 'preset = "triangle"' in text, text
+    assert config(home) is None
+    assert "bingsu doctor" not in text, text
+
+    # Nothing changes this time: the file is written, and the hint follows.
+    child = spawn(home, "--icons", "nerd")
+    child.expect(QUERY)
+    child.send(DARK)
+    child.expect(rb"the terminal looks dark")
+    child.send("\n")
+    child.expect(rb"\[Y/n\] ")
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 0, text
+    assert 'mode = "dark"' in config(home)
+    assert "Line ends look off? `bingsu doctor` checks the character widths." in text, text
+
+
 # 이것을 실패시키는 것: 터미널에서 `--icons`로 준 light·ascii를 받지 않는 것(사용법 오류로 끝남), 미리 답한
 # 아이콘 질문을 다시 묻는 것, 색 모드 질문을 건너뛰는 것, 그 집합의 시작 프리셋(light → triangle, ascii →
 # lean)을 쓰지 않는 것.

@@ -11,14 +11,22 @@
 //! Exit codes: 0 done (written, or already there), 1 refused or failed,
 //! 2 usage, 130 cancelled.
 use super::{
-    ctx::{self, EXIT_FAILED, EXIT_USAGE, User},
+    clock::SystemClock,
+    config_inspect::{self, Opening, Selection, open_loader},
+    config_load::name_present,
+    ctx::{self, Applied, EXIT_FAILED, EXIT_USAGE, User},
     group_policy::SystemGroups,
     init::{roots, trusted_env::TrustedEnv},
+    messages::{MsgId, en},
+    reload,
     runtime_root::{self, Chain, RootError},
+    setup_sources::{NewFile, Sources, Tape},
     sys,
     tty::{Answer, Tty},
 };
 use bingsu_core::color::osc11::{is_light, parse_osc11};
+use bingsu_core::config::compile::BUILTIN_TOML;
+use bingsu_core::config::source::Trust;
 use bingsu_core::config::starter::{Choices, Icons, Mode, differences, starter};
 use bingsu_core::fs_trust::Last;
 use bingsu_core::icons::{IconSet, lookup};
@@ -266,23 +274,18 @@ fn existing(chain: &Chain) -> std::io::Result<Option<(&'static str, Vec<u8>)>> {
     Ok(None)
 }
 
-/// `found` is what `existing` found in `dir`; a read error is named after
-/// the file `setup` would have written.
-fn report_existing(
-    dir: &Path,
-    found: std::io::Result<Option<(&'static str, Vec<u8>)>>,
-    c: Choices,
-) {
-    let name = match &found {
-        Ok(Some((name, _))) => name,
-        _ => FILE,
-    };
-    let shown = ctx::show(&dir.join(name));
-    eprintln!("bingsu: {shown} is already there, so nothing was written.");
-    let format = bingsu_core::config::tree::format_of(name.as_bytes());
-    match found {
-        Ok(Some((_, b))) if b.len() <= bingsu_core::config::tree::FILE_BYTES_MAX => {
-            match differences(format, &b, c) {
+/// Says that the settings file `path` is there and nothing was written,
+/// and how its `bytes` (when they could be read) differ from the choices.
+fn report_existing(path: &Path, bytes: Option<&[u8]>, c: Choices) {
+    use std::os::unix::ffi::OsStrExt;
+    eprintln!(
+        "bingsu: {} is already there, so nothing was written.",
+        ctx::show(path)
+    );
+    let format = bingsu_core::config::tree::format_of(path.as_os_str().as_bytes());
+    match bytes {
+        Some(b) if b.len() <= bingsu_core::config::tree::FILE_BYTES_MAX => {
+            match differences(format, b, c) {
                 Some(d) if d.is_empty() => eprintln!("It already has the choices you made."),
                 Some(d) => {
                     eprintln!("It differs from your choices here:");
@@ -300,12 +303,135 @@ fn report_existing(
     }
 }
 
+/// `report_existing` for what `existing` found in `dir`; a read error is
+/// named after the file `setup` would have written.
+fn report_found(dir: &Path, found: std::io::Result<Option<(&'static str, Vec<u8>)>>, c: Choices) {
+    match found {
+        Ok(Some((name, b))) => report_existing(&dir.join(name), Some(&b), c),
+        _ => report_existing(&dir.join(FILE), None, c),
+    }
+}
+
 fn refuse(what: &str) -> ExitCode {
     eprintln!("bingsu setup: {what}");
     ctx::code(EXIT_FAILED)
 }
 
-pub fn run(args: &[OsString]) -> ExitCode {
+/// The roots `init` pinned in the shell that ran `setup`, re-checked now;
+/// `None` before `init` (then the folders come from the environment,
+/// without the warning other commands give: that is the usual time to run
+/// `setup`).
+fn pinned(user: &User, runs_here: bool) -> Result<Option<roots::Roots>, (String, u8)> {
+    if runs_here {
+        ctx::pinned_roots(user)
+    } else {
+        Ok(None)
+    }
+}
+
+/// One reading of every settings source, as the reader makes it now.
+fn read_sources(user: &User, env: &TrustedEnv, runs_here: bool) -> Result<(Opening, Tape), String> {
+    let mut opening =
+        open_loader(user, env, pinned(user, runs_here).map_err(|(t, _)| t)?).map_err(|(t, _)| t)?;
+    let roots = opening.loader.roots(BUILTIN_TOML.as_bytes());
+    let (tape, _) = Tape::read(roots, &mut opening.loader, ctx::version());
+    Ok((opening, tape))
+}
+
+/// What a failed second reading says: nothing was written, and the keys
+/// the file would have had, so they can be chosen again.
+fn changed_words(text: &str) -> String {
+    let mut out = String::from(
+        "bingsu: settings changed while you edited; nothing written.\nThese are the keys it would have written:\n",
+    );
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        out.push_str("  ");
+        out.push_str(&bingsu_core::sanitize::sanitize(line.as_bytes()));
+        out.push('\n');
+    }
+    out
+}
+
+/// What `setup` says after publishing the settings with its new file.
+fn applied_words(a: &Applied) -> String {
+    match a {
+        Applied::Published { left_out, .. } => {
+            let mut text = String::from("bingsu: applied; the next prompt shows it\n");
+            for p in left_out {
+                text.push_str(&format!(
+                    "bingsu: left out, nothing in it runs: {}\n",
+                    ctx::show(p)
+                ));
+            }
+            text
+        }
+        Applied::Invalid => NOT_APPLIED.to_owned(),
+        Applied::Busy => String::from(
+            "bingsu: saved; another refresh is running, so the next prompt picks it up\n",
+        ),
+        other => match reload::report(other, "applied") {
+            Ok(text) => text,
+            Err((text, _)) => format!("{text}\n"),
+        },
+    }
+}
+
+const NOT_APPLIED: &str = "bingsu: not applied; the prompt keeps the last valid settings\n";
+const LOADS_LATER: &str = "bingsu: the new look shows once your shell loads bingsu\n";
+const DOCTOR: &str = "Line ends look off? `bingsu doctor` checks the character widths.";
+
+/// After the file is written: the same check as `config check` (its output
+/// only when the settings are not valid), then, in a shell that already
+/// runs bingsu, the same publication as `reload`, under the commands'
+/// deadline. Says what came of it; the file stays either way.
+fn apply_written(exe: &OsStr, user: &User, env: &TrustedEnv, runs_here: bool) {
+    // A reading earlier in this process may have left the refused latch.
+    let _ = super::io_meter::take_refused();
+    let started = ctx::start();
+    let deadline = match ctx::arm_deadline_ending(
+        ctx::COMMAND_LIMIT,
+        format!("{}\n", en(MsgId::DeadlineReached)),
+        0,
+    ) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!(
+                "bingsu: the deadline watchdog could not start, so the file was not checked or applied; run: bingsu reload"
+            );
+            return;
+        }
+    };
+    deadline.selection_saved();
+    let valid = match pinned(user, runs_here)
+        .and_then(|p| config_inspect::check_report_with(user, env, p))
+    {
+        Ok((_, 0)) => true,
+        Ok((shown, _)) => {
+            eprint!("{shown}");
+            false
+        }
+        Err((text, _)) => {
+            eprintln!("{text}");
+            false
+        }
+    };
+    if !runs_here {
+        eprint!("{}", if valid { LOADS_LATER } else { NOT_APPLIED });
+        return;
+    }
+    let (Some(started), Ok(Some(roots))) = (started, ctx::pinned_roots(user)) else {
+        eprintln!("{}", en(MsgId::ReloadIncomplete));
+        return;
+    };
+    let applied = ctx::apply(Path::new(exe), &roots, user, started, &mut SystemClock);
+    eprint!("{}", applied_words(&applied));
+}
+
+pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let args = match parse(args) {
         Ok(a) => a,
         Err(text) => {
@@ -329,27 +455,53 @@ pub fn run(args: &[OsString]) -> ExitCode {
     let Some(user) = User::current() else {
         return refuse("the account or its home folder cannot be read");
     };
-    // Before `init` there is nothing pinned, and that is the usual time to run
-    // `setup`: the folder then comes from the environment without a warning.
-    let written = if TrustedEnv::pinned_roots().is_some() {
-        match ctx::pinned_roots(&user) {
-            Ok(Some(roots::Roots {
-                config: Some(pin), ..
-            })) => pin.written,
-            Ok(_) => roots::config_candidate(&TrustedEnv::capture(), &user.pw.home),
-            Err((text, code)) => {
-                eprintln!("{text}");
-                return ctx::code(code);
-            }
+    let env = TrustedEnv::capture();
+    // `init` pinned roots in this shell (or the one that started it).
+    let runs_here = TrustedEnv::pinned_roots().is_some();
+    let written = match pinned(&user, runs_here) {
+        Ok(Some(roots::Roots {
+            config: Some(pin), ..
+        })) => pin.written,
+        Ok(_) => roots::config_candidate(&env, &user.pw.home),
+        Err((text, _)) => {
+            eprintln!("{text}");
+            return ctx::code(EXIT_FAILED);
         }
-    } else {
-        roots::config_candidate(&TrustedEnv::capture(), &user.pw.home)
     };
     let Some(dir) = roots::canonical_lenient(&written) else {
         return refuse("the settings folder cannot be placed (a `..` in its path?)");
     };
+    // The settings as the reader reads them now, before anything is asked.
+    let (opening, start) = match read_sources(&user, &env, runs_here) {
+        Ok(r) => r,
+        Err(text) => {
+            eprintln!("{text}");
+            return ctx::code(EXIT_FAILED);
+        }
+    };
+    // With a `config use` record the reader reads the chosen file in the
+    // place of the folder's own: that is the settings file.
+    let chosen = match &opening.selection {
+        Selection::Incomplete => {
+            return refuse(
+                "the settings choice could not be read, so nothing was written. Run: bingsu config path",
+            );
+        }
+        Selection::Chosen(r) if !name_present(&r.path) => {
+            eprintln!(
+                "bingsu: your chosen settings file {} is missing; run bingsu config use again",
+                ctx::show(&r.path)
+            );
+            return ctx::code(EXIT_FAILED);
+        }
+        Selection::Chosen(r) => Some(r.path.clone()),
+        Selection::None | Selection::Unusable(_) => None,
+    };
 
     // Choices: asked on the terminal, or all given.
+    // Anything but all three choices with `--yes` asked on a terminal (no
+    // terminal needs all three).
+    let asked = !(args.yes && args.icons.is_some() && args.mode.is_some());
     let choices = match (&tty, given) {
         (_, Some(c)) => c,
         (Some(t), None) => {
@@ -371,6 +523,12 @@ pub fn run(args: &[OsString]) -> ExitCode {
         }
         (None, None) => return ctx::code(EXIT_USAGE),
     };
+    if let Some(file) = chosen {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = start.root_bytes(file.as_os_str().as_bytes());
+        report_existing(&file, bytes, choices);
+        return finish(runs_here);
+    }
     let path = dir.join(FILE);
 
     let mut groups = SystemGroups::new(&user.pw.name);
@@ -400,8 +558,8 @@ pub fn run(args: &[OsString]) -> ExitCode {
         match existing(chain) {
             Ok(None) => {}
             other => {
-                report_existing(&dir, other, choices);
-                return finish();
+                report_found(&dir, other, choices);
+                return finish(runs_here);
             }
         }
     }
@@ -415,9 +573,37 @@ pub fn run(args: &[OsString]) -> ExitCode {
             Some(true) => {}
             Some(false) => {
                 eprintln!("bingsu: nothing written.");
-                return finish();
+                return finish(runs_here);
             }
             None => return cancelled(),
+        }
+    }
+    let text = starter(choices);
+    let file = NewFile {
+        display: opening
+            .root
+            .join(FILE)
+            .into_os_string()
+            .into_encoded_bytes(),
+        trust: if opening.shape_only {
+            Trust::ShapeOnly
+        } else {
+            Trust::Executable
+        },
+    };
+    let sources = Sources::new(start, file, ctx::version());
+    drop(opening);
+    // The settings read again: what the choices were made against must
+    // still be what the reader reads.
+    match read_sources(&user, &env, runs_here) {
+        Ok((_, now)) if sources.unchanged(&now) => {}
+        Ok(_) => {
+            eprint!("{}", changed_words(&text));
+            return ctx::code(EXIT_FAILED);
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            return refuse("the settings could not be read again, so nothing was written");
         }
     }
     let chain = match chain {
@@ -427,16 +613,31 @@ pub fn run(args: &[OsString]) -> ExitCode {
             Err(_) => return refuse(&format!("{} cannot be made", ctx::show(&dir))),
         },
     };
-    match create(&chain, &dir, &starter(choices)) {
+    // From the temporary file to its removal nothing ends the process: a
+    // Ctrl-C or a TERM then comes after.
+    let held = sys::hold_signals();
+    let made = create(&chain, &dir, &text);
+    drop(held);
+    match made {
         Ok(Created::Wrote) => eprintln!("bingsu: wrote {}", ctx::show(&path)),
         Ok(Created::Unflushed) => eprintln!(
             "bingsu: wrote {}, but the folder could not be flushed; it may not survive a crash",
             ctx::show(&path)
         ),
-        Ok(Created::Exists) => report_existing(&dir, existing(&chain), choices),
+        Ok(Created::Exists) => {
+            report_found(&dir, existing(&chain), choices);
+            return finish(runs_here);
+        }
         Err(_) => return refuse(&format!("{} could not be written", ctx::show(&path))),
     }
-    finish()
+    // The startup line goes out first: the deadline below may end the
+    // process.
+    let code = finish(runs_here);
+    apply_written(exe, &user, &env, runs_here);
+    if asked {
+        eprintln!("{DOCTOR}");
+    }
+    code
 }
 
 fn cancelled() -> ExitCode {
@@ -444,20 +645,20 @@ fn cancelled() -> ExitCode {
     ExitCode::from(CANCELLED)
 }
 
-/// What the startup line is for: a shell `init` already ran in has the
-/// roots it pinned.
+/// What the startup line is for: a shell `init` already ran in (or its
+/// parent) has the roots it pinned.
 fn startup_note(runs_here: bool) -> &'static str {
     if runs_here {
-        "bingsu already runs in this shell; this line is only for a new setup:"
+        "bingsu already runs in this shell or the shell that started it; this line is only for a new setup:"
     } else {
         "Add this to your shell's startup file to start bingsu:"
     }
 }
 
 /// The startup line on stdout, and a word on stderr about what it is.
-fn finish() -> ExitCode {
+fn finish(runs_here: bool) -> ExitCode {
     let shell = TrustedEnv::login_shell();
-    eprintln!("{}", startup_note(TrustedEnv::pinned_roots().is_some()));
+    eprintln!("{}", startup_note(runs_here));
     if ctx::print(&startup_lines(shell.as_deref())) {
         ExitCode::SUCCESS
     } else {
@@ -587,12 +788,60 @@ mod tests {
         assert_eq!(yes(None, true), None);
     }
 
+    // 이것을 실패시키는 것: 다시 읽기가 달라졌을 때 "nothing written"을 빼는 것, 주석·빈 줄을 키로 내는 것, 키의
+    // 제어 바이트를 그대로 내는 것.
+    #[test]
+    fn a_changed_reading_says_what_it_would_have_written() {
+        let w =
+            changed_words("#:schema x\n# a note\n\n[style]\npreset = \"pill\"\nx = \"\x1b[2J\"\n");
+        assert_eq!(
+            w,
+            "bingsu: settings changed while you edited; nothing written.\nThese are the keys it would have written:\n  [style]\n  preset = \"pill\"\n  x = \"[2J\"\n"
+        );
+    }
+
+    // 이것을 실패시키는 것: 발행의 끝마다 문구를 바꾸는 것(바쁨을 실패로, 유효하지 않음을 적용으로), 빠진 파일을
+    // 알리지 않거나 그 경로의 제어 바이트를 그대로 내는 것, 그대로인 설정에 reload의 문구를 쓰지 않는 것.
+    #[test]
+    fn every_publication_ending_has_its_words() {
+        let published = Applied::Published {
+            generation: 3,
+            left_out: vec![std::path::PathBuf::from("/c/x\u{1b}.toml")],
+        };
+        assert_eq!(
+            applied_words(&published),
+            "bingsu: applied; the next prompt shows it\nbingsu: left out, nothing in it runs: /c/x.toml\n"
+        );
+        assert_eq!(
+            applied_words(&Applied::Unchanged { generation: 3 }),
+            "bingsu: applied; the settings did not change (generation 3)\n"
+        );
+        assert_eq!(
+            applied_words(&Applied::Invalid),
+            "bingsu: not applied; the prompt keeps the last valid settings\n"
+        );
+        assert_eq!(
+            applied_words(&Applied::Busy),
+            "bingsu: saved; another refresh is running, so the next prompt picks it up\n"
+        );
+        for (a, m) in [
+            (Applied::Incomplete, MsgId::ReloadIncomplete),
+            (Applied::OverCap, MsgId::ReloadOverCap),
+            (
+                Applied::Unavailable(MsgId::NoRuntimeRoot),
+                MsgId::NoRuntimeRoot,
+            ),
+        ] {
+            assert_eq!(applied_words(&a), format!("{}\n", en(m)));
+        }
+    }
+
     // 이것을 실패시키는 것: init이 고정한 값이 있는 셸과 없는 셸의 안내를 바꾸는 것.
     #[test]
     fn the_startup_note_says_whether_bingsu_runs_here() {
         assert_eq!(
             startup_note(true),
-            "bingsu already runs in this shell; this line is only for a new setup:"
+            "bingsu already runs in this shell or the shell that started it; this line is only for a new setup:"
         );
         assert_eq!(
             startup_note(false),

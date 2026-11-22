@@ -74,6 +74,19 @@ impl Resolver for Recorder<'_> {
 }
 
 impl Tape {
+    /// The bytes the reading got for the root it names `display`, when it
+    /// read them.
+    pub(crate) fn root_bytes(&self, display: &[u8]) -> Option<&[u8]> {
+        let key = self.roots.iter().find_map(|r| match r {
+            Root::File(m) if m.display == display => Some(m.key),
+            _ => None,
+        })?;
+        self.calls.iter().find_map(|c| match c {
+            Call::Root(k, Ok(o)) if *k == key => Some(o.bytes.as_slice()),
+            _ => None,
+        })
+    }
+
     /// Loads `roots` through `loader` and keeps what it answered. The
     /// report is the start's own reading, without the new file.
     pub(crate) fn read(
@@ -153,46 +166,41 @@ pub(crate) struct NewFile {
     pub trust: Trust,
 }
 
+/// The new file's key while it has no inode. No file has inode 0 (the
+/// built-in source's `config_load::BUILTIN_KEY` is `0, 0`), and the
+/// loader's stand-ins for roots it does not read have `dev` all ones. The
+/// key lives only in a preview's catalog: the loader never sees it, so no
+/// trust or evidence is kept under it from one reading to the next.
+pub(crate) const NEW_FILE_KEY: FileKey = FileKey { dev: 1, ino: 0 };
+
 /// The start's tape and the file to add to it.
 pub(crate) struct Sources {
     tape: Tape,
     file: NewFile,
-    /// A key no source of the tape has: the new file has no inode yet.
-    key: FileKey,
     version: Version,
 }
 
 impl Sources {
     pub(crate) fn new(tape: Tape, file: NewFile, version: Version) -> Self {
-        // A root read has its root's key (the loader checks it), and every
-        // `extends` starts from a file already met.
-        let taken = |k: FileKey| {
-            tape.roots.iter().any(|r| root_key(r) == k)
-                || tape
-                    .calls
-                    .iter()
-                    .any(|c| matches!(c, Call::Edge { got: Ok(o), .. } if o.key == k))
-        };
-        let mut key = FileKey { dev: 0, ino: 1 };
-        while taken(key) {
-            key.ino += 1;
-        }
         Self {
             tape,
             file,
-            key,
             version,
         }
     }
 
-    /// The settings with `bytes` as the new file, loaded from the tape.
+    /// The settings with `bytes` as the new file, loaded from the tape. The
+    /// file stands where the reader puts the settings folder's own file:
+    /// `Loader::roots` gives the built-in source, then that place
+    /// (`config.toml` or `config.json`), then `conf.d` and `config.local`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the editor previews with it"))]
     pub(crate) fn load(&self, bytes: &[u8]) -> Result<LoadReport, LoadError> {
         let mut roots = self.tape.roots.clone();
         let at = 1.min(roots.len());
         roots.insert(
             at,
             Root::Read(Opened {
-                key: self.key,
+                key: NEW_FILE_KEY,
                 bytes: bytes.to_vec(),
                 trust: self.file.trust,
                 display: self.file.display.clone(),
@@ -206,23 +214,17 @@ impl Sources {
     }
 
     /// The new file's place in a catalog `load` returned.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the editor previews with it"))]
     pub(crate) fn target(&self, files: &[Found]) -> Option<SourceId> {
         files
             .iter()
-            .find(|f| f.opened.key == self.key)
+            .find(|f| f.opened.key == NEW_FILE_KEY)
             .map(|f| f.id)
     }
 
     /// Whether `now`, a reading made later, saw the same sources.
     pub(crate) fn unchanged(&self, now: &Tape) -> bool {
         self.tape == *now
-    }
-}
-
-fn root_key(r: &Root) -> FileKey {
-    match r {
-        Root::Read(o) => o.key,
-        Root::File(m) | Root::TwoFormats { meta: m, .. } => m.key,
     }
 }
 

@@ -101,6 +101,8 @@ pub(crate) struct Opening {
     pub root: PathBuf,
     pub written: PathBuf,
     pub notice: Option<[String; 2]>,
+    /// Nothing under the folder may run (`ConfigRootPin::shape_only`).
+    pub shape_only: bool,
 }
 
 /// The loader for `pinned`, the roots `init` pinned (`None`: the folders
@@ -128,7 +130,8 @@ pub(crate) fn open_loader(
             (pin, roots::state_root(env, &user.pw.home), written)
         }
     };
-    let (root, root_notice) = (pin.path.clone(), pin.shape_only_notice());
+    let (root, root_notice, shape_only) =
+        (pin.path.clone(), pin.shape_only_notice(), pin.shape_only);
     let session = state
         .as_deref()
         .map(|s| trust_record::read_session(s, user.me, &mut groups));
@@ -161,19 +164,31 @@ pub(crate) fn open_loader(
         root,
         written,
         notice: root_notice,
+        shape_only,
     })
 }
 
 /// Reads the settings the way the helper does, writing nothing. `Err` is
 /// the fixed message and exit code of a root that cannot be used at all.
 pub fn inspect_config(user: &User, env: &TrustedEnv) -> Result<Inspection, (String, u8)> {
+    inspect_with(user, env, ctx::pinned_roots(user)?)
+}
+
+/// `inspect_config` for the roots the caller found (`setup` warns about
+/// no unpinned roots).
+pub(crate) fn inspect_with(
+    user: &User,
+    env: &TrustedEnv,
+    pinned: Option<Roots>,
+) -> Result<Inspection, (String, u8)> {
     let Opening {
         mut loader,
         selection,
         root,
         written,
         notice: root_notice,
-    } = open_loader(user, env, ctx::pinned_roots(user)?)?;
+        ..
+    } = open_loader(user, env, pinned)?;
     let roots_in = loader.roots(BUILTIN_TOML.as_bytes());
     let loaded = load(roots_in, &mut loader, ctx::version());
     let mut report = report::from_loaded(loaded, Mode::Dark);
@@ -1011,7 +1026,16 @@ enum Extra {
 /// code it exits with: the same reading, the same executor lookups and notes
 /// (`env_shebang_notes`), the same text. `config edit` shows it after an edit.
 pub fn check_report(user: &User, env: &TrustedEnv) -> Result<(String, u8), (String, u8)> {
-    let mut i = inspect_config(user, env)?;
+    check_report_with(user, env, ctx::pinned_roots(user)?)
+}
+
+/// `check_report` for the roots the caller found.
+pub(crate) fn check_report_with(
+    user: &User,
+    env: &TrustedEnv,
+    pinned: Option<Roots>,
+) -> Result<(String, u8), (String, u8)> {
+    let mut i = inspect_with(user, env, pinned)?;
     let found = lookups(
         &i.report,
         env.path.as_deref(),

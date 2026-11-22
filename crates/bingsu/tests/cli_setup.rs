@@ -275,9 +275,11 @@ fn a_json_config_is_the_settings_file_already_there() {
 }
 
 // 이것을 실패시키는 것: init이 고정한 값이 있는 셸에서 시작 줄을 새로 넣으라고 하는 것, 없는 셸에서 이미 돈다고
-// 하는 것, 고정한 설정 폴더가 아닌 곳(지금의 XDG_CONFIG_HOME)에 쓰는 것, 시작 줄을 stdout 밖에 내는 것.
+// 하는 것, 고정한 설정 폴더가 아닌 곳(지금의 XDG_CONFIG_HOME)에 쓰는 것, 시작 줄을 stdout 밖에 내는 것,
+// bingsu가 도는 셸에서 쓴 뒤 발행하지 않는 것, 돌지 않는 셸에서 발행하는 것(런타임 폴더를 만듦), `--yes`로
+// 다 준 경로에 doctor 안내를 내는 것.
 #[test]
-fn the_startup_line_says_whether_bingsu_already_runs_here() {
+fn a_shell_that_runs_bingsu_gets_the_file_applied() {
     let e = user_env::Env::new("cli_setup", "runs-here");
     let var = user_env::frame(&e.pinned_words());
     let args = ["setup", "--yes", "--icons", "nerd", "--mode", "dark"];
@@ -289,20 +291,138 @@ fn the_startup_line_says_whether_bingsu_already_runs_here() {
     assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
     let err = text(&o.stderr);
     assert!(
-        err.contains("bingsu already runs in this shell; this line is only for a new setup:\n"),
+        err.contains("bingsu already runs in this shell or the shell that started it; this line is only for a new setup:\n"),
         "{err}"
     );
     assert!(!err.contains("Add this"), "{err}");
+    assert!(
+        err.contains("bingsu: applied; the next prompt shows it\n"),
+        "{err}"
+    );
+    assert!(!err.contains("bingsu doctor"), "{err}");
     assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
     assert!(e.config_dir().join("config.toml").exists());
+    assert!(e.context_dir().join("snapshot").exists(), "published");
     assert!(!e.base.join("elsewhere").exists());
 
     let h = Home::new("runs-not");
     let o = h.run(&args[1..]);
     assert_eq!(o.status.code(), Some(0), "{o:?}");
+    let err = text(&o.stderr);
     assert!(
-        text(&o.stderr).contains("Add this to your shell's startup file to start bingsu:\n"),
-        "{}",
-        text(&o.stderr)
+        err.contains("Add this to your shell's startup file to start bingsu:\n"),
+        "{err}"
     );
+    assert!(
+        err.contains("bingsu: the new look shows once your shell loads bingsu\n"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("applied") && !err.contains("bingsu doctor"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("result:"),
+        "the check is shown only when not valid: {err}"
+    );
+    assert_eq!(
+        h.tree(),
+        ["cfg 700", "cfg/bingsu 700", "cfg/bingsu/config.toml 600"],
+        "nothing published"
+    );
+}
+
+// 이것을 실패시키는 것: `config use`로 고른 파일이 있는데 설정 폴더에 읽히지 않을 config.toml을 만드는 것, 고른
+// 파일과 비교하지 않는 것, 고른 파일이 없는데 쓰는 것, 그때 종료 코드가 1이 아니거나 시작 줄을 내는 것.
+#[test]
+fn the_chosen_settings_file_is_the_one_setup_looks_at() {
+    let e = user_env::Env::new("cli_setup", "chosen");
+    let chosen = e.put("other/work.toml", "icons = \"ascii\"\n");
+    let o = e.run(&["config", "use", chosen.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let run = || {
+        let mut c = e.cmd(&["setup", "--yes", "--icons", "nerd", "--mode", "dark"]);
+        c.env("SHELL", "/bin/zsh");
+        // SAFETY: `detach` only calls setsid, which is async-signal-safe.
+        unsafe { c.pre_exec(detach) };
+        c.output().unwrap()
+    };
+    let o = run();
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(
+        err.contains("other/work.toml is already there, so nothing was written."),
+        "{err}"
+    );
+    assert!(
+        err.contains("icons: \"ascii\" now, \"nerd\" suggested"),
+        "{err}"
+    );
+    assert!(!e.config_dir().join("config.toml").exists());
+    assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
+
+    std::fs::remove_file(&chosen).unwrap();
+    let o = run();
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(&format!(
+            "bingsu: your chosen settings file {} is missing; run bingsu config use again\n",
+            chosen.display()
+        )),
+        "{err}"
+    );
+    assert!(!e.config_dir().join("config.toml").exists());
+    assert!(o.stdout.is_empty());
+}
+
+// 이것을 실패시키는 것: `config use` 기록을 읽지 못했을 때(읽힐 파일을 모름) 설정 폴더에 쓰는 것, 그때 종료 코드가
+// 1이 아닌 것.
+#[test]
+fn an_unreadable_settings_choice_writes_nothing() {
+    let e = user_env::Env::new("cli_setup", "choice-unread");
+    let long = e.base.join("x".repeat(300));
+    let mut c = e.cmd(&["setup", "--yes", "--icons", "nerd", "--mode", "dark"]);
+    // A name longer than a folder may hold: opening the state root fails
+    // with ENAMETOOLONG, which says nothing about the record.
+    c.env("XDG_STATE_HOME", &long).env("SHELL", "/bin/zsh");
+    // SAFETY: `detach` only calls setsid, which is async-signal-safe.
+    unsafe { c.pre_exec(detach) };
+    let o = c.output().unwrap();
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("the settings choice could not be read"),
+        "{err}"
+    );
+    assert!(!e.config_dir().join("config.toml").exists());
+}
+
+// 이것을 실패시키는 것: 다른 파일 때문에 유효하지 않은 설정을 쓴 뒤 검사 출력을 보이지 않는 것, 그것을 stdout에
+// 내는 것, 그때 새 모습이 나온다고 하는 것, 쓴 파일이 있는데 종료 코드가 0이 아닌 것.
+#[test]
+fn another_invalid_file_is_shown_and_nothing_claims_to_apply() {
+    let h = Home::new("invalid-other");
+    let conf = h.config().parent().unwrap().join("conf.d");
+    std::fs::create_dir_all(&conf).unwrap();
+    for d in [h.0.join("cfg"), h.0.join("cfg/bingsu"), conf.clone()] {
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(conf.join("10-bad.toml"), "[style]\ngap = 1234\n").unwrap();
+    std::fs::set_permissions(
+        conf.join("10-bad.toml"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let o = h.run(&["--yes", "--icons", "nerd", "--mode", "dark"]);
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(h.config().exists());
+    assert!(err.contains("E202"), "{err}");
+    assert!(
+        err.contains("bingsu: not applied; the prompt keeps the last valid settings\n"),
+        "{err}"
+    );
+    assert!(!err.contains("new look"), "{err}");
+    assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
 }
