@@ -76,19 +76,27 @@
 //! Pasting. With bracketed paste on (`CSI ? 2004 h`, the terminal marks a
 //! paste with `ESC [ 200 ~` and `ESC [ 201 ~`) the whole paste is dropped.
 //! Without the marks, pasting and typing cannot be told apart for sure; a
-//! guess stands in: a read with `BURST` (4) or more keys (a sequence is one
-//! key) counts as pasted and its keys are dropped, all but a Ctrl-C in it:
-//! cancelling writes nothing, and with `ISIG` off the 0x03 byte is the
-//! user's only quick way out, also when fast typing comes in one read (a
-//! slow ssh link). After a burst the next read is read as usual, with no
-//! drain: a paste longer than one read can leave one to three keys in its
-//! last read, which costs less than dropping what is typed next over a
-//! slow link. That is a weak guarantee, and a paste of up to three keys
-//! gets through. So a key that loses something (`q` with changes, Enter on
-//! the save screen) must be taken twice, and only a second press from a
-//! later read (a later `feed` call) confirms: all keys of one `Keys` came
-//! in one read. Two keys in one read are no confirmation: `qq`, or `\r\n`,
-//! which a terminal in newline mode (LNM) sends for one Enter (`\n\n` after
+//! guess stands in: a read with `BURST` (4) or more keys counts as pasted
+//! and its keys are dropped, all but a Ctrl-C in it. Every unit the reader
+//! drops in Ground counts as a key here too: a sequence (one, however
+//! long), a sequence cut by a new ESC, a broken or a whole character
+//! outside ASCII, a stray byte, an ESC dropped before a byte outside ASCII.
+//! Otherwise a paste padded with such units (`ESC [` again and again, 0xff,
+//! Latin-1 text) would keep each read under `BURST` and let one key per
+//! read through, a second Enter from a later read included.
+//!
+//! A Ctrl-C in a burst is kept: cancelling writes nothing, and with `ISIG`
+//! off the 0x03 byte is the user's only quick way out, also when fast
+//! typing comes in one read (a slow ssh link). After a burst the next read
+//! is read as usual, with no drain: a paste longer than one read can leave
+//! one to three keys in a read the read size cut short (its first or its
+//! last), which costs less than dropping what is typed next over a slow
+//! link. That is a weak guarantee, and a paste of up to three keys gets
+//! through. So a key that loses something (`q` with changes, Enter on the
+//! save screen) must be taken twice, and only a second press from a later
+//! read (a later `feed` call) confirms: all keys of one `Keys` came in one
+//! read. Two keys in one read are no confirmation: `qq`, or `\r\n`, which a
+//! terminal in newline mode (LNM) sends for one Enter (`\n\n` after
 //! `ICRNL`) and which comes out as two Enter keys. That check belongs to
 //! the editor.
 use core::time::Duration;
@@ -489,6 +497,9 @@ impl KeyReader {
                 // 깨는 바이트를 다시 읽지 않는 것(`0xE2 ESC [ A`의 ESC를 삼킴).
                 if !(lo..=hi).contains(&b) {
                     self.state = State::Ground;
+                    // 이것을 실패시키는 것: 깨진 글자를 묶음에 세지 않는 것(잘못된 UTF-8로 채운 붙여 넣기가 읽기마다 키를
+                    // 흘림).
+                    found.key(None);
                     return true;
                 }
                 if need <= 1 {
@@ -534,6 +545,9 @@ impl KeyReader {
             0x80..=0x9f => {
                 if let Some(state) = introduce(b - 0x40, now, false) {
                     self.state = state;
+                } else {
+                    // 이것을 실패시키는 것: 도입 바이트가 아닌 C1을 묶음에 세지 않는 것.
+                    found.key(None);
                 }
             }
             0xc2..=0xdf => self.utf8(1, 0x80, 0xbf),
@@ -544,7 +558,8 @@ impl KeyReader {
             0xf4 => self.utf8(3, 0x80, 0x8f),
             0xf1..=0xf3 => self.utf8(3, 0x80, 0xbf),
             // 0xa0-0xc1, 0xf5-0xff: no character starts with them.
-            _ => {}
+            // 이것을 실패시키는 것: 떠도는 바이트를 묶음에 세지 않는 것(0xff로 채운 붙여 넣기가 읽기마다 키를 흘림).
+            _ => found.key(None),
         }
     }
 
@@ -568,7 +583,10 @@ impl KeyReader {
         self.state = State::Ground;
         // 이것을 실패시키는 것: ESC 뒤 아스키 밖 바이트를 함께 버리는 것(`ESC 0x9f \r 0x9c`의 Enter가 키가 됨).
         if b >= 0x80 {
-            // The ESC is dropped; the byte is a C1 control or a character.
+            // The ESC is dropped, a unit of its own; the byte is a C1 control
+            // or a character.
+            // 이것을 실패시키는 것: 버린 ESC를 묶음에 세지 않는 것(`q ESC é q`가 키 넷이 아니게 됨).
+            found.key(None);
             return true;
         }
         // An Alt key, which the editor does not bind.
@@ -622,6 +640,9 @@ impl KeyReader {
             // 않는 것.
             ESC => {
                 self.state = State::Ground;
+                // 이것을 실패시키는 것: 끊긴 시퀀스를 묶음에 세지 않는 것(`ESC [`를 되풀이해 채운 붙여 넣기가 읽기마다 키를
+                // 흘림).
+                found.key(None);
                 true
             }
             _ => {

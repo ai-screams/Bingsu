@@ -133,13 +133,35 @@ fn other_input_is_dropped_and_the_reader_goes_on() {
     }
 }
 
-// 이것을 실패시키는 것: 잘못된 UTF-8을 글자 하나로 세는 것(이어지는 바이트 범위를 보지 않아 과장 부호화·대리 쌍이
-// 글자가 되고, 넷째 키로 세어 묶음이 됨).
+// 이것을 실패시키는 것: 이어지는 바이트 범위를 보지 않는 것(과장 부호화·대리 쌍·U+10FFFF 너머가 글자 하나가 되어,
+// 깨진 글자와 떠도는 바이트 둘이 아니라 하나로 세어짐).
 #[test]
 fn invalid_utf8_is_no_key() {
-    assert_eq!(one(b"q\xe0\x80\x80q\xed\xa0\x80"), [Char(b'q'); 2]);
-    assert_eq!(one(b"q\xf0\x80\x80\x80q\xf4\x90\x80\x80"), [Char(b'q'); 2]);
-    assert_eq!(one(b"q\x80\xbfq\xc0\xaf"), [Char(b'q'); 2]);
+    // A broken lead and its stray byte are two dropped units: with two `q`
+    // a read of four, a burst. A whole character is one.
+    assert_eq!(one(b"q\xe0\x80q"), []);
+    assert_eq!(one(b"q\xed\xa0q"), []);
+    assert_eq!(one(b"q\xf4\xa0q"), []);
+    assert_eq!(one(b"q\xe0\xa0\x80q"), [Char(b'q'); 2]);
+    assert_eq!(one(b"q\xed\x9f\xbfq"), [Char(b'q'); 2]);
+    assert_eq!(one(b"q\xf4\x8f\xbf\xbfq"), [Char(b'q'); 2]);
+}
+
+// 이것을 실패시키는 것: 버리는 단위 하나를 묶음에 세지 않는 것(끊긴 시퀀스, 깨진 글자, 도입 바이트가 아닌 C1, 떠도는
+// 바이트, 아스키 밖 바이트 앞에서 버린 ESC). 각 읽기는 그 단위 하나와 키 셋이라 넷이면 묶음이다.
+#[test]
+fn every_dropped_unit_counts_towards_a_burst() {
+    assert_eq!(one(b"qq\x1b[\x1b[A"), []);
+    assert_eq!(one(b"qq\xe9q"), []);
+    assert_eq!(one(b"qq\x85q"), []);
+    assert_eq!(one(b"qq\xffq"), []);
+    assert_eq!(one(b"q\x1b\xc3\xa9q"), []);
+    // One unit fewer: the keys come.
+    assert_eq!(one(b"q\x1b[\x1b[A"), [Char(b'q'), Up]);
+    assert_eq!(one(b"q\xe9q"), [Char(b'q'); 2]);
+    assert_eq!(one(b"q\x85q"), [Char(b'q'); 2]);
+    assert_eq!(one(b"q\xffq"), [Char(b'q'); 2]);
+    assert_eq!(one(b"\x1b\xc3\xa9q"), [Char(b'q')]);
 }
 
 // 이것을 실패시키는 것: 깨는 바이트를 다시 읽지 않는 것(`0xE2 ESC [ A`의 화살표, `0xC3 q`의 q, `0xE2 ESC [200~`의
@@ -180,8 +202,9 @@ fn c1_controls_are_their_esc_forms() {
     // After ESC, a C1 byte is read again.
     assert_eq!(one(b"\x1b\x9f\r\x9c"), []);
     assert_eq!(one(b"\x1b\x9bA"), [Up]);
-    // Stray C1 bytes are no keys.
-    assert_eq!(one(b"\x9cq\x85\x9c"), [Char(b'q')]);
+    // Stray C1 bytes are no keys, each a dropped unit.
+    assert_eq!(one(b"\x9cq\x85"), [Char(b'q')]);
+    assert_eq!(one(b"\x9cq\x85\x9c"), []);
     // A continuation byte of a character is no C1 control: `Û` is C3 9B.
     assert_eq!(one(b"\xc3\x9bA"), [Char(b'A')]);
     // In a payload a continuation 0x9c ends nothing (`Ŝ` is C5 9C), a 0x9c
