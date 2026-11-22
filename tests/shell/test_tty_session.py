@@ -33,7 +33,7 @@ MASKED = ("import os,signal,sys;"
           "signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGINT,signal.SIGTERM,signal.SIGHUP,"
           "signal.SIGTSTP,signal.SIGCONT,signal.SIGWINCH});"
           "os.execv(sys.argv[1],sys.argv[1:])")
-ENTER = b"\x1b[?1049h\x1b[?25l\x1b[?2004h"
+ENTER = b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
 LEAVE = b"\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l"
 
 

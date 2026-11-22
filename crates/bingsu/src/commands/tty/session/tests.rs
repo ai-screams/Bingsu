@@ -5,7 +5,8 @@ use crate::commands::tty::tests::pty::{
 use crate::commands::tty::{CANCEL, test_terminal};
 use std::os::unix::process::ExitStatusExt;
 
-const ENTER_ALL: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?2004h";
+const ENTER_ALL: &[u8] =
+    b"\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l";
 const LEAVE_ALL: &[u8] = b"\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l";
 const LEAVE_SYNCED: &[u8] = b"\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l";
 const WAIT: Duration = Duration::from_secs(5);

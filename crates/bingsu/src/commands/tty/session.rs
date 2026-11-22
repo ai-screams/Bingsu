@@ -5,9 +5,10 @@
 //! editing, no signal keys, no output flow control, non-blocking writes;
 //! `ICRNL` stays, so Enter comes as `\n`, or `\r` where the mode has no
 //! `ICRNL`) and then turns the alternate screen on (`CSI ? 1049 h`), hides
-//! the cursor (`CSI ? 25 l`) and turns bracketed paste on
-//! (`CSI ? 2004 h`). The caller then loops on [`Session::wait`], which
-//! returns one [`Event`]:
+//! the cursor (`CSI ? 25 l`), turns bracketed paste on (`CSI ? 2004 h`) and
+//! turns off mouse reports another program left on (`CSI ? 1000 l`, 1002,
+//! 1003, 1005, 1006, 1015; nothing of them is put back on the way out). The
+//! caller then loops on [`Session::wait`], which returns one [`Event`]:
 //!
 //! - `Input(bytes)`: what one read gave (keys, pasted text, late replies),
 //!   not parsed. Ctrl-C (0x03) and Ctrl-Z (0x1a) come as bytes: the caller
@@ -161,10 +162,20 @@ const PASTE: u8 = 4;
 const SYNC: u8 = 8;
 
 /// Turning the modes on, in order.
-const ENTER: [(u8, &[u8]); 3] = [
+const ENTER: [(u8, &[u8]); 4] = [
     (ALT, b"\x1b[?1049h"),
     (HIDDEN, b"\x1b[?25l"),
     (PASTE, b"\x1b[?2004h"),
+    // Mouse reports another program may have left on (X10 and normal
+    // tracking, button and any motion, the UTF-8, SGR and urxvt
+    // coordinates), so none reach the key parser: 1005's UTF-8 coordinates
+    // would read as keys. Nothing to put back: the session never turns
+    // them on.
+    // 이것을 실패시키는 것: 이 단계를 빼는 것(entering_and_leaving_put_every_mode_back_in_order의 진입 열).
+    (
+        0,
+        b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l",
+    ),
 ];
 
 /// What puts back the modes in `modes`, in the order of the way out: the
