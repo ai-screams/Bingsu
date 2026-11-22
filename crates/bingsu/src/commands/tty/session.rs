@@ -21,6 +21,9 @@
 //!   SIGSTOP) or a continue. The screen and the mode were taken again,
 //!   input typed meanwhile was dropped and a frame cut by the stop was
 //!   ended: drop pending output and key parser state, draw everything again.
+//!   It can be the first event after `full_screen` returns: a SIGSTOP and
+//!   `fg` while the modes went out stop the entry short, and the first
+//!   `wait` takes the terminal again from the start.
 //! - `Signal(sig)`: SIGINT, SIGTERM or SIGHUP came. End: dropping the
 //!   session restores the terminal, and the process then ends with that
 //!   signal (status 130, 143 or 129 in a shell). A signal the process
@@ -967,6 +970,16 @@ impl Session<'_> {
             self.modes |= mode;
             let (taken, ended) = self.put_owned(bytes, Instant::now() + WRITE_TIMEOUT);
             if let Some(ended) = ended {
+                // Not one byte of this mode went out before the entry
+                // stopped for the terminal (lost, or a continue first):
+                // nothing of it to put back. (A write that failed or timed
+                // out may have reached the terminal, so it stays.)
+                // 이것을 실패시키는 것: 이 기록을 지우지 않는 것(쓰지 않은 25l을 25h로 되돌림;
+                // a_reentry_whose_terminal_was_taken_waits_for_the_next_continue, an_entry_stopped_between_modes_and_fg_starts_again),
+                // 일부가 나간 모드도 지우는 것(an_entry_cut_by_sigstop_and_fg_starts_again).
+                if taken == 0 && matches!(ended, Entered::Lost | Entered::Resume) {
+                    self.modes &= !mode;
+                }
                 // The terminal is in the escape sequence the bytes began.
                 self.cut = taken > 0;
                 return ended;

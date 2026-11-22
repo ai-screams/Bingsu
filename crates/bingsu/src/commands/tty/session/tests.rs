@@ -1064,7 +1064,7 @@ fn job_shell(scenario: &str) -> (Vec<String>, Vec<u8>) {
         t.expect(b"REDRAW 1");
     }
     match scenario {
-        "entrystopfg" => t.send(b"q"),
+        "entrystopfg" | "enterstopfg" => t.send(b"q"),
         "reenterlost" => {
             t.send(b"\x1a");
             t.expect(b"REDRAW 2");
@@ -1362,11 +1362,9 @@ fn a_reentry_whose_terminal_was_taken_waits_for_the_next_continue() {
     ] {
         assert!(has(&lines, want), "{want}: {lines:?}");
     }
-    // The cursor's mode was recorded as on before its write found the
-    // terminal taken: its reset comes too (harmless for a mode never set).
     let again = cat(&[
         b"\x1b[?1049h",
-        b"\x1b[0m\x1b[?25h\x1b[?1049l",
+        b"\x1b[0m\x1b[?1049l",
         ENTER_ALL,
         b"\x1b[H\x1b[2JREDRAW 2",
     ]);
@@ -1411,6 +1409,30 @@ fn an_entry_cut_by_sigstop_and_fg_starts_again() {
     let want = cat(&[
         b"\x1b[?",
         CANCEL,
+        b"\x1b[0m\x1b[?1049l",
+        ENTER_ALL,
+        b"\x1b[H\x1b[2JREDRAW 1",
+        LEAVE_ALL,
+    ]);
+    assert_eq!(shown(&all), shown(&want));
+}
+
+// SIGSTOP after the alternate screen went on, and `fg`: the cursor's mode
+// finds the continue before any of its bytes went out, so the first wait
+// puts back only the alternate screen (no `25h` for a cursor never hidden)
+// and takes the terminal again. 이것을 실패시키는 것: 쓰지 않은 모드의 기록을 지우지 않는 것(25h가 끼어듦).
+#[test]
+fn an_entry_stopped_between_modes_and_fg_starts_again() {
+    let (lines, all) = job_shell("enterstopfg");
+    for want in [
+        "stopped by STOP true",
+        "job: first Resumed(Size { cols: 80, rows: 24 })",
+        "job ended true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
+    let want = cat(&[
+        b"\x1b[?1049h",
         b"\x1b[0m\x1b[?1049l",
         ENTER_ALL,
         b"\x1b[H\x1b[2JREDRAW 1",
@@ -1532,9 +1554,9 @@ fn job_shell_child() {
             }
         }
     });
-    if scenario == "entrystopfg" {
+    if scenario == "entrystopfg" || scenario == "enterstopfg" {
         // Stopped (SIGSTOP) while the alternate screen's switch waited for
-        // room; `fg`.
+        // room, or after it went out; `fg`.
         let (_, status) = wait_for(pid, libc::WUNTRACED);
         say(&format!(
             "stopped by STOP {}",
@@ -1892,7 +1914,7 @@ fn job_child() {
         "rawstop" => test_session::AFTER_RAW.set(Some(libc::SIGTSTP)),
         "leaveterm" => test_session::DURING_LEAVE.set([libc::SIGTERM, 0]),
         "leavecont" => test_session::DURING_LEAVE.set([libc::SIGTSTP, libc::SIGCONT]),
-        "enterlost" => test_session::AFTER_STEP.set(Some((0, libc::SIGSTOP))),
+        "enterlost" | "enterstopfg" => test_session::AFTER_STEP.set(Some((0, libc::SIGSTOP))),
         "entrystopfg" | "entrytaken" => {
             test_terminal::ROOM.set(Some((3, test_terminal::Then::Stall)));
             test_session::PAUSE.set(Some(if scenario == "entrytaken" {
@@ -1912,7 +1934,7 @@ fn job_child() {
             return;
         }
     };
-    if scenario == "entrystopfg" {
+    if scenario == "entrystopfg" || scenario == "enterstopfg" {
         // The entry stopped short for the continue; the first wait takes the
         // terminal again from the start.
         let event = format!("{:?}", s.wait(false, Some(Instant::now() + WAIT)));
