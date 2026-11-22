@@ -41,14 +41,23 @@
 //! first, then `tcflush(TCIFLUSH)` for what is still queued: `TCSAFLUSH`
 //! would wait for the output to drain, which never ends when the output is
 //! stopped (Ctrl-S) and `ISIG` is off.
+//!
+//! A full-screen session (`bingsu setup`'s editor) builds on the same guard:
+//! see [`session`].
 use super::sys;
 use bingsu_core::color::osc11::REPLY_MAX;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the setup editor calls it from a later change")
+)]
+pub mod session;
 
 /// How long the terminal gets to answer. A hypothesis (200 ms): the setup
 /// measurement of the answer time per terminal sets the final value.
@@ -227,6 +236,35 @@ static CAUGHT: AtomicU64 = AtomicU64::new(0);
 extern "C" fn on_signal(sig: libc::c_int) {
     CAUGHT.fetch_or(1u64 << (sig & 63), Ordering::SeqCst);
     STOP.store(true, Ordering::SeqCst);
+    // 이것을 실패시키는 것: 깨우지 않는 것(마감 없는 wait가 끝나지 않음; a_signal_from_outside_wakes_a_wait_with_no_time_limit).
+    wake();
+}
+
+/// The write end of the full-screen session's wake pipe once the first
+/// session made it, else -1. The pipe is made once per process and never
+/// closed (`session`), so a handler that loaded the number never writes into
+/// a file that took it over.
+static WAKE: AtomicI32 = AtomicI32::new(-1);
+
+/// Called from signal handlers: wakes a session's wait, which may have
+/// checked the flags just before this signal came (one byte on the wake
+/// pipe; before any session the write to -1 fails at once). Async-signal-safe:
+/// atomics and one non-blocking `write`. errno is put back, since the write
+/// can fail (EAGAIN on a full pipe, EBADF) between a call the handler
+/// interrupted and that call's read of errno.
+fn wake() {
+    let fd = WAKE.load(Ordering::SeqCst);
+    let errno = sys::errno_location();
+    // SAFETY: errno_location gives this thread's errno slot, valid while the
+    // thread runs; the handler runs on it.
+    let was = unsafe { *errno };
+    let byte = 1u8;
+    // SAFETY: `fd` is the wake pipe's write end, which is never closed, or
+    // -1; one byte from a local.
+    let _ = unsafe { libc::write(fd, (&raw const byte).cast(), 1) };
+    // 이것을 실패시키는 것: errno를 되돌리지 않는 것(waking_writes_one_byte_and_keeps_errno).
+    // SAFETY: as above.
+    unsafe { *errno = was };
 }
 
 const SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
@@ -239,6 +277,49 @@ struct Raw {
     saved: libc::termios,
     flags: libc::c_int,
     old: [Option<libc::sigaction>; 3],
+    /// The mode was switched (or a switch was tried): `saved` goes back on
+    /// `Drop`. A query guard keeps it to the end; a full-screen session
+    /// gives the terminal back before a stop and takes it again after
+    /// (`restore_terminal`, `reenter`).
+    on: bool,
+}
+
+/// The terminal's mode and this descriptor's status flags, as they are.
+fn read_mode(fd: RawFd) -> std::io::Result<(libc::termios, libc::c_int)> {
+    // Zeroed first: tcgetattr need not write every byte. musl passes the
+    // structure to the TCGETS ioctl, whose kernel structure is shorter (the
+    // tail of `c_cc` and the two speeds stay as they were).
+    // SAFETY: an all-zero `termios` (integers and arrays of integers) is a
+    // valid value.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is an open descriptor and `saved` is a valid structure
+    // of the type tcgetattr fills.
+    if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is open; F_GETFL only reads its status flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((saved, flags))
+}
+
+/// `saved` with no echo, no line editing, no signal keys and no output flow
+/// control, where a read returns at once with what is there. `ICRNL` stays:
+/// Enter comes as `\n` (or `\r` where the terminal mode has no `ICRNL`).
+fn raw_mode(saved: &libc::termios) -> libc::termios {
+    let mut raw = *saved;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
+    // Ctrl-S would stop the output, and on Linux a write then waits until
+    // Ctrl-Q, past any deadline (Ctrl-C cannot end it: ISIG is off). With
+    // IXON off the key is input that the next query discards, and Linux
+    // restarts output that was stopped before. macOS keeps such output
+    // stopped; small writes still return, so the query ends silent.
+    raw.c_iflag &= !libc::IXON;
+    raw.c_cc[libc::VMIN] = 0;
+    raw.c_cc[libc::VTIME] = 0;
+    raw
 }
 
 /// Whether this process is the terminal's foreground job. Only that job may
@@ -258,29 +339,7 @@ impl Raw {
     /// and no output flow control, where a read returns at once with what is
     /// there, and makes its writes non-blocking.
     fn enter(fd: RawFd) -> std::io::Result<Self> {
-        let mut saved = std::mem::MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: `fd` is an open descriptor and `saved` is writable memory
-        // of the type tcgetattr fills.
-        if unsafe { libc::tcgetattr(fd, saved.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: tcgetattr returned 0, so it wrote the whole structure.
-        let saved = unsafe { saved.assume_init() };
-        // SAFETY: `fd` is open; F_GETFL only reads its status flags.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut raw = saved;
-        raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
-        // Ctrl-S would stop the output, and on Linux a write then waits until
-        // Ctrl-Q, past any deadline (Ctrl-C cannot end it: ISIG is off). With
-        // IXON off the key is input that the next query discards, and Linux
-        // restarts output that was stopped before. macOS keeps such output
-        // stopped; small writes still return, so the query ends silent.
-        raw.c_iflag &= !libc::IXON;
-        raw.c_cc[libc::VMIN] = 0;
-        raw.c_cc[libc::VTIME] = 0;
+        let (saved, flags) = read_mode(fd)?;
         STOP.store(false, Ordering::SeqCst);
         let mut old: [Option<libc::sigaction>; 3] = [None; 3];
         for (slot, sig) in old.iter_mut().zip(SIGNALS) {
@@ -302,14 +361,25 @@ impl Raw {
             unsafe { libc::sigaction(sig, &act, &mut was) };
             *slot = Some(was);
         }
-        let this = Self {
+        let mut this = Self {
             fd,
             saved,
             flags,
             old,
+            on: false,
         };
+        this.take()?;
+        Ok(this)
+    }
+
+    /// Switches the terminal to `raw_mode(saved)` and makes this
+    /// descriptor's writes non-blocking.
+    fn take(&mut self) -> std::io::Result<()> {
+        // Recorded first: a switch that failed half way is put back too.
+        self.on = true;
+        let raw = raw_mode(&self.saved);
         // SAFETY: `fd` is open and `raw` is the structure tcgetattr filled.
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+        if unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &raw) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
         // A terminal whose reader stopped taking output (a full queue) would
@@ -317,10 +387,53 @@ impl Raw {
         // open of /dev/tty, so the flag does not reach the shell's
         // descriptors, which share no open file description with it.
         // SAFETY: `fd` is open; F_SETFL changes only its status flags.
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        if unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.flags | libc::O_NONBLOCK) } == -1 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(this)
+        Ok(())
+    }
+
+    /// Takes the terminal again after `restore_terminal`, from the mode it
+    /// has now: a job that was stopped comes back to whatever mode the shell
+    /// gave the terminal (zsh puts back the one it had at the stop), and the
+    /// user may have changed it meanwhile (`stty`).
+    fn reenter(&mut self) -> std::io::Result<()> {
+        let (saved, flags) = read_mode(self.fd)?;
+        self.saved = saved;
+        self.flags = flags;
+        self.take()
+    }
+
+    /// Puts the saved mode and status flags back, when they were switched;
+    /// the handlers stay. See `Drop` for the order.
+    fn restore_terminal(&mut self) {
+        // 이것을 실패시키는 것: 바꾸지 않은 모드도 되돌리는 것(배경에서 tcsetattr; a_session_that_lost_the_terminal_does_not_touch_it).
+        if !self.on {
+            return;
+        }
+        self.on = false;
+        let (fd, saved) = (self.fd, &self.saved);
+        // TCSANOW, not TCSAFLUSH: that one waits for the output to drain.
+        restore_with(|| {
+            // SAFETY: `fd` is the open terminal this was made for; `saved`
+            // came from tcgetattr.
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, saved) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+        for _ in 0..RESTORE_TRIES {
+            // SAFETY: as above. A second discard of what arrived meanwhile.
+            if unsafe { libc::tcflush(fd, libc::TCIFLUSH) } == 0
+                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                break;
+            }
+        }
+        // Blocking again, for `Tty::line` and `Tty::say`.
+        // SAFETY: as above; F_SETFL puts back the flags F_GETFL read.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, self.flags) };
     }
 }
 
@@ -348,28 +461,7 @@ fn settle(result: Answer, stop: bool) -> Answer {
 
 impl Drop for Raw {
     fn drop(&mut self) {
-        let (fd, saved) = (self.fd, &self.saved);
-        // TCSANOW, not TCSAFLUSH: that one waits for the output to drain.
-        restore_with(|| {
-            // SAFETY: `fd` is the open terminal this was made for; `saved`
-            // came from tcgetattr.
-            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, saved) } == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-        for _ in 0..RESTORE_TRIES {
-            // SAFETY: as above. A second discard of what arrived meanwhile.
-            if unsafe { libc::tcflush(fd, libc::TCIFLUSH) } == 0
-                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-            {
-                break;
-            }
-        }
-        // Blocking again, for `Tty::line` and `Tty::say`.
-        // SAFETY: as above; F_SETFL puts back the flags F_GETFL read.
-        unsafe { libc::fcntl(fd, libc::F_SETFL, self.flags) };
+        self.restore_terminal();
         // The handlers go back after the terminal does.
         for (old, sig) in self.old.iter().zip(SIGNALS) {
             if let Some(old) = old {
@@ -758,7 +850,7 @@ enum Spent {
 /// The terminal in raw mode, from `Tty::raw` until it is dropped.
 pub struct RawGuard<'a> {
     tty: &'a Tty,
-    _raw: Raw,
+    raw: Raw,
     /// After `_raw`: the place is given back once the terminal is restored.
     _slot: Slot,
     spent: Option<Spent>,
@@ -921,13 +1013,37 @@ impl Terminal for RawGuard<'_> {
 /// reports 0. Asks nothing and changes no mode, so any descriptor will do,
 /// standard output included (`bingsu explain`).
 pub fn columns_of(fd: BorrowedFd<'_>) -> Option<u16> {
+    // 이것을 실패시키는 것: 0칸을 받는 것(columns_come_from_the_window_size의 0칸 터미널).
+    window_size(fd).and_then(|size| (size.cols > 0).then_some(size.cols))
+}
+
+/// A terminal window's size in cells.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Size {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Columns and rows of the terminal behind `fd` from `TIOCGWINSZ`, either
+/// 0 when the terminal does not know; `None` when `fd` is not a terminal.
+/// Asks nothing and changes no mode, as `columns_of`.
+pub fn window_size(fd: BorrowedFd<'_>) -> Option<Size> {
     // SAFETY: an all-zero `winsize` is a valid value for the call to fill.
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     // SAFETY: the descriptor is borrowed open for the call and `size` is
     // writable memory of the type TIOCGWINSZ fills.
     let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
-    // 이것을 실패시키는 것: 0칸을 받는 것(columns_come_from_the_window_size의 0칸 터미널).
-    (rc == 0 && size.ws_col > 0).then_some(size.ws_col)
+    (rc == 0).then_some(Size {
+        cols: size.ws_col,
+        rows: size.ws_row,
+    })
+}
+
+/// Whether `select` can take `fd`: one at or above FD_SETSIZE would make it
+/// abort, with the terminal raw.
+fn fits_select(fd: RawFd) -> bool {
+    // 이것을 실패시키는 것: FD_SETSIZE와 같은 번호를 받는 것, 음수를 받는 것(descriptors_that_fit_select).
+    fd >= 0 && fd < RawFd::try_from(libc::FD_SETSIZE).unwrap_or(RawFd::MAX)
 }
 
 impl Tty {
@@ -941,7 +1057,7 @@ impl Tty {
             .ok()?;
         // `select` cannot take a descriptor at or above FD_SETSIZE (it would
         // abort with the terminal raw): such a terminal is not used.
-        if file.as_raw_fd() >= RawFd::try_from(libc::FD_SETSIZE).unwrap_or(RawFd::MAX) {
+        if !fits_select(file.as_raw_fd()) {
             return None;
         }
         // A device that is not a terminal (or a stale node) is no terminal.
@@ -983,17 +1099,22 @@ impl Tty {
     /// while another guard in this process is alive (the signal flag and
     /// handlers are process-wide).
     pub fn raw(&self) -> std::io::Result<RawGuard<'_>> {
-        if !foreground(self.file.as_raw_fd()) {
-            return Err(std::io::Error::other("not the terminal's foreground job"));
-        }
-        let slot = Slot::take()?;
+        let slot = self.claim()?;
         let raw = Raw::enter(self.file.as_raw_fd())?;
         Ok(RawGuard {
             tty: self,
-            _raw: raw,
+            raw,
             _slot: slot,
             spent: None,
         })
+    }
+
+    /// The one guard's place, for the terminal's foreground job only.
+    fn claim(&self) -> std::io::Result<Slot> {
+        if !foreground(self.file.as_raw_fd()) {
+            return Err(std::io::Error::other("not the terminal's foreground job"));
+        }
+        Slot::take()
     }
 
     /// Sends `OSC 11 ; ?` and waits up to `REPLY_TIMEOUT` for the answer.
@@ -1358,7 +1479,7 @@ mod tests {
     /// side, and an ignored child test (`tty::tests::<name>`) takes the slave
     /// as its controlling terminal and asks through `Tty`. The child prints
     /// `ANSWER ...` lines, which the parent compares.
-    mod pty {
+    pub(super) mod pty {
         use super::super::*;
         use std::os::fd::{FromRawFd, OwnedFd};
         use std::process::{Child, Command, Stdio};
@@ -1367,7 +1488,7 @@ mod tests {
         const OSC11: &[u8] = b"\x1b]11;?\x1b\\";
         const WAIT: Duration = Duration::from_secs(5);
 
-        pub(super) struct Pty {
+        pub(in crate::commands::tty) struct Pty {
             /// Other spawning tests wait, so no other child inherits this
             /// terminal's descriptors (held until `finish` reaps the child).
             _spawns: std::sync::MutexGuard<'static, ()>,
@@ -1380,26 +1501,81 @@ mod tests {
             slave: OwnedFd,
             /// The slave's mode before the child started.
             mode_before: Vec<u8>,
-            child: Child,
+            pub(in crate::commands::tty) child: Child,
             /// What the child wrote and `expect` has not matched yet.
             unread: Vec<u8>,
             /// Everything the child wrote.
-            all: Vec<u8>,
+            pub(in crate::commands::tty) all: Vec<u8>,
         }
 
         /// Starts the child test `name` on a new pseudo-terminal of `cols`
         /// columns (0: unknown).
+        pub(super) fn start(name: &str, cols: u16) -> Pty {
+            start_test(
+                &format!("commands::tty::tests::pty::{name}"),
+                cols,
+                24,
+                &[],
+                false,
+            )
+        }
+
+        /// The signals a full-screen session handles.
+        pub(in crate::commands::tty) const SESSION_SIGNALS: [libc::c_int; 6] = [
+            libc::SIGINT,
+            libc::SIGTERM,
+            libc::SIGHUP,
+            libc::SIGTSTP,
+            libc::SIGCONT,
+            libc::SIGWINCH,
+        ];
+
+        /// Makes `cmd`'s process start with `SESSION_SIGNALS` blocked, so
+        /// the test harness's own threads never take them; the child test
+        /// lets them through on its own thread (a bingsu with one thread).
+        pub(in crate::commands::tty) fn masked(cmd: &mut Command) -> &mut Command {
+            use std::os::unix::process::CommandExt;
+            let block = || {
+                // SAFETY: an all-zero `sigset_t` is valid storage for sigemptyset.
+                let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+                // SAFETY: `set` is a valid set.
+                unsafe { libc::sigemptyset(&mut set) };
+                for sig in SESSION_SIGNALS {
+                    // SAFETY: as above.
+                    unsafe { libc::sigaddset(&mut set, sig) };
+                }
+                // SAFETY: `set` is valid; the old mask is not wanted. The mask
+                // is kept across exec.
+                if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            };
+            // SAFETY: the closure runs in the child between fork and exec and
+            // calls only async-signal-safe functions on its own memory.
+            unsafe { cmd.pre_exec(block) }
+        }
+
+        /// Starts the child test at `path` on a new pseudo-terminal of
+        /// `cols` columns and `rows` rows, with `env` added to its
+        /// environment.
         #[allow(
             clippy::unnecessary_mut_passed,
             reason = "openpty takes the window size as *mut on macOS and *const on Linux"
         )]
-        pub(super) fn start(name: &str, cols: u16) -> Pty {
+        pub(in crate::commands::tty) fn start_test(
+            path: &str,
+            cols: u16,
+            rows: u16,
+            env: &[(&str, &str)],
+            mask: bool,
+        ) -> Pty {
             let spawns = crate::commands::sys::test_inherited_fd_lock();
             let (mut master, mut slave) = (-1, -1);
             // SAFETY: an all-zero `winsize` is valid; the columns are set below.
             let mut size: libc::winsize = unsafe { std::mem::zeroed() };
             size.ws_col = cols;
-            size.ws_row = 24;
+            size.ws_row = rows;
             assert_eq!(
                 // SAFETY: two writable descriptor outputs; default termios.
                 unsafe {
@@ -1435,19 +1611,22 @@ mod tests {
             } else {
                 keep.as_raw_fd()
             });
-            let child = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    &format!("commands::tty::tests::pty::{name}"),
-                    "--ignored",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .stdin(Stdio::from(slave))
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
+            let mut cmd = Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                path,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .envs(env.iter().copied())
+            .stdin(Stdio::from(slave))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+            if mask {
+                masked(&mut cmd);
+            }
+            let child = cmd.spawn().unwrap();
             Pty {
                 _spawns: spawns,
                 master: Some(master),
@@ -1462,7 +1641,11 @@ mod tests {
         impl Pty {
             /// Reads what the child wrote for up to `d`; `true` once `stop`
             /// says so of what is unread.
-            fn pump(&mut self, d: Duration, stop: impl Fn(&[u8]) -> bool) -> bool {
+            pub(in crate::commands::tty) fn pump(
+                &mut self,
+                d: Duration,
+                stop: impl Fn(&[u8]) -> bool,
+            ) -> bool {
                 let until = Instant::now() + d;
                 let mut buf = [0u8; 256];
                 loop {
@@ -1490,7 +1673,7 @@ mod tests {
 
             /// Waits until the child wrote `want`, and forgets what came up
             /// to its end.
-            pub(super) fn expect(&mut self, want: &[u8]) {
+            pub(in crate::commands::tty) fn expect(&mut self, want: &[u8]) {
                 let found = |b: &[u8]| b.windows(want.len()).any(|w| w == want);
                 assert!(
                     self.pump(WAIT, found),
@@ -1506,8 +1689,33 @@ mod tests {
                 self.unread.drain(..at + want.len());
             }
 
+            /// Waits until the child wrote `want` to its standard error,
+            /// reading the terminal meanwhile; the error output read here is
+            /// not in `end`'s.
+            pub(in crate::commands::tty) fn expect_stderr(&mut self, want: &str) {
+                let err = self.child.stderr.as_ref().unwrap().as_raw_fd();
+                // SAFETY: `err` is the open pipe end; F_GETFL only reads flags.
+                let flags = unsafe { libc::fcntl(err, libc::F_GETFL) };
+                // SAFETY: as above; F_SETFL adds O_NONBLOCK for the polling here.
+                let set = unsafe { libc::fcntl(err, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+                assert_eq!(set, 0);
+                let mut seen = Vec::new();
+                let until = Instant::now() + WAIT;
+                while !String::from_utf8_lossy(&seen).contains(want) {
+                    assert!(Instant::now() < until, "no {want:?} on the standard error");
+                    let mut chunk = [0u8; 256];
+                    match self.child.stderr.as_mut().unwrap().read(&mut chunk) {
+                        Ok(n) if n > 0 => seen.extend_from_slice(&chunk[..n]),
+                        _ => self.idle(Duration::from_millis(5)),
+                    }
+                }
+                // SAFETY: as above; the flags F_GETFL read.
+                let set = unsafe { libc::fcntl(err, libc::F_SETFL, flags) };
+                assert_eq!(set, 0);
+            }
+
             /// Writes as the terminal would: typed keys, replies.
-            pub(super) fn send(&mut self, bytes: &[u8]) {
+            pub(in crate::commands::tty) fn send(&mut self, bytes: &[u8]) {
                 let fd = self.master.as_ref().unwrap().as_raw_fd();
                 // SAFETY: the master is open and `bytes` is a valid slice.
                 let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
@@ -1515,14 +1723,14 @@ mod tests {
             }
 
             /// Reads for `d` without answering.
-            pub(super) fn idle(&mut self, d: Duration) {
+            pub(in crate::commands::tty) fn idle(&mut self, d: Duration) {
                 self.pump(d, |_| false);
             }
 
             /// Waits up to `limit` for the child to end without reading the
             /// master, as a terminal that stopped taking output. `true`: it
             /// ended.
-            pub(super) fn wait_unread(&mut self, limit: Duration) -> bool {
+            pub(in crate::commands::tty) fn wait_unread(&mut self, limit: Duration) -> bool {
                 let until = Instant::now() + limit;
                 while Instant::now() < until {
                     if self.child.try_wait().unwrap().is_some() {
@@ -1534,13 +1742,30 @@ mod tests {
             }
 
             /// Closes the master: the terminal goes away.
-            pub(super) fn hang_up(&mut self) {
+            pub(in crate::commands::tty) fn hang_up(&mut self) {
                 self.master = None;
+            }
+
+            /// The child's process id.
+            pub(in crate::commands::tty) fn pid(&self) -> libc::pid_t {
+                libc::pid_t::try_from(self.child.id()).unwrap()
+            }
+
+            /// Changes the window size, as a terminal does: the kernel sends
+            /// SIGWINCH to the foreground process group.
+            pub(in crate::commands::tty) fn resize(&self, cols: u16, rows: u16) {
+                // SAFETY: an all-zero `winsize` is valid; the size is set below.
+                let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+                size.ws_col = cols;
+                size.ws_row = rows;
+                let fd = self.master.as_ref().unwrap().as_raw_fd();
+                // SAFETY: the master is open and `size` is a valid winsize.
+                assert_eq!(unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &size) }, 0);
             }
 
             /// Waits for the child, which must pass. Its `ANSWER` lines, and
             /// everything it wrote to the terminal.
-            pub(super) fn finish(mut self) -> (Vec<String>, Vec<u8>) {
+            pub(in crate::commands::tty) fn finish(mut self) -> (Vec<String>, Vec<u8>) {
                 let (lines, status, out, err) = self.end();
                 assert!(status.success(), "{lines:?} {out}\n{err}");
                 (lines, self.all)
@@ -1548,7 +1773,7 @@ mod tests {
 
             /// Whether the terminal's mode now is the one from before the
             /// child started.
-            pub(super) fn mode_restored(&self) -> bool {
+            pub(in crate::commands::tty) fn mode_restored(&self) -> bool {
                 let fd = if cfg!(target_os = "macos") {
                     self.master.as_ref().unwrap().as_raw_fd()
                 } else {
@@ -1559,7 +1784,7 @@ mod tests {
 
             /// Waits for the child. Its `ANSWER` lines, how it ended, and its
             /// whole output and error output.
-            pub(super) fn end(
+            pub(in crate::commands::tty) fn end(
                 &mut self,
             ) -> (Vec<String>, std::process::ExitStatus, String, String) {
                 let until = Instant::now() + WAIT;
@@ -1608,7 +1833,7 @@ mod tests {
             clippy::useless_conversion,
             reason = "TIOCSCTTY is c_uint on macOS and the ioctl request type elsewhere"
         )]
-        fn take_terminal() -> Tty {
+        pub(in crate::commands::tty) fn take_terminal() -> Tty {
             // SAFETY: setsid takes no arguments; a test process is no group leader.
             assert!(unsafe { libc::setsid() } >= 0);
             // SAFETY: fd 0 is the slave this process holds.
@@ -1616,12 +1841,12 @@ mod tests {
             Tty::open().expect("the pseudo-terminal is the controlling terminal")
         }
 
-        fn mode() -> Vec<u8> {
+        pub(in crate::commands::tty) fn mode() -> Vec<u8> {
             mode_of(0)
         }
 
         /// The terminal mode on `fd`, as bytes.
-        fn mode_of(fd: RawFd) -> Vec<u8> {
+        pub(in crate::commands::tty) fn mode_of(fd: RawFd) -> Vec<u8> {
             // SAFETY: all-zero storage for tcgetattr to fill.
             let mut t: libc::termios = unsafe { std::mem::zeroed() };
             // SAFETY: `fd` is a terminal; `t` is writable.
@@ -1666,7 +1891,7 @@ mod tests {
             show(g.query(request, end, Instant::now() + REPLY_TIMEOUT))
         }
 
-        fn say(line: &str) {
+        pub(in crate::commands::tty) fn say(line: &str) {
             println!("ANSWER {line}");
         }
 
@@ -1943,7 +2168,7 @@ mod tests {
         }
 
         /// The handler `sig` has now.
-        fn disposition(sig: libc::c_int) -> libc::sighandler_t {
+        pub(in crate::commands::tty) fn disposition(sig: libc::c_int) -> libc::sighandler_t {
             // SAFETY: an all-zero `sigaction` is a valid value to fill.
             let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
             // SAFETY: a null new action only reads the current one.
@@ -2019,7 +2244,7 @@ mod tests {
 
         /// Waits until the terminal has `bytes` of input queued for this
         /// process.
-        fn wait_queued(bytes: usize) {
+        pub(in crate::commands::tty) fn wait_queued(bytes: usize) {
             let until = Instant::now() + WAIT;
             loop {
                 let mut queued: libc::c_int = 0;
@@ -2142,7 +2367,7 @@ mod tests {
         /// back for about 1.8 KB after a first EAGAIN at 10,240 bytes (arm64).
         /// 이것을 실패시키는 것: 첫 EAGAIN에서 멈추는 것(나중에 난 자리로 질의의 요청이 나가, 큐 시험이 가끔
         /// 실패함: arm64 컨테이너 40번 중 4번).
-        fn fill_output() -> usize {
+        pub(in crate::commands::tty) fn fill_output() -> usize {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let filler = OpenOptions::new()

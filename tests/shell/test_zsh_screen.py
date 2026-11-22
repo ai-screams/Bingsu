@@ -80,6 +80,33 @@ def test_screen_model_alternate_screen_comes_back():
     assert (screen.lines(), screen.cursor()) == (["keep", "abc", ""], (1, 3))
 
 
+# 이것을 실패시키는 것: 대체 화면 중 크기 변경에 남겨 둔 본 화면의 행을 그대로 두는 것(나간 뒤 옛 크기의 행이
+# 보임), 대체 화면 쪽 행을 줄이지 않는 것.
+def test_screen_model_resize_under_the_alternate_screen_resizes_the_kept_rows():
+    screen = recorded(b"1\r\n2\r\n3abcdefghi\x1b[?1049h\x1b[3;1HALT", rows=3, cols=10)
+    screen.resize(2, 5)
+    assert screen.lines() == ["", "ALT"]
+    screen.session.log.write(b"\x1b[?1049l")
+    screen.feed()
+    assert screen.lines() == ["2", "3abcd"]
+
+
+# 이것을 실패시키는 것: 1049l이 커서 숨김을 저장해 둔 커서로 되돌리는 것(xterm은 되돌리지 않는다; 25h를 빠뜨린
+# 프로그램을 놓침).
+def test_screen_model_keeps_the_cursor_hidden_across_the_alternate_screen():
+    assert recorded(b"\x1b[?1049h\x1b[?25l\x1b[?1049l").screen.cursor.hidden
+    assert not recorded(b"\x1b[?1049h\x1b[?25l\x1b[?25h\x1b[?1049l").screen.cursor.hidden
+
+
+# 이것을 실패시키는 것: private_mode가 pyte의 자리 옮김(<< 5)을 하지 않는 것, 끈 모드를 켜진 것으로 보는 것.
+def test_screen_model_reports_private_modes():
+    screen = recorded(b"\x1b[?2004h\x1b[?2026h")
+    assert screen.screen.private_mode(2004) and screen.screen.private_mode(2026)
+    screen.session.log.write(b"\x1b[?2026l")
+    screen.feed()
+    assert screen.screen.private_mode(2004) and not screen.screen.private_mode(2026)
+
+
 # 이것을 실패시키는 것: .resize가 화면 모델만 바꾸거나 pty 크기만 바꾸는 것, 새 크기 전에 쌓인 출력을 넣지 않는 것.
 def test_screen_model_resize_sets_both_sizes():
     screen = recorded(b"", rows=3, cols=10)

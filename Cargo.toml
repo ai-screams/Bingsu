@@ -32,6 +32,20 @@ unsafe_op_in_unsafe_fn = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 
+# Debug info goes to .dwo files beside the object files (split DWARF), not
+# into the binaries. `bingsu init` reads a sibling's build markers only when
+# the file is at most 64 MiB (`read_build`, crates/bingsu/src/commands/
+# collector.rs), and a Linux debug bingsu-collect with its DWARF inside
+# measured 67.1 MB (x86_64 musl, built as CI builds it) to 68.9 MB (aarch64
+# glibc), almost all of it debug info, so init stopped pinning it once it
+# crossed the cap. Split, it is about 24 MB, and the line tables stay in
+# the binaries: backtraces keep file and line. `debug = "line-tables-only"`
+# would fit too, but takes variables and types from every debugger. Cargo
+# passes the option only where the target supports it: Linux, and macOS,
+# where it is already the default; not wasm or Windows.
+[profile.dev]
+split-debuginfo = "unpacked"
+
 # std's debug build checks that an fd is open (fcntl F_GETFD) on every
 # OwnedFd drop; switched off so the synthetic strace program makes only its
 # known calls. overflow-checks stay on. bingsu-bench only.
