@@ -102,7 +102,10 @@ impl Grid {
     /// (exclusive) inside the row.
     fn set(&mut self, x: u32, y: u16, text: &str, width: u8, paint: Paint, end: u32) -> bool {
         let w = u32::from(width);
-        if w == 0 || x + w > end.min(u32::from(self.cols)) || y >= self.rows {
+        let fits = x
+            .checked_add(w)
+            .is_some_and(|e| e <= end.min(u32::from(self.cols)));
+        if w == 0 || !fits || y >= self.rows {
             return false;
         }
         let x = x as u16;
@@ -432,7 +435,11 @@ fn preview(g: &mut Grid, v: &View<'_>, u: &Ui, y: u16, i: usize) {
             if paint.bg == Ink::Default {
                 paint.bg = base;
             }
-            g.set(from + c.at, y, c.text, c.width, paint, end);
+            // `right_at` is a public field: a position past `u32` is off
+            // the grid.
+            if let Some(x) = from.checked_add(c.at) {
+                g.set(x, y, c.text, c.width, paint, end);
+            }
         }
     }
 }
@@ -614,7 +621,12 @@ fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
             }
             for ch in c {
                 lines.push((
-                    format!("{}: {} now, {} chosen", ch.key, ch.now, ch.chosen),
+                    format!(
+                        "{}: {} now, {} chosen",
+                        ch.key,
+                        clean(ch.now.as_bytes()),
+                        ch.chosen
+                    ),
                     false,
                 ));
                 lines.push((format!("  {}", ch.line), false));

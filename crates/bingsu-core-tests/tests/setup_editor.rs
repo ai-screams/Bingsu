@@ -7,6 +7,7 @@ use bingsu_core::color::sgr::ColorDepth;
 use bingsu_core::config::compile::{BUILTIN_TOML, CompiledConfig};
 use bingsu_core::config::report::{ConfigReport, report};
 use bingsu_core::config::source::{ExtendsRef, FileKey, OpenError, Opened, Resolver, Trust};
+use bingsu_core::config::starter::{Icons as StarterIcons, Mode as StarterMode};
 use bingsu_core::config::tree::Format;
 use bingsu_core::diag::{Severity, SourceId};
 use bingsu_core::field::BUILTIN;
@@ -237,16 +238,34 @@ fn a_new_file_starts_from_nerd_and_follows_the_icons() {
     }
     assert!(text.is_ascii() && text.starts_with("#:schema https://"));
     let l = layers(&load("", &[], &[]));
-    for (icons, preset) in [(1u8, "triangle"), (3, "lean"), (2, "lean")] {
+    for (icons, preset) in [
+        (StarterIcons::Light, "triangle"),
+        (StarterIcons::Ascii, "lean"),
+        (StarterIcons::Unicode, "lean"),
+    ] {
         let given = Given {
             icons: Some(icons),
-            mode: Some(0),
+            mode: Some(StarterMode::Auto),
         };
         let m = Model::new(l.clone(), Target::New, given);
-        assert_eq!(STYLES[usize::from(m.chosen(Row::Style))], preset, "{icons}");
-        assert!(m.marked(Row::Icons) && m.marked(Row::Colors), "{icons}");
+        assert_eq!(
+            STYLES[usize::from(m.chosen(Row::Style))],
+            preset,
+            "{icons:?}"
+        );
+        assert_eq!(ICONS[usize::from(m.chosen(Row::Icons))], icons.word());
+        assert!(m.marked(Row::Icons) && m.marked(Row::Colors), "{icons:?}");
         assert!(!m.changed());
     }
+    let dark = Model::new(
+        l.clone(),
+        Target::New,
+        Given {
+            icons: None,
+            mode: Some(StarterMode::Dark),
+        },
+    );
+    assert_eq!(dark.chosen(Row::Colors), 1);
     // The four sets of the editor are the icon sets of the config.
     for (i, name) in ICONS.iter().enumerate() {
         assert_eq!(
@@ -811,7 +830,7 @@ fn row_notes_paints_and_hints() {
         layers(&load("", &[], &[])),
         Target::New,
         Given {
-            icons: Some(2),
+            icons: Some(StarterIcons::Unicode),
             mode: None,
         },
     );
@@ -1305,4 +1324,40 @@ fn a_stale_wide_preview_leaves_the_last_column() {
             );
         }
     }
+}
+
+// 이것을 실패시키는 것: 공개 구조체(`Layers`)로 들어온 줄 목록 밖 값을 걸러 내지 않아 새 파일 글·화면에서 범위 밖
+// 색인으로 멈추는 것, 공개 필드 `PreviewLine::right_at`이 `u32` 끝일 때 좌표 덧셈이 넘치는 것(release에서는 돌아
+// 격자 안 칸으로 쓰인다), `Layers`로 들어온 파일 값의 글을 화면에 그대로 내는 것.
+#[test]
+fn public_inputs_out_of_range_are_dropped() {
+    let mut l = layers(&load("", &[], &[]));
+    l.rows[Row::Outer.index()].earlier = Some(200);
+    l.rows[Row::Joint.index()].written = Some(255);
+    l.rows[Row::Gap.index()].later = Some((9, 0));
+    let m = Model::new(l.clone(), Target::New, Given::default());
+    assert_eq!(m.inherited(Row::Outer), 0);
+    assert_eq!(m.written(Row::Joint), None);
+    assert_eq!(m.covered_by(Row::Gap), None);
+    let text = new_file_text(&m).unwrap();
+    assert!(!text.contains("outer_end"), "{text}");
+    let c = compiled(load("[layout.line2]\nright = [\"duration\"]\n", &[], &[]));
+    let mut lines = view_lines(&c, 80);
+    assert!(!lines[1].right.is_empty());
+    assert!(text_of(&draw(&m, &view(&m, &c, &lines, 80, 24)))[10].contains("2.1s"));
+    lines[1].right_at = u32::MAX;
+    let g = draw(&m, &view(&m, &c, &lines, 80, 24));
+    assert!(!g.row_text(10).contains("2.1s"), "{:?}", g.row_text(10));
+    // A file's own text from a hand-made `Layers` is cleaned when shown.
+    let mut l = layers(&load("[style]\nouter_end = \"round\"\n", &[], &[]));
+    l.rows[Row::Outer.index()].written_raw[0] = Some("\"\u{1b}[2J\u{202e}x\"".into());
+    let mut e = Model::new(l, Target::Existing(Format::Toml), Given::default());
+    e.remove_override(Row::Outer);
+    key(&mut e, Key::Enter, 1);
+    let all = text_of(&draw(&e, &view(&e, &c, &lines, 80, 24))).concat();
+    assert!(
+        !all.chars().any(bingsu_core::sanitize::is_removed),
+        "{all:?}"
+    );
+    assert!(all.contains("style.outer_end: \"[2Jx\" now"), "{all}");
 }

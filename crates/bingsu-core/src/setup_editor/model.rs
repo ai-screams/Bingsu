@@ -13,6 +13,7 @@
 //! swaps it with the current one, so `u` twice comes back.
 use super::layers::Layers;
 use super::rows::{self, Row};
+use crate::config::starter::{Icons as StarterIcons, Mode as StarterMode};
 use crate::config::tree::Format;
 
 /// One key, as the key reader gives it (the variants of `keys::Key`).
@@ -51,12 +52,17 @@ pub enum Target {
     Existing(Format),
 }
 
-/// Values given on the command line, as indexes of `rows::ICONS` and
-/// `rows::MODES`: the editor starts with them, marked to be written.
+/// Values given on the command line (`--icons`, `--mode`): the editor
+/// starts with them, marked to be written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Given {
-    pub icons: Option<u8>,
-    pub mode: Option<u8>,
+    pub icons: Option<StarterIcons>,
+    pub mode: Option<StarterMode>,
+}
+
+/// `v` when it is one of `row`'s values.
+fn valid(row: Row, v: Option<u8>) -> Option<u8> {
+    v.filter(|v| usize::from(*v) < row.values().len())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,7 +153,23 @@ pub struct Model {
 impl Model {
     /// A new file starts with Nerd Font icons and the preset they pick;
     /// an existing one with what it writes. `given` values start written in either.
-    pub fn new(layers: Layers, target: Target, given: Given) -> Self {
+    /// Values of `layers` that are not one of their row's values (the
+    /// struct is public) count as none.
+    pub fn new(mut layers: Layers, target: Target, given: Given) -> Self {
+        for row in Row::ALL {
+            let l = &mut layers.rows[row.index()];
+            l.earlier = valid(row, l.earlier);
+            l.written = valid(row, l.written);
+            l.later = l.later.filter(|(v, _)| valid(row, Some(*v)).is_some());
+        }
+        let icons = given
+            .icons
+            .and_then(|g| StarterIcons::ALL.iter().position(|i| *i == g))
+            .map(|i| i as u8);
+        let mode = given
+            .mode
+            .and_then(|g| rows::MODES.iter().position(|w| *w == g.word()))
+            .map(|i| i as u8);
         let original = core::array::from_fn(|i| layers.rows[i].written);
         let mut m = Self {
             layers,
@@ -172,14 +194,14 @@ impl Model {
         };
         let mut s = m.state;
         if target == Target::New {
-            let icons = given.icons.unwrap_or(0);
-            s = m.picked(s, Row::Icons, icons);
-            s = m.picked(s, Row::Style, rows::icons_preset(icons));
+            let first = icons.unwrap_or(0);
+            s = m.picked(s, Row::Icons, first);
+            s = m.picked(s, Row::Style, rows::icons_preset(first));
         }
-        if let Some(i) = given.icons {
+        if let Some(i) = icons {
             s.written[Row::Icons.index()] = Some(i);
         }
-        if let Some(c) = given.mode {
+        if let Some(c) = mode {
             s.written[Row::Colors.index()] = Some(c);
         }
         // The preset the icons picked is not the user's: icons go on
