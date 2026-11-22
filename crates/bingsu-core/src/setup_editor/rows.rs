@@ -58,8 +58,18 @@ impl Row {
         Row::Colors,
         Row::Lines,
     ];
-    /// The five rows that shape the blocks; a template replaces them all.
+    /// The five rows that shape the blocks.
     pub const SHAPE: [Row; 5] = [Row::Style, Row::Outer, Row::Joint, Row::Inner, Row::Gap];
+    /// The rows a template (`style.template`) replaces: the shape rows and
+    /// the layout lines it draws in place of.
+    pub const TEMPLATED: [Row; 6] = [
+        Row::Style,
+        Row::Outer,
+        Row::Joint,
+        Row::Inner,
+        Row::Gap,
+        Row::Lines,
+    ];
 
     pub const fn index(self) -> usize {
         self as usize

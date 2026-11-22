@@ -1391,3 +1391,44 @@ fn the_preset_reset_follows_this_files_choice() {
         (Some(flat), "triangle")
     );
 }
+
+// 이것을 실패시키는 것: 템플릿이 줄 수(`layout` 줄)도 대신 그리는데 lines 줄에 그 알림을 붙이지 않는 것, 저장 화면이
+// 템플릿을 둔 출처와 그 키들이 그려지지 않는다는 것을 말하지 않는 것, 쓰는 키가 없을 때도 그 줄을 내는 것.
+#[test]
+fn a_template_replaces_the_lines_too() {
+    let later = [(
+        "config.local.toml",
+        "[style]\ntemplate = \"{dir}{@nl}{char}\"\n",
+    )];
+    let c = compiled(load("", &[], &[]));
+    let lines = view_lines(&c, 80);
+    let mut m = Model::new(
+        layers(&load("", &later, &[])),
+        Target::New,
+        Given::default(),
+    );
+    m.pick(Row::Lines, 1);
+    let t = text(&draw(&m, &view(&m, &c, &lines, 80, 24)));
+    assert!(
+        t[19].contains("a template in config.local.toml replaces these"),
+        "{:?}",
+        t[19]
+    );
+    assert!(!t[17].contains("template"), "{:?}", t[17]);
+    key(&mut m, Key::Enter, 1);
+    let save = text(&draw(&m, &view(&m, &c, &lines, 80, 24))).concat();
+    assert!(
+        save.contains("A template in config.local.toml draws in place of the style and line keys."),
+        "{save}"
+    );
+    // An existing file that changes nothing under the template: no line.
+    let mut e = Model::new(
+        layers(&load("icons = \"nerd\"\n", &later, &[])),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    e.pick(Row::Icons, 3);
+    key(&mut e, Key::Enter, 1);
+    let save = text(&draw(&e, &view(&e, &c, &lines, 80, 24))).concat();
+    assert!(!save.contains("A template in"), "{save}");
+}

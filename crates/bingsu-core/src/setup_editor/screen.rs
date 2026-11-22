@@ -448,7 +448,7 @@ fn preview(g: &mut Grid, v: &View<'_>, u: &Ui, y: u16, i: usize) {
 /// changes nothing (then drawn on `neutral.surface1`).
 fn row_note(m: &Model, v: &View<'_>, row: Row) -> (String, bool) {
     let name = |i: usize| clean(m.layers().names.get(i).map_or(&[][..], |n| n.as_slice()));
-    if Row::SHAPE.contains(&row) {
+    if Row::TEMPLATED.contains(&row) {
         if let Some(t) = m.layers().template {
             return (format!("a template in {} replaces these", name(t)), true);
         }
@@ -567,6 +567,20 @@ fn keys_screen(g: &mut Grid, u: &Ui) {
     }
 }
 
+/// The save screen's line about a template, when one replaces rows this
+/// file writes (or changes): those keys draw nothing.
+fn template_line(m: &Model, writes: impl Fn(Row) -> bool) -> Option<(String, bool)> {
+    let t = m.layers().template?;
+    if !Row::TEMPLATED.into_iter().any(writes) {
+        return None;
+    }
+    let name = clean(m.layers().names.get(t).map_or(&[][..], |n| n.as_slice()));
+    Some((
+        format!("A template in {name} draws in place of the style and line keys."),
+        false,
+    ))
+}
+
 fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
     let end = v.cols - 1;
     let path = clean(v.path);
@@ -587,6 +601,7 @@ fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
                     ));
                 }
             }
+            lines.extend(template_line(m, |r| m.marked(r)));
             let parts = [Row::Outer, Row::Joint, Row::Inner, Row::Gap];
             if parts.iter().any(|r| m.written(*r).is_some()) {
                 lines.push((
@@ -619,6 +634,7 @@ fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
             if c.is_empty() {
                 lines.push((String::from("It already has the choices you made."), false));
             }
+            lines.extend(template_line(m, |r| m.marked(r)));
             for ch in c {
                 lines.push((
                     format!(
