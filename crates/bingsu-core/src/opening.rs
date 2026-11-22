@@ -32,6 +32,17 @@
 //! glyphs carry the picture, so a monochrome screen (`NO_COLOR`) draws the
 //! same band without the inks. All arithmetic is `f64` and `libm`, so
 //! every platform draws the same bits.
+//!
+//! Contrast: the one exception to the design rule that non-text marks
+//! reach 3:1 on the background. Faint cells fade towards it, as the
+//! approved motion study does: over the 45 frames from 0 to 4.4 s at 80
+//! columns, 2,857 of 9,281 drawn cells (31%) are under 3:1 on dark (lowest
+//! 1.44:1, median 4.31:1) and 4,132 (45%) on light (lowest 1.51:1, median
+//! 3.38:1). The bowl is decoration and carries no information; its shape
+//! comes from the glyph ramp and stays the same without colors
+//! (`NO_COLOR`); the fading is the approved look; a key skips the opening
+//! and `--no-motion` turns it off. The editor's text keeps 4.5:1 and every
+//! mark that means something keeps 3:1.
 use crate::color::math::{Srgb8, lab_to_linear, oklab_q, to_srgb8};
 use crate::color::palette::{Mode, TOKENS, named_color};
 use alloc::string::String;
