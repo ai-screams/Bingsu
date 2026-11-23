@@ -56,6 +56,7 @@ def test_a_background_bingsu_left_running_is_killed(tmp_path, monkeypatch):
     stuck.chmod(0o755)
     monkeypatch.setenv("BINGSU_BIN", str(stuck))
     shell = subprocess.Popen(["/bin/sh", "-c", f'"{stuck}" & echo BPID=$!; wait $!'], stdout=subprocess.PIPE)
+    pid = None
     try:
         log = shell.stdout.readline() + shell.stdout.readline()
         pid = int(log.split(b"BPID=")[1].split()[0])
@@ -66,6 +67,14 @@ def test_a_background_bingsu_left_running_is_killed(tmp_path, monkeypatch):
         end_background()
         assert not alive(pid)
     finally:
+        # The stand-in is the shell's child, not this test's: a failing run
+        # (a cleanup that kills nothing) would leave it running.
+        # 이것을 실패시키는 것: 셸만 죽이는 것(실패한 시험이 대역을 남김).
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         shell.kill()
         shell.wait()
 
