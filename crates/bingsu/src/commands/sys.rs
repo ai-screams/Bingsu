@@ -29,7 +29,8 @@ pub fn exit_now(code: i32) -> ! {
 }
 
 /// Best effort only: never wait for room in a full stderr pipe. A single
-/// nonblocking write avoids EINTR retries; the caller immediately uses _exit.
+/// nonblocking write avoids EINTR retries; the caller then ends the process
+/// or the command.
 pub fn write_deadline_notice(buf: &[u8]) {
     // SAFETY: F_GETFL only reads descriptor flags.
     let flags = unsafe { libc::fcntl(2, libc::F_GETFL) };
@@ -42,6 +43,50 @@ pub fn write_deadline_notice(buf: &[u8]) {
     }
     // SAFETY: buf is valid for its length. No retry or flush follows.
     let _ = unsafe { libc::write(2, buf.as_ptr().cast(), buf.len()) };
+    // The flag belongs to the open file description, which stderr shares
+    // with the shell and every other process writing there (a terminal, a
+    // pipe): put the flags back, or they keep a non-blocking terminal after
+    // this process ends.
+    // 이것을 실패시키는 것: 되돌리지 않는 것(the_deadline_notice_leaves_stderr_as_it_was), 쓰기 전에 되돌리는 것(가득 찬
+    // stderr에서 쓰기가 기다림; deadline_exits_even_when_stderr_is_full).
+    // SAFETY: F_SETFL puts back the flags F_GETFL read.
+    unsafe { libc::fcntl(2, libc::F_SETFL, flags) };
+}
+
+#[cfg(test)]
+mod deadline_notice_tests {
+    // The deadline's notice goes out without waiting, and stderr's open file
+    // description, which the process shares with its parent (here a pipe this
+    // test holds a copy of), is left blocking as it came.
+    // 이것을 실패시키는 것: 알림 뒤 O_NONBLOCK을 되돌리지 않는 것(셸의 터미널이 non-blocking으로 남음).
+    #[test]
+    fn the_deadline_notice_leaves_stderr_as_it_was() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let shared = writer.try_clone().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::ctx::tests::deadline_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(shared)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(3));
+        // SAFETY: `writer` is open; F_GETFL only reads its status flags.
+        let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::O_NONBLOCK, 0, "stderr left non-blocking");
+        drop(writer);
+        let mut said = String::new();
+        reader.read_to_string(&mut said).unwrap();
+        assert!(said.contains("bingsu: test deadline\n"), "{said}");
+    }
 }
 
 /// Sets this process's umask (a disposable test child only).
