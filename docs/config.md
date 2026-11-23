@@ -515,6 +515,7 @@ bingsu setup: there is no terminal to ask, so it needs --mode too
 usage: bingsu setup [--yes] [--plain] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]
 ```
 
+<!-- PLACEHOLDER(help): when `bingsu setup --help` (and `-h`) prints its help on standard output with exit 0, mention it here with a real run. -->
 `--icons` and `--mode` also answer their question in advance on a terminal: the editor starts from them, and the line
 questions skip them. `--yes` skips the last question of the line questions (whether to write the file); the editor always
 asks before it writes. The starter takes the `triangle` preset with `nerd` or `light` and `lean` with `unicode` or `ascii`.
