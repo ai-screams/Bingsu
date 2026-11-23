@@ -139,6 +139,7 @@ mod trust_record;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) mod tty;
+mod usage;
 mod version;
 #[cfg(unix)]
 pub(crate) mod version_manager;
@@ -150,13 +151,29 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
     std::hint::black_box(&ROLE_TAG);
     #[cfg(not(unix))]
     let _ = &a.argv0;
-    match a.args.first().and_then(|w| w.to_str()) {
+    let first = a.args.first().and_then(|w| w.to_str());
+    // The internal entry points first: none of them takes `-h` or `--help`,
+    // and the trusted relay starts before any other code here.
+    match first {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        Some(bingsu_core::handoff::ENTRY) => crate::relay::run(&a.args),
+        Some(bingsu_core::handoff::ENTRY) => return crate::relay::run(&a.args),
         #[cfg(unix)]
-        Some("__refresh-v1") => helper::run(&a.argv0, &a.args[1..]),
+        Some("__refresh-v1") => return helper::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
-        Some(command_supervisor::ENTRY) => command_supervisor::run(&a.argv0),
+        Some(command_supervisor::ENTRY) => return command_supervisor::run(&a.argv0),
+        #[cfg(feature = "bench-stubs")]
+        Some("__collect-stub") => {
+            return ExitCode::from(
+                u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
+            );
+        }
+        _ => {}
+    }
+    // `-h` or `--help` as the only word after a user command.
+    if let Some(help) = usage::asked(&a.args) {
+        return usage::print(&help);
+    }
+    match first {
         #[cfg(unix)]
         Some("config") => config::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
@@ -173,14 +190,8 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         Some("setup") => setup::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
         Some("reload") => reload::run(&a.argv0, &a.args[1..]),
-        #[cfg(feature = "bench-stubs")]
-        Some("__collect-stub") => ExitCode::from(
-            u8::try_from(bingsu_bench::collector_stub::stub_main(&a.args[1..])).unwrap_or(1),
-        ),
         _ => {
-            eprintln!(
-                "usage: bingsu <config|doctor|explain|help|init|list|prompt|reload|setup|--version> ..."
-            );
+            eprintln!("{}", usage::line(&[]));
             ExitCode::from(2)
         }
     }

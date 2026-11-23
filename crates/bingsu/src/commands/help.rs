@@ -5,12 +5,11 @@ use bingsu_core::diag_help::{parse_code, render};
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu help <code>   (a code such as E201, W404 or N501)";
 const EXIT_USAGE: u8 = 2;
 
 pub fn run(args: &[OsString]) -> ExitCode {
     let [word] = args else {
-        eprintln!("{USAGE}");
+        eprintln!("{}", super::usage::line(&["help"]));
         return ExitCode::from(EXIT_USAGE);
     };
     let Some(text) = word.to_str().and_then(parse_code).and_then(render) else {
@@ -18,30 +17,14 @@ pub fn run(args: &[OsString]) -> ExitCode {
             "bingsu help: unknown code `{}`",
             word.to_string_lossy().escape_debug()
         );
-        eprintln!("{USAGE}");
+        eprintln!("{}", super::usage::line(&["help"]));
         return ExitCode::from(EXIT_USAGE);
     };
-    if write_stdout(text.as_bytes()) {
+    if super::usage::write_stdout(text.as_bytes()) {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
     }
-}
-
-#[cfg(unix)]
-fn write_stdout(bytes: &[u8]) -> bool {
-    matches!(
-        super::sys::write_fd(1, bytes),
-        super::sys::WriteOutcome::Done
-    )
-}
-
-// Windows has no `sys` module; a plain write is enough for a help text.
-#[cfg(not(unix))]
-#[allow(clippy::disallowed_methods, reason = "no sys::write_fd outside unix")]
-fn write_stdout(bytes: &[u8]) -> bool {
-    use std::io::Write as _;
-    std::io::stdout().write_all(bytes).is_ok()
 }
 
 #[cfg(test)]

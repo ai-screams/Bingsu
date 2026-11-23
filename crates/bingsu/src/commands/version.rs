@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 pub fn run(args: &[OsString]) -> ExitCode {
     if !args.is_empty() {
-        eprintln!("usage: bingsu --version");
+        eprintln!("{}", super::usage::line(&["--version"]));
         return ExitCode::from(2);
     }
     #[allow(unused_mut)]

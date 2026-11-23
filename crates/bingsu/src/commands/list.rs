@@ -17,8 +17,6 @@ use std::process::ExitCode;
 /// The longest preset name (`triangle`) and one space.
 const NAME_COLUMN: u16 = 9;
 
-const USAGE: &str = "usage: bingsu list <presets [--preview [--icons nerd|light|unicode|ascii]]|segments|flavors|roles|shorteners|icons>";
-
 fn emit(text: &str) -> ExitCode {
     match sys::write_fd(1, text.as_bytes()) {
         sys::WriteOutcome::Done => ExitCode::SUCCESS,
@@ -75,28 +73,67 @@ fn preview(icons: IconSet) -> ExitCode {
     emit(&String::from_utf8_lossy(&out))
 }
 
-pub fn run(args: &[OsString]) -> ExitCode {
+/// What a `list` command line asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Ask {
+    Rows(What),
+    Preview(IconSet),
+}
+
+/// The subject and its flags; `None` for a wrong use.
+pub(super) fn parse(args: &[OsString]) -> Option<Ask> {
     let words: Vec<Option<&str>> = args.iter().map(|a| a.to_str()).collect();
     match words.as_slice() {
-        [Some("presets"), Some("--preview")] => preview(bingsu_core::default_theme::ICONS),
+        [Some("presets"), Some("--preview")] => {
+            Some(Ask::Preview(bingsu_core::default_theme::ICONS))
+        }
         [
             Some("presets"),
             Some("--preview"),
             Some("--icons"),
             Some(set),
-        ] => match IconSet::parse(set) {
-            Some(icons) => preview(icons),
-            None => usage(),
-        },
-        [Some(w)] => match What::parse(w) {
-            Some(what) => emit(&lines(&rows(what))),
-            None => usage(),
-        },
-        _ => usage(),
+        ] => IconSet::parse(set).map(Ask::Preview),
+        [Some(w)] => What::parse(w).map(Ask::Rows),
+        _ => None,
+    }
+}
+
+pub fn run(args: &[OsString]) -> ExitCode {
+    match parse(args) {
+        Some(Ask::Preview(icons)) => preview(icons),
+        Some(Ask::Rows(what)) => emit(&lines(&rows(what))),
+        None => usage(),
     }
 }
 
 fn usage() -> ExitCode {
-    eprintln!("{USAGE}");
+    eprintln!("{}", super::usage::line(&["list"]));
     ExitCode::from(super::ctx::EXIT_USAGE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ask(words: &[&str]) -> Option<Ask> {
+        parse(&words.iter().map(OsString::from).collect::<Vec<_>>())
+    }
+
+    // 이것을 실패시키는 것: `--icons`로 고른 아이콘 묶음을 버리고 기본 묶음으로 그리는 것, 모르는 묶음이나 `--preview`
+    // 없는 `--icons`를 받는 것.
+    #[test]
+    fn the_preview_draws_with_the_icon_set_asked_for() {
+        for set in ["nerd", "light", "unicode", "ascii"] {
+            let want = IconSet::parse(set).map(Ask::Preview);
+            assert!(want.is_some(), "{set}");
+            assert_eq!(ask(&["presets", "--preview", "--icons", set]), want);
+        }
+        assert_eq!(
+            ask(&["presets", "--preview"]),
+            Some(Ask::Preview(bingsu_core::default_theme::ICONS))
+        );
+        assert_eq!(ask(&["presets", "--preview", "--icons", "emoji"]), None);
+        assert_eq!(ask(&["presets", "--icons", "ascii"]), None);
+        assert_eq!(ask(&["segments"]), Some(Ask::Rows(What::Segments)));
+    }
 }
