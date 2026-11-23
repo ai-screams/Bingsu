@@ -32,6 +32,8 @@ TITLE = rb"bingsu setup"
 KEYS = rb"enter save"
 # The end of a frame: a key's frame draws only the cells that changed.
 FRAME = rb"\x1b\[\?2026l"
+# Entering the alternate screen: the editor opened.
+ALT_SCREEN = rb"\x1b\[\?1049h"
 
 
 # Nothing a setup test runs may reach the account's own state folder (a
@@ -77,6 +79,15 @@ def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None, back
 
 # Closes the child as it ends (see there): tests here spawn again too.
 from test_setup_pty import finish  # noqa: E402
+
+
+def ended_without_the_editor(child):
+    """`finish` for a run that must not open the editor: fails at once, and
+    closes the child, when it enters the alternate screen."""
+    if child.expect([pexpect.EOF, ALT_SCREEN]) == 1:
+        child.close(force=True)
+        pytest.fail("the editor opened")
+    return finish(child)
 
 
 def opened(child, rows=24, cols=80):
@@ -229,10 +240,9 @@ def test_a_new_file_is_not_made_while_the_settings_do_not_load(home, bad):
     path.chmod(0o600)
     out = home / "out"
     child = spawn(home, out=out)
-    code, before, after, text = finish(child)
+    code, before, after, text = ended_without_the_editor(child)
     assert code == 0, text
     assert before == after
-    assert b"\x1b[?1049h" not in child.transcript.getvalue()
     assert "bingsu: nothing was written." in text, text
     assert "The settings do not load now, so setup cannot tell what a new file would change:" in text, text
     assert "E101: this is not valid TOML" in text and f"{bad}:1:" in text, text
