@@ -22,7 +22,7 @@ use bingsu_core::config::starter::{Choices, Icons as StarterIcons, Mode as Start
 use bingsu_core::config::tree::Format;
 use bingsu_core::envelope::{colorfgbg_mode, display_mode};
 use bingsu_core::preview::{PreviewLine, Request, Sample, lines};
-use bingsu_core::setup_editor::layers::{Layers, builtin_narrow};
+use bingsu_core::setup_editor::layers::{Layers, builtin_narrow, composed_text};
 use bingsu_core::setup_editor::model::{Effect, Given, Input, Model, Target};
 use bingsu_core::setup_editor::rows::{MODES, Row};
 use bingsu_core::setup_editor::screen::{
@@ -97,11 +97,16 @@ impl Preview {
     /// from the start's reading (no file is opened). Settings that do not
     /// compile (another file has an error) show no preview, on the
     /// default colors of the mode. `None`: those colors could not be made.
+    ///
+    /// The color mode is what those settings compose to, as the prompt
+    /// draws them: a later file (`config.local`) can cover the pick, and a
+    /// file the preview does not follow keeps its own.
     fn new(s: &Start<'_>, m: &Model, cols: u16) -> Option<Self> {
         let (text, bytes, stale) = file_bytes(s, m);
-        let word = MODES[usize::from(m.chosen(Row::Colors))];
+        // The mode given here is not used by the report.
+        let r = report::from_loaded(s.sources.load(&bytes), Mode::Dark);
+        let word = composed_text(&r.files, &r.order, &["colors", "mode"]).unwrap_or("auto");
         let (mode, note) = preview_mode(word, s.colorfgbg);
-        let r = report::from_loaded(s.sources.load(&bytes), mode);
         let Some(c) = &r.snapshot else {
             let palette = resolve_palette(&PaletteInput {
                 mode,

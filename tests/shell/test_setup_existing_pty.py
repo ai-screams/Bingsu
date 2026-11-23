@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pyte
 import pytest
 
 from conftest import real_bin
@@ -190,6 +191,49 @@ def test_no_change_says_the_file_already_has_it(home):
     assert code == 0, transcript
     assert "It already has the choices you made." in transcript and CHANGED not in transcript, transcript
     assert kept(path) == before
+
+
+def preview_cells(child, rows=24, cols=80):
+    """The label and the two preview lines below it: the label's text, and
+    each preview cell's glyph and colors as the terminal model draws them."""
+    screen = pyte.Screen(cols, rows)
+    pyte.ByteStream(screen).feed(child.transcript.getvalue())
+    row = next(i for i, line in enumerate(screen.display) if line.startswith(" preview"))
+    cells = [(c.data, c.fg, c.bg) for y in (row + 1, row + 2) for c in
+             (screen.buffer[y][x] for x in range(cols))]
+    return screen.display[row], cells
+
+
+# 이것을 실패시키는 것: 미리보기의 색 모드를 고른 값에서 가져오는 것. 뒤 파일(config.local)이 auto로 덮으면 바꿀 줄을 적용해도
+# 프롬프트는 터미널(COLORFGBG=0;15, 밝음)을 따르므로 미리보기 색도 그대로여야 하고, 미리보기가 따르지 않는 JSON도 그대로여야
+# 한다. 덮지 않는 TOML은 dark로 바뀐다(이 시험이 색을 본다는 것).
+@pytest.mark.parametrize(("name", "text", "local", "changes"), [
+    ("config.toml", '[colors]\nmode = "auto"\n', '[colors]\nmode = "auto"\n', False),
+    ("config.json", '{"colors": {"mode": "auto"}}\n', None, False),
+    ("config.toml", '[colors]\nmode = "auto"\n', None, True),
+])
+def test_the_preview_draws_the_color_mode_the_settings_compose_to(home, name, text, local, changes):
+    put(home / "cfg/bingsu" / name, text)
+    if local:
+        put(home / "cfg/bingsu/config.local.toml", local)
+    child = spawn(home, extra={"COLORFGBG": "0;15"})
+    opened(child)
+    label, before = preview_cells(child)
+    assert "auto: light (COLORFGBG)" in label, label
+    child.send("c")
+    # The colors row picks dark (a covered row's status line names its source).
+    until(child, lambda d: any("c colors" in line and "dark" in line and "*" in line for line in d))
+    label_after, after = preview_cells(child)
+    if changes:
+        assert "dark" in label_after and "auto" not in label_after, label_after
+        assert after != before
+    else:
+        assert "auto: light (COLORFGBG)" in label_after, label_after
+        assert after == before
+    child.send("u")
+    until(child, has("undone"))
+    child.send("q")
+    finish(child)
 
 
 # 이것을 실패시키는 것: 있는 파일에서 q로 나갈 때 종료 코드가 0이 아닌 것, Ctrl-C를 130으로 끝내지 않는 것, 그 파일을
