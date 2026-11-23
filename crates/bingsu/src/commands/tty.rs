@@ -556,10 +556,6 @@ fn writable(fd: RawFd) -> impl Fn(Instant) -> bool {
 /// Waits until `fd` can be written (`write`) or read, or `until` passes.
 /// `select`, not `poll`: macOS `poll` does not support `/dev/tty` (it reports
 /// the descriptor invalid at once).
-#[allow(
-    clippy::unnecessary_fallible_conversions,
-    reason = "`tv_usec` is 32 bits on macOS and 64 on Linux; one spelling for both"
-)]
 fn ready(fd: RawFd, stoppable: bool, write: bool) -> impl Fn(Instant) -> bool {
     move |until| loop {
         if stoppable && STOP.load(Ordering::SeqCst) {
@@ -569,25 +565,7 @@ fn ready(fd: RawFd, stoppable: bool, write: bool) -> impl Fn(Instant) -> bool {
         if left.is_zero() {
             return false;
         }
-        let mut tv = libc::timeval {
-            tv_sec: left.as_secs().try_into().unwrap_or(0),
-            tv_usec: left.subsec_micros().try_into().unwrap_or(0),
-        };
-        let mut set = std::mem::MaybeUninit::<libc::fd_set>::uninit();
-        // SAFETY: `set` is writable memory; FD_ZERO initialises all of it.
-        unsafe { libc::FD_ZERO(set.as_mut_ptr()) };
-        // SAFETY: FD_ZERO above initialised `set`.
-        let mut set = unsafe { set.assume_init() };
-        // SAFETY: `Tty::open` refuses a descriptor at or above FD_SETSIZE, so
-        // `fd` fits the set, and `set` is initialised.
-        unsafe { libc::FD_SET(fd, &mut set) };
-        let (reads, writes): (*mut libc::fd_set, *mut libc::fd_set) = if write {
-            (std::ptr::null_mut(), &mut set)
-        } else {
-            (&mut set, std::ptr::null_mut())
-        };
-        // SAFETY: `set` and `tv` are valid for the call; one set, no error set.
-        let n = unsafe { libc::select(fd + 1, reads, writes, std::ptr::null_mut(), &mut tv) };
+        let n = select_one(fd, write, left);
         if n > 0 {
             return true;
         }
@@ -595,6 +573,43 @@ fn ready(fd: RawFd, stoppable: bool, write: bool) -> impl Fn(Instant) -> bool {
             return false;
         }
     }
+}
+
+/// One `select` on `fd` alone, for reading or (`write`) writing, waiting at
+/// most `left`: what `select` returns.
+#[allow(
+    clippy::unnecessary_fallible_conversions,
+    reason = "`tv_usec` is 32 bits on macOS and 64 on Linux; one spelling for both"
+)]
+fn select_one(fd: RawFd, write: bool, left: Duration) -> libc::c_int {
+    let mut tv = libc::timeval {
+        tv_sec: left.as_secs().try_into().unwrap_or(0),
+        tv_usec: left.subsec_micros().try_into().unwrap_or(0),
+    };
+    let mut set = std::mem::MaybeUninit::<libc::fd_set>::uninit();
+    // SAFETY: `set` is writable memory; FD_ZERO initialises all of it.
+    unsafe { libc::FD_ZERO(set.as_mut_ptr()) };
+    // SAFETY: FD_ZERO above initialised `set`.
+    let mut set = unsafe { set.assume_init() };
+    // SAFETY: `Tty::open` refuses a descriptor at or above FD_SETSIZE, so
+    // `fd` fits the set, and `set` is initialised.
+    unsafe { libc::FD_SET(fd, &mut set) };
+    let (reads, writes): (*mut libc::fd_set, *mut libc::fd_set) = if write {
+        (std::ptr::null_mut(), &mut set)
+    } else {
+        (&mut set, std::ptr::null_mut())
+    };
+    // SAFETY: `set` and `tv` are valid for the call; one set, no error set.
+    unsafe { libc::select(fd + 1, reads, writes, std::ptr::null_mut(), &mut tv) }
+}
+
+/// Whether `fd` has something to read now, without waiting. (A stop asked
+/// for meanwhile needs no check here: `settle` turns any answer into
+/// `Cancelled` then.)
+fn answer_waiting(fd: RawFd) -> bool {
+    #[cfg(test)]
+    test_terminal::looked();
+    select_one(fd, false, Duration::ZERO) > 0
 }
 
 /// Reads what the terminal sends until a reply of kind `end` is complete.
@@ -738,7 +753,24 @@ mod test_terminal {
         Stop,
     }
 
+    /// What the process does between the next request and reading its
+    /// reply, as one that comes to read only after the deadline.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Late {
+        /// Waits until the terminal sent something, then until the deadline
+        /// passed.
+        Answered,
+        /// Waits until the deadline passed.
+        Unanswered,
+    }
+
     thread_local! {
+        /// How the next query comes to read its reply.
+        pub(super) static LATE: Cell<Option<Late>> = const { Cell::new(None) };
+        /// When the wait of `LATE` ended.
+        pub(super) static LATE_END: Cell<Option<Instant>> = const { Cell::new(None) };
+        /// Looks without waiting (`answer_waiting`), counted.
+        pub(super) static LOOKS: Cell<usize> = const { Cell::new(0) };
         /// How many bytes of the next request the terminal takes, then what.
         pub(super) static ROOM: Cell<Option<(usize, Then)>> = const { Cell::new(None) };
         /// How many bytes of the next cancel the terminal takes in its first
@@ -747,6 +779,25 @@ mod test_terminal {
         /// Told once a request ending in `Then::Stop` took its bytes.
         pub(super) static STOPPER: RefCell<Option<std::sync::mpsc::Sender<()>>> =
             const { RefCell::new(None) };
+    }
+
+    /// Between the request and its reply, as `LATE` says.
+    pub(super) fn after_send(fd: std::os::fd::RawFd, deadline: Instant) {
+        let Some(late) = LATE.take() else {
+            return;
+        };
+        if late == Late::Answered {
+            // Reads nothing: the reply stays for the query.
+            let _ = super::ready(fd, false, false)(Instant::now() + Duration::from_secs(5));
+        }
+        while Instant::now() <= deadline + Duration::from_millis(20) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        LATE_END.set(Some(Instant::now()));
+    }
+
+    pub(super) fn looked() {
+        LOOKS.set(LOOKS.get() + 1);
     }
 
     /// A request write on `fd` under `room`: `None` writes as usual. Once
@@ -971,7 +1022,21 @@ impl Terminal for RawGuard<'_> {
                 Sent::All => {
                     let wait = readable(fd, true);
                     let mut f = &self.tty.file;
-                    read_reply(end, || wait(deadline), |b| f.read(b))
+                    #[cfg(test)]
+                    test_terminal::after_send(fd, deadline);
+                    // Once the time is up, what is already there still
+                    // counts: a process that comes to read only after the
+                    // deadline (a loaded machine, a slow build) takes a reply
+                    // the terminal sent in time. Each look waits for nothing
+                    // and the first empty one ends the wait, so the deadline
+                    // holds; the input read is bounded by `end.input_cap()`.
+                    // The look is here and not in `ready`: `drain` waits
+                    // with `ready` too and would read past its window while
+                    // input kept coming, and a write never needs it (a write
+                    // is tried before any wait).
+                    // 이것을 실패시키는 것: 마감 뒤 이미 와 있는 답을 보지 않는 것(Silent; an_answer_already_there_counts_after_the_deadline),
+                    // 마지막 보기가 기다리는 것(nothing_there_after_the_deadline_ends_at_once).
+                    read_reply(end, || wait(deadline) || answer_waiting(fd), |b| f.read(b))
                 }
                 Sent::Stopped { .. } => Answer::Cancelled,
                 Sent::TimedOut { .. } => Answer::Silent,
@@ -1971,6 +2036,99 @@ mod tests {
                     "silent at once {}",
                     start.elapsed() < LATE_REPLY_DRAIN
                 ));
+            }
+            say(&format!("restored {}", mode() == before));
+        }
+
+        // The process comes to read the reply only after the deadline (a
+        // loaded machine), while the terminal answered in time: the reply
+        // already there is taken, and the guard asks the next question as
+        // after any reply (doctor asks several in one guard).
+        // 이것을 실패시키는 것: 마감 뒤 이미 와 있는 답을 보지 않는 것(Silent, 다음 질문도 묻지 않음).
+        #[test]
+        fn an_answer_already_there_counts_after_the_deadline() {
+            let mut t = start("late_reader_child", 80);
+            t.expect(OSC11);
+            t.send(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+            t.expect(CPR);
+            t.send(b"\x1b[3;1R");
+            let (lines, _) = t.finish();
+            assert_eq!(
+                lines,
+                [
+                    r"reply \x1b]11;rgb:0000/0000/0000\x1b\\",
+                    "looked true",
+                    r"reply \x1b[3;1R",
+                    "restored true",
+                ]
+            );
+        }
+
+        // Late as above with half of the reply there: the query does not
+        // wait for the rest; it ends silent (what follows is read and
+        // dropped for `LATE_REPLY_DRAIN`, and the next query clears the
+        // input first).
+        // 이것을 실패시키는 것: 마감 뒤에 나머지를 기다리는 것, 반쪽을 답으로 받는 것.
+        #[test]
+        fn half_a_reply_at_the_deadline_is_silence() {
+            let mut t = start("late_half_child", 80);
+            t.expect(OSC11);
+            t.send(b"\x1b]11;rgb:00");
+            let (lines, _) = t.finish();
+            assert_eq!(lines, ["silent", "restored true"]);
+        }
+
+        // Late with nothing there: the query ends without waiting (the
+        // drain's 50 ms only; the limit here is generous and only catches a
+        // look that waits).
+        // 이것을 실패시키는 것: 마감 뒤의 보기가 기다리는 것(5초 기다리는 변이).
+        #[test]
+        fn nothing_there_after_the_deadline_ends_at_once() {
+            let mut t = start("late_unanswered_child", 80);
+            t.expect(OSC11);
+            let (lines, _) = t.finish();
+            assert_eq!(lines, ["silent", "within 2 s true", "restored true"]);
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn late_reader_child() {
+            let tty = take_terminal();
+            let before = mode();
+            {
+                let mut g = tty.raw().unwrap();
+                test_terminal::LATE.set(Some(test_terminal::Late::Answered));
+                say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+                say(&format!("looked {}", test_terminal::LOOKS.get() > 0));
+                say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
+            }
+            say(&format!("restored {}", mode() == before));
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn late_half_child() {
+            let tty = take_terminal();
+            let before = mode();
+            {
+                let mut g = tty.raw().unwrap();
+                test_terminal::LATE.set(Some(test_terminal::Late::Answered));
+                say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+            }
+            say(&format!("restored {}", mode() == before));
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn late_unanswered_child() {
+            let tty = take_terminal();
+            let before = mode();
+            {
+                let mut g = tty.raw().unwrap();
+                test_terminal::LATE.set(Some(test_terminal::Late::Unanswered));
+                say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+                let waited = test_terminal::LATE_END.get().unwrap().elapsed();
+                say(&format!("within 2 s {}", waited < Duration::from_secs(2)));
             }
             say(&format!("restored {}", mode() == before));
         }
