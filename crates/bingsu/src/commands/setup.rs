@@ -660,8 +660,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 Ended::Lost(why) => {
                     return refuse(&format!("{why}; nothing was written"));
                 }
-                // Only an existing file is compared.
-                Ended::NotLoaded(_) => return ctx::code(EXIT_FAILED),
+                Ended::NotLoaded(why) => {
+                    not_loaded(
+                        "nothing was written.",
+                        "setup cannot tell what a new file would change",
+                        &why,
+                    );
+                    return finish(runs_here);
+                }
                 // A new file's save screen writes.
                 Ended::Report { .. } => return ctx::code(EXIT_FAILED),
             }
@@ -942,19 +948,27 @@ fn edit_existing(
             Ended::Cancelled => cancelled(),
             Ended::Lost(why) => refuse(&format!("{why}; nothing was written")),
             Ended::NotLoaded(why) => {
-                eprintln!(
-                    "bingsu: {} is already there, so nothing was written.",
+                let lead = format!(
+                    "{} is already there, so nothing was written.",
                     ctx::show(Path::new(std::ffi::OsStr::from_bytes(&display)))
                 );
-                eprintln!("The settings do not load now, so there is nothing to compare it with:");
-                eprintln!("{why}");
-                eprintln!("`bingsu config check` lists every problem.");
+                not_loaded(&lead, "there is nothing to compare it with", &why);
                 finish(runs_here)
             }
             // An existing file's save screen writes nothing.
             Ended::Write { .. } => ctx::code(EXIT_FAILED),
         },
     )
+}
+
+/// What setup says when the settings do not load (`Ended::NotLoaded`):
+/// `lead` after `bingsu: `, why that stops it, the reader's first problem
+/// `why` (rendered and cleaned), and where to see every problem.
+fn not_loaded(lead: &str, stops: &str, why: &str) {
+    eprintln!("bingsu: {lead}");
+    eprintln!("The settings do not load now, so {stops}:");
+    eprintln!("{why}");
+    eprintln!("`bingsu config check` lists every problem.");
 }
 
 /// When the settings file `place` is a link (its folder resolved, the

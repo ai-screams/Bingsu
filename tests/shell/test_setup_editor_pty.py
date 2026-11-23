@@ -214,6 +214,33 @@ def test_nothing_a_config_names_runs_while_the_editor_previews(home):
     assert config(home) is None
 
 
+# 이것을 실패시키는 것: 설정이 지금 불러지지 않을 때(conf.d나 config.local의 문법 오류) 새 파일 편집판을 여는 것(불러오지
+# 못한 읽기에는 적용 순서가 없어 물려받는 값을 모른 채 쓸 키를 정함), 그 이유와 위치를 알리지 않는 것, 파일을 쓰는 것,
+# 종료 코드가 0이 아니거나 stdout에 시작 줄이 없는 것.
+@pytest.mark.parametrize("bad", ["conf.d/10-bad.toml", "config.local.toml"])
+def test_a_new_file_is_not_made_while_the_settings_do_not_load(home, bad):
+    path = home / "cfg/bingsu" / bad
+    path.parent.mkdir(parents=True)
+    for d in [home / "cfg", home / "cfg/bingsu", path.parent]:
+        d.chmod(0o700)
+    path.write_text("x = [\n")
+    path.chmod(0o600)
+    out = home / "out"
+    child = spawn(home, out=out)
+    code, before, after, text = finish(child)
+    assert code == 0, text
+    assert before == after
+    assert b"\x1b[?1049h" not in child.transcript.getvalue()
+    assert "bingsu: nothing was written." in text, text
+    assert "The settings do not load now, so setup cannot tell what a new file would change:" in text, text
+    assert "E101: this is not valid TOML" in text and f"{bad}:1:" in text, text
+    assert "`bingsu config check` lists every problem." in text, text
+    assert out.read_text() == 'eval "$(bingsu init zsh)"\n'
+    assert config(home) is None
+    # Nothing else in the settings folder (no left temporary file either).
+    assert [p.name for p in (home / "cfg/bingsu").iterdir()] == [bad.split("/")[0]]
+
+
 # 이것을 실패시키는 것: 편집하는 동안 바뀐 설정(새 conf.d 파일)을 보지 않고 쓰는 것, 그때 쓰려던 키를 알리지 않는 것,
 # 종료 코드가 1이 아닌 것.
 def test_settings_changed_while_editing_stop_the_save(home):

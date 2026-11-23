@@ -58,9 +58,10 @@ pub(crate) enum Ended {
     /// The terminal went away, took no output, or could not be taken:
     /// nothing written, and why.
     Lost(String),
-    /// An existing file the settings do not apply as they are (another
-    /// file, or the file itself, fails to load): no editor, since there is
-    /// nothing to compare against; the reader's first problem, rendered and
+    /// The settings do not load as they are (another file, or an existing
+    /// file itself, fails to load), so the file's place is not applied: no
+    /// editor, since nothing is known to compare an existing file against
+    /// or to make a new one on; the reader's first problem, rendered and
     /// cleaned.
     NotLoaded(String),
 }
@@ -297,12 +298,14 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
     let start = s.sources.load(s.sources.original());
     let r = report::from_loaded(start, Mode::Dark);
     let target = s.sources.target(&r.files);
-    // An existing file's values are known only from a load that applies
-    // it: a failed one keeps no order, and the file would seem to set
-    // nothing.
-    // 이것을 실패시키는 것: 불러오지 못한 설정에서 편집판을 여는 것(이미 있는 값을 "not set now"로 보임;
-    // test_settings_that_do_not_load_show_nothing_to_compare).
-    if matches!(s.target, Target::Existing(_)) && !target.is_some_and(|t| r.order.contains(&t)) {
+    // What the file's place holds and what comes before and after it are
+    // known only from a load that applies it: a failed one keeps no order,
+    // so an existing file would seem to set nothing and a new one would be
+    // written against values nobody inherits.
+    // 이것을 실패시키는 것: 불러오지 못한 설정에서 편집판을 여는 것(있는 파일은 이미 있는 값을 "not set now"로
+    // 보임, test_settings_that_do_not_load_show_nothing_to_compare; 새 파일은 물려받는 값을 모른 채 씀,
+    // test_a_new_file_is_not_made_while_the_settings_do_not_load).
+    if !target.is_some_and(|t| r.order.contains(&t)) {
         return Ended::NotLoaded(first_problem(&r));
     }
     let layers = match target {
