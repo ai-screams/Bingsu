@@ -59,14 +59,17 @@ def put(path, text):
     return path
 
 
-def kept(path):
-    """What must stay: the bytes, the modification time and the inode (of a
-    link, the link's own and its target's)."""
+def kept(path, read=True):
+    """What must stay: the file's bytes, mode, modification time and inode,
+    and its folder's mode, modification time and inode (a file made and
+    removed there changes the folder's time); of a link, the link's own
+    with its folder's, and its target's with its folder's."""
     st = os.lstat(path)
-    mine = (st.st_mtime_ns, st.st_ino)
+    folder = os.stat(path.parent)
+    mine = (st.st_mode, st.st_mtime_ns, st.st_ino, folder.st_mode, folder.st_mtime_ns, folder.st_ino)
     if path.is_symlink():
-        return mine, kept(path.resolve())
-    return mine, path.read_bytes()
+        return mine, kept(path.resolve(), read)
+    return mine, path.read_bytes() if read else None
 
 
 STARTUP = 'eval "$(bingsu init zsh)"\n'
@@ -95,7 +98,8 @@ def change_and_print(child, stale):
     return finish(child)
 
 
-# 이것을 실패시키는 것: 있는 파일을 바꾸는 것(바이트, 수정 시각, inode), 편집판을 열지 않는 것, 제목에 "exists: not
+# 이것을 실패시키는 것: 있는 파일을 바꾸는 것(바이트, 권한, 수정 시각, inode), 그 폴더를 바꾸는 것(권한, 수정 시각, inode:
+# 파일을 만들었다 지워도 바뀜), 편집판을 열지 않는 것, 제목에 "exists: not
 # changed"가 없는 것, TOML을 국소 편집한 후보로 미리 보지 않는 것, JSON과 국소 편집이 거부하는 모양에서 미리보기가
 # 고른 값을 따르지 않는다고 알리지 않는 것, 바꿀 키와 줄을 stderr에 내지 않는 것, stdout에 시작 줄 말고 다른 것을 내는 것.
 @pytest.mark.parametrize(("name", "text", "stale", "line"), [
@@ -121,7 +125,7 @@ def test_an_existing_file_shows_what_to_change_and_stays(home, name, text, stale
     assert kept(path) == before
 
 
-# 이것을 실패시키는 것: 링크로 된 설정 파일이나 그 링크를 바꾸는 것, 링크 너머의 파일을 열지 않는 것, 제목이 링크
+# 이것을 실패시키는 것: 링크로 된 설정 파일이나 그 링크(와 둘의 폴더)를 바꾸는 것, 링크 너머의 파일을 열지 않는 것, 제목이 링크
 # 너머의 이름인데 어느 링크인지 알리지 않는 것.
 def test_a_linked_settings_file_stays(home):
     real = put(home / "real/theme.toml", 'icons = "nerd"\n[style]\npreset = "pill"\n')
@@ -308,7 +312,7 @@ def test_an_unreadable_settings_file_opens_no_editor(resolve):
 def unreadable(home):
     path = put(home / "cfg/bingsu/config.toml", 'icons = "nerd"\n')
     path.chmod(0)
-    before = os.lstat(path)
+    before = kept(path, read=False)
     out = home / "out"
     # No choices given: the line questions would wait for answers.
     child = spawn(home, out=out)
@@ -318,5 +322,4 @@ def unreadable(home):
     assert "It could not be read to compare: " in transcript, transcript
     assert b"\x1b[?1049h" not in child.transcript.getvalue()
     assert out.read_text() == STARTUP
-    after = os.lstat(path)
-    assert (after.st_mtime_ns, after.st_ino, after.st_mode) == (before.st_mtime_ns, before.st_ino, before.st_mode)
+    assert kept(path, read=False) == before
