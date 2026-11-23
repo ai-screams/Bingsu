@@ -1043,18 +1043,25 @@ fn print(text: &[u8]) {
 
 /// The parent's side of job_shell_child's scenario: what it types and when.
 fn job_shell(scenario: &str) -> (Vec<String>, Vec<u8>) {
+    job_shell_with(scenario, &[])
+}
+
+/// `job_shell` with more parameters for the shell and the job.
+fn job_shell_with(scenario: &str, env: &[(&str, &str)]) -> (Vec<String>, Vec<u8>) {
+    // One file per call: tests that share a scenario run at the same time.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let report = std::env::temp_dir().join(format!(
-        "bingsu-session-test-{}-{scenario}",
+        "bingsu-session-test-{}-{call}-{scenario}",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&report);
-    let mut t = start(
-        "job_shell_child",
-        &[
-            ("BINGSU_TEST_SCENARIO", scenario),
-            ("BINGSU_TEST_REPORT", report.to_str().unwrap()),
-        ],
-    );
+    let mut params = vec![
+        ("BINGSU_TEST_SCENARIO", scenario),
+        ("BINGSU_TEST_REPORT", report.to_str().unwrap()),
+    ];
+    params.extend_from_slice(env);
+    let mut t = start("job_shell_child", &params);
     if scenario == "entrystopfg" || scenario == "entrytaken" {
         // The terminal took 3 bytes of the alternate screen's switch.
         t.expect(b"\x1b[?");
@@ -1253,6 +1260,23 @@ fn a_continue_during_the_way_out_cancels_the_stop() {
         LEAVE_ALL,
     ]);
     assert_eq!(shown(&all), shown(&want));
+}
+
+// The job's lines reach the test through the shell, which passes them on
+// from a thread; when that thread is slow (here 100 ms a line, as on a
+// loaded machine), the shell still waits for the job's last lines before it
+// ends. 이것을 실패시키는 것: 셸이 그 스레드를 기다리지 않고 끝나는 것(job: resumed, job: typed 줄을 잃음).
+#[test]
+fn a_job_shell_passes_on_the_last_lines_of_its_job() {
+    let (lines, _) = job_shell_with("leavecont", &[("BINGSU_TEST_SLOW_LINES", "1")]);
+    for want in [
+        "job: back from the stop, wrote 5",
+        "job: resumed 1",
+        "job: typed q",
+        "ended without a stop true",
+    ] {
+        assert!(has(&lines, want), "{want}: {lines:?}");
+    }
 }
 
 // A SIGTERM sent while the job is stopped comes with the SIGCONT of `fg`:
@@ -1476,16 +1500,37 @@ fn failed_raw_child() {
     say(&format!("handlers back {}", handlers() == before));
 }
 
-/// Kills the job's process group when dropped (`None`: the job is meant to
-/// outlive the shell).
-struct KillJob(Option<libc::pid_t>);
+/// The job, at the shell's end: its process group is killed (a job a broken
+/// build left stopped or waiting, and the other process of `stop`), then the
+/// shell waits, at most `WAIT`, until the thread that passes the job's lines
+/// on reached the end of their pipe, which ends with the job. A shell that
+/// ended first would lose the job's last lines still in the pipe.
+/// `outlives`: the job is meant to outlive the shell, and is left alone.
+/// 이것을 실패시키는 것: 줄을 기다리지 않는 것(a_job_shell_passes_on_the_last_lines_of_its_job), 남겨 둘 작업도 죽이는 것
+/// (a_background_session_ends_when_its_terminal_goes_away).
+struct JobEnd {
+    pid: libc::pid_t,
+    lines: Option<std::thread::JoinHandle<()>>,
+    outlives: bool,
+}
 
-impl Drop for KillJob {
+impl Drop for JobEnd {
     fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            // SAFETY: sends SIGKILL to the job's process group; one that
-            // ended already is not there (ESRCH).
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        if self.outlives {
+            return;
+        }
+        // SAFETY: sends SIGKILL to the job's process group; one that ended
+        // already is not there (ESRCH).
+        unsafe { libc::kill(-self.pid, libc::SIGKILL) };
+        let Some(reader) = self.lines.take() else {
+            return;
+        };
+        let until = Instant::now() + WAIT;
+        while !reader.is_finished() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if reader.is_finished() {
+            let _ = reader.join();
         }
     }
 }
@@ -1523,8 +1568,12 @@ fn job_shell_child() {
     .unwrap();
     let pid = libc::pid_t::try_from(job.id()).unwrap();
     // A job a broken build leaves stopped or waiting is killed: when this
-    // shell fails, and in any case after 20 s.
-    let mut killer = KillJob(Some(pid));
+    // shell ends (`JobEnd`), and in any case after 20 s.
+    let mut end = JobEnd {
+        pid,
+        lines: None,
+        outlives: false,
+    };
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(20));
         // SAFETY: sends SIGKILL to the job's process group.
@@ -1532,13 +1581,18 @@ fn job_shell_child() {
     });
     let (tell, told) = std::sync::mpsc::channel();
     let out = job.stdout.take().unwrap();
-    std::thread::spawn(move || {
+    // A slow pass (as on a loaded machine), for the test of the wait above.
+    let slow = param_if_given("BINGSU_TEST_SLOW_LINES").is_some();
+    end.lines = Some(std::thread::spawn(move || {
         for line in std::io::BufReader::new(out).lines() {
             let line = line.unwrap();
+            if slow {
+                std::thread::sleep(Duration::from_millis(100));
+            }
             println!("{line}");
             let _ = tell.send(line);
         }
-    });
+    }));
     let wait_line = |want: &str| loop {
         let line = told.recv_timeout(WAIT).expect(want);
         if line.contains(want) {
@@ -1832,7 +1886,7 @@ fn job_shell_child() {
         }
         "hangup" => {
             // The shell ends; the job reports through its file.
-            killer.0 = None;
+            end.outlives = true;
             print(b"SHELL bg\n");
             return;
         }
