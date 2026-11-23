@@ -101,8 +101,13 @@ def spawn(home, *args, background=False, high_fds=False, extra=None):
 
 
 def finish(child):
-    """Reads to the end; returns (exit code of setup, settings before, settings after, text)."""
+    """Reads to the end and closes the child; returns (exit code of setup,
+    settings before, settings after, text). Closing here, not when the child
+    object goes (pexpect then sleeps `delayafterclose`, and more while the
+    child is not reaped yet), keeps that wait out of the next child's 200 ms
+    answer window: a test that spawns again sends its answer only after it."""
     child.expect(pexpect.EOF)
+    child.close()
     text = child.transcript.getvalue().decode("utf-8", "replace")
     before, after = (re.search(rf"{k}=(\S+)", text).group(1) for k in ("BEFORE", "AFTER"))
     return int(re.search(r"RC=(\d+)", text).group(1)), before, after, text
@@ -111,6 +116,16 @@ def finish(child):
 def config(home):
     path = home / "cfg/bingsu/config.toml"
     return path.read_text() if path.exists() else None
+
+
+# 이것을 실패시키는 것: finish가 자식을 닫지 않는 것. 그러면 다음 spawn으로 바꿔 끼울 때 pexpect가 옛 자식을 닫느라
+# 0.1 s 이상(바쁜 러너에서는 그 몇 배) 멈추고, 그동안 새 자식의 배경색 질의 창(200 ms)이 흘러 답이 늦는다
+# (test_settings_changed_while_asking_write_nothing의 두 번째 spawn이 "the terminal did not say"로 실패).
+def test_finish_closes_the_child(home):
+    child = spawn(home, "--no-such-flag")
+    code, _, _, text = finish(child)
+    assert code == 2, text
+    assert child.closed and not child.isalive()
 
 
 # 이것을 실패시키는 것: 응답을 받은 뒤 `tcsetattr`로 되돌리지 않는 것(Drop의 복구 삭제), 응답을 화면에

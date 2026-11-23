@@ -70,11 +70,8 @@ def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None, back
     return child
 
 
-def finish(child):
-    child.expect(pexpect.EOF)
-    text = child.transcript.getvalue().decode("utf-8", "replace")
-    before, after = (re.search(rf"{k}=(\S+)", text).group(1) for k in ("BEFORE", "AFTER"))
-    return int(re.search(r"RC=(\d+)", text).group(1)), before, after, text
+# Closes the child as it ends (see there): tests here spawn again too.
+from test_setup_pty import finish  # noqa: E402
 
 
 def opened(child, rows=24, cols=80):
