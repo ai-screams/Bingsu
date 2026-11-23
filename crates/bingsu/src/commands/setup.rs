@@ -41,7 +41,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: bingsu setup [--yes] [--plain] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]";
 const FILE: &str = "config.toml";
 /// The names of the one place `setup` writes: the file it makes, and the
 /// JSON name that stands in the same place.
@@ -49,21 +48,24 @@ const NAMES: [&str; 2] = [FILE, "config.json"];
 const CANCELLED: u8 = 130;
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct Args {
+pub(super) struct Args {
     yes: bool,
     /// The line questions even where the editor could be drawn.
     plain: bool,
+    /// The editor's opening drawn still (its end frame).
+    no_motion: bool,
     icons: Option<Icons>,
     mode: Option<Mode>,
 }
 
-fn parse(args: &[OsString]) -> Result<Args, String> {
+pub(super) fn parse(args: &[OsString]) -> Result<Args, String> {
     let mut out = Args::default();
     let mut it = args.iter().map(|a| a.to_str());
     while let Some(word) = it.next() {
         match word {
             Some("--yes") => out.yes = true,
             Some("--plain") => out.plain = true,
+            Some("--no-motion") => out.no_motion = true,
             Some("--icons") => {
                 let v = it.next().flatten().and_then(Icons::parse);
                 out.icons = Some(v.ok_or("--icons takes nerd, light, unicode or ascii")?);
@@ -72,7 +74,7 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
                 let v = it.next().flatten().and_then(Mode::parse);
                 out.mode = Some(v.ok_or("--mode takes auto, dark or light")?);
             }
-            _ => return Err(USAGE.to_owned()),
+            _ => return Err(super::usage::line(&["setup"])),
         }
     }
     Ok(out)
@@ -95,8 +97,9 @@ fn complete(a: &Args) -> Result<Choices, String> {
     match (a.icons, a.mode) {
         (Some(icons), Some(mode)) if a.yes => Ok(Choices { icons, mode }),
         _ => Err(format!(
-            "bingsu setup: there is no terminal to ask, so it needs {} too\n{USAGE}",
-            missing.join(", ")
+            "bingsu setup: there is no terminal to ask, so it needs {} too\n{}",
+            missing.join(", "),
+            super::usage::line(&["setup"])
         )),
     }
 }
@@ -878,6 +881,7 @@ fn edit_with(
             ColorDepth::Ansi256
         },
         mono: no_color,
+        still: args.no_motion,
         read_only: !mine,
         given: Given {
             icons: args.icons,
@@ -1082,18 +1086,22 @@ mod tests {
         let e = parse(&args(&["--icons", "emoji"])).unwrap_err();
         assert_eq!(e, "--icons takes nerd, light, unicode or ascii");
         let words = Icons::ALL.map(Icons::word).join("|");
-        assert!(USAGE.contains(&format!("[--icons {words}]")), "{USAGE}");
+        let usage = crate::commands::usage::line(&["setup"]);
+        assert!(usage.contains(&format!("[--icons {words}]")), "{usage}");
         let a = parse(&args(&["--yes", "--icons", "nerd", "--mode", "light"])).unwrap();
         assert_eq!(
             a,
             Args {
                 yes: true,
                 plain: false,
+                no_motion: false,
                 icons: Some(Icons::Nerd),
                 mode: Some(Mode::Light)
             }
         );
         assert!(parse(&args(&["--plain"])).unwrap().plain);
+        assert!(parse(&args(&["--no-motion"])).unwrap().no_motion);
+        assert!(!parse(&args(&["--plain"])).unwrap().no_motion);
         for bad in [
             &["--icons", "emoji"][..],
             &["--icons", "Light"],
@@ -1136,11 +1144,13 @@ mod tests {
             way(&a(&["--yes", "--mode", "dark"]), xterm, fit),
             Way::Editor
         );
-        assert!(USAGE.contains(" [--plain] "), "{USAGE}");
+        let usage = crate::commands::usage::line(&["setup"]);
+        assert!(usage.contains(" [--plain] "), "{usage}");
+        assert!(usage.contains(" [--no-motion] "), "{usage}");
     }
 
     // 이것을 실패시키는 것: 터미널 없이 기본값을 조용히 고르는 것, 빠진 인자를 이름으로 알리지 않는 것,
-    // `--yes` 없이 쓰기로 넘어가는 것.
+    // `--yes` 없이 쓰기로 넘어가는 것, 안내 끝의 사용법 줄을 빼는 것.
     #[test]
     fn without_a_terminal_all_three_must_be_given() {
         let all = Args {
@@ -1158,6 +1168,8 @@ mod tests {
         );
         let e = complete(&Args::default()).unwrap_err();
         assert!(e.contains("--yes, --icons, --mode"), "{e}");
+        let usage = crate::commands::usage::line(&["setup"]);
+        assert!(e.ends_with(&format!("\n{usage}")), "{e}");
         let e = complete(&Args {
             icons: Some(Icons::Nerd),
             ..Args::default()

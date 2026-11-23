@@ -59,8 +59,6 @@ mod terminal_rows;
 
 use render::{exit_of, render, render_json};
 
-const USAGE: &str = "usage: bingsu doctor [--format json|text] [--terminal] [--evidence-stdin]";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Status {
     Ok,
@@ -255,7 +253,7 @@ fn open_controlling_terminal() -> Option<Box<dyn Controlling>> {
 
 /// What the command line asked for.
 #[derive(Debug, PartialEq, Eq)]
-struct Opts {
+pub(super) struct Opts {
     json: bool,
     /// The shell function hands its evidence on standard input.
     evidence: bool,
@@ -266,7 +264,7 @@ struct Opts {
 
 /// `--format json|text`, `--terminal` and `--evidence-stdin`, each at most
 /// once, in any order.
-fn parse(args: &[OsString]) -> Option<Opts> {
+pub(super) fn parse(args: &[OsString]) -> Option<Opts> {
     let mut o = Opts {
         json: false,
         evidence: false,
@@ -310,7 +308,7 @@ const EXIT_CANCELLED: u8 = 130;
 
 pub fn run(args: &[OsString]) -> ExitCode {
     let Some(opts) = parse(args) else {
-        eprintln!("{USAGE}");
+        eprintln!("{}", super::usage::line(&["doctor"]));
         return ctx::code(EXIT_USAGE);
     };
     let json = opts.json;

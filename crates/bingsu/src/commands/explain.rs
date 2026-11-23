@@ -40,8 +40,6 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "usage: bingsu explain [SEGMENT] [--width N] [--config FILE] [--format json|text]";
 /// The widest file `--config` reads (the cap of one config file).
 const FILE_MAX: u64 = 256 * 1024;
 /// What the text report adds after `width: N cells`.
@@ -284,7 +282,7 @@ const FOOTER: &str = "explain runs no command and collects no git or folder fact
 
 pub fn run(args: &[OsString]) -> ExitCode {
     let Some(a) = parse(args) else {
-        eprintln!("{USAGE}");
+        eprintln!("{}", super::usage::line(&["explain"]));
         return ctx::code(EXIT_USAGE);
     };
     let Some(user) = User::current() else {
