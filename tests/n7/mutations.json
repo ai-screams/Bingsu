@@ -2874,8 +2874,14 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/config.rs",
-        "before": "Some((explain, json)) => {",
-        "after": "Some((explain, json)) => { let _ = super::reload::run(exe, &[]);",
+        "before": "}) => return config_inspect::check_explain(json),",
+        "after": "}) => { let _ = super::reload::run(exe, &[]); return config_inspect::check_explain(json); },",
+        "count": 1
+      },
+      {
+        "file": "crates/bingsu/src/commands/config.rs",
+        "before": "}) => return config_inspect::check(json),",
+        "after": "}) => { let _ = super::reload::run(exe, &[]); return config_inspect::check(json); },",
         "count": 1
       }
     ]
@@ -2901,8 +2907,8 @@
     "patches": [
       {
         "file": "crates/bingsu/src/commands/config.rs",
-        "before": "[Some(\"path\")] => return config_inspect::path(),",
-        "after": "[Some(\"path\")] => { let _ = super::reload::run(exe, &[]); return config_inspect::path(); },",
+        "before": "Some(Verb::Path) => return config_inspect::path(),",
+        "after": "Some(Verb::Path) => { let _ = super::reload::run(exe, &[]); return config_inspect::path(); },",
         "count": 1
       }
     ]
