@@ -649,32 +649,42 @@ def end_frame(home, rows=24, cols=80):
     return shown
 
 
+def drain(child, seconds):
+    """Reads for `seconds`, as a terminal keeps taking output."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            child.read_nonblocking(65536, timeout=0.05)
+        except pexpect.TIMEOUT:
+            pass
+
+
+def bowls_per_frame(log, rows=24, cols=80):
+    """The bowl's rows after each frame of `log` (up to each frame's end)."""
+    screen = pyte.Screen(cols, rows)
+    stream = pyte.ByteStream(screen)
+    out = []
+    for part in log.split(b"\x1b[?2026l")[:-1]:
+        stream.feed(part + b"\x1b[?2026l")
+        out.append(bowl(screen.display))
+    return out
+
+
 # 이것을 실패시키는 것: 여는 그림을 그리지 않는 것(1-7행이 움직이지 않음), 끝 프레임에서 멈추지 않는 것, 끝난 뒤에도
-# 프레임이나 타이머로 쓰는 것(조용하지 않음), 1초에 30장보다 많이 그리는 것.
+# 프레임이나 타이머로 쓰는 것(조용하지 않음), 1초에 30장보다 많이 그리는 것. 읽기를 멈추지 않고(멈추면 놓친 프레임이
+# 쌓여 그림이 일찍 끝남) 다 읽은 뒤 프레임마다의 그림을 본다.
 def test_the_opening_plays_and_then_stays_still(home):
     still = end_frame(home)
     child = spawn(home)
     opened(child)
     first = len(child.transcript.getvalue())
-    start = time.monotonic()
-    moving = []
-    for at in (0.4, 1.4, 2.6):
-        while time.monotonic() < start + at:
-            try:
-                child.read_nonblocking(65536, timeout=0.05)
-            except pexpect.TIMEOUT:
-                pass
-        moving.append(bowl(screen_of(child)))
-    assert len({tuple(b) for b in moving}) == 3, "\n".join("\n".join(b) for b in moving)
-    # Past its 4.4 s: the end frame, and nothing after it.
-    while time.monotonic() < start + 5.2:
-        try:
-            child.read_nonblocking(65536, timeout=0.05)
-        except pexpect.TIMEOUT:
-            pass
-    assert bowl(screen_of(child)) == still, "\n".join(bowl(screen_of(child)))
-    assert quiet(child, 1.5), "output after the end frame"
+    # Past its 4.4 s.
+    drain(child, 5.2)
     log = child.transcript.getvalue()
+    pictures = bowls_per_frame(log)
+    assert len({tuple(p) for p in pictures}) >= 3, len(pictures)
+    assert pictures[-1] == still, "\n".join(pictures[-1])
+    assert quiet(child, 1.5), "output after the end frame"
     frames = log[first:].count(b"\x1b[?2026l")
     # 4.4 s at 30 frames a second at most, with the end frame.
     assert frames <= 4.4 * 30 + 2, frames
@@ -737,10 +747,20 @@ def test_the_opening_ends_after_a_stop(home):
     time.sleep(0.3)
     resumed_at = len(child.transcript.getvalue())
     os.kill(pid, signal.SIGCONT)
-    # The resume draws the whole screen again, with the end frame.
-    shown = until(child, lambda d: len(child.transcript.getvalue()) > resumed_at
-                  and bowl(d) == still)
-    assert bowl(shown) == still
+    # The resume draws the whole screen again (`ESC [ 2 J`): that frame,
+    # up to its end, has the end frame of the opening.
+    def full_frame_after_resume():
+        log = child.transcript.getvalue()
+        start = log.find(b"\x1b[2J", resumed_at)
+        end = log.find(b"\x1b[?2026l", start) if start >= 0 else -1
+        return log[:end + len(b"\x1b[?2026l")] if end >= 0 else None
+    deadline = time.monotonic() + 10
+    while full_frame_after_resume() is None:
+        assert time.monotonic() < deadline, "no full frame after the resume"
+        drain(child, 0.05)
+    screen = pyte.Screen(80, 24)
+    pyte.ByteStream(screen).feed(full_frame_after_resume())
+    assert bowl(screen.display) == still, "\n".join(bowl(screen.display))
     assert quiet(child, 1.2), "the opening went on after the resume"
     child.send("q")
     finish(child)
