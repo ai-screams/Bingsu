@@ -2123,7 +2123,8 @@ fn every_editor_text_cell_meets_4_5_to_1() {
 // under it, not the last column. Its inks become 24-bit or 256-color
 // paints, or the default color with `NO_COLOR`; the background stays.
 // 이것을 실패시키는 것: 그릇 자리 조건을 배치와 따로 두는 것(그 크기에서 1-7행에 다른 줄이 옴), 다른 줄이나
-// 마지막 칸에 쓰는 것, 색 깊이를 무시하는 것, NO_COLOR에서 색을 쓰는 것, 바탕을 바꾸는 것.
+// 마지막 칸에 쓰는 것, 색 깊이를 무시하는 것, 16색을 편집판 글과 다르게 옮기는 것, NO_COLOR에서 색을 쓰는 것,
+// 바탕을 바꾸는 것.
 #[test]
 fn the_band_goes_only_where_the_layout_keeps_the_bowl() {
     use bingsu_core::color::math::nearest_256;
@@ -2154,6 +2155,7 @@ fn the_band_goes_only_where_the_layout_keeps_the_bowl() {
         for (depth, mono) in [
             (ColorDepth::TrueColor, false),
             (ColorDepth::Ansi256, false),
+            (ColorDepth::Ansi16, false),
             (ColorDepth::TrueColor, true),
         ] {
             let mut with = g.clone();
@@ -2175,10 +2177,11 @@ fn the_band_goes_only_where_the_layout_keeps_the_bowl() {
                     };
                     drawn += 1;
                     assert_eq!(after.text, char::from(c.ch).to_string());
+                    // As the editor's own colors: no 16-color mapping.
                     let want = match (mono, depth) {
-                        (true, _) => Ink::Default,
                         (false, ColorDepth::TrueColor) => Ink::Rgb(ink.r, ink.g, ink.b),
-                        _ => Ink::Indexed(nearest_256(ink)),
+                        (false, ColorDepth::Ansi256) => Ink::Indexed(nearest_256(ink)),
+                        _ => Ink::Default,
                     };
                     assert_eq!(after.paint.fg, want, "{depth:?} {mono}");
                 }

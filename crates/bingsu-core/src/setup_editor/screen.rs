@@ -68,10 +68,14 @@ pub fn bowl_shown(m: &Model, cols: u16, rows: u16) -> bool {
 
 /// Copies the opening's `band` into the grid's rows `BOWL_TOP`.. (the
 /// caller draws it `cols - 1` wide: the last column stays empty). A cell
-/// with an ink takes its glyph in that color (24-bit, or the nearest of
-/// 256), or in the default color with `mono` (`NO_COLOR`); the background
-/// stays the screen's. An empty cell is left as the screen has it. Nothing
-/// goes past the grid or onto its last column.
+/// with an ink takes its glyph in that color, mapped as the editor's own
+/// colors are (`ink`), or in the default color with `mono` (`NO_COLOR`);
+/// the background stays the screen's. An empty cell is left as the screen
+/// has it. Through `Grid::set`, like every other cell: a glyph that is a
+/// control is not put, and nothing goes past the grid or onto its last
+/// column.
+/// 이것을 실패시키는 것: 칸을 직접 써서 set을 건너뛰는 것(제어 글자가 칸에 들어감; a_band_cell_goes_through_the_one_writer),
+/// 색 깊이를 편집판 글과 다르게 옮기는 것(Ansi16에 256색; the_band_goes_only_where_the_layout_keeps_the_bowl).
 pub fn put_band(g: &mut Grid, band: &crate::opening::Band, depth: ColorDepth, mono: bool) {
     let end = g.cols.saturating_sub(1);
     for y in 0..crate::opening::ROWS {
@@ -80,17 +84,20 @@ pub fn put_band(g: &mut Grid, band: &crate::opening::Band, depth: ColorDepth, mo
             break;
         }
         for (x, c) in (0..end).zip(band.row(y)) {
-            let Some(ink) = c.ink else { continue };
+            let Some(color) = c.ink else { continue };
             let fg = if mono {
                 Ink::Default
-            } else if depth == ColorDepth::TrueColor {
-                Ink::Rgb(ink.r, ink.g, ink.b)
             } else {
-                Ink::Indexed(nearest_256(ink))
+                ink(Some(color), depth)
             };
-            let cell = g.cell_mut(x, gy);
-            cell.text = String::from(char::from(c.ch));
-            cell.paint = Paint { fg, ..cell.paint };
+            let paint = Paint {
+                fg,
+                ..g.cell(x, gy).paint
+            };
+            let mut glyph = [0u8; 4];
+            let text = char::from(c.ch).encode_utf8(&mut glyph);
+            let w = grapheme_width(text, WidthProfile::DEFAULT, |_| None).0;
+            g.set(u32::from(x), gy, text, w, paint, u32::from(end));
         }
     }
 }
@@ -842,6 +849,26 @@ fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A band cell whose glyph is a control (U+0085 from byte 0x85) is not
+    // put; a plain one is. 이것을 실패시키는 것: put_band가 set을 건너뛰고 칸을 직접 쓰는 것.
+    #[test]
+    fn a_band_cell_goes_through_the_one_writer() {
+        use crate::opening::{Band, Cell as BandCell, ROWS};
+        let ink = Some(Srgb8 {
+            r: 200,
+            g: 200,
+            b: 200,
+        });
+        let mut cells = vec![BandCell::EMPTY; 4 * usize::from(ROWS)];
+        cells[0] = BandCell { ch: 0x85, ink };
+        cells[1] = BandCell { ch: b'x', ink };
+        let band = Band::from_cells(4, cells);
+        let mut g = Grid::new(5, 9, Paint::default());
+        put_band(&mut g, &band, ColorDepth::TrueColor, false);
+        assert_eq!(g.cell(0, BOWL_TOP).text, " ");
+        assert_eq!(g.cell(1, BOWL_TOP).text, "x");
+    }
 
     // 이것을 실패시키는 것: 칸이 없는 cluster(바탕 없는 결합 표지)를 제 칸에 두는 것(그 칸의 폭이 0이 되어 줄이
     // 한 칸 모자란다), 줄 끝을 넘는 2칸 글자를 두는 것(다음 줄 첫 칸에 쓰인다), 격자 밖 줄에 쓰는 것.
