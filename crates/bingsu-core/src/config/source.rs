@@ -61,7 +61,7 @@ pub enum Trust {
 }
 
 /// One opened file.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opened {
     pub key: FileKey,
     pub bytes: Vec<u8>,
@@ -90,7 +90,7 @@ pub struct OpenError {
 /// A root before it is read: what the caller learns from `fstat` (key,
 /// size) and from where the file is (trust). Core decides the budget on
 /// this and asks for the bytes only when the root fits.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootMeta {
     pub key: FileKey,
     pub size: usize,
@@ -99,7 +99,7 @@ pub struct RootMeta {
 }
 
 /// One root: already in memory (the built-in source) or still on disk.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Root {
     Read(Opened),
     File(RootMeta),

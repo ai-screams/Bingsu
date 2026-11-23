@@ -202,19 +202,25 @@ fn require_watchdog<T>(result: std::io::Result<T>) -> Result<T, u8> {
 }
 
 pub fn arm_deadline(limit: Duration, text: String) -> Result<Deadline, u8> {
+    require_watchdog(arm_deadline_ending(limit, text, EXIT_UNFINISHED))
+}
+
+/// `arm_deadline` ending with `code`, and saying nothing when the watchdog
+/// cannot start: `setup` has written its file by then, so its deadline is
+/// a notice, not a failure, and it words a watchdog that did not start
+/// itself.
+pub fn arm_deadline_ending(limit: Duration, text: String, code: u8) -> std::io::Result<Deadline> {
     let saved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stage = saved.clone();
     let end = std::time::Instant::now() + limit;
-    require_watchdog(
-        std::thread::Builder::new()
-            .name("deadline".into())
-            .spawn(move || {
-                std::thread::sleep(end.saturating_duration_since(std::time::Instant::now()));
-                let text = deadline_text(stage.load(std::sync::atomic::Ordering::Acquire), &text);
-                sys::write_deadline_notice(text.as_bytes());
-                sys::exit_now(i32::from(EXIT_UNFINISHED));
-            }),
-    )?;
+    std::thread::Builder::new()
+        .name("deadline".into())
+        .spawn(move || {
+            std::thread::sleep(end.saturating_duration_since(std::time::Instant::now()));
+            let text = deadline_text(stage.load(std::sync::atomic::Ordering::Acquire), &text);
+            sys::write_deadline_notice(text.as_bytes());
+            sys::exit_now(i32::from(code));
+        })?;
     Ok(Deadline(saved))
 }
 
@@ -327,6 +333,37 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(t.elapsed() < Duration::from_secs(15));
+    }
+
+    // The child half of `a_deadline_can_end_with_another_code`.
+    #[test]
+    #[ignore = "runs inside the child process of a_deadline_can_end_with_another_code"]
+    fn deadline_child_ending_0() {
+        let d = arm_deadline_ending(Duration::from_millis(50), "generic\n".into(), 0).unwrap();
+        d.selection_saved();
+        std::thread::sleep(Duration::from_secs(20));
+    }
+
+    // 이것을 실패시키는 것: 감시가 받은 종료 코드 대신 늘 3으로 끝내는 것.
+    #[test]
+    fn a_deadline_can_end_with_another_code() {
+        let _inherited_fds = crate::commands::sys::test_inherited_fd_lock();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::ctx::tests::deadline_child_ending_0",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("your choice was saved"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     // 이것을 실패시키는 것: core가 아는 버전과 이 crate의 버전이 다른 것, pre-release 표지를 버리는 것.

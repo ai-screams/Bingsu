@@ -16,7 +16,7 @@ use super::rows::{self, Row};
 use super::write::{changes, written_keys};
 use crate::color::math::{Srgb8, nearest_256};
 use crate::color::palette::{Mode, ResolvedPalette, named_color};
-use crate::color::sgr::{BOLD, ColorDepth, Ink, Paint};
+use crate::color::sgr::{BOLD, ColorDepth, Ink, Paint, REVERSE, write_paint};
 use crate::preview::PreviewLine;
 use crate::width::{WidthProfile, fit_prefix, fit_suffix, grapheme_width, str_width};
 use alloc::format;
@@ -105,7 +105,15 @@ impl Grid {
         let fits = x
             .checked_add(w)
             .is_some_and(|e| e <= end.min(u32::from(self.cols)));
-        if w == 0 || !fits || y >= self.rows {
+        // The one writer of cells: a control, bidi or invisible character
+        // never reaches a frame, whatever the caller forgot to clean.
+        // A closure: the purity gate refuses a function item passed on.
+        let removed = text
+            .chars()
+            .filter(|&c| crate::sanitize::is_removed(c))
+            .count()
+            > 0;
+        if w == 0 || !fits || y >= self.rows || removed {
             return false;
         }
         let x = x as u16;
@@ -137,6 +145,68 @@ impl Grid {
             }
         }
         at
+    }
+}
+
+/// Cursor to column `x`, row `y` (0-based).
+fn move_to(x: u16, y: u16, out: &mut Vec<u8>) {
+    out.extend_from_slice(format!("\x1b[{};{}H", u32::from(y) + 1, u32::from(x) + 1).as_bytes());
+}
+
+/// The bytes that turn the screen `prev` showed into `next`: cursor moves,
+/// SGR, erase to the line's end and the cells' text, no other escape (no
+/// string, no mode). `None`, or a grid of another size: the whole screen,
+/// first cleared. Otherwise only the cells that changed, from the first one
+/// of each run, and a paint only where it changes. The last column gets
+/// no glyph (one there leaves the cursor waiting to wrap, and on the last
+/// row a terminal can scroll): its paint comes from erasing from it to the
+/// line's end in that paint (the terminal's background-color erase). Each
+/// frame sets its first paint whole, so it needs nothing of the terminal's
+/// state.
+pub fn frame(prev: Option<&Grid>, next: &Grid, out: &mut Vec<u8>) {
+    let (cols, rows) = (next.cols, next.rows);
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    let last = cols - 1;
+    let prev = prev.filter(|p| p.cols == cols && p.rows == rows);
+    if prev.is_none() {
+        write_paint(next.cell(last, 0).paint, out);
+        out.extend_from_slice(b"\x1b[2J");
+    }
+    let mut paint = None;
+    for y in 0..rows {
+        // Where the cursor is after the last cell written on this row.
+        let mut at = None;
+        for x in 0..last {
+            let cell = next.cell(x, y);
+            // A cell a 2-cell cluster covers comes with that cluster.
+            if cell.text.is_empty() {
+                continue;
+            }
+            let wide = x + 1 < last && next.cell(x + 1, y).text.is_empty();
+            if prev.is_some_and(|p| p.cell(x, y) == cell) {
+                continue;
+            }
+            if at != Some(x) {
+                move_to(x, y, out);
+            }
+            if paint != Some(cell.paint) {
+                write_paint(cell.paint, out);
+                paint = Some(cell.paint);
+            }
+            out.extend_from_slice(cell.text.as_bytes());
+            at = Some(x + if wide { 2 } else { 1 });
+        }
+        let edge = next.cell(last, y).paint;
+        if prev.is_none_or(|p| p.cell(last, y).paint != edge) {
+            move_to(last, y, out);
+            if paint != Some(edge) {
+                write_paint(edge, out);
+                paint = Some(edge);
+            }
+            out.extend_from_slice(b"\x1b[K");
+        }
     }
 }
 
@@ -197,6 +267,9 @@ pub struct View<'a> {
     /// The width picks the built-in `narrow` band with its built-in
     /// template: the preview cannot show the shape rows.
     pub narrow: bool,
+    /// `NO_COLOR`: bingsu's own text in the terminal's colors, the picked
+    /// value reversed and bold; the preview keeps its colors.
+    pub mono: bool,
 }
 
 /// The paints of bingsu's own text.
@@ -205,8 +278,6 @@ struct Ui {
     sub: Paint,
     title: Paint,
     pick: Paint,
-    /// A picked value that changes nothing.
-    idle: Paint,
     base: Ink,
 }
 
@@ -220,8 +291,26 @@ fn ink(c: Option<Srgb8>, depth: ColorDepth) -> Ink {
 
 /// The UI colors of `mode`, as names of the palette (text
 /// `neutral.text` and `neutral.subtext` on `neutral.base`; a picked value
-/// on the accent, one that changes nothing on `neutral.surface1`).
-fn ui(mode: Mode, depth: ColorDepth) -> Ui {
+/// on the accent). A picked value that changes nothing has no box: it is
+/// `[value]` in the subtext color, so it never looks stronger than an
+/// effective pick, and the brackets mark it without color.
+fn ui(mode: Mode, depth: ColorDepth, mono: bool) -> Ui {
+    if mono {
+        let text = Paint::default();
+        return Ui {
+            text,
+            sub: text,
+            title: Paint {
+                attrs: BOLD,
+                ..text
+            },
+            pick: Paint {
+                attrs: BOLD | REVERSE,
+                ..text
+            },
+            base: Ink::Default,
+        };
+    }
     let c = |name: &str, read: bool| ink(named_color(name, mode, read), depth);
     let base = c("neutral.base", false);
     let text = Paint {
@@ -242,11 +331,6 @@ fn ui(mode: Mode, depth: ColorDepth) -> Ui {
         pick: Paint {
             fg: c("neutral.ink", false),
             bg: c("accent.blue", false),
-            attrs: BOLD,
-        },
-        idle: Paint {
-            fg: c("neutral.text", true),
-            bg: c("neutral.surface1", false),
             attrs: BOLD,
         },
         base,
@@ -283,7 +367,7 @@ pub fn draw(m: &Model, v: &View<'_>) -> Grid {
         rows: v.rows.min(MAX_ROWS),
         ..*v
     };
-    let u = ui(v.mode, v.depth);
+    let u = ui(v.mode, v.depth, v.mono);
     let mut g = Grid::new(
         v.cols,
         v.rows,
@@ -445,7 +529,7 @@ fn preview(g: &mut Grid, v: &View<'_>, u: &Ui, y: u16, i: usize) {
 }
 
 /// The note at the end of a setting row, and whether the picked value
-/// changes nothing (then drawn on `neutral.surface1`).
+/// changes nothing (then drawn as `[value]`).
 fn row_note(m: &Model, v: &View<'_>, row: Row) -> (String, bool) {
     let name = |i: usize| clean(m.layers().names.get(i).map_or(&[][..], |n| n.as_slice()));
     if Row::TEMPLATED.contains(&row) {
@@ -487,20 +571,30 @@ fn setting(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui, y: u16, row: Row) {
     g.put(0, y, &head, u.text, end);
     let (note, idle) = row_note(m, v, row);
     let picked = usize::from(m.chosen(row));
-    let pick = if idle { u.idle } else { u.pick };
+    // A pick that changes nothing: `[value]` in the subtext color, the
+    // brackets in the spaces around it (the row keeps its width).
+    let pick = if idle { u.sub } else { u.pick };
     let values = row.values();
     let mut x = VALUES_AT;
     if v.cols >= 80 {
         for (i, value) in values.iter().enumerate() {
             if i > 0 {
-                x = g.put(x, y, "  ", u.text, end);
+                let gap = if idle && i == picked + 1 { " " } else { "  " };
+                x = g.put(x, y, gap, u.text, end);
+            }
+            if idle && i == picked {
+                g.put(x - 1, y, "[", u.sub, end);
             }
             x = g.put(x, y, value, if i == picked { pick } else { u.text }, end);
+            if idle && i == picked {
+                x = g.put(x, y, "]", u.sub, end);
+            }
         }
     } else {
-        x = g.put(x, y, "< ", u.text, end);
+        let (open, close) = if idle { ("<[", "]>") } else { ("< ", " >") };
+        x = g.put(x, y, open, u.text, end);
         x = g.put(x, y, values[picked], pick, end);
-        x = g.put(x, y, " >", u.text, end);
+        x = g.put(x, y, close, u.text, end);
         let count = format!("  {}/{}", picked + 1, values.len());
         x = g.put(x, y, &count, u.sub, end);
     }
@@ -708,5 +802,18 @@ mod tests {
         assert!(!g.set(4, 1, "x", 1, p, 9));
         assert_eq!(g.put(0, 1, "\u{301}ab", p, 4), 2);
         assert_eq!(g.row_text(1), "ab  ");
+    }
+
+    // 이것을 실패시키는 것: 칸 쓰기가 제어 글자(ESC, BEL, 8비트 CSI)나 bidi 표지(U+202E)를 칸에 두는 것(호출하는 쪽이
+    // 정제를 빠뜨려도 프레임에 들어가지 않아야 한다).
+    #[test]
+    fn a_cell_never_takes_a_removed_character() {
+        let p = Paint::default();
+        let mut g = Grid::new(6, 1, p);
+        for bad in ["\u{1b}", "\u{7}", "\u{202e}", "\u{9b}", "a\u{1b}"] {
+            assert!(!g.set(0, 0, bad, 1, p, 6), "{bad:?}");
+        }
+        assert_eq!(g.put(0, 0, "a\u{1b}[2Jb\u{202e}c", p, 6), 6);
+        assert_eq!(g.row_text(0), "a[2Jbc");
     }
 }

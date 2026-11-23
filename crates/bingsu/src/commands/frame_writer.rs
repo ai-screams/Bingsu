@@ -63,6 +63,16 @@ pub trait Sink {
     fn mark_synced(&mut self, on: bool);
 }
 
+/// The full-screen session takes the frames, through its own methods.
+impl Sink for super::tty::session::Session<'_> {
+    fn write_some(&mut self, rest: &[u8]) -> std::io::Result<usize> {
+        super::tty::session::Session::write_some(self, rest)
+    }
+    fn mark_synced(&mut self, on: bool) {
+        super::tty::session::Session::mark_synced(self, on);
+    }
+}
+
 /// How a `flush` ended.
 #[derive(Debug)]
 pub enum Flushed {

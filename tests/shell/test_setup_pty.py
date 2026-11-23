@@ -1,6 +1,7 @@
-"""`bingsu setup` on a pseudo-terminal: the terminal is restored on every way
-out of the background query, and a late answer does not reach the command
-line.
+"""`bingsu setup --plain` (the line questions) on a pseudo-terminal: the
+terminal is restored on every way out of the background query, and a late
+answer does not reach the command line. The editor has its own tests
+(`test_setup_editor_pty.py`).
 
 The test plays the terminal. `sh` prints the terminal settings (`stty -g`)
 before and after `bingsu setup`, and the test answers (or does not answer) the
@@ -13,6 +14,7 @@ import resource
 import select
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -22,6 +24,31 @@ import pexpect
 import pytest
 
 from conftest import real_bin
+from shell_support import account_state_listing, setup_env
+
+
+# Nothing a setup test runs may reach the account's own state folder (a
+# `config use` there once replaced the user's settings choice).
+@pytest.fixture(autouse=True, scope="module")
+def account_state_untouched():
+    before = account_state_listing()
+    yield
+    assert account_state_listing() == before, "a test changed the account's own bingsu state folder"
+
+
+
+# 이것을 실패시키는 것: 계정 상태 폴더 목록이 새 파일이나 바뀐 파일을 보지 못하는 것(지킴이가 아무것도 잡지 못함).
+def test_the_state_guard_sees_a_new_or_changed_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    (tmp_path / "bingsu").mkdir()
+    before = account_state_listing()
+    record = tmp_path / "bingsu" / "config-use"
+    record.write_text("x")
+    added = account_state_listing()
+    assert added != before
+    record.write_text("xy")
+    assert account_state_listing() != added
+
 
 QUERY = rb"\x1b\]11;\?\x1b\\"
 DARK = b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"
@@ -55,10 +82,10 @@ HIGH_DESCRIPTORS = (
 )
 
 
-def spawn(home, *args, background=False, high_fds=False):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
-           "PATH": os.environ["PATH"], "TERM": "xterm"}
-    run = f'"{real_bin()}" setup {" ".join(args)}'
+def spawn(home, *args, background=False, high_fds=False, extra=None):
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
+           "PATH": os.environ["PATH"], "TERM": "xterm", **(extra or {})}
+    run = f'"{real_bin()}" setup --plain {" ".join(args)}'
     if high_fds:
         run = f"'{sys.executable}' -c '{HIGH_DESCRIPTORS}' {run}"
     # In the background `$!` names bingsu itself (not a shell around it), for a signal.
@@ -74,8 +101,13 @@ def spawn(home, *args, background=False, high_fds=False):
 
 
 def finish(child):
-    """Reads to the end; returns (exit code of setup, settings before, settings after, text)."""
+    """Reads to the end and closes the child; returns (exit code of setup,
+    settings before, settings after, text). Closing here, not when the child
+    object goes (pexpect then sleeps `delayafterclose`, and more while the
+    child is not reaped yet), keeps that wait out of the next child's 200 ms
+    answer window: a test that spawns again sends its answer only after it."""
     child.expect(pexpect.EOF)
+    child.close()
     text = child.transcript.getvalue().decode("utf-8", "replace")
     before, after = (re.search(rf"{k}=(\S+)", text).group(1) for k in ("BEFORE", "AFTER"))
     return int(re.search(r"RC=(\d+)", text).group(1)), before, after, text
@@ -84,6 +116,16 @@ def finish(child):
 def config(home):
     path = home / "cfg/bingsu/config.toml"
     return path.read_text() if path.exists() else None
+
+
+# 이것을 실패시키는 것: finish가 자식을 닫지 않는 것. 그러면 다음 spawn으로 바꿔 끼울 때 pexpect가 옛 자식을 닫느라
+# 0.1 s 이상(바쁜 러너에서는 그 몇 배) 멈추고, 그동안 새 자식의 배경색 질의 창(200 ms)이 흘러 답이 늦는다
+# (test_settings_changed_while_asking_write_nothing의 두 번째 spawn이 "the terminal did not say"로 실패).
+def test_finish_closes_the_child(home):
+    child = spawn(home, "--no-such-flag")
+    code, _, _, text = finish(child)
+    assert code == 2, text
+    assert child.closed and not child.isalive()
 
 
 # 이것을 실패시키는 것: 응답을 받은 뒤 `tcsetattr`로 되돌리지 않는 것(Drop의 복구 삭제), 응답을 화면에
@@ -101,6 +143,114 @@ def test_reply_restores_the_terminal_and_is_not_echoed(home):
     assert before == after, (before, after)
     assert "rgb:1e1e" not in text, "the answer must not be echoed"
     assert 'mode = "dark"' in config(home)
+
+
+def at_the_write_question(home, extra=None):
+    """Setup with both choices given, stopped at its write question."""
+    child = spawn(home, "--icons", "nerd", "--mode", "dark", extra=extra)
+    child.expect(rb"\[Y/n\] ")
+    return child
+
+
+# 이것을 실패시키는 것: 묻는 동안 설정 경로(XDG_CONFIG_HOME)의 링크가 다른 빈 폴더를 가리키게 바뀐 것을 보지 않고
+# 처음 폴더에 쓰는 것. 두 읽기의 출처와 선택은 같고, 처음 폴더도 그대로라 그 폴더만 다시 열면 통과한다; 읽는 쪽은 새
+# 폴더를 읽는다.
+def test_a_settings_path_pointed_elsewhere_while_asking_stops_the_write(home):
+    for name in ["A", "B"]:
+        (home / name / "bingsu").mkdir(parents=True)
+        (home / name).chmod(0o700)
+        (home / name / "bingsu").chmod(0o700)
+    link = home / "cfglink"
+    link.symlink_to(home / "A")
+    child = at_the_write_question(home, extra={"XDG_CONFIG_HOME": str(link)})
+    link.unlink()
+    link.symlink_to(home / "B")
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 1, text
+    assert before == after
+    assert "changed while you edited, so nothing was written" in text, text
+    assert os.listdir(home / "A/bingsu") == [] and os.listdir(home / "B/bingsu") == []
+
+
+# 이것을 실패시키는 것: 묻는 동안 `config use`로 고른 파일이 바뀐 것을 보지 않고 쓰는 것. 고른 파일이 이미 읽던
+# conf.d 파일이면 읽는 쪽은 그것을 설정 자리로 옮기고 conf.d의 같은 파일을 빼므로, 출처와 바이트는 그대로다.
+def test_a_settings_file_chosen_while_asking_stops_the_write(home):
+    conf = home / "cfg/bingsu/conf.d"
+    conf.mkdir(parents=True)
+    for d in [home / "cfg", home / "cfg/bingsu", conf]:
+        d.chmod(0o700)
+    chosen = conf / "10.toml"
+    chosen.write_text("[style]\ngap = true\n")
+    chosen.chmod(0o600)
+    child = at_the_write_question(home)
+    env = {**setup_env(home), "PATH": os.environ["PATH"]}
+    used = subprocess.run([str(real_bin()), "config", "use", str(chosen)], env=env, capture_output=True, timeout=10)
+    assert used.returncode == 0, used.stderr
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 1, text
+    assert before == after
+    assert "settings changed while you edited; nothing written." in text, text
+    assert config(home) is None
+
+
+# 이것을 실패시키는 것: 묻는 동안 빈 설정 폴더가 다른 빈 폴더로 바뀐 것을 보지 않고, 처음 연 옛 폴더에 쓰고 새 경로에
+# 썼다고 하는 것. 두 읽기의 출처는 같다(둘 다 비었음).
+def test_a_settings_folder_replaced_while_asking_stops_the_write(home):
+    folder = home / "cfg/bingsu"
+    folder.mkdir(parents=True)
+    for d in [home / "cfg", folder]:
+        d.chmod(0o700)
+    child = at_the_write_question(home)
+    folder.rename(home / "cfg/bingsu.old")
+    folder.mkdir()
+    folder.chmod(0o700)
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 1, text
+    assert before == after
+    assert "changed while you edited, so nothing was written" in text, text
+    assert os.listdir(folder) == [] and os.listdir(home / "cfg/bingsu.old") == [], "both folders stay empty"
+
+
+# 이것을 실패시키는 것: 묻는 동안 바뀐 설정(새 conf.d 파일)을 보지 않고 쓰는 것, 그때 쓰려던 키를 알리지 않는
+# 것, 종료 코드가 1이 아닌 것, 바뀌지 않았을 때 쓴 뒤 doctor 안내 줄을 내지 않는 것.
+def test_settings_changed_while_asking_write_nothing(home):
+    child = spawn(home, "--icons", "nerd")
+    child.expect(QUERY)
+    conf = home / "cfg/bingsu/conf.d"
+    conf.mkdir(parents=True, mode=0o700)
+    (home / "cfg").chmod(0o700)
+    (home / "cfg/bingsu").chmod(0o700)
+    added = conf / "10-mine.toml"
+    added.write_text('[style]\ngap = true\n')
+    added.chmod(0o600)
+    child.send(DARK)
+    child.expect(rb"the terminal looks dark")
+    child.send("\n")
+    child.expect(rb"\[Y/n\] ")
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 1, text
+    assert before == after, (before, after)
+    assert "settings changed while you edited; nothing written." in text, text
+    assert 'preset = "triangle"' in text, text
+    assert config(home) is None
+    assert "bingsu doctor" not in text, text
+
+    # Nothing changes this time: the file is written, and the hint follows.
+    child = spawn(home, "--icons", "nerd")
+    child.expect(QUERY)
+    child.send(DARK)
+    child.expect(rb"the terminal looks dark")
+    child.send("\n")
+    child.expect(rb"\[Y/n\] ")
+    child.send("\n")
+    code, before, after, text = finish(child)
+    assert code == 0, text
+    assert 'mode = "dark"' in config(home)
+    assert "Line ends look off? `bingsu doctor` checks the character widths." in text, text
 
 
 # 이것을 실패시키는 것: 터미널에서 `--icons`로 준 light·ascii를 받지 않는 것(사용법 오류로 끝남), 미리 답한
@@ -242,9 +392,9 @@ class RawTerminal:
 
 
 def raw_terminal(home, after=""):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
-    script = (f'echo BEFORE=$(stty -g); "{real_bin()}" setup --icons nerd; echo RC=$?; {after}'
+    script = (f'echo BEFORE=$(stty -g); "{real_bin()}" setup --plain --icons nerd; echo RC=$?; {after}'
               'echo AFTER=$(stty -g)')
     return RawTerminal(script, env)
 
@@ -377,9 +527,9 @@ BACKGROUND_JOB = (
 # 이것을 실패시키는 것: 전경 작업인지 확인하지 않는 것(SIGTTOU를 무시한 배경 작업이 전경 셸 밑에서 터미널 모드를
 # 바꾸고, 복구의 `tcflush`가 사용자가 미리 친 글자를 버림). 확인하면 터미널이 없는 것으로 보아 질문 없이 인자를 요구한다.
 def test_a_background_job_does_not_touch_the_terminal(home):
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
-    script = (f"echo BEFORE=$(stty -g); '{sys.executable}' -c '{BACKGROUND_JOB}' \"{real_bin()}\" setup --icons nerd; "
+    script = (f"echo BEFORE=$(stty -g); '{sys.executable}' -c '{BACKGROUND_JOB}' \"{real_bin()}\" setup --plain --icons nerd; "
               "echo RC=$?; read -r LEFT; echo LEFT=[$LEFT]; echo AFTER=$(stty -g)")
     t = RawTerminal(script, env)
     os.write(t.fd, b"typed\n")
@@ -398,10 +548,10 @@ def test_a_background_job_does_not_touch_the_terminal(home):
 # 시험(`reading_a_reply_ends_on_hang_up…`)이 잡는다: 끊김에는 SIGHUP이 먼저 와서 이 시험으로는 가려지지 않는다.
 def test_a_hung_up_terminal_ends_without_a_panic(home):
     err, rc = home / "stderr", home / "rc"
-    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "cfg"), "SHELL": "/bin/zsh",
+    env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm"}
     # The shell ignores SIGHUP so that it outlives the hang-up and records how bingsu ended.
-    script = f'trap "" HUP; "{real_bin()}" setup --icons nerd 2>"{err}"; echo $? > "{rc}"'
+    script = f'trap "" HUP; "{real_bin()}" setup --plain --icons nerd 2>"{err}"; echo $? > "{rc}"'
     t = RawTerminal(script, env)
     t.read_until(b"\x1b]11;?\x1b\\")
     os.close(t.fd)

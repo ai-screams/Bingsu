@@ -9,7 +9,9 @@
 use super::rows::Row;
 use crate::config::source::Found;
 use crate::config::tree::{Table, Value};
+use crate::default_theme::NARROW_TEMPLATE;
 use crate::diag::SourceId;
+use crate::diag_widths::WidthRun;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -102,4 +104,47 @@ impl Layers {
         }
         out
     }
+}
+
+/// The text at `path` in `t`, when it is one.
+fn text_at<'a>(t: &'a Table, path: &[&str]) -> Option<&'a str> {
+    let (last, tables) = path.split_last()?;
+    let mut t = t;
+    for key in tables {
+        match t.get(key).map(|e| &e.node.value) {
+            Some(Value::Table(inner)) => t = inner,
+            _ => return None,
+        }
+    }
+    match t.get(last).map(|e| &e.node.value) {
+        Some(Value::Str(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Whether a preview `width` cells wide draws the `narrow` band with the
+/// built-in template, from a load's catalog `files`, apply `order` and the
+/// compiled band of each width (`CompiledConfig::widths`): the shape rows
+/// then change nothing on screen, and `View::narrow` says so. A band of
+/// that name with a template a source wrote draws that template.
+pub fn builtin_narrow(
+    files: &[Found],
+    order: &[SourceId],
+    widths: &[WidthRun],
+    width: u16,
+) -> bool {
+    // The runs cover the widths in order from 0.
+    let band = widths
+        .iter()
+        .find(|r| width <= r.to)
+        .and_then(|r| r.band.as_deref());
+    if band != Some("narrow") {
+        return false;
+    }
+    let template = order
+        .iter()
+        .rev()
+        .filter_map(|id| files.get(id.0 as usize))
+        .find_map(|f| text_at(&f.tree, &["layout", "when", "narrow", "style", "template"]));
+    template == Some(NARROW_TEMPLATE)
 }

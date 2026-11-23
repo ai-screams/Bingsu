@@ -21,6 +21,66 @@ pub enum WriteOutcome {
     Failed,
 }
 
+/// SIGINT, SIGTERM and SIGHUP held back in the calling thread until the
+/// guard drops; one that came meanwhile is delivered then. For a short
+/// stretch that must finish once begun (`setup` makes its file: temporary
+/// file, link, removal of the temporary). Only the calling thread's mask
+/// changes, so the caller must be the only thread that can take these
+/// signals (no other thread runs then).
+pub struct HeldSignals {
+    old: libc::sigset_t,
+    /// Neither `Send` nor `Sync`: the mask belongs to the thread that held
+    /// it, and only that thread may put it back.
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+/// Whether one of `HELD_SIGNALS` waits for this thread (or the process)
+/// while the guard holds it back.
+pub fn held_pending() -> bool {
+    // SAFETY: all-zero storage; sigpending fills it.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is writable.
+    if unsafe { libc::sigpending(&mut set) } != 0 {
+        return false;
+    }
+    // SAFETY: `set` is initialized and each is a valid signal.
+    HELD_SIGNALS
+        .iter()
+        .any(|&s| unsafe { libc::sigismember(&set, s) } == 1)
+}
+
+pub const HELD_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+pub fn hold_signals() -> std::io::Result<HeldSignals> {
+    // SAFETY: all-zero storage, emptied below.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is writable.
+    unsafe { libc::sigemptyset(&mut set) };
+    for sig in HELD_SIGNALS {
+        // SAFETY: `set` is initialized and `sig` is a valid signal.
+        unsafe { libc::sigaddset(&mut set, sig) };
+    }
+    // SAFETY: all-zero storage; pthread_sigmask fills it.
+    let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: both sets are valid; only this thread's mask changes.
+    let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old) };
+    if rc != 0 {
+        return Err(std::io::Error::from_raw_os_error(rc));
+    }
+    Ok(HeldSignals {
+        old,
+        _thread: std::marker::PhantomData,
+    })
+}
+
+impl Drop for HeldSignals {
+    fn drop(&mut self) {
+        // SAFETY: `old` is the mask pthread_sigmask returned; only this
+        // thread's mask changes. It cannot fail with a valid `how`.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut()) };
+    }
+}
+
 /// Ends the process now without atexit handlers or a flush (a deadline
 /// that already passed; `std::process::exit` is disallowed here).
 pub fn exit_now(code: i32) -> ! {
@@ -211,6 +271,26 @@ use bingsu_core::fs_trust::{AclFacts, Facts};
 use std::ffi::{CStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
+
+/// This machine's short name: `gethostname` up to the first dot, `None`
+/// when it cannot be read. Not sanitized: the preview applies the prompt's
+/// own rules to it (an empty name draws no `host`).
+pub fn host_name() -> Option<Vec<u8>> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is writable for the length given, which leaves its last
+    // byte 0 whatever the call writes.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len() - 1) };
+    if rc != 0 {
+        return None;
+    }
+    let name = std::ffi::CStr::from_bytes_until_nul(&buf).ok()?.to_bytes();
+    Some(
+        name.split(|&b| b == b'.')
+            .next()
+            .unwrap_or_default()
+            .to_vec(),
+    )
+}
 
 pub fn current_uid() -> u32 {
     // SAFETY: getuid has no preconditions and cannot fail.
@@ -914,6 +994,95 @@ mod linux_boundary_tests {
             assert_eq!(f_type_is_local(&st), want);
         }
         assert_eq!(fd_is_local(-1), None);
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    // 이것을 실패시키는 것: 이름을 첫 점에서 자르지 않는 것(이 Mac의 이름에는 점이 있다), 다른 이름을 내는 것.
+    #[test]
+    fn the_host_name_is_the_node_name_up_to_its_first_dot() {
+        let out = std::process::Command::new("uname")
+            .arg("-n")
+            .output()
+            .unwrap();
+        let node = String::from_utf8(out.stdout).unwrap();
+        let short = node
+            .trim_end()
+            .split('.')
+            .next()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        assert_eq!(super::host_name(), Some(short));
+    }
+}
+
+#[cfg(test)]
+mod held_tests {
+    use super::*;
+
+    /// Which of `HELD_SIGNALS` this thread blocks now.
+    fn blocked() -> Vec<bool> {
+        // SAFETY: all-zero storage; pthread_sigmask fills it.
+        let mut now: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a null new set only reads this thread's mask.
+        let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now) };
+        assert_eq!(rc, 0);
+        HELD_SIGNALS
+            .iter()
+            // SAFETY: `now` is initialized and each is a valid signal.
+            .map(|&s| unsafe { libc::sigismember(&now, s) } == 1)
+            .collect()
+    }
+
+    // 이것을 실패시키는 것: 셋 가운데 하나(INT, TERM, HUP)를 막지 않는 것, 끝난 뒤 원래 마스크로 돌려놓지 않는 것,
+    // 막아 둔 신호가 기다리는지 셋 가운데 하나라도 보지 못하는 것.
+    #[test]
+    fn the_three_end_signals_wait_while_held() {
+        std::thread::spawn(|| {
+            // SAFETY: all-zero storage, emptied below.
+            let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `set` is writable.
+            unsafe { libc::sigemptyset(&mut set) };
+            for sig in HELD_SIGNALS {
+                // SAFETY: `set` is initialized and `sig` is a valid signal.
+                unsafe { libc::sigaddset(&mut set, sig) };
+            }
+            // SAFETY: `set` is initialized; only this thread's mask changes.
+            let rc =
+                unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()) };
+            assert_eq!(rc, 0);
+            assert_eq!(blocked(), [false; 3]);
+            let held = hold_signals().unwrap();
+            assert_eq!(blocked(), [true; 3]);
+            // A held signal waits; taking it here keeps it from ending the
+            // test once the mask goes back.
+            for sig in HELD_SIGNALS {
+                assert!(!held_pending());
+                // SAFETY: pthread_self has no preconditions.
+                let me = unsafe { libc::pthread_self() };
+                // SAFETY: a valid signal to this very thread, which holds it.
+                assert_eq!(unsafe { libc::pthread_kill(me, sig) }, 0);
+                assert!(held_pending(), "{sig}");
+                // SAFETY: all-zero storage, emptied below.
+                let mut one: libc::sigset_t = unsafe { std::mem::zeroed() };
+                // SAFETY: `one` is writable.
+                unsafe { libc::sigemptyset(&mut one) };
+                // SAFETY: `one` is initialized and `sig` is valid.
+                unsafe { libc::sigaddset(&mut one, sig) };
+                let mut got = 0;
+                // SAFETY: `one` holds a pending, blocked signal: no wait.
+                assert_eq!(unsafe { libc::sigwait(&one, &mut got) }, 0);
+                assert_eq!(got, sig);
+            }
+            assert!(!held_pending());
+            drop(held);
+            assert_eq!(blocked(), [false; 3]);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(HELD_SIGNALS, [libc::SIGINT, libc::SIGTERM, libc::SIGHUP]);
     }
 }
 

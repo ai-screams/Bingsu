@@ -30,6 +30,10 @@ pub const BOLD: u8 = 1;
 pub const DIM: u8 = 2;
 pub const ITALIC: u8 = 4;
 pub const UNDERLINE: u8 = 8;
+/// Reversed colors (`SGR 7`): for the setup editor's own text when it
+/// draws without color (`NO_COLOR`). `write_sgr` does not write it and
+/// `paint` drops it from a style, so the prompt never writes it.
+pub const REVERSE: u8 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Style {
@@ -145,12 +149,13 @@ fn ink(c: Color, p: &ResolvedPalette, depth: ColorDepth) -> Ink {
     }
 }
 
-/// `style` resolved against `p` at `depth`.
+/// `style` resolved against `p` at `depth`. Only the four bits `write_sgr`
+/// writes pass: `REVERSE` is the editor's own, never a style's.
 pub fn paint(style: Style, p: &ResolvedPalette, depth: ColorDepth) -> Paint {
     Paint {
         fg: ink(style.fg, p, depth),
         bg: ink(style.bg, p, depth),
-        attrs: style.attrs,
+        attrs: style.attrs & (BOLD | DIM | ITALIC | UNDERLINE),
     }
 }
 
@@ -170,7 +175,13 @@ fn write_ink(ink: Ink, bg: bool, w: &mut Buf<'_>) {
 pub fn write_paint(paint: Paint, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\x1b[0");
     let mut w = Buf(out);
-    for (bit, code) in [(BOLD, 1), (DIM, 2), (ITALIC, 3), (UNDERLINE, 4)] {
+    for (bit, code) in [
+        (BOLD, 1),
+        (DIM, 2),
+        (ITALIC, 3),
+        (UNDERLINE, 4),
+        (REVERSE, 7),
+    ] {
         if paint.attrs & bit != 0 {
             let _ = write!(w, ";{code}");
         }

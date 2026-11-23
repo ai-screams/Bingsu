@@ -80,13 +80,6 @@ mod explain;
 #[cfg(unix)]
 mod explain_builtin;
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the setup editor writes its frames with it from a later change"
-    )
-)]
 mod frame_writer;
 #[cfg(unix)]
 mod git_global;
@@ -107,13 +100,6 @@ mod init;
 #[cfg(unix)]
 pub(crate) mod io_meter;
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the setup editor reads its keys with it from a later change"
-    )
-)]
 mod keys;
 #[cfg(unix)]
 mod list;
@@ -131,6 +117,10 @@ mod reload;
 pub(crate) mod runtime_root;
 #[cfg(unix)]
 mod setup;
+#[cfg(unix)]
+mod setup_screen;
+#[cfg(unix)]
+mod setup_sources;
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod signal_guard;
@@ -180,7 +170,7 @@ pub fn run(a: NonPromptArgs) -> ExitCode {
         #[cfg(unix)]
         Some("list") => list::run(&a.args[1..]),
         #[cfg(unix)]
-        Some("setup") => setup::run(&a.args[1..]),
+        Some("setup") => setup::run(&a.argv0, &a.args[1..]),
         #[cfg(unix)]
         Some("reload") => reload::run(&a.argv0, &a.args[1..]),
         #[cfg(feature = "bench-stubs")]

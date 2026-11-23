@@ -6,6 +6,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "support/user_env.rs"]
+mod user_env;
+
 /// A new session has no controlling terminal, so `/dev/tty` cannot be opened
 /// and `setup` takes its no-terminal path even when the test runs in one.
 fn detach() -> std::io::Result<()> {
@@ -14,7 +17,41 @@ fn detach() -> std::io::Result<()> {
     Ok(())
 }
 
-struct Home(PathBuf);
+/// The account's own bingsu state folders (named from its home, and from
+/// the run's XDG_STATE_HOME when it has one): names and metadata of what
+/// they hold, never the contents. A test must leave them as they were.
+type Listing = Vec<(PathBuf, Option<(std::ffi::OsString, u64, u64, i64)>)>;
+
+fn account_state() -> Listing {
+    use std::os::unix::fs::MetadataExt;
+    let mut folders = vec![user_env::account_home().join(".local/state/bingsu")];
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test run's own environment, read only"
+    )]
+    if let Some(x) = std::env::var_os("XDG_STATE_HOME") {
+        folders.push(PathBuf::from(x).join("bingsu"));
+    }
+    let mut out = Vec::new();
+    for folder in folders {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            out.push((folder, None));
+            continue;
+        };
+        let mut names: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let m = e.path().symlink_metadata().ok()?;
+                Some((e.file_name(), m.ino(), m.len(), m.mtime()))
+            })
+            .collect();
+        names.sort();
+        out.extend(names.into_iter().map(|n| (folder.clone(), Some(n))));
+    }
+    out
+}
+
+struct Home(PathBuf, Listing);
 
 impl Home {
     fn new(tag: &str) -> Self {
@@ -22,16 +59,24 @@ impl Home {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
-        Self(p.canonicalize().unwrap())
+        Self(p.canonicalize().unwrap(), account_state())
     }
     fn config(&self) -> PathBuf {
         self.0.join("cfg/bingsu/config.toml")
     }
     fn run(&self, args: &[&str]) -> Output {
+        self.cmd(args).output().unwrap()
+    }
+    fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_bingsu"));
         c.env_clear()
             .env("HOME", &self.0)
             .env("XDG_CONFIG_HOME", self.0.join("cfg"))
+            // The choice record lives under the state folder: without this
+            // one the account's own (from its home, not $HOME) is read.
+            .env("XDG_STATE_HOME", self.0.join("state"))
+            .env("XDG_RUNTIME_DIR", self.0.join("run"))
+            .env("XDG_CACHE_HOME", self.0.join("cache"))
             .env("SHELL", "/bin/zsh");
         // `setup` unless the test names another command.
         if args.first() != Some(&"config") {
@@ -40,7 +85,7 @@ impl Home {
         c.args(args);
         // SAFETY: `detach` only calls setsid, which is async-signal-safe.
         unsafe { c.pre_exec(detach) };
-        c.output().unwrap()
+        c
     }
     /// Every path under the home with its mode, sorted.
     fn tree(&self) -> Vec<String> {
@@ -65,6 +110,15 @@ impl Home {
 impl Drop for Home {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        // 이것을 실패시키는 것: setup 시험이 계정의 실제 상태 폴더에 무언가를 남기거나 바꾸는 것(XDG_STATE_HOME 없이
+        // `config use`를 부름).
+        if !std::thread::panicking() {
+            assert_eq!(
+                account_state(),
+                self.1,
+                "a test changed the account's own bingsu state folder"
+            );
+        }
     }
 }
 
@@ -268,5 +322,188 @@ fn a_json_config_is_the_settings_file_already_there() {
     assert!(
         out.contains("result: valid") && !out.contains("E308"),
         "{out}"
+    );
+}
+
+// 이것을 실패시키는 것: init이 고정한 값이 있는 셸에서 시작 줄을 새로 넣으라고 하는 것, 없는 셸에서 이미 돈다고
+// 하는 것, 고정한 설정 폴더가 아닌 곳(지금의 XDG_CONFIG_HOME)에 쓰는 것, 시작 줄을 stdout 밖에 내는 것,
+// bingsu가 도는 셸에서 쓴 뒤 발행하지 않는 것, 돌지 않는 셸에서 발행하는 것(런타임 폴더를 만듦), `--yes`로
+// 다 준 경로에 doctor 안내를 내는 것.
+#[test]
+fn a_shell_that_runs_bingsu_gets_the_file_applied() {
+    let e = user_env::Env::new("cli_setup", "runs-here");
+    let var = user_env::frame(&e.pinned_words());
+    let args = ["setup", "--yes", "--icons", "nerd", "--mode", "dark"];
+    let mut c = e.cmd_pinned(&args, &var);
+    c.env("SHELL", "/bin/zsh");
+    // SAFETY: `detach` only calls setsid, which is async-signal-safe.
+    unsafe { c.pre_exec(detach) };
+    let o = c.output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let err = text(&o.stderr);
+    assert!(
+        err.contains("bingsu already runs in this shell or the shell that started it; this line is only for a new setup:\n"),
+        "{err}"
+    );
+    assert!(!err.contains("Add this"), "{err}");
+    assert!(
+        err.contains("bingsu: applied; the next prompt shows it\n"),
+        "{err}"
+    );
+    assert!(!err.contains("bingsu doctor"), "{err}");
+    assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
+    assert!(e.config_dir().join("config.toml").exists());
+    assert!(e.context_dir().join("snapshot").exists(), "published");
+    assert!(!e.base.join("elsewhere").exists());
+
+    let h = Home::new("runs-not");
+    let o = h.run(&args[1..]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    let err = text(&o.stderr);
+    assert!(
+        err.contains("Add this to your shell's startup file to start bingsu:\n"),
+        "{err}"
+    );
+    assert!(
+        err.contains("bingsu: the new look shows once your shell loads bingsu\n"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("applied") && !err.contains("bingsu doctor"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("result:"),
+        "the check is shown only when not valid: {err}"
+    );
+    assert_eq!(
+        h.tree(),
+        ["cfg 700", "cfg/bingsu 700", "cfg/bingsu/config.toml 600"],
+        "nothing published"
+    );
+}
+
+// 이것을 실패시키는 것: `config use`로 고른 파일이 있는데 설정 폴더에 읽히지 않을 config.toml을 만드는 것, 고른
+// 파일과 비교하지 않는 것, 고른 파일이 없는데 쓰는 것, 그때 종료 코드가 1이 아니거나 시작 줄을 내는 것.
+#[test]
+fn the_chosen_settings_file_is_the_one_setup_looks_at() {
+    let e = user_env::Env::new("cli_setup", "chosen");
+    let chosen = e.put("other/work.toml", "icons = \"ascii\"\n");
+    let o = e.run(&["config", "use", chosen.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let run = || {
+        let mut c = e.cmd(&["setup", "--yes", "--icons", "nerd", "--mode", "dark"]);
+        c.env("SHELL", "/bin/zsh");
+        // SAFETY: `detach` only calls setsid, which is async-signal-safe.
+        unsafe { c.pre_exec(detach) };
+        c.output().unwrap()
+    };
+    let o = run();
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(
+        err.contains("other/work.toml is already there, so nothing was written."),
+        "{err}"
+    );
+    assert!(
+        err.contains("icons: \"ascii\" now, \"nerd\" suggested"),
+        "{err}"
+    );
+    assert!(!e.config_dir().join("config.toml").exists());
+    assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
+
+    std::fs::remove_file(&chosen).unwrap();
+    let o = run();
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(&format!(
+            "bingsu: your chosen settings file {} is missing; run bingsu config use again\n",
+            chosen.display()
+        )),
+        "{err}"
+    );
+    assert!(!e.config_dir().join("config.toml").exists());
+    assert!(o.stdout.is_empty());
+}
+
+// 이것을 실패시키는 것: `config use` 기록을 읽지 못했을 때(읽힐 파일을 모름) 설정 폴더에 쓰는 것, 그때 종료 코드가
+// 1이 아닌 것.
+#[test]
+fn an_unreadable_settings_choice_writes_nothing() {
+    let e = user_env::Env::new("cli_setup", "choice-unread");
+    let long = e.base.join("x".repeat(300));
+    let mut c = e.cmd(&["setup", "--yes", "--icons", "nerd", "--mode", "dark"]);
+    // A name longer than a folder may hold: opening the state root fails
+    // with ENAMETOOLONG, which says nothing about the record.
+    c.env("XDG_STATE_HOME", &long).env("SHELL", "/bin/zsh");
+    // SAFETY: `detach` only calls setsid, which is async-signal-safe.
+    unsafe { c.pre_exec(detach) };
+    let o = c.output().unwrap();
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("the settings choice could not be read"),
+        "{err}"
+    );
+    assert!(!e.config_dir().join("config.toml").exists());
+}
+
+// 이것을 실패시키는 것: 다른 파일 때문에 유효하지 않은 설정을 쓴 뒤 검사 출력을 보이지 않는 것, 그것을 stdout에
+// 내는 것, 그때 새 모습이 나온다고 하는 것, 쓴 파일이 있는데 종료 코드가 0이 아닌 것.
+#[test]
+fn another_invalid_file_is_shown_and_nothing_claims_to_apply() {
+    let h = Home::new("invalid-other");
+    let conf = h.config().parent().unwrap().join("conf.d");
+    std::fs::create_dir_all(&conf).unwrap();
+    for d in [h.0.join("cfg"), h.0.join("cfg/bingsu"), conf.clone()] {
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(conf.join("10-bad.toml"), "[style]\ngap = 1234\n").unwrap();
+    std::fs::set_permissions(
+        conf.join("10-bad.toml"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let o = h.run(&["--yes", "--icons", "nerd", "--mode", "dark"]);
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(h.config().exists());
+    assert!(err.contains("E202"), "{err}");
+    assert!(
+        err.contains("bingsu: not applied; the prompt keeps the last valid settings\n"),
+        "{err}"
+    );
+    assert!(!err.contains("new look"), "{err}");
+    assert_eq!(text(&o.stdout), "eval \"$(bingsu init zsh)\"\n");
+}
+
+// 이것을 실패시키는 것: 파일을 쓴 뒤 stdout이 시작 줄을 받지 못했는데 0으로 끝내는 것(시작 줄을 받는 스크립트가 빈 값을
+// 모름), 쓴 파일과 시작 줄을 stderr에 알리지 않는 것, 그 때문에 파일을 지우거나 쓰지 않는 것.
+#[test]
+fn a_startup_line_stdout_does_not_take_is_an_error_but_the_file_stays() {
+    use std::os::fd::FromRawFd;
+    let h = Home::new("stdout-gone");
+    let mut ends = [0; 2];
+    // SAFETY: `ends` has room for the two descriptors.
+    assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+    // SAFETY: the read end, owned here and closed at once: writes fail (EPIPE).
+    drop(unsafe { std::fs::File::from_raw_fd(ends[0]) });
+    // SAFETY: the write end, owned here from now on.
+    let write = unsafe { std::fs::File::from_raw_fd(ends[1]) };
+    let o = h
+        .cmd(&["--yes", "--icons", "nerd", "--mode", "dark"])
+        .stdout(write)
+        .output()
+        .unwrap();
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(h.config().exists());
+    assert!(
+        err.contains(&format!(
+            "bingsu: {} was written, but standard output did not take the startup line; it is:\neval \"$(bingsu init zsh)\"\n",
+            h.config().display()
+        )),
+        "{err}"
     );
 }

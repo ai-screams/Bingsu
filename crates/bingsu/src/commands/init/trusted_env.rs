@@ -106,6 +106,25 @@ impl TrustedEnv {
         )
     }
 
+    /// `$TERM`: `setup` draws its editor only on a terminal that is not
+    /// `dumb` and has a name.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the user's own command draws for the terminal they run it in"
+    )]
+    pub fn term() -> Option<OsString> {
+        std::env::var_os("TERM")
+    }
+
+    /// `$PWD`, the folder as the shell shows it, for `setup`'s preview.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the user's own command shows the folder their shell shows"
+    )]
+    pub fn pwd() -> Option<OsString> {
+        std::env::var_os("PWD")
+    }
+
     /// `$SHELL`, to name the shell whose startup line `setup` prints.
     #[expect(
         clippy::disallowed_methods,
