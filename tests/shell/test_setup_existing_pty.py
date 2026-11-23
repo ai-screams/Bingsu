@@ -15,7 +15,7 @@ import pytest
 
 from conftest import real_bin
 from shell_support import account_state_listing, setup_env
-from test_setup_editor_pty import finish, has, opened, screen_of, spawn, until
+from test_setup_editor_pty import ended_without_the_editor, finish, has, opened, screen_of, spawn, until
 
 
 # Nothing a setup test runs may reach the account's own state folder.
@@ -279,6 +279,22 @@ def test_settings_that_do_not_load_show_nothing_to_compare(home, own, other):
     assert "The settings do not load now, so there is nothing to compare it with:" in transcript, transcript
     bad = "10-bad.toml:1:" if other else "config.toml:3:"
     assert "E101: this is not valid TOML" in transcript and bad in transcript, transcript
+    assert "not set now" not in transcript and CHANGED not in transcript, transcript
+    assert out.read_text() == STARTUP
+    assert kept(path) == before
+
+
+# 이것을 실패시키는 것: 다 읽지 못한 시작 읽기(conf.d의 없는 `extends` 대상)에서 있는 파일의 편집판을 여는 것(뒤 출처를
+# 모른 채 바꿀 줄을 보임), 그 이유를 알리지 않는 것, 그 파일을 바꾸는 것.
+def test_an_existing_file_shows_nothing_while_the_settings_are_not_read_whole(home):
+    path = put(home / "cfg/bingsu/config.toml", '[style]\npreset = "pill"\n')
+    put(home / "cfg/bingsu/conf.d/10-a.toml", 'extends = ["missing.toml"]\n')
+    before = kept(path)
+    out = home / "out"
+    code, _, _, transcript = ended_without_the_editor(spawn(home, out=out))
+    assert code == 0, transcript
+    assert "config.toml is already there, so nothing was written." in transcript, transcript
+    assert "`extends` entry `missing.toml` cannot be used" in transcript, transcript
     assert "not set now" not in transcript and CHANGED not in transcript, transcript
     assert out.read_text() == STARTUP
     assert kept(path) == before

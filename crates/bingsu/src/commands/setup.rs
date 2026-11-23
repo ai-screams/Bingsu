@@ -660,8 +660,14 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 Ended::Lost(why) => {
                     return refuse(&format!("{why}; nothing was written"));
                 }
-                // Only an existing file is compared.
-                Ended::NotLoaded(_) => return ctx::code(EXIT_FAILED),
+                Ended::NotLoaded(why) => {
+                    not_loaded(
+                        "nothing was written.",
+                        "setup cannot tell what a new file would change",
+                        &why,
+                    );
+                    return finish(runs_here);
+                }
                 // A new file's save screen writes.
                 Ended::Report { .. } => return ctx::code(EXIT_FAILED),
             }
@@ -697,6 +703,12 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // The choice of settings file is part of what was read: `config use`
     // can move the reader to a file already read, with the same sources.
     let root_now = match read_sources(&user, &env, runs_here) {
+        // What was chosen on a whole reading is not saved on one that is not.
+        // 이것을 실패시키는 것: 저장 직전 읽기가 다 읽지 못했는데 쓰는 것
+        // (test_settings_not_read_whole_before_the_save_stop_it).
+        Ok((_, now)) if sources.complete() && !now.complete() => {
+            return refuse("the settings could not all be read again, so nothing was written");
+        }
         Ok((again, now)) => match reread(&selection, &again.selection, sources.unchanged(&now)) {
             Reread::Same => again.root,
             Reread::Unreadable => return refuse(UNREAD_CHOICE),
@@ -942,19 +954,27 @@ fn edit_existing(
             Ended::Cancelled => cancelled(),
             Ended::Lost(why) => refuse(&format!("{why}; nothing was written")),
             Ended::NotLoaded(why) => {
-                eprintln!(
-                    "bingsu: {} is already there, so nothing was written.",
+                let lead = format!(
+                    "{} is already there, so nothing was written.",
                     ctx::show(Path::new(std::ffi::OsStr::from_bytes(&display)))
                 );
-                eprintln!("The settings do not load now, so there is nothing to compare it with:");
-                eprintln!("{why}");
-                eprintln!("`bingsu config check` lists every problem.");
+                not_loaded(&lead, "there is nothing to compare it with", &why);
                 finish(runs_here)
             }
             // An existing file's save screen writes nothing.
             Ended::Write { .. } => ctx::code(EXIT_FAILED),
         },
     )
+}
+
+/// What setup says when the settings do not load (`Ended::NotLoaded`):
+/// `lead` after `bingsu: `, why that stops it, the reader's first problem
+/// `why` (rendered and cleaned), and where to see every problem.
+fn not_loaded(lead: &str, stops: &str, why: &str) {
+    eprintln!("bingsu: {lead}");
+    eprintln!("The settings do not load now, so {stops}:");
+    eprintln!("{why}");
+    eprintln!("`bingsu config check` lists every problem.");
 }
 
 /// When the settings file `place` is a link (its folder resolved, the
