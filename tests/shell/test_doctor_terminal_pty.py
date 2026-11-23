@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import real_bin
+from conftest import real_bin, track_background
 
 # The probe characters in the order doctor writes them
 # (crates/bingsu-core/src/terminal_width.rs, PROBES).
@@ -85,6 +85,7 @@ class Terminal:
         if pid == 0:
             os.execve("/bin/sh", ["/bin/sh", "-c", script], env)
         self.pid, self.fd = pid, fd
+        track_background(lambda: self.log)
 
     def _feed(self, text):
         self.pending += text

@@ -3,9 +3,11 @@ environment: containers for minimum versions, Homebrew on macOS."""
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -19,6 +21,44 @@ SHELL_CMD = {"zsh": ["zsh", "-f"], "bash": ["bash", "--noprofile", "--norc"], "f
 
 def real_bin():
     return pathlib.Path(os.environ.get("BINGSU_BIN", ROOT / "target/debug/bingsu")).resolve()
+
+
+# Terminal logs (each a function giving the output so far) of tests that ran
+# bingsu as a background job and printed its pid as `BPID=<pid>`.
+_BACKGROUND = []
+
+
+def track_background(log):
+    """At the end of the test, `end_background` kills each bingsu that `log()`
+    names with `BPID=<pid>` and that is still running: a bingsu that does not
+    end (a failing or mutated build) would otherwise outlive the test, its
+    shell and its terminal."""
+    _BACKGROUND.append(log)
+
+
+def end_background():
+    """Kills the tracked background bingsu processes still running, and waits
+    (at most 2 s each) until they are gone. A pid is only killed while its
+    command line still names `real_bin()`, so a number taken by another
+    process since is left alone."""
+    while _BACKGROUND:
+        log = _BACKGROUND.pop()()
+        for pid in sorted({int(n) for n in re.findall(rb"BPID=(\d+)", log)}):
+            args = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+                                  check=False).stdout
+            if str(real_bin()) not in args:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.01)
 
 
 def cargo_test_binaries(profile_dir, package, name):

@@ -23,7 +23,7 @@ from pathlib import Path
 import pexpect
 import pytest
 
-from conftest import real_bin
+from conftest import real_bin, track_background
 from shell_support import account_state_listing, setup_env
 
 
@@ -97,6 +97,8 @@ def spawn(home, *args, background=False, high_fds=False, extra=None):
     child.delaybeforesend = None
     child.transcript = io.BytesIO()
     child.logfile_read = child.transcript
+    if background:
+        track_background(child.transcript.getvalue)
     return child
 
 
