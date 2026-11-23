@@ -552,10 +552,6 @@ fn writable(fd: RawFd) -> impl Fn(Instant) -> bool {
 /// Waits until `fd` can be written (`write`) or read, or `until` passes.
 /// `select`, not `poll`: macOS `poll` does not support `/dev/tty` (it reports
 /// the descriptor invalid at once).
-#[allow(
-    clippy::unnecessary_fallible_conversions,
-    reason = "`tv_usec` is 32 bits on macOS and 64 on Linux; one spelling for both"
-)]
 fn ready(fd: RawFd, stoppable: bool, write: bool) -> impl Fn(Instant) -> bool {
     move |until| loop {
         if stoppable && STOP.load(Ordering::SeqCst) {
@@ -565,25 +561,7 @@ fn ready(fd: RawFd, stoppable: bool, write: bool) -> impl Fn(Instant) -> bool {
         if left.is_zero() {
             return false;
         }
-        let mut tv = libc::timeval {
-            tv_sec: left.as_secs().try_into().unwrap_or(0),
-            tv_usec: left.subsec_micros().try_into().unwrap_or(0),
-        };
-        let mut set = std::mem::MaybeUninit::<libc::fd_set>::uninit();
-        // SAFETY: `set` is writable memory; FD_ZERO initialises all of it.
-        unsafe { libc::FD_ZERO(set.as_mut_ptr()) };
-        // SAFETY: FD_ZERO above initialised `set`.
-        let mut set = unsafe { set.assume_init() };
-        // SAFETY: `Tty::open` refuses a descriptor at or above FD_SETSIZE, so
-        // `fd` fits the set, and `set` is initialised.
-        unsafe { libc::FD_SET(fd, &mut set) };
-        let (reads, writes): (*mut libc::fd_set, *mut libc::fd_set) = if write {
-            (std::ptr::null_mut(), &mut set)
-        } else {
-            (&mut set, std::ptr::null_mut())
-        };
-        // SAFETY: `set` and `tv` are valid for the call; one set, no error set.
-        let n = unsafe { libc::select(fd + 1, reads, writes, std::ptr::null_mut(), &mut tv) };
+        let n = select_one(fd, write, left);
         if n > 0 {
             return true;
         }
@@ -591,6 +569,47 @@ fn ready(fd: RawFd, stoppable: bool, write: bool) -> impl Fn(Instant) -> bool {
             return false;
         }
     }
+}
+
+/// One `select` on `fd` alone, for reading or (`write`) writing, waiting at
+/// most `left`: what `select` returns.
+#[allow(
+    clippy::unnecessary_fallible_conversions,
+    reason = "`tv_usec` is 32 bits on macOS and 64 on Linux; one spelling for both"
+)]
+fn select_one(fd: RawFd, write: bool, left: Duration) -> libc::c_int {
+    let mut tv = libc::timeval {
+        tv_sec: left.as_secs().try_into().unwrap_or(0),
+        tv_usec: left.subsec_micros().try_into().unwrap_or(0),
+    };
+    let mut set = std::mem::MaybeUninit::<libc::fd_set>::uninit();
+    // SAFETY: `set` is writable memory; FD_ZERO initialises all of it.
+    unsafe { libc::FD_ZERO(set.as_mut_ptr()) };
+    // SAFETY: FD_ZERO above initialised `set`.
+    let mut set = unsafe { set.assume_init() };
+    // SAFETY: `Tty::open` refuses a descriptor at or above FD_SETSIZE, so
+    // `fd` fits the set, and `set` is initialised.
+    unsafe { libc::FD_SET(fd, &mut set) };
+    let (reads, writes): (*mut libc::fd_set, *mut libc::fd_set) = if write {
+        (std::ptr::null_mut(), &mut set)
+    } else {
+        (&mut set, std::ptr::null_mut())
+    };
+    // SAFETY: `set` and `tv` are valid for the call; one set, no error set.
+    unsafe { libc::select(fd + 1, reads, writes, std::ptr::null_mut(), &mut tv) }
+}
+
+/// Whether `fd` has something to read now, without waiting; `false` once a
+/// signal asked to stop, so the reply wait ends as a cancel and the clean-up
+/// drops what is there unread as a reply.
+/// 이것을 실패시키는 것: 멈춤 요청 뒤에도 보는 것(a_stop_before_the_late_look_takes_no_reply).
+fn answer_waiting(fd: RawFd) -> bool {
+    // The deadline passed: no wait at all.
+    let left = Duration::ZERO;
+    let found = !STOP.load(Ordering::SeqCst) && select_one(fd, false, left) > 0;
+    #[cfg(test)]
+    test_terminal::looked(left, found);
+    found
 }
 
 /// Reads what the terminal sends until a reply of kind `end` is complete.
@@ -734,7 +753,39 @@ mod test_terminal {
         Stop,
     }
 
+    /// What the process does between the next request and reading its
+    /// reply, as one that comes to read only after the deadline.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Late {
+        /// Waits until the terminal sent something, then until the deadline
+        /// passed.
+        Answered,
+        /// As `Answered`, with a SIGTERM to this process once the terminal
+        /// sent something.
+        AnsweredThenTerm,
+        /// Waits until the deadline passed.
+        Unanswered,
+        /// Waits until the terminal sent something and 50 ms more, so all of
+        /// it is there; the deadline is not waited for (an on-time read).
+        Settled,
+    }
+
     thread_local! {
+        /// How the next query comes to read its reply.
+        pub(super) static LATE: Cell<Option<Late>> = const { Cell::new(None) };
+        /// Looks after the deadline (`answer_waiting`), counted, and the time
+        /// the last one was given and what it found.
+        pub(super) static LOOKS: Cell<usize> = const { Cell::new(0) };
+        pub(super) static LAST_LOOK: Cell<Option<(Duration, bool)>> = const { Cell::new(None) };
+        /// A SIGTERM between the reply wait and the clean-up of the next query.
+        pub(super) static TERM_BEFORE_CLEANUP: Cell<bool> = const { Cell::new(false) };
+        /// A SIGTERM after the clean-up was chosen, before the last look at
+        /// the stop flag.
+        pub(super) static TERM_BEFORE_LAST_SETTLE: Cell<bool> = const { Cell::new(false) };
+        /// Drains begun.
+        pub(super) static DRAINS: Cell<usize> = const { Cell::new(0) };
+        /// A SIGTERM as the next drain begins.
+        pub(super) static TERM_IN_DRAIN: Cell<bool> = const { Cell::new(false) };
         /// How many bytes of the next request the terminal takes, then what.
         pub(super) static ROOM: Cell<Option<(usize, Then)>> = const { Cell::new(None) };
         /// How many bytes of the next cancel the terminal takes in its first
@@ -743,6 +794,56 @@ mod test_terminal {
         /// Told once a request ending in `Then::Stop` took its bytes.
         pub(super) static STOPPER: RefCell<Option<std::sync::mpsc::Sender<()>>> =
             const { RefCell::new(None) };
+    }
+
+    /// Between the request and its reply, as `LATE` says.
+    pub(super) fn after_send(fd: std::os::fd::RawFd, deadline: Instant) {
+        let Some(late) = LATE.take() else {
+            return;
+        };
+        if late != Late::Unanswered {
+            // Reads nothing: the reply stays for the query.
+            let _ = super::ready(fd, false, false)(Instant::now() + Duration::from_secs(5));
+        }
+        if late == Late::AnsweredThenTerm {
+            // SAFETY: raises SIGTERM in this process; the guard's handler takes it.
+            unsafe { libc::raise(libc::SIGTERM) };
+        }
+        let until = if late == Late::Settled {
+            Instant::now() + Duration::from_millis(50)
+        } else {
+            deadline + Duration::from_millis(20)
+        };
+        while Instant::now() <= until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    pub(super) fn looked(left: Duration, found: bool) {
+        LOOKS.set(LOOKS.get() + 1);
+        LAST_LOOK.set(Some((left, found)));
+    }
+
+    pub(super) fn before_cleanup() {
+        if TERM_BEFORE_CLEANUP.take() {
+            // SAFETY: raises SIGTERM in this process; the guard's handler takes it.
+            unsafe { libc::raise(libc::SIGTERM) };
+        }
+    }
+
+    pub(super) fn before_last_settle() {
+        if TERM_BEFORE_LAST_SETTLE.take() {
+            // SAFETY: raises SIGTERM in this process; the guard's handler takes it.
+            unsafe { libc::raise(libc::SIGTERM) };
+        }
+    }
+
+    pub(super) fn draining() {
+        DRAINS.set(DRAINS.get() + 1);
+        if TERM_IN_DRAIN.take() {
+            // SAFETY: raises SIGTERM in this process; the guard's handler takes it.
+            unsafe { libc::raise(libc::SIGTERM) };
+        }
     }
 
     /// A request write on `fd` under `room`: `None` writes as usual. Once
@@ -836,6 +937,17 @@ fn write_once(fd: RawFd, b: &[u8]) -> std::io::Result<usize> {
     usize::try_from(n).map_err(|_| std::io::Error::last_os_error())
 }
 
+/// What `RawGuard::typed` found in the input waiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Typed {
+    /// A Ctrl-C.
+    Cancel,
+    /// No Ctrl-C, and nothing more waiting.
+    Clear,
+    /// No Ctrl-C in the first `TYPED_CAP` bytes; more may wait.
+    Full,
+}
+
 /// How a guard's earlier query ended, when it ended without a reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Spent {
@@ -862,6 +974,8 @@ impl RawGuard<'_> {
         let mut chunk = [0u8; 64];
         let wait = readable(fd, false);
         let until = Instant::now() + LATE_REPLY_DRAIN;
+        #[cfg(test)]
+        test_terminal::draining();
         while wait(until) {
             match f.read(&mut chunk) {
                 Ok(n) if n > 0 => {
@@ -875,9 +989,9 @@ impl RawGuard<'_> {
         result
     }
 
-    /// Whether the input waiting now holds a Ctrl-C (0x03). Reads at most
-    /// `TYPED_CAP` bytes without waiting; the query's flush drops the rest.
-    fn typed_cancel(&self) -> bool {
+    /// What the input waiting now holds: a Ctrl-C (0x03), none, or more
+    /// than the look reads. Reads at most `TYPED_CAP` bytes without waiting.
+    fn typed(&self) -> Typed {
         let mut f = &self.tty.file;
         let mut chunk = [0u8; 64];
         let mut read = 0;
@@ -885,14 +999,14 @@ impl RawGuard<'_> {
             match f.read(&mut chunk) {
                 Ok(n) if n > 0 => {
                     if chunk[..n].contains(&0x03) {
-                        return true;
+                        return Typed::Cancel;
                     }
                     read += n;
                 }
-                _ => return false,
+                _ => return Typed::Clear,
             }
         }
-        false
+        Typed::Full
     }
 
     /// Writes `bytes` until `deadline`. On a timeout what is still queued is
@@ -957,7 +1071,8 @@ impl Terminal for RawGuard<'_> {
         // A Ctrl-C typed since the last query is a cancel, not input to throw
         // away; and once a stop is recorded no request goes out, so no reply
         // can come after the terminal is restored.
-        let mut result = if STOP.load(Ordering::SeqCst) || self.typed_cancel() {
+        // (More typed than the look reads: the query's flush drops the rest.)
+        let mut result = if STOP.load(Ordering::SeqCst) || self.typed() == Typed::Cancel {
             Answer::Cancelled
         } else {
             // What came before this query (typed keys, a late reply to an
@@ -967,16 +1082,61 @@ impl Terminal for RawGuard<'_> {
                 Sent::All => {
                     let wait = readable(fd, true);
                     let mut f = &self.tty.file;
-                    read_reply(end, || wait(deadline), |b| f.read(b))
+                    #[cfg(test)]
+                    test_terminal::after_send(fd, deadline);
+                    // Once the time is up, what is already there still
+                    // counts: a process that comes to read only after the
+                    // deadline (a loaded machine, a slow build) takes a reply
+                    // the terminal sent in time. Each look waits for nothing
+                    // and the first empty one ends the wait, so the deadline
+                    // holds; the input read is bounded by `end.input_cap()`.
+                    // The look is here and not in `ready`: `drain` waits
+                    // with `ready` too and would read past its window while
+                    // input kept coming, and a write never needs it (a write
+                    // is tried before any wait).
+                    // 이것을 실패시키는 것: 마감 뒤 이미 와 있는 답을 보지 않는 것(Silent; an_answer_already_there_counts_after_the_deadline),
+                    // 마지막 보기가 기다리는 것(nothing_there_after_the_deadline_ends_at_once).
+                    read_reply(end, || wait(deadline) || answer_waiting(fd), |b| f.read(b))
                 }
                 Sent::Stopped { .. } => Answer::Cancelled,
                 Sent::TimedOut { .. } => Answer::Silent,
             }
         };
-        if !matches!(result, Answer::Reply(_)) {
+        // A Ctrl-C already queued behind a complete reply (in the next read,
+        // typed while the reply came) is a cancel: the guard may end with this
+        // query and drop it unread. Looked for in at most `TYPED_CAP` bytes,
+        // without waiting, on time or late alike; when more waits, the timed
+        // drain reads on and sees one there. (After silence or a cancel the
+        // drain below would see it as well.)
+        // 이것을 실패시키는 것: 답 뒤에 이미 와 있는 Ctrl-C를 보지 않는 것, 한도를 넘는 입력 뒤의 Ctrl-C를 보지 않는 것
+        // (a_ctrl_c_queued_behind_a_reply_cancels).
+        let mut drained = false;
+        match self.typed() {
+            Typed::Cancel => result = Answer::Cancelled,
+            Typed::Full => {
+                result = self.drain(result);
+                drained = true;
+            }
+            Typed::Clear => {}
+        }
+        // Silence or a cancel drains, and the stop flag is looked at after
+        // that (a stop during the drain wins). A stop that turns a reply into
+        // a cancel there, whenever it came, gets the drain too.
+        // 이것을 실패시키는 것: 버리기 뒤에 멈춤을 다시 보지 않는 것(a_stop_during_the_drain_cancels), 멈춤으로 취소가 된
+        // 답에 버리기를 하지 않는 것(a_stop_right_after_the_reply_still_drains, a_stop_after_the_choice_still_drains),
+        // 이미 버렸는데 또 버리는 것(a_ctrl_c_queued_behind_a_reply_cancels의 drains 1).
+        #[cfg(test)]
+        test_terminal::before_cleanup();
+        if !drained && !matches!(result, Answer::Reply(_)) {
+            result = self.drain(result);
+            drained = true;
+        }
+        #[cfg(test)]
+        test_terminal::before_last_settle();
+        let mut result = settle(result, STOP.load(Ordering::SeqCst));
+        if !drained && !matches!(result, Answer::Reply(_)) {
             result = self.drain(result);
         }
-        let result = settle(result, STOP.load(Ordering::SeqCst));
         self.spent = match result {
             Answer::Reply(_) => None,
             Answer::Silent => Some(Spent::Silent),
@@ -1972,6 +2132,259 @@ mod tests {
                 say(&format!(
                     "silent at once {}",
                     start.elapsed() < LATE_REPLY_DRAIN
+                ));
+            }
+            say(&format!("restored {}", mode() == before));
+        }
+
+        // The process comes to read the reply only after the deadline (a
+        // loaded machine), while the terminal answered in time: the reply
+        // already there is taken, and the guard asks the next question as
+        // after any reply (doctor asks several in one guard).
+        // 이것을 실패시키는 것: 마감 뒤 이미 와 있는 답을 보지 않는 것(Silent, 다음 질문도 묻지 않음).
+        #[test]
+        fn an_answer_already_there_counts_after_the_deadline() {
+            let mut t = start("late_reader_child", 80);
+            t.expect(OSC11);
+            t.send(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+            t.expect(CPR);
+            t.send(b"\x1b[3;1R");
+            let (lines, _) = t.finish();
+            assert_eq!(
+                lines,
+                [
+                    r"reply \x1b]11;rgb:0000/0000/0000\x1b\\",
+                    "looked true",
+                    r"reply \x1b[3;1R",
+                    "restored true",
+                ]
+            );
+        }
+
+        // Late as above with half of the reply there: the query does not
+        // wait for the rest; it ends silent (what follows is read and
+        // dropped for `LATE_REPLY_DRAIN`, and the next query clears the
+        // input first).
+        // 이것을 실패시키는 것: 마감 뒤에 나머지를 기다리는 것, 반쪽을 답으로 받는 것.
+        #[test]
+        fn half_a_reply_at_the_deadline_is_silence() {
+            let mut t = start("late_half_child", 80);
+            t.expect(OSC11);
+            t.send(b"\x1b]11;rgb:00");
+            let (lines, _) = t.finish();
+            assert_eq!(lines, ["silent", "restored true"]);
+        }
+
+        // Late with nothing there: the look after the deadline waits for
+        // nothing (its time is zero; a look that waited would also run into
+        // the child's 5 s end).
+        // 이것을 실패시키는 것: 마감 뒤의 보기가 기다리는 것(5초 기다리는 변이).
+        #[test]
+        fn nothing_there_after_the_deadline_ends_at_once() {
+            let mut t = start("late_unanswered_child", 80);
+            t.expect(OSC11);
+            let (lines, _) = t.finish();
+            assert_eq!(lines, ["silent", "looked for 0ns", "restored true"]);
+        }
+
+        // A SIGTERM comes once the reply is there, before the late look: the
+        // look finds nothing (a stop ends the wait), and the query is
+        // cancelled.
+        // 이것을 실패시키는 것: 멈춤 요청 뒤에도 마감 뒤 보기가 답을 찾는 것.
+        #[test]
+        fn a_stop_before_the_late_look_takes_no_reply() {
+            use std::os::unix::process::ExitStatusExt;
+            let mut t = start("late_term_child", 80);
+            t.expect(OSC11);
+            t.send(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+            let (lines, status, out, err) = t.end();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
+            assert_eq!(lines, ["cancelled", "the late look found false"]);
+            assert!(t.mode_restored());
+        }
+
+        // A SIGTERM right after a complete reply: the stop wins before the
+        // clean-up is chosen, so the cancel drains as silence does.
+        // 이것을 실패시키는 것: 정리 방법을 고른 뒤에야 멈춤을 반영하는 것(답이 있던 취소가 버리기 없이 끝남).
+        #[test]
+        fn a_stop_right_after_the_reply_still_drains() {
+            use std::os::unix::process::ExitStatusExt;
+            let mut t = start("term_after_reply_child", 80);
+            t.expect(OSC11);
+            t.send(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+            let (lines, status, out, err) = t.end();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
+            assert_eq!(lines, ["cancelled", "drains 1"]);
+            assert!(t.mode_restored());
+        }
+
+        // A SIGTERM while a silent query drains: the stop wins after the
+        // drain too. 이것을 실패시키는 것: 버리기 뒤에 멈춤을 다시 보지 않는 것(Silent로 남음).
+        #[test]
+        fn a_stop_during_the_drain_cancels() {
+            use std::os::unix::process::ExitStatusExt;
+            let mut t = start("term_in_drain_child", 80);
+            t.expect(OSC11);
+            let (lines, status, out, err) = t.end();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
+            assert_eq!(lines, ["cancelled"]);
+            assert!(t.mode_restored());
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn term_in_drain_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            test_terminal::TERM_IN_DRAIN.set(true);
+            say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+        }
+
+        // A Ctrl-C queued right behind a complete reply, read late or on
+        // time: the query is cancelled. 25 bytes of reply, then 39 spaces (the
+        // Ctrl-C is the 65th byte, in the next read) or 295 (it comes after
+        // the 256 bytes the look reads; the drain finds it).
+        // 이것을 실패시키는 것: 답을 찾고 바로 돌아가 뒤의 Ctrl-C를 보지 않는 것(취소가 사라짐), 한도까지 읽고 Ctrl-C가
+        // 없으면 남은 입력을 보지 않는 것(295칸), 이미 버렸는데 또 버리는 것(drains 2).
+        #[test]
+        fn a_ctrl_c_queued_behind_a_reply_cancels() {
+            for spaces in [39, 295] {
+                for child in ["ctrl_c_behind_late_child", "ctrl_c_behind_on_time_child"] {
+                    let mut t = start(child, 80);
+                    t.expect(OSC11);
+                    let mut input = b"\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec();
+                    assert_eq!(input.len(), 25);
+                    input.extend_from_slice(&vec![b' '; spaces]);
+                    input.push(0x03);
+                    t.send(&input);
+                    let (lines, _) = t.finish();
+                    // One drain: a second one would only wait 50 ms more.
+                    assert_eq!(
+                        lines,
+                        ["cancelled", "drains 1", "restored true"],
+                        "{child} {spaces}"
+                    );
+                }
+            }
+        }
+
+        // A SIGTERM after a complete reply was kept, before the last look at
+        // the stop flag: the result is a cancel, and it drains.
+        // 이것을 실패시키는 것: 마지막에 취소로 바뀐 답에 버리기를 하지 않는 것.
+        #[test]
+        fn a_stop_after_the_choice_still_drains() {
+            use std::os::unix::process::ExitStatusExt;
+            let mut t = start("term_before_last_settle_child", 80);
+            t.expect(OSC11);
+            t.send(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+            let (lines, status, out, err) = t.end();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
+            assert_eq!(lines, ["cancelled", "drains 1"]);
+            assert!(t.mode_restored());
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn term_before_last_settle_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            test_terminal::TERM_BEFORE_LAST_SETTLE.set(true);
+            say(&ask(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+            say(&format!("drains {}", test_terminal::DRAINS.get()));
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn late_term_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            test_terminal::LATE.set(Some(test_terminal::Late::AnsweredThenTerm));
+            say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+            say(&format!(
+                "the late look found {}",
+                test_terminal::LAST_LOOK.get().unwrap().1
+            ));
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn term_after_reply_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            test_terminal::TERM_BEFORE_CLEANUP.set(true);
+            say(&ask(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+            say(&format!("drains {}", test_terminal::DRAINS.get()));
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn ctrl_c_behind_late_child() {
+            ctrl_c_behind(test_terminal::Late::Answered);
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn ctrl_c_behind_on_time_child() {
+            ctrl_c_behind(test_terminal::Late::Settled);
+        }
+
+        fn ctrl_c_behind(late: test_terminal::Late) {
+            let tty = take_terminal();
+            let before = mode();
+            {
+                let mut g = tty.raw().unwrap();
+                test_terminal::LATE.set(Some(late));
+                let deadline = if late == test_terminal::Late::Settled {
+                    Instant::now() + WAIT
+                } else {
+                    Instant::now() + REPLY_TIMEOUT
+                };
+                say(&show(g.query(OSC11, ReplyEnd::Osc(b"11;"), deadline)));
+                say(&format!("drains {}", test_terminal::DRAINS.get()));
+            }
+            say(&format!("restored {}", mode() == before));
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn late_reader_child() {
+            let tty = take_terminal();
+            let before = mode();
+            {
+                let mut g = tty.raw().unwrap();
+                test_terminal::LATE.set(Some(test_terminal::Late::Answered));
+                say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+                say(&format!("looked {}", test_terminal::LOOKS.get() > 0));
+                say(&ask(&mut g, CPR, ReplyEnd::Csi(b'R')));
+            }
+            say(&format!("restored {}", mode() == before));
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn late_half_child() {
+            let tty = take_terminal();
+            let before = mode();
+            {
+                let mut g = tty.raw().unwrap();
+                test_terminal::LATE.set(Some(test_terminal::Late::Answered));
+                say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+            }
+            say(&format!("restored {}", mode() == before));
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn late_unanswered_child() {
+            let tty = take_terminal();
+            let before = mode();
+            {
+                let mut g = tty.raw().unwrap();
+                test_terminal::LATE.set(Some(test_terminal::Late::Unanswered));
+                say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+                say(&format!(
+                    "looked for {:?}",
+                    test_terminal::LAST_LOOK.get().unwrap().0
                 ));
             }
             say(&format!("restored {}", mode() == before));
