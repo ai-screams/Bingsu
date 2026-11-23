@@ -438,6 +438,41 @@ fn an_existing_file_gets_the_lines_to_change() {
     );
 }
 
+// 이것을 실패시키는 것: 긴 머신 이름(CI 러너의 61자)을 미리보기 줄에 다 넣으려고 줄 폭을 넘기는 것, 자를 때 줄임표 없이
+// 자르는 것, 이름의 앞부분을 남기지 않는 것. 편집판 시험(`test_the_preview_follows_each_key`)은 이 모양으로 머신 이름을 찾는다.
+#[test]
+fn a_long_host_name_is_cut_with_an_ellipsis() {
+    let host = "sjc22-bt144-881efc80-108a-428d-bc68-0d60264e3be6-92F81018D27A";
+    let c = compiled(load("", &[], &[]));
+    let left = |cols: u16| {
+        let l = lines(
+            &c,
+            &Request {
+                mode: Mode::Dark,
+                icons: c.icons,
+                depth: ColorDepth::TrueColor,
+                width: cols,
+                sample: Sample {
+                    pwd: b"/home/u/src",
+                    home: Some(b"/home/u"),
+                    host: Some(host.as_bytes()),
+                },
+            },
+        );
+        l[0].left.text().to_string()
+    };
+    // At 80 columns it does not fit: a prefix, then the ellipsis.
+    let cut = left(80);
+    assert!(!cut.contains(host), "{cut:?}");
+    let kept = (1..host.len())
+        .rev()
+        .find(|k| cut.contains(&format!("{}\u{2026}", &host[..*k])))
+        .unwrap_or(0);
+    assert!(kept >= 8, "{cut:?}");
+    // At 120 it fits whole.
+    assert!(left(120).contains(&format!(" {host} ")), "{:?}", left(120));
+}
+
 fn view_lines(c: &CompiledConfig, cols: u16) -> Vec<PreviewLine> {
     lines(
         c,

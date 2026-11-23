@@ -283,7 +283,27 @@ def test_the_preview_follows_each_key(home):
     assert before[row + 1] != after[row + 1], (before[row + 1], after[row + 1])
     # The folder as the shell shows it, and this machine's name.
     assert home.name in before[row + 1], before[row + 1]
-    assert os.uname().nodename.split(".")[0] in before[row + 1], before[row + 1]
+    assert host_shown(before[row + 1], os.uname().nodename.split(".")[0]), before[row + 1]
+
+
+def host_shown(line, host):
+    """Whether the preview line shows the machine name `host`: whole, or,
+    when the line has no room for it, cut to a prefix of at least eight
+    characters and the ellipsis, as the prompt cuts a long value."""
+    if host in line:
+        return True
+    return any(f"{host[:k]}\u2026" in line for k in range(min(8, len(host)), len(host)))
+
+
+# 이것을 실패시키는 것: 잘린 머신 이름(CI 러너의 61자 이름이 80칸 미리보기에서 앞 41자와 줄임표로 나온 줄)을 찾지 못하는 것,
+# 이름이 아닌 것이나 너무 짧은 앞부분을 이름으로 받는 것.
+def test_a_cut_host_name_is_found():
+    host = "sjc22-bt144-881efc80-108a-428d-bc68-0d60264e3be6-92F81018D27A"
+    row = " \u25c2 sjc22-bt144-881efc80-108a-428d-bc68-0d602\u2026 \u25b8\u25c2 \u2026/bexist-x \u25b8"
+    assert host_shown(row, host)
+    assert host_shown(f" {host} ", host)
+    assert not host_shown(" \u25c2 sjc22-b\u2026 \u25b8", host)
+    assert not host_shown(" \u25c2 other-host\u2026 \u25b8", host)
 
 
 # 이것을 실패시키는 것: 터미널의 배경 답을 편집판에 넘기지 않는 것(밝은 터미널인데 안내가 없음), 답이 없을 때 기다리기만
