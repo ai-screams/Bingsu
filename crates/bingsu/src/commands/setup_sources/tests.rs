@@ -455,3 +455,29 @@ fn the_settings_root_says_whether_it_was_read() {
     assert!(why.is_some(), "a file the reader cannot open is not read");
     assert!(Sources::existing(tape, key, VERSION).is_none());
 }
+
+// 이것을 실패시키는 것: 다 읽지 못한 읽기(없는 `extends` 대상)를 다 읽은 것으로 기록하는 것, 다 읽은 읽기를 아니라고
+// 기록하는 것, 시작 읽기의 그 기록을 Sources가 잃는 것.
+#[test]
+fn a_reading_says_whether_it_read_everything() {
+    let fx = Fx::new("whole");
+    layered(&fx);
+    let (whole, _) = fx.read();
+    assert!(whole.complete());
+    assert!(fx.sources().complete());
+    fx.put(
+        &fx.root.join("conf.d/20-b.toml"),
+        "extends = [\"missing.toml\"]\n",
+    );
+    let (partial, loaded) = fx.read();
+    assert!(!partial.complete());
+    let r = report::from_loaded(loaded, Mode::Dark);
+    assert!(
+        !r.order.is_empty(),
+        "the missed source is dropped, an order stays"
+    );
+    let sources = fx.sources();
+    assert!(!sources.complete());
+    assert!(sources.unchanged(&partial));
+    assert!(!sources.unchanged(&whole));
+}

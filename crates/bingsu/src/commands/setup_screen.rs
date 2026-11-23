@@ -284,7 +284,7 @@ fn first_problem(r: &report::ConfigReport) -> String {
         .find(|d| d.severity() == Severity::Error)
         .or(r.diagnostics.first());
     d.map_or_else(
-        || String::from("the settings did not load"),
+        || String::from("a settings folder or file could not be read"),
         |d| render_human(d, &Catalog(&r.files)),
     )
 }
@@ -305,7 +305,12 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
     // 이것을 실패시키는 것: 불러오지 못한 설정에서 편집판을 여는 것(있는 파일은 이미 있는 값을 "not set now"로
     // 보임, test_settings_that_do_not_load_show_nothing_to_compare; 새 파일은 물려받는 값을 모른 채 씀,
     // test_a_new_file_is_not_made_while_the_settings_do_not_load).
-    if !target.is_some_and(|t| r.order.contains(&t)) {
+    // A reading that could not read everything it met (a folder not
+    // listed, an `extends` target not there) drops what it missed and can
+    // still keep an order: what is inherited or covered is not known then.
+    // 이것을 실패시키는 것: 다 읽지 못한 읽기에서 편집판을 여는 것(test_a_new_file_is_not_made_while_the_settings_are_not_read_whole,
+    // test_an_existing_file_shows_nothing_while_the_settings_are_not_read_whole).
+    if !s.sources.complete() || !target.is_some_and(|t| r.order.contains(&t)) {
         return Ended::NotLoaded(first_problem(&r));
     }
     let layers = match target {

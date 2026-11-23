@@ -41,12 +41,15 @@ enum Call {
     },
 }
 
-/// What one reading of the settings saw: the roots and every answer the
-/// loader gave.
+/// What one reading of the settings saw: the roots, every answer the
+/// loader gave, and whether it read everything it met.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Tape {
     roots: Vec<Root>,
     calls: Vec<Call>,
+    /// `Loader::read_whole` after the reading: a source dropped for a file
+    /// or folder that could not be read can still leave an apply order.
+    complete: bool,
 }
 
 /// Passes every call to the loader and keeps its answer.
@@ -139,7 +142,20 @@ impl Tape {
         };
         let loaded = load(roots.clone(), &mut recorder, version);
         let calls = recorder.calls;
-        (Self { roots, calls }, loaded)
+        let complete = loader.read_whole();
+        (
+            Self {
+                roots,
+                calls,
+                complete,
+            },
+            loaded,
+        )
+    }
+
+    /// Whether the reading read everything it met.
+    pub(crate) fn complete(&self) -> bool {
+        self.complete
     }
 }
 
@@ -353,6 +369,11 @@ impl Sources {
             Place::Existing(o) => o.key,
         };
         files.iter().find(|f| f.opened.key == key).map(|f| f.id)
+    }
+
+    /// Whether the start read everything it met (`Tape::complete`).
+    pub(crate) fn complete(&self) -> bool {
+        self.tape.complete
     }
 
     /// Whether `now`, a reading made later, saw the same sources.

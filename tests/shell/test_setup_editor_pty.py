@@ -255,6 +255,62 @@ def test_a_new_file_is_not_made_while_the_settings_do_not_load(home, bad):
 
 # 이것을 실패시키는 것: 편집하는 동안 바뀐 설정(새 conf.d 파일)을 보지 않고 쓰는 것, 그때 쓰려던 키를 알리지 않는 것,
 # 종료 코드가 1이 아닌 것.
+def settings_with(home, conf_d_file, text):
+    conf = home / "cfg/bingsu/conf.d"
+    conf.mkdir(parents=True)
+    for d in [home / "cfg", home / "cfg/bingsu", conf]:
+        d.chmod(0o700)
+    (conf / conf_d_file).write_text(text)
+    (conf / conf_d_file).chmod(0o600)
+    return conf
+
+
+# 이것을 실패시키는 것: 다 읽지 못한 시작 읽기(없는 `extends` 대상, 읽을 수 없는 conf.d)에서 새 파일 편집판을 여는 것. 그
+# 읽기는 놓친 출처를 빼고도 적용 순서를 남기므로, 순서만 보면 편집판이 열려 물려받는 값을 모른 채 쓴다. 그 이유를 알리지 않는
+# 것, 종료 코드가 0이 아니거나 stdout에 시작 줄이 없는 것, 파일을 쓰는 것.
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a folder whatever its mode")
+@pytest.mark.parametrize("case", ["missing extends", "unreadable conf.d"])
+def test_a_new_file_is_not_made_while_the_settings_are_not_read_whole(home, case):
+    text = 'extends = ["missing.toml"]\n' if case == "missing extends" else "[style]\ngap = true\n"
+    conf = settings_with(home, "10-a.toml", text)
+    if case == "unreadable conf.d":
+        conf.chmod(0)
+    out = home / "out"
+    try:
+        code, before, after, text = ended_without_the_editor(spawn(home, out=out))
+    finally:
+        conf.chmod(0o700)
+    assert code == 0, text
+    assert before == after
+    assert "bingsu: nothing was written." in text, text
+    why = "`extends` entry `missing.toml` cannot be used" if case == "missing extends" else \
+        "a settings folder or file could not be read"
+    assert why in text, text
+    assert out.read_text() == 'eval "$(bingsu init zsh)"\n'
+    assert config(home) is None
+
+
+# 이것을 실패시키는 것: 다 읽은 시작 읽기로 고른 것을, 저장 직전 읽기가 다 읽지 못했는데(그사이 conf.d를 읽을 수 없게 됨)
+# 쓰는 것, 그 까닭을 알리지 않는 것, 종료 코드가 1이 아닌 것.
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a folder whatever its mode")
+def test_settings_not_read_whole_before_the_save_stop_it(home):
+    conf = settings_with(home, "10-a.toml", "[style]\ngap = true\n")
+    child = spawn(home)
+    opened(child)
+    child.send("\r")
+    until(child, has("enter write"))
+    conf.chmod(0)
+    try:
+        child.send("\r")
+        code, before, after, text = finish(child)
+    finally:
+        conf.chmod(0o700)
+    assert code == 1, text
+    assert before == after
+    assert "the settings could not all be read again, so nothing was written" in text, text
+    assert config(home) is None
+
+
 def test_settings_changed_while_editing_stop_the_save(home):
     child = spawn(home)
     opened(child)

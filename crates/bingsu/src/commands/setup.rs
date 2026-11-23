@@ -703,6 +703,12 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // The choice of settings file is part of what was read: `config use`
     // can move the reader to a file already read, with the same sources.
     let root_now = match read_sources(&user, &env, runs_here) {
+        // What was chosen on a whole reading is not saved on one that is not.
+        // 이것을 실패시키는 것: 저장 직전 읽기가 다 읽지 못했는데 쓰는 것
+        // (test_settings_not_read_whole_before_the_save_stop_it).
+        Ok((_, now)) if sources.complete() && !now.complete() => {
+            return refuse("the settings could not all be read again, so nothing was written");
+        }
         Ok((again, now)) => match reread(&selection, &again.selection, sources.unchanged(&now)) {
             Reread::Same => again.root,
             Reread::Unreadable => return refuse(UNREAD_CHOICE),
