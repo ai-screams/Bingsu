@@ -170,6 +170,7 @@ in the hooks retain their original bytes. Displayed paths with removed control c
 
 ## Setting up and customizing
 
+<!-- PLACEHOLDER(help): when `bingsu <command> --help` (and `-h`) prints each command's help, add a line here that every command explains itself with `--help`. -->
 Settings live in `config.toml` in `$XDG_CONFIG_HOME/bingsu/` (`~/.config/bingsu/` by default). Every key is optional: an
 empty file gives the built-in look. The commands below only read your settings, except `bingsu setup`, which makes the
 first file, and `bingsu reload`, which applies a change right away (otherwise the next prompt picks it up).

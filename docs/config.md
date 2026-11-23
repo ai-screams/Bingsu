@@ -488,6 +488,7 @@ the config it reads.
 
 ## Commands that help with a config
 
+<!-- PLACEHOLDER(help): when `bingsu <command> --help` (and `-h`) prints each command's help on standard output with exit 0, say so here with a real run. -->
 The outputs below were copied from real runs, with the home folder written as `~` (and the path of a development build
 shortened). The `setup` editor screens were copied from a terminal model on Linux, without their colors, for an
 account whose home is `/home/tester` on a machine named `box`; the editor shows the full path of the file. A line in parentheses in the `config edit` examples says what the editor did. One kind of line is left out of
@@ -695,7 +696,6 @@ colors.mode: "dark" now, "light" chosen
 The preview follows your picks in a TOML file. For a JSON or YAML file, or a TOML file that cannot be edited in
 place, it keeps drawing the settings as they are and says so (`not updated for this format`), and the list names the
 key to set (`style.preset: "pill"` for JSON).
-<!-- PLACEHOLDER(new-file not-loading fix): when no settings file exists but the settings do not load (a `conf.d` file or `config.local.toml` does not parse), the editor does not open; describe the message when it ships, with a real run. -->
 
 The line questions and the arguments list how the file differs from the starter:
 
@@ -710,6 +710,29 @@ Edit it yourself to change them; `bingsu config check` checks the result.
 Add this to your shell's startup file to start bingsu:
 eval "$(bingsu init zsh)"
 ```
+
+#### When the settings do not load
+
+When there is no settings file yet but the settings do not load (a `conf.d` file or `config.local.toml` does not
+parse), the editor does not open: without them it cannot tell what a new file would change. `setup` writes nothing,
+shows the first problem as `config check` does, and exits 0:
+
+```text
+bingsu: nothing was written.
+The settings do not load now, so setup cannot tell what a new file would change:
+E101: this is not valid TOML: unclosed table, expected `]`
+  where: ~/.config/bingsu/conf.d/extra.toml:1:8
+  why: the file must parse before anything in it is used
+  fix: fix the text at this place
+  code: E101 (bingsu help E101)
+`bingsu config check` lists every problem.
+Add this to your shell's startup file to start bingsu:
+eval "$(bingsu init zsh)"
+```
+
+The line questions and the arguments still write the starter file, which needs nothing from the other files. The
+check that follows the write reports the same problem, and the settings are not applied until it is fixed (`bingsu:
+not applied; the prompt keeps the last valid settings`).
 
 #### If the terminal is left raw
 
