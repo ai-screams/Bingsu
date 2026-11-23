@@ -489,20 +489,254 @@ the config it reads.
 ## Commands that help with a config
 
 The outputs below were copied from real runs, with the home folder written as `~` (and the path of a development build
-shortened). A line in parentheses in the `config edit` examples says what the editor did. One kind of line is left out of
+shortened). The `setup` editor screens were copied from a terminal model on Linux, without their colors, for an
+account whose home is `/home/tester` on a machine named `box`; the editor shows the full path of the file. A line in parentheses in the `config edit` examples says what the editor did. One kind of line is left out of
 the `config check`, `config edit` and `doctor` examples: in a shell that has not run `bingsu init`, each command also
 prints on standard error a notice that it found its folders from the environment now, not from what `init` pinned.
 
+`bingsu --help` lists the commands. Each of them but `prompt` (which the shell hook runs) and `--version` prints its
+help with `-h` or `--help`, on standard output with exit status 0:
+
+```console
+$ bingsu config edit -h
+bingsu config edit: open the settings in $VISUAL or $EDITOR, then apply them
+
+usage: bingsu config edit
+
+options:
+  -h, --help          print this help
+```
+
 ### First settings: `bingsu setup`
 
-`bingsu setup` makes a first settings file from two questions: whether you can see Nerd Font symbols, and the color
-mode (it asks the terminal for its background color and shows what it found). It writes
-`$XDG_CONFIG_HOME/bingsu/config.toml` (folder 0700, file 0600) only when there is no such file. Answering "no" to the
-symbols question writes `icons = "unicode"` and `preset = "lean"`. The file starts with a `#:schema` line, so editors
-that read JSON Schema complete the keys, and every line has a comment.
+`bingsu setup` makes a first settings file. It writes `$XDG_CONFIG_HOME/bingsu/config.toml` (folder 0700, file 0600)
+only when there is no such file. The file starts with a `#:schema` line, so editors that read JSON Schema complete the
+keys, and every line has a comment. It does not edit your shell startup file: it prints the line to add.
 
-When the file is there, `setup` changes nothing and lists how it differs from what it would have written. It does not
-edit your shell startup file: it prints the line to add.
+How it asks depends on where it runs:
+
+| Where | What happens |
+| -- | -- |
+| A terminal of at least 40 columns and 16 rows, with `TERM` set and not `dumb` | The one-screen editor below |
+| `--plain`, `TERM` unset, empty or `dumb`, a smaller window, or one whose size is unknown | Two questions on lines: can you see Nerd Font symbols, and the color mode |
+| `--yes --icons nerd\|light\|unicode\|ascii --mode auto\|dark\|light`, on a terminal or not | Nothing is asked |
+| No terminal, and any of the three missing | Nothing is written; the command names what is missing and exits 2 |
+
+```console
+$ bingsu setup --yes --icons nerd
+bingsu setup: there is no terminal to ask, so it needs --mode too
+usage: bingsu setup [--yes] [--plain] [--no-motion] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]
+```
+
+`bingsu setup --help` (or `-h`) lists its arguments, on standard output with exit status 0:
+
+```console
+$ bingsu setup --help
+bingsu setup: make a first settings file, asking on the terminal
+
+usage: bingsu setup [--yes] [--plain] [--no-motion]
+                    [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]
+
+options:
+  --yes               with --icons and --mode: write without asking
+  --plain             ask line by line instead of the one-screen editor
+  --no-motion         draw the opening still (no animation)
+  --icons nerd|light|unicode|ascii
+                      the icon set
+  --mode auto|dark|light
+                      the color mode
+  -h, --help          print this help
+```
+
+`--icons` and `--mode` also answer their question in advance on a terminal: the editor starts from them, and the line
+questions skip them. `--yes` skips the last question of the line questions (whether to write the file); the editor always
+asks before it writes. The starter takes the `triangle` preset with `nerd` or `light` and `lean` with `unicode` or `ascii`.
+
+The exit status is 0 when the file was written or was already there, 1 when it was refused or failed, 2 for a usage
+mistake and 130 when you cancelled.
+
+#### The editor
+
+Each row of the editor is one choice, with the key it sets in the file:
+
+| Key | Row | Values | Sets |
+| -- | -- | -- | -- |
+| `s` | style | `lean`, `triangle`, `pill`, `capsule`, `slant`, `diamond`, `block`, `bracket` | `style.preset` |
+| `o` | outer | `none`, `triangle`, `round`, `slant`, `flat` | `style.outer_end` |
+| `j` | joint | `triangle`, `round`, `slant`, `flat`, `none`, `caps` | `style.separator` |
+| `n` | inner | `none`, `triangle`, `round`, `slant`, `flat` | `style.inner_end` |
+| `g` | gap | `off`, `on` | `style.gap` |
+| `i` | icons | `nerd`, `light`, `unicode`, `ascii` | `icons` |
+| `c` | colors | `auto`, `dark`, `light` | `colors.mode` |
+| `l` | lines | `2 lines`, `1 line` | `layout.line1.left` and `layout.line2.enabled` (one line puts `host`, `dir`, `git` and `char` on it) |
+
+[Block shapes](#block-shapes) says what the outer, joint, inner and gap keys draw. The preview above the rows draws
+the prompt with your folder and this machine's name and sample values for the rest (git, duration, status), at the
+width of your window. In color, each row's value is drawn on a colored block. A value in brackets is chosen but has no
+effect with the current style, and the note at the end of the row says why. `*` marks the rows the file will set, and
+`>` the row the arrow keys change. This is an 80 × 24 window once the opening picture has ended, without its colors:
+
+```text
+ bingsu setup                 /home/tester/.config/bingsu/config.toml  new file
+                              .:-+#@@@@@@@@@++-:
+                          .=*%#%%%%#@%##@@##%##%++-
+                        .++##%#%*%%%*%*#%%%%%%%#%%#++
+                        .@@####%%%%*%%*%%%%%%%%%%#@@@.
+                         -##@%*##%%+*####%#%*#@%####:
+                           -**+===%%***++*%%-==*++:
+                              .::=#%++-*=*##=-:.
+ preview  80 columns, auto: dark (no COLORFGBG), sample values
+box ~/projects/api main !1 ?1                                            2.1s 1
+❯
+
+>* s style     lean  triangle  pill  capsule  slant  diamond  block  bracket
+   o outer    [none] triangle  round  slant  flat  no ends without a background
+   j joint     triangle  round  slant [flat] none  caps  one blank cell
+   n inner    [none] triangle  round  slant  flat  no ends without a background
+   g gap      [off] on  only with none or caps
+ * i icons     nerd  light  unicode  ascii
+   c colors    auto  dark  light
+   l lines     2 lines  1 line
+
+ writes 2 keys: style.preset, icons
+
+ s o j n g i c l change  arrows move  ? keys  u undo  enter save  q quit
+```
+
+The seven rows under the title hold the opening picture: a bowl of shaved ice builds there for 4.4 seconds and then
+stays as above. The editor takes keys while it plays; a key shows the finished bowl at once and also does its own
+command. `--no-motion`, or `NO_COLOR` set to a value that is not empty, draws the finished bowl from the start, so
+nothing moves. A window under 24 rows or 60 columns shows no picture.
+
+`?` lists the keys:
+
+```text
+ Keys
+
+ s o j n g i c l    change that row (upper case: back)
+ up down, tab       move between the rows
+ left right, space  change the value
+ 1-9                pick a value
+ backspace          remove this file's value
+ u                  undo the last change (again: redo)
+ r                  back to the start
+ enter              save
+ q                  quit
+ ctrl-l             draw again
+ esc                close this list
+```
+
+Under 80 columns each row shows only its value and its place among the values, here at 60 columns. With the built-in
+width bands and narrow layout, under 60 columns the preview draws that narrow layout and says so
+(`narrow layout under 60 columns`).
+
+```text
+>* s style     < triangle >  2/8
+   o outer     < none >  1/5
+   j joint     < triangle >  1/6
+```
+
+Enter shows what will be written and asks once more (Enter writes, Esc goes back, `q` quits; after a change, `q`
+twice). After `s` (to
+`triangle`) and Enter:
+
+```text
+ Write /home/tester/.config/bingsu/config.toml?
+
+   style.preset = "triangle"
+   icons = "unicode"
+```
+
+After the file is written, the terminal is back as it was and the editor prints:
+
+```text
+bingsu: wrote ~/.config/bingsu/config.toml
+Add this to your shell's startup file to start bingsu:
+eval "$(bingsu init zsh)"
+bingsu: the new look shows once your shell loads bingsu
+Line ends look off? `bingsu doctor` checks the character widths.
+```
+
+`q` leaves without writing (`bingsu: nothing written.` and the startup line, exit 0). After a change, the first `q`
+only says `press q again to quit without saving`, and a `q` right after it leaves. Ctrl-C cancels
+(`bingsu: cancelled, nothing written.`, exit 130). Ctrl-Z suspends the editor like any program; `fg` draws it again.
+
+#### The line questions
+
+```console
+$ bingsu setup --plain
+These should look like three small symbols, not boxes or blanks:
+      ❯
+Can you see them? [Y/n] y
+Color mode (the terminal looks dark): [a]uto, [d]ark or [l]ight? [d]
+Write ~/.config/bingsu/config.toml? [Y/n]
+bingsu: wrote ~/.config/bingsu/config.toml
+Add this to your shell's startup file to start bingsu:
+eval "$(bingsu init zsh)"
+bingsu: the new look shows once your shell loads bingsu
+Line ends look off? `bingsu doctor` checks the character widths.
+```
+
+Answering "no" to the symbols question writes `icons = "unicode"` and `preset = "lean"`.
+
+#### The background color
+
+To tell a dark terminal from a light one, `setup` asks the terminal for its background color (OSC 11) and waits 200 ms
+for the answer. Without an answer in time the mode question says `the terminal did not say` and offers `auto`. What
+the terminal sends in the next 50 ms is read and dropped; an answer later than that can still show up as typed text.
+An answer the terminal sent in time still counts when `bingsu` itself, on a busy machine, comes to read it late.
+
+#### When a file is there
+
+A settings file that is already there (the one `config use` chose, else `config.toml` or `config.json` in the settings
+folder) is never changed. On a terminal that can draw it, the editor opens on that file: the title says `exists: not
+changed`, each row starts at the value the settings have now, and the line under the rows counts what you changed
+(`no changes`, `changes 2 keys: style.preset, colors.mode`). Enter shows each changed key with its value now and the
+one chosen, and the line to put in the file:
+
+```text
+ config.toml is already there; bingsu does not change it.
+
+ style.preset: "triangle" now, "pill" chosen
+   under [style]: preset = "pill"
+ colors.mode: "dark" now, "light" chosen
+   under [colors]: mode = "light"
+```
+
+Enter again prints the list and quits (Esc goes back). The list goes to standard error, and standard output gets only
+the startup line, as whenever `setup` writes a file, finds one there or quits with `q`; a cancel and a usage mistake
+print nothing there, and `--help` prints its help:
+
+```text
+bingsu: config.toml is already there; bingsu does not change it.
+
+style.preset: "triangle" now, "pill" chosen
+  under [style]: preset = "pill"
+colors.mode: "dark" now, "light" chosen
+  under [colors]: mode = "light"
+Edit it yourself: bingsu config edit
+Add this to your shell's startup file to start bingsu:
+eval "$(bingsu init zsh)"
+```
+
+With nothing changed, Enter says `It already has the choices you made.` A later file that sets the same key wins over
+the change you would make, and the row and the list say so:
+
+```text
+   c colors    auto [dark] light  overridden by /home/tester/.config/bingsu/...
+```
+
+```text
+colors.mode: "dark" now, "light" chosen
+  under [colors]: mode = "light"
+  /home/tester/.config/bingsu/config.local.toml sets this too, and wins.
+```
+
+The preview follows your picks in a TOML file. Otherwise it keeps drawing the settings as they are and says so:
+`not updated for this format` for a JSON or YAML file, and the list names the key to set (`style.preset: "pill"`
+for JSON); `not updated for this layout` for a TOML file that cannot be edited in place.
+
+The line questions and the arguments list how the file differs from the starter:
 
 ```console
 $ bingsu setup --yes --icons unicode --mode light
@@ -516,9 +750,37 @@ Add this to your shell's startup file to start bingsu:
 eval "$(bingsu init zsh)"
 ```
 
-Without a terminal it asks nothing and needs `--yes --icons nerd|light|unicode|ascii --mode auto|dark|light`. On a
-terminal, `--icons` and `--mode` answer their question in advance and `--yes` skips the final confirmation. The file
-starts from the `triangle` preset with `nerd` or `light` and from `lean` with `unicode` or `ascii`.
+#### When the settings do not load
+
+When there is no settings file yet but the settings do not load (a `conf.d` file or `config.local.toml` does not
+parse), the editor does not open: without them it cannot tell what a new file would change. `setup` writes nothing,
+shows the first problem as `config check` does, and exits 0:
+
+```text
+bingsu: nothing was written.
+The settings do not load now, so setup cannot tell what a new file would change:
+E101: this is not valid TOML: unclosed table, expected `]`
+  where: ~/.config/bingsu/conf.d/extra.toml:1:8
+  why: the file must parse before anything in it is used
+  fix: fix the text at this place
+  code: E101 (bingsu help E101)
+`bingsu config check` lists every problem.
+Add this to your shell's startup file to start bingsu:
+eval "$(bingsu init zsh)"
+```
+
+The line questions and the arguments still write the starter file, which needs nothing from the other files. The
+check that follows the write reports the same problem, and the settings are not applied until it is fixed (`bingsu:
+not applied; the prompt keeps the last valid settings`).
+
+#### If the terminal is left raw
+
+While the editor is open the terminal is in raw mode, on the alternate screen, with the cursor hidden and bracketed
+paste on. Saving, `q`, Ctrl-C, SIGINT, SIGTERM and SIGHUP put all of it back (the last three then end the command with that
+signal, 130, 143 or 129 in a shell). A signal bingsu does not handle (SIGKILL, SIGQUIT, SIGSEGV) ends
+it at once, and the terminal stays as the editor left it: what you type does not show, and the editor's screen stays.
+Type `reset` and press Enter: it puts back the line settings and resets the screen. `stty sane` puts back only the line
+settings, not the screen.
 
 ### Editing: `bingsu config edit`
 
