@@ -161,7 +161,8 @@ impl Grid {
         let fits = x
             .checked_add(w)
             .is_some_and(|e| e <= end.min(u32::from(self.cols)));
-        // The one writer of cells: a control, bidi or invisible character
+        // The one writer of cells but for the blank fill of `preview`, which
+        // puts a constant space: a control, bidi or invisible character
         // never reaches a frame, whatever the caller forgot to clean.
         // A closure: the purity gate refuses a function item passed on.
         let removed = text
