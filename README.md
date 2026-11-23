@@ -94,7 +94,7 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width; your text, command and environment variable segments, and node, python, rust and go versions where a layout draws them |
 | User commands and segments (M6) | Done on Linux and macOS: text, command and `env` segments are drawn, commands run in the background with a cleaned environment, time limits, caching and `match`, and the built-in language segments show versions. User-defined language segments run their version command where their project files are found. See [docs/config.md](docs/config.md), which also says how a team shares a config, and [docs/writing-command-segments.md](docs/writing-command-segments.md) for writing a command segment others will use. Not complete: on macOS the helper's check of the folders on `PATH` is slower than on Linux, because it asks the system about each account's group membership; this delays the first value of a command segment (the prompt does not wait for it); on macOS, prompt time has only a record-only run on one Mac: no case was slower than M4 beyond that run's noise, and the cost of command segments could not be called; the Linux CI prompt gate gives the verdict |
 | Theme selection and customization | Partly: eight style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
-| First-use commands and presets (M7) | In progress. Done: the eight built-in presets (`lean`, `triangle`, `pill`, `capsule`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file in a one-screen editor that previews the prompt as you choose, and for a settings file that is already there shows what to change without changing it (line questions where the editor cannot be drawn, and arguments for scripts); `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation, the zsh hooks and the terminal; `bingsu config edit` opens your settings file and applies it when it is valid; JSON and YAML config files are read; `bingsu --version` shows the build and whether its sibling programs are from the same build; `bingsu help CODE` explains a diagnostic. Still to come in M7: <!-- PLACEHOLDER(opening): drop this item when the opening picture of `bingsu setup` ships. -->the opening picture of `bingsu setup`, and the first release. Not complete: `bingsu explain --timings` (time per segment) is not built; the shell checks of `bingsu doctor` work in zsh only; a `config.yaml` in the settings folder is not read and nothing reports it. See [Setting up and customizing](#setting-up-and-customizing) |
+| First-use commands and presets (M7) | In progress. Done: the eight built-in presets (`lean`, `triangle`, `pill`, `capsule`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file in a one-screen editor that opens with a shaved-ice picture and previews the prompt as you choose, and for a settings file that is already there shows what to change without changing it (line questions where the editor cannot be drawn, and arguments for scripts); `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation, the zsh hooks and the terminal; `bingsu config edit` opens your settings file and applies it when it is valid; JSON and YAML config files are read; `bingsu --version` shows the build and whether its sibling programs are from the same build; `bingsu help CODE` explains a diagnostic; `bingsu --help` lists the commands and `bingsu <command> --help` (or `-h`) shows a command's arguments. Still to come in M7: the first release. Not complete: `bingsu explain --timings` (time per segment) is not built; the shell checks of `bingsu doctor` work in zsh only; a `config.yaml` in the settings folder is not read and nothing reports it. See [Setting up and customizing](#setting-up-and-customizing) |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
 
@@ -170,7 +170,8 @@ in the hooks retain their original bytes. Displayed paths with removed control c
 
 ## Setting up and customizing
 
-<!-- PLACEHOLDER(help): when `bingsu <command> --help` (and `-h`) prints each command's help, add a line here that every command explains itself with `--help`. -->
+`bingsu --help` lists the commands, and `bingsu <command> --help` (or `-h`) shows a command's arguments.
+
 Settings live in `config.toml` in `$XDG_CONFIG_HOME/bingsu/` (`~/.config/bingsu/` by default). Every key is optional: an
 empty file gives the built-in look. The commands below only read your settings, except `bingsu setup`, which makes the
 first file, and `bingsu reload`, which applies a change right away (otherwise the next prompt picks it up).
@@ -181,7 +182,7 @@ first file, and `bingsu reload`, which applies a change right away (otherwise th
 editor: each row is a choice (style preset, the shapes at the ends and between segments, icons, colors, one or two
 lines), and the preview above them draws your prompt with every change, with your folder and machine name and sample
 values for the rest. Enter shows the keys it will write and asks once more; `q` leaves without writing. This is the screen on a
-dark 80 × 24 terminal, without its colors (in color, each row's value is drawn on a colored block; `*` marks the rows
+dark 80 × 24 terminal once the opening picture has ended, without its colors (in color, each row's value is drawn on a colored block; `*` marks the rows
 the file will set, and `>` the row the arrow keys change):
 
 ```console
@@ -190,13 +191,13 @@ $ bingsu setup --icons unicode
 
 ```text
  bingsu setup                 /home/tester/.config/bingsu/config.toml  new file
-
-
-
-
-
-
-
+                              .:-+#@@@@@@@@@++-:
+                          .=*%#%%%%#@%##@@##%##%++-
+                        .++##%#%*%%%*%*#%%%%%%%#%%#++
+                        .@@####%%%%*%%*%%%%%%%%%%#@@@.
+                         -##@%*##%%+*####%#%*#@%####:
+                           -**+===%%***++*%%-==*++:
+                              .::=#%++-*=*##=-:.
  preview  80 columns, auto: dark (no COLORFGBG), sample values
 box ~/projects/api main !1 ?1                                            2.1s 1
 ❯
@@ -215,7 +216,11 @@ box ~/projects/api main !1 ?1                                            2.1s 1
  s o j n g i c l change  arrows move  ? keys  u undo  enter save  q quit
 ```
 
-<!-- PLACEHOLDER(opening): the empty rows at the top hold the opening picture once it ships; describe it here then. -->
+The rows under the title hold the opening picture: a bowl of shaved ice builds there for 4.4 seconds and then stays
+as above. The editor takes keys while it plays; a key shows the finished bowl at once and also does its own command.
+`--no-motion`, or `NO_COLOR` set to a value that is not empty, draws the finished bowl from the start. A window under
+24 rows or 60 columns shows no picture.
+
 The file is made only when there is none, as 0600 in a 0700 folder, and its lines carry comments and a `#:schema`
 line for editors. A settings file that is already there is never changed: the editor opens on it (`exists: not
 changed` in the title), and Enter lists each key you changed, with its value now, the one you chose and the line to

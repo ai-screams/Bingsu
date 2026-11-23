@@ -488,12 +488,24 @@ the config it reads.
 
 ## Commands that help with a config
 
-<!-- PLACEHOLDER(help): when `bingsu <command> --help` (and `-h`) prints each command's help on standard output with exit 0, say so here with a real run. -->
 The outputs below were copied from real runs, with the home folder written as `~` (and the path of a development build
 shortened). The `setup` editor screens were copied from a terminal model on Linux, without their colors, for an
 account whose home is `/home/tester` on a machine named `box`; the editor shows the full path of the file. A line in parentheses in the `config edit` examples says what the editor did. One kind of line is left out of
 the `config check`, `config edit` and `doctor` examples: in a shell that has not run `bingsu init`, each command also
 prints on standard error a notice that it found its folders from the environment now, not from what `init` pinned.
+
+`bingsu --help` lists the commands. Each of them but `prompt` (which the shell hook runs) and `--version` prints its
+help with `-h` or `--help`, on standard output with exit status 0:
+
+```console
+$ bingsu config edit -h
+bingsu config edit: open the settings in $VISUAL or $EDITOR, then apply them
+
+usage: bingsu config edit
+
+options:
+  -h, --help          print this help
+```
 
 ### First settings: `bingsu setup`
 
@@ -513,10 +525,29 @@ How it asks depends on where it runs:
 ```console
 $ bingsu setup --yes --icons nerd
 bingsu setup: there is no terminal to ask, so it needs --mode too
-usage: bingsu setup [--yes] [--plain] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]
+usage: bingsu setup [--yes] [--plain] [--no-motion] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]
 ```
 
-<!-- PLACEHOLDER(help): when `bingsu setup --help` (and `-h`) prints its help on standard output with exit 0, mention it here with a real run. -->
+`bingsu setup --help` (or `-h`) lists its arguments, on standard output with exit status 0:
+
+```console
+$ bingsu setup --help
+bingsu setup: make a first settings file, asking on the terminal
+
+usage: bingsu setup [--yes] [--plain] [--no-motion]
+                    [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]
+
+options:
+  --yes               with --icons and --mode: write without asking
+  --plain             ask line by line instead of the one-screen editor
+  --no-motion         draw the opening still (no animation)
+  --icons nerd|light|unicode|ascii
+                      the icon set
+  --mode auto|dark|light
+                      the color mode
+  -h, --help          print this help
+```
+
 `--icons` and `--mode` also answer their question in advance on a terminal: the editor starts from them, and the line
 questions skip them. `--yes` skips the last question of the line questions (whether to write the file); the editor always
 asks before it writes. The starter takes the `triangle` preset with `nerd` or `light` and `lean` with `unicode` or `ascii`.
@@ -543,17 +574,17 @@ Each row of the editor is one choice, with the key it sets in the file:
 the prompt with your folder and this machine's name and sample values for the rest (git, duration, status), at the
 width of your window. In color, each row's value is drawn on a colored block. A value in brackets is chosen but has no
 effect with the current style, and the note at the end of the row says why. `*` marks the rows the file will set, and
-`>` the row the arrow keys change. This is an 80 × 24 window, without its colors:
+`>` the row the arrow keys change. This is an 80 × 24 window once the opening picture has ended, without its colors:
 
 ```text
  bingsu setup                 /home/tester/.config/bingsu/config.toml  new file
-
-
-
-
-
-
-
+                              .:-+#@@@@@@@@@++-:
+                          .=*%#%%%%#@%##@@##%##%++-
+                        .++##%#%*%%%*%*#%%%%%%%#%%#++
+                        .@@####%%%%*%%*%%%%%%%%%%#@@@.
+                         -##@%*##%%+*####%#%*#@%####:
+                           -**+===%%***++*%%-==*++:
+                              .::=#%++-*=*##=-:.
  preview  80 columns, auto: dark (no COLORFGBG), sample values
 box ~/projects/api main !1 ?1                                            2.1s 1
 ❯
@@ -572,7 +603,11 @@ box ~/projects/api main !1 ?1                                            2.1s 1
  s o j n g i c l change  arrows move  ? keys  u undo  enter save  q quit
 ```
 
-<!-- PLACEHOLDER(opening): the empty rows under the title hold the opening picture once it ships; describe it here then, with `--no-motion` if that is its switch. -->
+The seven rows under the title hold the opening picture: a bowl of shaved ice builds there for 4.4 seconds and then
+stays as above. The editor takes keys while it plays; a key shows the finished bowl at once and also does its own
+command. `--no-motion`, or `NO_COLOR` set to a value that is not empty, draws the finished bowl from the start, so
+nothing moves. A window under 24 rows or 60 columns shows no picture.
+
 `?` lists the keys:
 
 ```text
