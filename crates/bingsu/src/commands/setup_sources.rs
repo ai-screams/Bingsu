@@ -160,6 +160,15 @@ enum Swap<'a> {
     New { path: &'a Path, file: &'a Opened },
     /// The existing file's key and the bytes in its place: an `extends`
     /// entry that opened it gets them, with the trust of that answer.
+    ///
+    /// The loader does not reach that today: core keeps a file's first
+    /// place when it meets the file again, and gives the place to a later
+    /// answer only when that one has stronger trust, which the loader has
+    /// not given an alias (a link through a folder others can change and a
+    /// hard link from a trusted folder both read with the root's trust).
+    /// It stays because such an alias would otherwise draw the start's
+    /// bytes in the preview; `every_answer_that_opened_the_settings_file_
+    /// gets_the_changed_bytes` makes that case from a recorded reading.
     Existing { key: FileKey, bytes: &'a [u8] },
 }
 
