@@ -811,6 +811,13 @@ impl Loader {
         self.plan.get(&key).map(|p| p.written.as_path())
     }
 
+    /// Whether this reading read everything it met: `false` when a folder
+    /// could not be listed, a path walked, a file read whole, or a limit
+    /// was reached. `verified` also checks the evidence again.
+    pub(crate) fn read_whole(&self) -> bool {
+        self.complete
+    }
+
     /// N2 passes the final catalog and whether S3b produced a snapshot.
     /// This boundary deliberately uses only S3a types. Call immediately
     /// before publication, retaining this loader throughout compilation.
