@@ -648,9 +648,55 @@ sent in time still counts when `bingsu` itself, on a busy machine, comes to read
 
 #### When a file is there
 
-When the file is there, `setup` changes nothing and lists how it differs from what it would have written.
-<!-- PLACEHOLDER(#412): the editor for a settings file that is already there (title "exists: not changed", the lines to change on standard error); describe it here when it ships, with a real run. -->
-<!-- PLACEHOLDER(new-file not-loading fix): when no settings file exists but the settings do not load (a `conf.d` file or `config.local.toml` does not parse), the editor does not open; describe the message when it ships. -->
+A settings file that is already there (the one `config use` chose, else `config.toml` or `config.json` in the settings
+folder) is never changed. On a terminal that can draw it, the editor opens on that file: the title says `exists: not
+changed`, each row starts at the value the settings have now, and the line under the rows counts what you changed
+(`no changes`, `changes 2 keys: style.preset, colors.mode`). Enter shows each changed key with its value now and the
+one chosen, and the line to put in the file:
+
+```text
+ config.toml is already there; bingsu does not change it.
+
+ style.preset: "triangle" now, "pill" chosen
+   under [style]: preset = "pill"
+ colors.mode: "dark" now, "light" chosen
+   under [colors]: mode = "light"
+```
+
+Enter again prints the list and quits (Esc goes back). The list goes to standard error, and standard output gets only
+the startup line, as on every path of `setup`:
+
+```text
+bingsu: config.toml is already there; bingsu does not change it.
+
+style.preset: "triangle" now, "pill" chosen
+  under [style]: preset = "pill"
+colors.mode: "dark" now, "light" chosen
+  under [colors]: mode = "light"
+Edit it yourself: bingsu config edit
+Add this to your shell's startup file to start bingsu:
+eval "$(bingsu init zsh)"
+```
+
+With nothing changed, Enter says `It already has the choices you made.` A later file that sets the same key wins over
+the change you would make, and the row and the list say so:
+
+```text
+   c colors    auto [dark] light  overridden by /home/tester/.config/bingsu/...
+```
+
+```text
+colors.mode: "dark" now, "light" chosen
+  under [colors]: mode = "light"
+  /home/tester/.config/bingsu/config.local.toml sets this too, and wins.
+```
+
+The preview follows your picks in a TOML file. For a JSON or YAML file, or a TOML file that cannot be edited in
+place, it keeps drawing the settings as they are and says so (`not updated for this format`), and the list names the
+key to set (`style.preset: "pill"` for JSON).
+<!-- PLACEHOLDER(new-file not-loading fix): when no settings file exists but the settings do not load (a `conf.d` file or `config.local.toml` does not parse), the editor does not open; describe the message when it ships, with a real run. -->
+
+The line questions and the arguments list how the file differs from the starter:
 
 ```console
 $ bingsu setup --yes --icons unicode --mode light
