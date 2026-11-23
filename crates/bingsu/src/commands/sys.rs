@@ -32,29 +32,74 @@ pub fn exit_now(code: i32) -> ! {
 /// nonblocking write avoids EINTR retries; the caller then ends the process
 /// or the command.
 pub fn write_deadline_notice(buf: &[u8]) {
+    notice_on(2, buf);
+}
+
+/// `write_deadline_notice` on `fd`.
+fn notice_on(fd: i32, buf: &[u8]) {
     // SAFETY: F_GETFL only reads descriptor flags.
-    let flags = unsafe { libc::fcntl(2, libc::F_GETFL) };
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return;
     }
+    // Written only once the descriptor is non-blocking: a blocking write
+    // could wait on a full pipe past the deadline. (No test: no descriptor
+    // was found where F_SETFL fails and a write would then wait; on a
+    // kqueue, the one failing shape known, the write fails at once.)
     // SAFETY: F_SETFL accepts the existing flags plus O_NONBLOCK.
-    if unsafe { libc::fcntl(2, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return;
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0 {
+        // SAFETY: buf is valid for its length. No retry or flush follows.
+        let _ = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
     }
-    // SAFETY: buf is valid for its length. No retry or flush follows.
-    let _ = unsafe { libc::write(2, buf.as_ptr().cast(), buf.len()) };
     // The flag belongs to the open file description, which stderr shares
     // with the shell and every other process writing there (a terminal, a
     // pipe): put the flags back, or they keep a non-blocking terminal after
-    // this process ends.
+    // this process ends. Also when the switch above failed: on macOS
+    // F_SETFL sets the flags first and can then fail in the file's own
+    // FIONBIO (a kqueue: ENOTTY), leaving O_NONBLOCK on; putting them back
+    // fails the same way, with the flags back.
     // 이것을 실패시키는 것: 되돌리지 않는 것(the_deadline_notice_leaves_stderr_as_it_was), 쓰기 전에 되돌리는 것(가득 찬
-    // stderr에서 쓰기가 기다림; deadline_exits_even_when_stderr_is_full).
+    // stderr에서 쓰기가 기다림; deadline_exits_even_when_stderr_is_full), 켜기가 실패했을 때 되돌리지 않고 나가는 것
+    // (a_failed_switch_still_puts_the_flags_back, macOS).
     // SAFETY: F_SETFL puts back the flags F_GETFL read.
-    unsafe { libc::fcntl(2, libc::F_SETFL, flags) };
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
 }
 
 #[cfg(test)]
 mod deadline_notice_tests {
+    // F_SETFL on a kqueue sets O_NONBLOCK and then fails (ENOTTY from the
+    // file's FIONBIO): the notice writes nothing and still puts the flags
+    // back. 이것을 실패시키는 것: 켜기가 실패하면 되돌리지 않고 나가는 것(O_NONBLOCK이 남음).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_switch_still_puts_the_flags_back() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        // SAFETY: kqueue takes no arguments; a new descriptor or -1.
+        let raw = unsafe { libc::kqueue() };
+        assert!(raw >= 0);
+        // SAFETY: `raw` is a new descriptor this test alone owns.
+        let kq = unsafe { OwnedFd::from_raw_fd(raw) };
+        // SAFETY: `kq` is open; F_GETFL only reads its status flags.
+        let before = unsafe { libc::fcntl(kq.as_raw_fd(), libc::F_GETFL) };
+        assert!(before >= 0 && before & libc::O_NONBLOCK == 0);
+        // The shape this test needs: the switch fails with the flag set.
+        // SAFETY: as above; F_SETFL adds O_NONBLOCK.
+        let set = unsafe { libc::fcntl(kq.as_raw_fd(), libc::F_SETFL, before | libc::O_NONBLOCK) };
+        // SAFETY: as above.
+        let during = unsafe { libc::fcntl(kq.as_raw_fd(), libc::F_GETFL) };
+        assert!(
+            set < 0 && during & libc::O_NONBLOCK != 0,
+            "{set} {during:#x}"
+        );
+        // SAFETY: as above; the flags F_GETFL read, which this fails to put
+        // back as well, with the flags back.
+        unsafe { libc::fcntl(kq.as_raw_fd(), libc::F_SETFL, before) };
+        super::notice_on(kq.as_raw_fd(), b"x");
+        // SAFETY: as above.
+        let after = unsafe { libc::fcntl(kq.as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(after, before);
+    }
+
     // The deadline's notice goes out without waiting, and stderr's open file
     // description, which the process shares with its parent (here a pipe this
     // test holds a copy of), is left blocking as it came.
