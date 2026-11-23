@@ -12,14 +12,16 @@ pytest.register_assert_rewrite("trace_support", "trace_captures", "trace_live")
 from shell_support import (
     ROOT, FAKE, SHELL_CMD, COLD_INIT_NOTICE, Install, real_bin, real_collector, real_prompt,
     trusted_env, run_shell_script, short_dir, minimal_record, status_bait_record, _SHORT_DIRS,
+    end_background, track_background,
 )
 
 
 @pytest.fixture(autouse=True)
 def _cleanup():
-    """After each test: end PTY sessions a failing test left running and
-    remove the short canary folders."""
+    """After each test: end the background bingsu processes and PTY sessions
+    a failing test left running and remove the short canary folders."""
     yield
+    end_background()
     import sys
     pty = sys.modules.get("pty_session")
     if pty is not None:
