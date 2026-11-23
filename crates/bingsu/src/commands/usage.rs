@@ -20,7 +20,8 @@ pub(super) struct Opt {
 
 /// One command: its name, what follows the name in its usage line, what it
 /// does, its subcommands (the usage line is then `<sub|sub ...>`), its
-/// options, and whether `-h`/`--help` after it prints this entry's help.
+/// options, and whether `-h`/`--help` after it prints this entry's help
+/// (the subjects of `list` are words of one command line, not commands).
 pub(super) struct Cmd {
     pub name: &'static str,
     pub args: &'static str,
@@ -96,18 +97,29 @@ const CONFIG_SUBS: &[Cmd] = &[
     ),
 ];
 
+/// A word of `list` that names what to list: no help of its own.
+const fn subject(name: &'static str, args: &'static str, what: &'static str) -> Cmd {
+    Cmd {
+        name,
+        args,
+        what,
+        subs: &[],
+        opts: &[],
+        help: false,
+    }
+}
+
 const LIST_SUBS: &[Cmd] = &[
-    cmd(
+    subject(
         "presets",
         "[--preview [--icons nerd|light|unicode|ascii]]",
         "the style presets",
-        &[],
     ),
-    cmd("segments", "", "the segments a layout can show", &[]),
-    cmd("flavors", "", "the color flavors", &[]),
-    cmd("roles", "", "the color roles of the segments", &[]),
-    cmd("shorteners", "", "the ways a long path is shortened", &[]),
-    cmd("icons", "", "the icon sets", &[]),
+    subject("segments", "", "the segments a layout can show"),
+    subject("flavors", "", "the color flavors"),
+    subject("roles", "", "the color roles of the segments"),
+    subject("shorteners", "", "the ways a long path is shortened"),
+    subject("icons", "", "the icon sets"),
 ];
 
 /// Every command, in the order of the top-level usage line.
@@ -277,7 +289,9 @@ pub(super) fn line(path: &[&str]) -> String {
         let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
         return format!("usage: bingsu <{}> ...", names.join("|"));
     }
-    let Some(c) = find(path) else {
+    let found = find(path);
+    debug_assert!(found.is_some(), "no usage line for {path:?}");
+    let Some(c) = found else {
         return line(&[]);
     };
     let name = path.join(" ");
@@ -372,7 +386,7 @@ pub(super) fn text(path: &[&str]) -> String {
         item(o.words, o.what, &mut out);
     }
     item("-h, --help", "print this help", &mut out);
-    if path == ["config"] {
+    if c.subs.iter().any(|s| s.help) {
         out.push_str(&format!(
             "\nbingsu {name} <command> --help shows the arguments of a command.\n"
         ));
@@ -381,8 +395,8 @@ pub(super) fn text(path: &[&str]) -> String {
 }
 
 /// The help `args` ask for, when they do: `-h` or `--help` as the only word
-/// at the top level, after a command, or after a `config` subcommand.
-/// `None` otherwise, and for a command that has no help here.
+/// at the top level, after a command, or after a subcommand that has a help
+/// (those of `config`). `None` otherwise, and for an entry without help.
 pub(super) fn asked(args: &[OsString]) -> Option<String> {
     let words: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
     let (last, path) = words.split_last()?;
@@ -392,10 +406,7 @@ pub(super) fn asked(args: &[OsString]) -> Option<String> {
     if path.is_empty() {
         return Some(text(&[]));
     }
-    let c = find(path)?;
-    // Only `config` has help per subcommand.
-    let allowed = c.help && (path.len() == 1 || path[0] == "config");
-    allowed.then(|| text(path))
+    find(path)?.help.then(|| text(path))
 }
 
 /// Prints `help` on stdout: exit 0, or 1 when stdout takes no output.

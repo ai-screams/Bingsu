@@ -107,8 +107,17 @@ fn save(
     }
 }
 
+/// The one word after `config use`, the file to use, whatever it looks
+/// like (`./--help` is a path); `None` for no word or more than one.
+pub(super) fn parse(args: &[OsString]) -> Option<&OsString> {
+    match args {
+        [arg] => Some(arg),
+        _ => None,
+    }
+}
+
 pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
-    let [arg] = args else {
+    let Some(arg) = parse(args) else {
         eprintln!("{}", super::usage::line(&["config", "use"]));
         return ctx::code(EXIT_USAGE);
     };

@@ -6,10 +6,8 @@ fn helped() -> Vec<Vec<&'static str>> {
     let mut out = vec![vec![]];
     for c in COMMANDS.iter().filter(|c| c.help) {
         out.push(vec![c.name]);
-        if c.name == "config" {
-            for s in c.subs {
-                out.push(vec![c.name, s.name]);
-            }
+        for s in c.subs.iter().filter(|s| s.help) {
+            out.push(vec![c.name, s.name]);
         }
     }
     out
@@ -62,9 +60,16 @@ fn usage_lines_are_the_ones_from_before() {
     // A wrong use of `init` prints a message, not a usage line: this line is
     // new, and only its help shows it.
     assert_eq!(super::line(&["init"]), "usage: bingsu init zsh|bash|fish");
-    // A path the table does not know gets the top-level line.
-    assert_eq!(super::line(&["nope"]), super::line(&[]));
-    assert_eq!(super::line(&["config", "nope"]), super::line(&[]));
+    // A path the table does not know: a debug build stops on it, a release
+    // build prints the top-level line.
+    for path in [&["nope"][..], &["config", "nope"]] {
+        let got = std::panic::catch_unwind(|| super::line(path));
+        if cfg!(debug_assertions) {
+            assert!(got.is_err(), "{path:?}");
+        } else {
+            assert_eq!(got.ok(), Some(super::line(&[])), "{path:?}");
+        }
+    }
 }
 
 // 이것을 실패시키는 것: 도움말 줄이 80칸을 넘거나 ASCII 밖 글자를 쓰거나 빈칸으로 끝나는 것, 도움말에 그 명령의
@@ -165,38 +170,38 @@ fn samples(words: &str) -> Vec<Vec<String>> {
     }
 }
 
-// 이것을 실패시키는 것: 도움말이 이름하는 옵션·값·하위 명령을 실제 파서가 받지 않는 것(도움말이 없는 인자를 안내함).
+// 이것을 실패시키는 것: 도움말이 이름하는 옵션·값·하위 명령을 실제 파서가 받지 않는 것(도움말이 없는 인자를 안내함),
+// 도움말이 이름하는 플래그를 파서가 모르는 플래그와 똑같이 받는 것(config use가 `--force`를 경로로 받듯이).
 // The parsers of the commands are built on Unix only.
 #[cfg(unix)]
 #[test]
 fn every_option_the_help_names_is_accepted() {
+    use super::super::{config, config_use, doctor, explain, list, setup};
     let accepts = |path: &[&str], args: &[String]| -> bool {
         let a: Vec<OsString> = args.iter().map(OsString::from).collect();
         match path {
+            ["config", "use"] => config_use::parse(&a).is_some(),
             ["config", sub] => {
                 let mut all = vec![OsString::from(*sub)];
                 all.extend(a);
-                super::super::config::parse(&all).is_some()
+                config::parse(&all).is_some()
             }
-            ["doctor"] => super::super::doctor::parse(&a).is_some(),
-            ["explain"] => super::super::explain::parse(&a).is_some(),
-            ["help"] => args
-                .first()
-                .and_then(|w| bingsu_core::diag_help::parse_code(w))
-                .is_some(),
+            ["doctor"] => doctor::parse(&a).is_some(),
+            ["explain"] => explain::parse(&a).is_some(),
+            ["help"] => matches!(args, [w] if bingsu_core::diag_help::parse_code(w).is_some()),
             ["init"] => {
-                args.len() == 1
-                    && bingsu_core::shell_word::Shell::parse(args[0].as_bytes()).is_some()
+                matches!(args, [w] if bingsu_core::shell_word::Shell::parse(w.as_bytes()).is_some())
             }
             ["list"] => {
-                // Options of `presets`, after the word.
-                let mut all = vec![OsString::from("presets"), OsString::from("--preview")];
+                // The options follow `presets`; `--icons` follows `--preview`.
+                let mut all = vec![OsString::from("presets")];
                 if args.first().is_some_and(|w| w == "--icons") {
-                    all.extend(a);
+                    all.push(OsString::from("--preview"));
                 }
-                super::super::list::parse(&all).is_some()
+                all.extend(a);
+                list::parse(&all).is_some()
             }
-            ["setup"] => super::super::setup::parse(&a).is_ok(),
+            ["setup"] => setup::parse(&a).is_ok(),
             _ => panic!("no parser for {path:?}"),
         }
     };
@@ -206,23 +211,91 @@ fn every_option_the_help_names_is_accepted() {
         for o in c.opts {
             for args in samples(o.words) {
                 assert!(accepts(&path, &args), "{path:?} {args:?}");
+                // A flag is one only when an unknown flag in its place is
+                // refused.
+                if args[0].starts_with('-') {
+                    let mut other = args.clone();
+                    other[0] = String::from("--not-an-option");
+                    assert!(!accepts(&path, &other), "{path:?} takes {other:?} too");
+                }
                 checked += 1;
             }
         }
     }
-    // The subcommands themselves, bare.
+    // The subcommands themselves.
     for sub in ["check", "edit", "path", "schema"] {
         assert!(accepts(&["config", sub], &[]), "config {sub}");
     }
+    let use_words = os(&["use", "f.toml"]);
+    let used = config::parse(&use_words);
+    assert!(matches!(used, Some(config::Verb::Use(_))), "{used:?}");
     for s in find(&["list"]).unwrap().subs {
-        let a = [OsString::from(s.name)];
-        assert!(super::super::list::parse(&a).is_some(), "list {}", s.name);
+        assert!(list::parse(&os(&[s.name])).is_some(), "list {}", s.name);
     }
     assert!(checked > 20, "{checked}");
 }
 
-/// The body of the first `fn NAME` in `src`, from its `{` to the matching
-/// `}`, skipping braces inside string and char literals.
+/// What a byte of Rust source is to the scans below.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Code,
+    /// Inside a string literal (escapes as written).
+    Text,
+    /// A comment, a char literal, or a quote.
+    Other,
+}
+
+fn set(k: &mut [Kind], from: usize, to: usize, kind: Kind) {
+    let to = to.min(k.len());
+    for x in &mut k[from.min(to)..to] {
+        *x = kind;
+    }
+}
+
+/// The kind of each byte of `src`: line comments, char literals and string
+/// literals (with `\"` and other escapes) are told apart from code. Raw
+/// strings are not; the scanned functions hold none.
+fn kinds(src: &str) -> Vec<Kind> {
+    let b = src.as_bytes();
+    let mut k = vec![Kind::Code; b.len()];
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                let end = src[i..].find('\n').map_or(b.len(), |n| i + n);
+                set(&mut k, i, end, Kind::Other);
+                i = end;
+            }
+            b'"' => {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != b'"' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                set(&mut k, i, i + 1, Kind::Other);
+                set(&mut k, i + 1, j, Kind::Text);
+                set(&mut k, j, j + 1, Kind::Other);
+                i = j + 1;
+            }
+            b'\'' if b.get(i + 2) == Some(&b'\'') => {
+                set(&mut k, i, i + 3, Kind::Other);
+                i += 3;
+            }
+            b'\'' if b.get(i + 1) == Some(&b'\\') => {
+                let end = src
+                    .get(i + 3..)
+                    .and_then(|r| r.find('\''))
+                    .map_or(b.len(), |n| i + 3 + n + 1);
+                set(&mut k, i, end, Kind::Other);
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    k
+}
+
+/// The body of the first `fn NAME` in `src` (`Type::NAME`: the first after
+/// `impl Type`), from its `{` to the matching `}` in code.
 fn body<'a>(src: &'a str, name: &str) -> &'a str {
     let (from, f) = match name.split_once("::") {
         Some((ty, f)) => (
@@ -237,23 +310,13 @@ fn body<'a>(src: &'a str, name: &str) -> &'a str {
             .find(&format!("fn {f}("))
             .unwrap_or_else(|| panic!("no fn {name}"));
     let open = at + src[at..].find('{').unwrap();
-    let b = src.as_bytes();
-    let (mut depth, mut i) = (0usize, open);
-    while i < b.len() {
-        match b[i] {
-            b'"' => {
-                i += 1;
-                while b[i] != b'"' {
-                    i += if b[i] == b'\\' { 2 } else { 1 };
-                }
-            }
-            b'\'' if b.get(i + 2) == Some(&b'\'') => i += 2,
-            b'\'' if b.get(i + 1) == Some(&b'\\') => {
-                i += 2;
-                while b[i] != b'\'' {
-                    i += 1;
-                }
-            }
+    let k = kinds(src);
+    let mut depth = 0usize;
+    for (i, c) in src.bytes().enumerate().skip(open) {
+        if k[i] != Kind::Code {
+            continue;
+        }
+        match c {
             b'{' => depth += 1,
             b'}' => {
                 depth -= 1;
@@ -263,13 +326,15 @@ fn body<'a>(src: &'a str, name: &str) -> &'a str {
             }
             _ => {}
         }
-        i += 1;
     }
     panic!("fn {name} does not end");
 }
 
 /// The string literals of `code` (`"…"` and `b"…"`) that are one word:
-/// option words (`--x`, `-x`) always, plain words only when `words`.
+/// option words (`--x`, `-x`, and `--x=` as written) always, plain words
+/// only when `words`. No help names a `--x=VALUE` form yet, so a parser that
+/// matches `--x=` fails the scan until both the help and `documented` do.
+/// A flag held in a `const` and matched by its name is outside this scan.
 fn literals(code: &str, words: bool) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     // Attributes (`#[cfg(feature = "...")]`) and the paths of this table
@@ -283,26 +348,32 @@ fn literals(code: &str, words: bool) -> BTreeSet<String> {
         let end = at + code[at..].find("])").expect("a closed path");
         code.replace_range(at..end + 2, "");
     }
-    let mut rest = code.as_str();
-    while let Some(at) = rest.find('"') {
-        let after = &rest[at + 1..];
-        let Some(end) = after.find('"') else { break };
-        let lit = &after[..end];
-        let flag = lit.starts_with('-')
-            && lit.len() > 1
-            && lit
+    let k = kinds(&code);
+    let mut i = 0;
+    while i < code.len() {
+        if k[i] != Kind::Text {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < code.len() && k[i] == Kind::Text {
+            i += 1;
+        }
+        let lit = &code[start..i];
+        let name = lit.strip_suffix('=').unwrap_or(lit);
+        let flag = name.starts_with('-')
+            && name.len() > 1
+            && name
                 .trim_start_matches('-')
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-');
-        let word = !lit.is_empty()
-            && lit.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        let word = lit.chars().next().is_some_and(|c| c.is_ascii_lowercase())
             && lit
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
         if flag || (words && word) {
             out.insert(lit.to_owned());
         }
-        rest = &after[end + 1..];
     }
     out
 }
@@ -366,11 +437,12 @@ fn every_word_a_parser_takes_is_in_its_help() {
     };
     // (help path, source file, function, plain words too): a parser's
     // words, and a command's `run` for flags it might read itself.
-    let regions: [(&[&str], &str, &str, bool); 21] = [
+    let regions: [(&[&str], &str, &str, bool); 24] = [
         (&[], "mod", "run", true),
         (&["config"], "config", "parse", true),
         (&["config"], "config", "check_flags", true),
         (&["config"], "config", "run", false),
+        (&["config", "use"], "config_use", "parse", true),
         (&["config", "use"], "config_use", "run", false),
         (&["config", "edit"], "config_edit", "run", false),
         (&["doctor"], "doctor", "parse", true),
@@ -381,12 +453,14 @@ fn every_word_a_parser_takes_is_in_its_help() {
         (&["init"], "shell_word", "parse", true),
         (&["init"], "init", "run", false),
         (&["list"], "list", "parse", true),
+        (&["list"], "list", "run", false),
         (&["list"], "listing", "word", true),
         (&["list"], "icons", "parse", true),
         (&["reload"], "reload", "run", false),
         // `--version` has no help of its own: the top level names it.
         (&[], "version", "run", false),
         (&["setup"], "setup", "parse", true),
+        (&["setup"], "setup", "run", false),
         (&["setup"], "starter", "Icons::parse", true),
         (&["setup"], "starter", "Mode::parse", true),
     ];
@@ -469,4 +543,21 @@ fn an_option_keeps_two_spaces_before_what_it_does() {
     assert_eq!(row(&w18), format!("  {w18}  what\n"));
     let w19 = "w".repeat(19);
     assert_eq!(row(&w19), format!("  {w19}\n{:COLUMN$}what\n", ""));
+}
+
+// 이것을 실패시키는 것: 문자열 안의 `\"`에서 문자열을 끝내는 것, 문자 리터럴(`'"'`, `'\"'`)의 따옴표에서 문자열을
+// 시작하는 것, 주석 안의 문자열을 읽는 것, `--x=` 꼴의 플래그를 버리는 것. One rule per case: a second
+// misread quote in the same case would put the scan back in step.
+#[test]
+fn the_scan_reads_rust_literals() {
+    for (code, want) in [
+        (r#"f("a\"", "--x")"#, "--x"),
+        (r#"f('"', "--x")"#, "--x"),
+        (r#"f('\"', "--x")"#, "--x"),
+        ("// \"--y\"\nf(\"--x\")", "--x"),
+        (r#"f("--w=")"#, "--w="),
+    ] {
+        let got = literals(code, false);
+        assert_eq!(got, BTreeSet::from([want.to_owned()]), "{code}");
+    }
 }
