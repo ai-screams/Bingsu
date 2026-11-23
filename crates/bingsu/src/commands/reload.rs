@@ -48,7 +48,7 @@ pub fn report(applied: &Applied, what: &str) -> Result<String, (String, u8)> {
 
 pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     if !args.is_empty() {
-        eprintln!("usage: bingsu reload");
+        eprintln!("{}", super::usage::line(&["reload"]));
         return ctx::code(EXIT_USAGE);
     }
     let Some(started) = ctx::start() else {

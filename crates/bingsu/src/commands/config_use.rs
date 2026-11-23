@@ -109,7 +109,7 @@ fn save(
 
 pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     let [arg] = args else {
-        eprintln!("usage: bingsu config use PATH");
+        eprintln!("{}", super::usage::line(&["config", "use"]));
         return ctx::code(EXIT_USAGE);
     };
     let Some(started) = ctx::start() else {
