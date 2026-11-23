@@ -82,7 +82,33 @@ HIGH_DESCRIPTORS = (
 )
 
 
-def spawn(home, *args, background=False, high_fds=False, extra=None):
+QUERY_BYTES = b"\x1b]11;?\x1b\\"
+
+
+class Terminal(pexpect.spawn):
+    """pexpect's terminal that answers bingsu's background query itself: when
+    the query's bytes are read, `answer` is written back in that same read,
+    before pexpect matches anything or the test runs again. bingsu waits
+    200 ms for the answer (`tty::REPLY_TIMEOUT`); the test's own matching,
+    sending and scheduling between seeing the query and answering are no
+    part of it then. One answer, to the first query."""
+
+    answer = None
+
+    def read_nonblocking(self, size=1, timeout=-1):
+        data = super().read_nonblocking(size, timeout)
+        if self.answer is not None:
+            self.seen = (getattr(self, "seen", b"") + data)[-64:]
+            if QUERY_BYTES in self.seen:
+                os.write(self.child_fd, self.answer)
+                self.answer = None
+        return data
+
+
+def spawn(home, *args, background=False, high_fds=False, extra=None, answer=None):
+    """Setup on a terminal; `answer`: what the terminal says to the
+    background query, at once (`Terminal`). Without it the test answers, or
+    stays silent, on its own time."""
     env = {**setup_env(home), "SHELL": "/bin/zsh",
            "PATH": os.environ["PATH"], "TERM": "xterm", **(extra or {})}
     run = f'"{real_bin()}" setup --plain {" ".join(args)}'
@@ -91,7 +117,8 @@ def spawn(home, *args, background=False, high_fds=False, extra=None):
     # In the background `$!` names bingsu itself (not a shell around it), for a signal.
     run = f"{run} & echo BPID=$!; wait $!" if background else run
     script = f"echo BEFORE=$(stty -g); {run}; echo RC=$?; echo AFTER=$(stty -g)"
-    child = pexpect.spawn("/bin/sh", ["-c", script], env=env, timeout=10)
+    child = Terminal("/bin/sh", ["-c", script], env=env, timeout=10)
+    child.answer = answer
     # pexpect waits 50 ms before every send by default; the late answer must
     # arrive inside a 50 ms window.
     child.delaybeforesend = None
@@ -133,9 +160,7 @@ def test_finish_closes_the_child(home):
 # 이것을 실패시키는 것: 응답을 받은 뒤 `tcsetattr`로 되돌리지 않는 것(Drop의 복구 삭제), 응답을 화면에
 # 되풀이(echo)하는 것, 응답을 읽지 못하거나 밝기 판정이 뒤집히는 것(어두운 배경이 dark로 안 나옴).
 def test_reply_restores_the_terminal_and_is_not_echoed(home):
-    child = spawn(home, "--icons", "nerd")
-    child.expect(QUERY)
-    child.send(DARK)
+    child = spawn(home, "--icons", "nerd", answer=DARK)
     child.expect(rb"the terminal looks dark")
     child.send("\n")
     child.expect(rb"\[Y/n\] ")
@@ -219,8 +244,9 @@ def test_a_settings_folder_replaced_while_asking_stops_the_write(home):
 # 이것을 실패시키는 것: 묻는 동안 바뀐 설정(새 conf.d 파일)을 보지 않고 쓰는 것, 그때 쓰려던 키를 알리지 않는
 # 것, 종료 코드가 1이 아닌 것, 바뀌지 않았을 때 쓴 뒤 doctor 안내 줄을 내지 않는 것.
 def test_settings_changed_while_asking_write_nothing(home):
-    child = spawn(home, "--icons", "nerd")
-    child.expect(QUERY)
+    child = spawn(home, "--icons", "nerd", answer=DARK)
+    child.expect(rb"the terminal looks dark")
+    # The settings change while setup asks.
     conf = home / "cfg/bingsu/conf.d"
     conf.mkdir(parents=True, mode=0o700)
     (home / "cfg").chmod(0o700)
@@ -228,8 +254,6 @@ def test_settings_changed_while_asking_write_nothing(home):
     added = conf / "10-mine.toml"
     added.write_text('[style]\ngap = true\n')
     added.chmod(0o600)
-    child.send(DARK)
-    child.expect(rb"the terminal looks dark")
     child.send("\n")
     child.expect(rb"\[Y/n\] ")
     child.send("\n")
@@ -242,9 +266,7 @@ def test_settings_changed_while_asking_write_nothing(home):
     assert "bingsu doctor" not in text, text
 
     # Nothing changes this time: the file is written, and the hint follows.
-    child = spawn(home, "--icons", "nerd")
-    child.expect(QUERY)
-    child.send(DARK)
+    child = spawn(home, "--icons", "nerd", answer=DARK)
     child.expect(rb"the terminal looks dark")
     child.send("\n")
     child.expect(rb"\[Y/n\] ")
@@ -260,9 +282,7 @@ def test_settings_changed_while_asking_write_nothing(home):
 # lean)을 쓰지 않는 것.
 @pytest.mark.parametrize(("icons", "preset"), [("light", "triangle"), ("ascii", "lean")])
 def test_icons_given_on_a_terminal_skip_only_that_question(home, icons, preset):
-    child = spawn(home, "--icons", icons)
-    child.expect(QUERY)
-    child.send(DARK)
+    child = spawn(home, "--icons", icons, answer=DARK)
     child.expect(rb"the terminal looks dark")
     child.send("\n")
     child.expect(rb"\[Y/n\] ")
