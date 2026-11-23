@@ -21,7 +21,7 @@ import pexpect
 import pyte
 import pytest
 
-from conftest import real_bin
+from conftest import real_bin, track_background
 from pty_session import Session
 from screen_session import ScreenSession
 from shell_support import account_state_listing, setup_env, trusted_env
@@ -67,6 +67,8 @@ def spawn(home, *args, term="xterm-256color", rows=24, cols=80, extra=None, back
     child.delaybeforesend = None
     child.transcript = io.BytesIO()
     child.logfile_read = child.transcript
+    if background:
+        track_background(child.transcript.getvalue)
     return child
 
 
