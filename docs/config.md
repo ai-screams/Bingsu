@@ -626,8 +626,9 @@ nothing moves. A window under 24 rows or 60 columns shows no picture.
  esc                close this list
 ```
 
-Under 80 columns each row shows only its value and its place among the values, here at 60 columns. Under 60 columns
-the preview draws the built-in narrow layout and says so (`narrow layout under 60 columns`).
+Under 80 columns each row shows only its value and its place among the values, here at 60 columns. With the built-in
+width bands and narrow layout, under 60 columns the preview draws that narrow layout and says so
+(`narrow layout under 60 columns`).
 
 ```text
 >* s style     < triangle >  2/8
@@ -635,7 +636,8 @@ the preview draws the built-in narrow layout and says so (`narrow layout under 6
    j joint     < triangle >  1/6
 ```
 
-Enter shows what will be written and asks once more (Enter writes, Esc goes back, `q` quits). After `s` (to
+Enter shows what will be written and asks once more (Enter writes, Esc goes back, `q` quits; after a change, `q`
+twice). After `s` (to
 `triangle`) and Enter:
 
 ```text
@@ -655,7 +657,8 @@ bingsu: the new look shows once your shell loads bingsu
 Line ends look off? `bingsu doctor` checks the character widths.
 ```
 
-`q` leaves without writing (`bingsu: nothing written.` and the startup line, exit 0), and Ctrl-C cancels
+`q` leaves without writing (`bingsu: nothing written.` and the startup line, exit 0). After a change, the first `q`
+only says `press q again to quit without saving`, and a `q` right after it leaves. Ctrl-C cancels
 (`bingsu: cancelled, nothing written.`, exit 130). Ctrl-Z suspends the editor like any program; `fg` draws it again.
 
 #### The line questions
@@ -679,9 +682,9 @@ Answering "no" to the symbols question writes `icons = "unicode"` and `preset = 
 #### The background color
 
 To tell a dark terminal from a light one, `setup` asks the terminal for its background color (OSC 11) and waits 200 ms
-for the answer. Without an answer in time the mode question says `the terminal did not say` and offers `auto`. An
-answer that comes later is read and dropped, so it does not show up as typed text in your shell; an answer the terminal
-sent in time still counts when `bingsu` itself, on a busy machine, comes to read it late.
+for the answer. Without an answer in time the mode question says `the terminal did not say` and offers `auto`. What
+the terminal sends in the next 50 ms is read and dropped; an answer later than that can still show up as typed text.
+An answer the terminal sent in time still counts when `bingsu` itself, on a busy machine, comes to read it late.
 
 #### When a file is there
 
@@ -701,7 +704,8 @@ one chosen, and the line to put in the file:
 ```
 
 Enter again prints the list and quits (Esc goes back). The list goes to standard error, and standard output gets only
-the startup line, as on every path of `setup`:
+the startup line, as whenever `setup` writes a file, finds one there or quits with `q`; a cancel and a usage mistake
+print nothing there, and `--help` prints its help:
 
 ```text
 bingsu: config.toml is already there; bingsu does not change it.
@@ -728,9 +732,9 @@ colors.mode: "dark" now, "light" chosen
   /home/tester/.config/bingsu/config.local.toml sets this too, and wins.
 ```
 
-The preview follows your picks in a TOML file. For a JSON or YAML file, or a TOML file that cannot be edited in
-place, it keeps drawing the settings as they are and says so (`not updated for this format`), and the list names the
-key to set (`style.preset: "pill"` for JSON).
+The preview follows your picks in a TOML file. Otherwise it keeps drawing the settings as they are and says so:
+`not updated for this format` for a JSON or YAML file, and the list names the key to set (`style.preset: "pill"`
+for JSON); `not updated for this layout` for a TOML file that cannot be edited in place.
 
 The line questions and the arguments list how the file differs from the starter:
 
