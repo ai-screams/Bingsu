@@ -67,8 +67,9 @@ bingsu is designed to start from a single set of color tokens and generate all o
 
 ### Customization and config
 
-- A web **Studio** for live previews and a segment catalog, a terminal **wizard** for the basics,
-  and a local Studio that can preview on your real terminal (also over SSH port forwarding).
+- A web **Studio** for live previews and a segment catalog, a terminal **wizard** for the basics
+  (`bingsu setup`, which works today for a first settings file), and a local Studio that can preview on your real
+  terminal (also over SSH port forwarding).
 - **TOML** config with a JSON Schema for editor completion, JSON config files, and YAML files in `conf.d`, through
   `extends` and with `bingsu config use`, without anchors, aliases or tags (all work today).
 - Layered configs with `extends`, share links, and a `bingsu.lock` file for reproducible setups.
@@ -93,7 +94,7 @@ bingsu is designed to start from a single set of color tokens and generate all o
 | User-visible prompt | Built-in default theme or your config in bash, zsh and fish; folder, failure status, duration from 2 seconds and nonzero jobs, subject to available width; your text, command and environment variable segments, and node, python, rust and go versions where a layout draws them |
 | User commands and segments (M6) | Done on Linux and macOS: text, command and `env` segments are drawn, commands run in the background with a cleaned environment, time limits, caching and `match`, and the built-in language segments show versions. User-defined language segments run their version command where their project files are found. See [docs/config.md](docs/config.md), which also says how a team shares a config, and [docs/writing-command-segments.md](docs/writing-command-segments.md) for writing a command segment others will use. Not complete: on macOS the helper's check of the folders on `PATH` is slower than on Linux, because it asks the system about each account's group membership; this delays the first value of a command segment (the prompt does not wait for it); on macOS, prompt time has only a record-only run on one Mac: no case was slower than M4 beyond that run's noise, and the cost of command segments could not be called; the Linux CI prompt gate gives the verdict |
 | Theme selection and customization | Partly: eight style presets, templates, colors, layout, width bands and icons from the config; no theme catalog yet |
-| First-use commands and presets (M7) | In progress. Done: the eight built-in presets (`lean`, `triangle`, `pill`, `capsule`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file; `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation, the zsh hooks and the terminal; `bingsu config edit` opens your settings file and applies it when it is valid; JSON and YAML config files are read; `bingsu --version` shows the build and whether its sibling programs are from the same build; `bingsu help CODE` explains a diagnostic. Still to come in M7: the first release. Not complete: `bingsu explain --timings` (time per segment) is not built; the shell checks of `bingsu doctor` work in zsh only; a `config.yaml` in the settings folder is not read and nothing reports it. See [Setting up and customizing](#setting-up-and-customizing) |
+| First-use commands and presets (M7) | In progress. Done: the eight built-in presets (`lean`, `triangle`, `pill`, `capsule`, `slant`, `diamond`, `block`, `bracket`); `bingsu setup` makes a first settings file in a one-screen editor that previews the prompt as you choose (line questions where the editor cannot be drawn, and arguments for scripts); `bingsu list` prints the names a config accepts and previews every preset with your folder; `bingsu explain` says which segments are hidden or shortened at a width, also as JSON; `bingsu doctor` checks the installation, the zsh hooks and the terminal; `bingsu config edit` opens your settings file and applies it when it is valid; JSON and YAML config files are read; `bingsu --version` shows the build and whether its sibling programs are from the same build; `bingsu help CODE` explains a diagnostic. Still to come in M7: <!-- PLACEHOLDER(#412): drop this item when the editor for a settings file that is already there ships. -->the editor for a settings file that is already there, <!-- PLACEHOLDER(opening): drop this item when the opening picture of `bingsu setup` ships. -->the opening picture of `bingsu setup`, and the first release. Not complete: `bingsu explain --timings` (time per segment) is not built; the shell checks of `bingsu doctor` work in zsh only; a `config.yaml` in the settings folder is not read and nothing reports it. See [Setting up and customizing](#setting-up-and-customizing) |
 | Terminal and CLI generators, Studio | Not started |
 | Releases | None yet |
 
@@ -175,18 +176,63 @@ first file, and `bingsu reload`, which applies a change right away (otherwise th
 
 ### First settings
 
-`bingsu setup` asks two questions (can you see Nerd Font symbols? is the terminal dark or light?) and writes a starter
-`config.toml`, with comments and a `#:schema` line for editors. It never replaces a file that is there: it shows how
-your file differs from its suggestion instead. It does not edit your shell startup file; it prints the line to add.
+`bingsu setup` makes your first `config.toml`. On a terminal of at least 40 columns and 16 rows it opens a one-screen
+editor: each row is a choice (style preset, the shapes at the ends and between segments, icons, colors, one or two
+lines), and the preview above them draws your prompt with every change, with your folder and machine name and sample
+values for the rest. Enter shows the keys it will write and asks once more; `q` leaves without writing. This is the screen on a
+dark 80 × 24 terminal, without its colors (in color, each row's value is drawn on a colored block; `*` marks the rows
+the file will set, and `>` the row the arrow keys change):
+
+```console
+$ bingsu setup --icons unicode
+```
+
+```text
+ bingsu setup                 /home/tester/.config/bingsu/config.toml  new file
+
+
+
+
+
+
+
+ preview  80 columns, auto: dark (no COLORFGBG), sample values
+box ~/projects/api main !1 ?1                                            2.1s 1
+❯
+
+>* s style     lean  triangle  pill  capsule  slant  diamond  block  bracket
+   o outer    [none] triangle  round  slant  flat  no ends without a background
+   j joint     triangle  round  slant [flat] none  caps  one blank cell
+   n inner    [none] triangle  round  slant  flat  no ends without a background
+   g gap      [off] on  only with none or caps
+ * i icons     nerd  light  unicode  ascii
+   c colors    auto  dark  light
+   l lines     2 lines  1 line
+
+ writes 2 keys: style.preset, icons
+
+ s o j n g i c l change  arrows move  ? keys  u undo  enter save  q quit
+```
+
+<!-- PLACEHOLDER(opening): the empty rows at the top hold the opening picture once it ships; describe it here then. -->
+The file is made only when there is none, as 0600 in a 0700 folder, and its lines carry comments and a `#:schema`
+line for editors. When a settings file is there, `setup` writes nothing and lists how it differs from what it would
+have written. <!-- PLACEHOLDER(#412): the editor for a settings file that is already there; describe it here when it ships. -->
+`setup` never edits your shell startup file; it prints the line to add.
+
+Where the editor cannot be drawn (`--plain`, `TERM` unset or `dumb`, a smaller window) it asks two questions on lines
+instead. With all three arguments it asks nothing, on a terminal or not; without a terminal they are needed:
 
 ```console
 $ bingsu setup --yes --icons nerd --mode dark
 bingsu: wrote ~/.config/bingsu/config.toml
 Add this to your shell's startup file to start bingsu:
 eval "$(bingsu init zsh)"
+bingsu: the new look shows once your shell loads bingsu
 ```
 
-Without a terminal it asks nothing, so all three arguments are needed. [docs/config.md](docs/config.md) has the details.
+If bingsu is killed by a signal it does not handle (SIGKILL, SIGQUIT, SIGSEGV) while the editor is open, the terminal
+stays as the editor left it: typed keys do not show, and the editor's screen stays. Type `reset` and press Enter. [docs/config.md](docs/config.md#first-settings-bingsu-setup) has the details.
 
 ### 1. Pick a theme
 
