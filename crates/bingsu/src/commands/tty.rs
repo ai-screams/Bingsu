@@ -783,6 +783,9 @@ mod test_terminal {
         pub(super) static LAST_LOOK: Cell<Option<(Duration, bool)>> = const { Cell::new(None) };
         /// A SIGTERM between the reply wait and the clean-up of the next query.
         pub(super) static TERM_BEFORE_CLEANUP: Cell<bool> = const { Cell::new(false) };
+        /// A SIGTERM after the clean-up was chosen, before the last look at
+        /// the stop flag.
+        pub(super) static TERM_BEFORE_LAST_SETTLE: Cell<bool> = const { Cell::new(false) };
         /// Drains begun.
         pub(super) static DRAINS: Cell<usize> = const { Cell::new(0) };
         /// A SIGTERM as the next drain begins.
@@ -827,6 +830,13 @@ mod test_terminal {
 
     pub(super) fn before_cleanup() {
         if TERM_BEFORE_CLEANUP.take() {
+            // SAFETY: raises SIGTERM in this process; the guard's handler takes it.
+            unsafe { libc::raise(libc::SIGTERM) };
+        }
+    }
+
+    pub(super) fn before_last_settle() {
+        if TERM_BEFORE_LAST_SETTLE.take() {
             // SAFETY: raises SIGTERM in this process; the guard's handler takes it.
             unsafe { libc::raise(libc::SIGTERM) };
         }
@@ -931,6 +941,17 @@ fn write_once(fd: RawFd, b: &[u8]) -> std::io::Result<usize> {
     usize::try_from(n).map_err(|_| std::io::Error::last_os_error())
 }
 
+/// What `RawGuard::typed` found in the input waiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Typed {
+    /// A Ctrl-C.
+    Cancel,
+    /// No Ctrl-C, and nothing more waiting.
+    Clear,
+    /// No Ctrl-C in the first `TYPED_CAP` bytes; more may wait.
+    Full,
+}
+
 /// How a guard's earlier query ended, when it ended without a reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Spent {
@@ -972,9 +993,9 @@ impl RawGuard<'_> {
         result
     }
 
-    /// Whether the input waiting now holds a Ctrl-C (0x03). Reads at most
-    /// `TYPED_CAP` bytes without waiting; the query's flush drops the rest.
-    fn typed_cancel(&self) -> bool {
+    /// What the input waiting now holds: a Ctrl-C (0x03), none, or more
+    /// than the look reads. Reads at most `TYPED_CAP` bytes without waiting.
+    fn typed(&self) -> Typed {
         let mut f = &self.tty.file;
         let mut chunk = [0u8; 64];
         let mut read = 0;
@@ -982,14 +1003,14 @@ impl RawGuard<'_> {
             match f.read(&mut chunk) {
                 Ok(n) if n > 0 => {
                     if chunk[..n].contains(&0x03) {
-                        return true;
+                        return Typed::Cancel;
                     }
                     read += n;
                 }
-                _ => return false,
+                _ => return Typed::Clear,
             }
         }
-        false
+        Typed::Full
     }
 
     /// Writes `bytes` until `deadline`. On a timeout what is still queued is
@@ -1054,7 +1075,8 @@ impl Terminal for RawGuard<'_> {
         // A Ctrl-C typed since the last query is a cancel, not input to throw
         // away; and once a stop is recorded no request goes out, so no reply
         // can come after the terminal is restored.
-        let mut result = if STOP.load(Ordering::SeqCst) || self.typed_cancel() {
+        // (More typed than the look reads: the query's flush drops the rest.)
+        let mut result = if STOP.load(Ordering::SeqCst) || self.typed() == Typed::Cancel {
             Answer::Cancelled
         } else {
             // What came before this query (typed keys, a late reply to an
@@ -1086,24 +1108,39 @@ impl Terminal for RawGuard<'_> {
         };
         // A Ctrl-C already queued behind a complete reply (in the next read,
         // typed while the reply came) is a cancel: the guard may end with this
-        // query and drop it unread. Bounded by `TYPED_CAP`, without waiting;
-        // on time or late alike. (After silence or a cancel the drain below
-        // would see it as well.)
-        // 이것을 실패시키는 것: 답 뒤에 이미 와 있는 Ctrl-C를 보지 않는 것(a_ctrl_c_queued_behind_a_reply_cancels).
-        if self.typed_cancel() {
-            result = Answer::Cancelled;
+        // query and drop it unread. Looked for in at most `TYPED_CAP` bytes,
+        // without waiting, on time or late alike; when more waits, the timed
+        // drain reads on and sees one there. (After silence or a cancel the
+        // drain below would see it as well.)
+        // 이것을 실패시키는 것: 답 뒤에 이미 와 있는 Ctrl-C를 보지 않는 것, 한도를 넘는 입력 뒤의 Ctrl-C를 보지 않는 것
+        // (a_ctrl_c_queued_behind_a_reply_cancels).
+        let mut drained = false;
+        match self.typed() {
+            Typed::Cancel => result = Answer::Cancelled,
+            Typed::Full => {
+                result = self.drain(result);
+                drained = true;
+            }
+            Typed::Clear => {}
         }
-        // A stop asked for meanwhile wins before the clean-up is chosen, so a
-        // cancel drains as silence does; and again after the drain.
-        // 이것을 실패시키는 것: 정리 방법을 고른 뒤에야 멈춤을 반영하는 것(답이 있던 취소가 버리기 없이 끝남;
-        // a_stop_right_after_the_reply_still_drains), 버리기 뒤에 다시 보지 않는 것(a_stop_during_the_drain_cancels).
+        // Silence or a cancel drains, and the stop flag is looked at after
+        // that (a stop during the drain wins). A stop that turns a reply into
+        // a cancel there, whenever it came, gets the drain too.
+        // 이것을 실패시키는 것: 버리기 뒤에 멈춤을 다시 보지 않는 것(a_stop_during_the_drain_cancels), 멈춤으로 취소가 된
+        // 답에 버리기를 하지 않는 것(a_stop_right_after_the_reply_still_drains, a_stop_after_the_choice_still_drains),
+        // 이미 버렸는데 또 버리는 것(a_ctrl_c_queued_behind_a_reply_cancels의 drains 1).
         #[cfg(test)]
         test_terminal::before_cleanup();
-        result = settle(result, STOP.load(Ordering::SeqCst));
-        if !matches!(result, Answer::Reply(_)) {
+        if !drained && !matches!(result, Answer::Reply(_)) {
+            result = self.drain(result);
+            drained = true;
+        }
+        #[cfg(test)]
+        test_terminal::before_last_settle();
+        let mut result = settle(result, STOP.load(Ordering::SeqCst));
+        if !drained && !matches!(result, Answer::Reply(_)) {
             result = self.drain(result);
         }
-        let result = settle(result, STOP.load(Ordering::SeqCst));
         self.spent = match result {
             Answer::Reply(_) => None,
             Answer::Silent => Some(Spent::Silent),
@@ -2201,23 +2238,57 @@ mod tests {
             say(&ask_unanswered(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
         }
 
-        // A Ctrl-C queued right behind a complete reply, in the next read
-        // (25 bytes of reply, 39 spaces, then 0x03 as the 65th byte), read
-        // late or on time: the query is cancelled.
-        // 이것을 실패시키는 것: 답을 찾고 바로 돌아가 뒤의 Ctrl-C를 보지 않는 것(취소가 사라짐).
+        // A Ctrl-C queued right behind a complete reply, read late or on
+        // time: the query is cancelled. 25 bytes of reply, then 39 spaces (the
+        // Ctrl-C is the 65th byte, in the next read) or 295 (it comes after
+        // the 256 bytes the look reads; the drain finds it).
+        // 이것을 실패시키는 것: 답을 찾고 바로 돌아가 뒤의 Ctrl-C를 보지 않는 것(취소가 사라짐), 한도까지 읽고 Ctrl-C가
+        // 없으면 남은 입력을 보지 않는 것(295칸), 이미 버렸는데 또 버리는 것(drains 2).
         #[test]
         fn a_ctrl_c_queued_behind_a_reply_cancels() {
-            for child in ["ctrl_c_behind_late_child", "ctrl_c_behind_on_time_child"] {
-                let mut t = start(child, 80);
-                t.expect(OSC11);
-                let mut input = b"\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec();
-                assert_eq!(input.len(), 25);
-                input.extend_from_slice(&[b' '; 39]);
-                input.push(0x03);
-                t.send(&input);
-                let (lines, _) = t.finish();
-                assert_eq!(lines, ["cancelled", "restored true"], "{child}");
+            for spaces in [39, 295] {
+                for child in ["ctrl_c_behind_late_child", "ctrl_c_behind_on_time_child"] {
+                    let mut t = start(child, 80);
+                    t.expect(OSC11);
+                    let mut input = b"\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec();
+                    assert_eq!(input.len(), 25);
+                    input.extend_from_slice(&vec![b' '; spaces]);
+                    input.push(0x03);
+                    t.send(&input);
+                    let (lines, _) = t.finish();
+                    // One drain: a second one would only wait 50 ms more.
+                    assert_eq!(
+                        lines,
+                        ["cancelled", "drains 1", "restored true"],
+                        "{child} {spaces}"
+                    );
+                }
             }
+        }
+
+        // A SIGTERM after a complete reply was kept, before the last look at
+        // the stop flag: the result is a cancel, and it drains.
+        // 이것을 실패시키는 것: 마지막에 취소로 바뀐 답에 버리기를 하지 않는 것.
+        #[test]
+        fn a_stop_after_the_choice_still_drains() {
+            use std::os::unix::process::ExitStatusExt;
+            let mut t = start("term_before_last_settle_child", 80);
+            t.expect(OSC11);
+            t.send(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+            let (lines, status, out, err) = t.end();
+            assert_eq!(status.signal(), Some(libc::SIGTERM), "{out}\n{err}");
+            assert_eq!(lines, ["cancelled", "drains 1"]);
+            assert!(t.mode_restored());
+        }
+
+        #[test]
+        #[ignore = "child: asks on a pseudo-terminal"]
+        fn term_before_last_settle_child() {
+            let tty = take_terminal();
+            let mut g = tty.raw().unwrap();
+            test_terminal::TERM_BEFORE_LAST_SETTLE.set(true);
+            say(&ask(&mut g, OSC11, ReplyEnd::Osc(b"11;")));
+            say(&format!("drains {}", test_terminal::DRAINS.get()));
         }
 
         #[test]
@@ -2267,6 +2338,7 @@ mod tests {
                     Instant::now() + REPLY_TIMEOUT
                 };
                 say(&show(g.query(OSC11, ReplyEnd::Osc(b"11;"), deadline)));
+                say(&format!("drains {}", test_terminal::DRAINS.get()));
             }
             say(&format!("restored {}", mode() == before));
         }
