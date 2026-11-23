@@ -147,7 +147,7 @@ pub(super) const COMMANDS: &[Cmd] = &[
             },
             Opt {
                 words: "--width N",
-                what: "the width in columns (the terminal's by default)",
+                what: "the width in columns (else COLUMNS, the terminal's or 80)",
             },
             Opt {
                 words: "--config FILE",

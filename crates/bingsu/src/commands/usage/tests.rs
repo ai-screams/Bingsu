@@ -19,10 +19,11 @@ fn os(words: &[&str]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
 }
 
-// 이것을 실패시키는 것: 오늘의 사용법 줄을 한 바이트라도 바꾸는 것(오류 경로의 문구와 그것을 고정한 시험이 갈라짐).
+// 이것을 실패시키는 것: 오늘의 사용법 줄을 한 바이트라도 바꾸는 것(오류 경로의 문구와 그것을 고정한 시험이 갈라짐),
+// 표에 없는 경로에 최상위 줄이 아닌 다른 줄을 주는 것.
 #[test]
 fn usage_lines_are_the_ones_from_before() {
-    let want: [(&[&str], &str); 11] = [
+    let want: [(&[&str], &str); 10] = [
         (
             &[],
             "usage: bingsu <config|doctor|explain|help|init|list|prompt|reload|setup|--version> ...",
@@ -54,11 +55,16 @@ fn usage_lines_are_the_ones_from_before() {
             "usage: bingsu setup [--yes] [--plain] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]",
         ),
         (&["--version"], "usage: bingsu --version"),
-        (&["init"], "usage: bingsu init zsh|bash|fish"),
     ];
     for (path, line) in want {
         assert_eq!(super::line(path), line, "{path:?}");
     }
+    // A wrong use of `init` prints a message, not a usage line: this line is
+    // new, and only its help shows it.
+    assert_eq!(super::line(&["init"]), "usage: bingsu init zsh|bash|fish");
+    // A path the table does not know gets the top-level line.
+    assert_eq!(super::line(&["nope"]), super::line(&[]));
+    assert_eq!(super::line(&["config", "nope"]), super::line(&[]));
 }
 
 // 이것을 실패시키는 것: 도움말 줄이 80칸을 넘거나 ASCII 밖 글자를 쓰거나 빈칸으로 끝나는 것, 도움말에 그 명령의
