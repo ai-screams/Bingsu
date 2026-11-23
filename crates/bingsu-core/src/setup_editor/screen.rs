@@ -1,6 +1,7 @@
 //! The editor's screen as a grid of cells, from the model and the preview
-//! lines. Writing the grid to the terminal, and the
-//! shaved-ice bowl in rows 1-7, are not here.
+//! lines. Writing the grid to the terminal is not here; the shaved-ice
+//! bowl's frames come from `crate::opening`, and [`put_band`] copies one
+//! into rows 1-7 where [`bowl_shown`] says the main screen has them.
 //!
 //! Sizes: 80 columns or more list every value of a row; 60-79 show the
 //! picked one (`< triangle >  2/8`); below 24 rows or 60 columns the bowl's
@@ -44,6 +45,61 @@ pub const MAX_ROWS: u16 = 256;
 
 pub fn too_small(cols: u16, rows: u16) -> bool {
     cols < MIN_COLS || rows < MIN_ROWS
+}
+
+/// The first of the bowl's rows (under the title).
+pub const BOWL_TOP: u16 = 1;
+
+/// Whether the main screen's layout keeps the bowl's rows at this size
+/// (24 rows and 60 columns or more).
+/// 이것을 실패시키는 것: 그릇 자리 조건을 배치와 따로 두는 것(그릇이 다른 줄 위에 그려짐;
+/// the_band_goes_only_where_the_layout_keeps_the_bowl).
+const fn bowl_fits(cols: u16, rows: u16) -> bool {
+    rows >= 24 && cols >= 60
+}
+
+/// Whether a frame drawn now (`draw(m, v)`) has the bowl's rows: the main
+/// screen, at a size that keeps them. The keys and save screens use those
+/// rows for their own text.
+pub fn bowl_shown(m: &Model, cols: u16, rows: u16) -> bool {
+    let (cols, rows) = (cols.min(MAX_COLS), rows.min(MAX_ROWS));
+    m.screen() == Screen::Main && !too_small(cols, rows) && bowl_fits(cols, rows)
+}
+
+/// Copies the opening's `band` into the grid's rows `BOWL_TOP`.. (the
+/// caller draws it `cols - 1` wide: the last column stays empty). A cell
+/// with an ink takes its glyph in that color, mapped as the editor's own
+/// colors are (`ink`), or in the default color with `mono` (`NO_COLOR`);
+/// the background stays the screen's. An empty cell is left as the screen
+/// has it. Through `Grid::set`, like every other cell: a glyph that is a
+/// control is not put, and nothing goes past the grid or onto its last
+/// column.
+/// 이것을 실패시키는 것: 칸을 직접 써서 set을 건너뛰는 것(제어 글자가 칸에 들어감; a_band_cell_goes_through_the_one_writer),
+/// 색 깊이를 편집판 글과 다르게 옮기는 것(Ansi16에 256색; the_band_goes_only_where_the_layout_keeps_the_bowl).
+pub fn put_band(g: &mut Grid, band: &crate::opening::Band, depth: ColorDepth, mono: bool) {
+    let end = g.cols.saturating_sub(1);
+    for y in 0..crate::opening::ROWS {
+        let gy = BOWL_TOP + y;
+        if gy >= g.rows {
+            break;
+        }
+        for (x, c) in (0..end).zip(band.row(y)) {
+            let Some(color) = c.ink else { continue };
+            let fg = if mono {
+                Ink::Default
+            } else {
+                ink(Some(color), depth)
+            };
+            let paint = Paint {
+                fg,
+                ..g.cell(x, gy).paint
+            };
+            let mut glyph = [0u8; 4];
+            let text = char::from(c.ch).encode_utf8(&mut glyph);
+            let w = grapheme_width(text, WidthProfile::DEFAULT, |_| None).0;
+            g.set(u32::from(x), gy, text, w, paint, u32::from(end));
+        }
+    }
 }
 
 /// One cell: one grapheme cluster and its paint. A cell covered by the
@@ -105,7 +161,8 @@ impl Grid {
         let fits = x
             .checked_add(w)
             .is_some_and(|e| e <= end.min(u32::from(self.cols)));
-        // The one writer of cells: a control, bidi or invisible character
+        // The one writer of cells but for the blank fill of `preview`, which
+        // puts a constant space: a control, bidi or invisible character
         // never reaches a frame, whatever the caller forgot to clean.
         // A closure: the purity gate refuses a function item passed on.
         let removed = text
@@ -408,7 +465,7 @@ fn too_small_screen(g: &mut Grid, v: &View<'_>, u: &Ui) {
 }
 
 fn main_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
-    let bowl = v.rows >= 24 && v.cols >= 60;
+    let bowl = bowl_fits(v.cols, v.rows);
     let mut plan = vec![Line::Title];
     if bowl {
         plan.extend([Line::Bowl; BOWL_ROWS as usize]);
@@ -793,6 +850,26 @@ fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A band cell whose glyph is a control (U+0085 from byte 0x85) is not
+    // put; a plain one is. 이것을 실패시키는 것: put_band가 set을 건너뛰고 칸을 직접 쓰는 것.
+    #[test]
+    fn a_band_cell_goes_through_the_one_writer() {
+        use crate::opening::{Band, Cell as BandCell, ROWS};
+        let ink = Some(Srgb8 {
+            r: 200,
+            g: 200,
+            b: 200,
+        });
+        let mut cells = vec![BandCell::EMPTY; 4 * usize::from(ROWS)];
+        cells[0] = BandCell { ch: 0x85, ink };
+        cells[1] = BandCell { ch: b'x', ink };
+        let band = Band::from_cells(4, cells);
+        let mut g = Grid::new(5, 9, Paint::default());
+        put_band(&mut g, &band, ColorDepth::TrueColor, false);
+        assert_eq!(g.cell(0, BOWL_TOP).text, " ");
+        assert_eq!(g.cell(1, BOWL_TOP).text, "x");
+    }
 
     // 이것을 실패시키는 것: 칸이 없는 cluster(바탕 없는 결합 표지)를 제 칸에 두는 것(그 칸의 폭이 0이 되어 줄이
     // 한 칸 모자란다), 줄 끝을 넘는 2칸 글자를 두는 것(다음 줄 첫 칸에 쓰인다), 격자 밖 줄에 쓰는 것.

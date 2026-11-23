@@ -661,6 +661,12 @@ pub struct Band {
 }
 
 impl Band {
+    /// A band of these cells, `cols` a row (tests).
+    #[cfg(test)]
+    pub(crate) fn from_cells(cols: u16, cells: Vec<Cell>) -> Self {
+        Self { cols, cells }
+    }
+
     pub fn cols(&self) -> u16 {
         self.cols
     }

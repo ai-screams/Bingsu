@@ -615,3 +615,173 @@ def test_nothing_a_config_names_runs_in_a_shell_that_runs_bingsu(tmp_path):
     assert "bingsu: applied; the next prompt shows it" in text, text
     time.sleep(1.0)
     assert not marker.exists(), "the editor, its save or the publication ran the command"
+
+
+# The opening: the bowl builds in rows 1-7 of the main screen for 4.4 s while the editor already
+# takes keys, and stops on its end frame.
+
+def bowl(display):
+    """The bowl's rows (1-7) of a screen."""
+    return display[1:8]
+
+
+def quiet(child, seconds):
+    """Reads for `seconds`; whether nothing came (no frame, no timer)."""
+    before = len(child.transcript.getvalue())
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            child.read_nonblocking(65536, timeout=0.05)
+        except pexpect.TIMEOUT:
+            pass
+    return len(child.transcript.getvalue()) == before
+
+
+def end_frame(home, rows=24, cols=80):
+    """The bowl as `--no-motion` draws it: the end frame, from the start."""
+    sub = home / "still"
+    sub.mkdir(mode=0o700, exist_ok=True)
+    child = spawn(sub, "--no-motion", rows=rows, cols=cols)
+    opened(child, rows, cols)
+    shown = bowl(screen_of(child, rows, cols))
+    child.send("q")
+    finish(child)
+    return shown
+
+
+def drain(child, seconds):
+    """Reads for `seconds`, as a terminal keeps taking output."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            child.read_nonblocking(65536, timeout=0.05)
+        except pexpect.TIMEOUT:
+            pass
+
+
+def bowls_per_frame(log, rows=24, cols=80):
+    """The bowl's rows after each frame of `log` (up to each frame's end)."""
+    screen = pyte.Screen(cols, rows)
+    stream = pyte.ByteStream(screen)
+    out = []
+    for part in log.split(b"\x1b[?2026l")[:-1]:
+        stream.feed(part + b"\x1b[?2026l")
+        out.append(bowl(screen.display))
+    return out
+
+
+# 이것을 실패시키는 것: 여는 그림을 그리지 않는 것(1-7행이 움직이지 않음), 끝 프레임에서 멈추지 않는 것, 끝난 뒤에도
+# 프레임이나 타이머로 쓰는 것(조용하지 않음), 1초에 30장보다 많이 그리는 것. 읽기를 멈추지 않고(멈추면 놓친 프레임이
+# 쌓여 그림이 일찍 끝남) 다 읽은 뒤 프레임마다의 그림을 본다.
+def test_the_opening_plays_and_then_stays_still(home):
+    still = end_frame(home)
+    child = spawn(home)
+    opened(child)
+    first = len(child.transcript.getvalue())
+    # Past its 4.4 s.
+    drain(child, 5.2)
+    log = child.transcript.getvalue()
+    pictures = bowls_per_frame(log)
+    assert len({tuple(p) for p in pictures}) >= 3, len(pictures)
+    assert pictures[-1] == still, "\n".join(pictures[-1])
+    assert quiet(child, 1.5), "output after the end frame"
+    frames = log[first:].count(b"\x1b[?2026l")
+    # 4.4 s at 30 frames a second at most, with the end frame.
+    assert frames <= 4.4 * 30 + 2, frames
+    child.send("q")
+    finish(child)
+
+
+# 이것을 실패시키는 것: 키가 여는 그림을 끝 프레임으로 넘기지 않는 것, 그 키의 명령을 하지 않는 것(설계: 넘기고
+# 명령도 함), 넘긴 뒤에도 움직이는 것.
+def test_a_key_skips_the_opening_and_does_its_own_command(home):
+    still = end_frame(home, cols=70)
+    child = spawn(home, cols=70)
+    opened(child, cols=70)
+    child.send("s")
+    shown = until(child, has("< pill >"), cols=70)
+    assert bowl(shown) == still, "\n".join(bowl(shown))
+    assert quiet(child, 1.2), "the opening went on after the key"
+    child.send("\x03")
+    finish(child)
+
+
+# 이것을 실패시키는 것: --no-motion이나 비어 있지 않은 NO_COLOR에서 움직이는 것(끝 프레임 한 장이 아님), NO_COLOR에서
+# 그릇에 색을 쓰는 것.
+@pytest.mark.parametrize("how", ["--no-motion", "NO_COLOR"])
+def test_no_motion_and_no_color_draw_one_still_frame(home, how):
+    still = end_frame(home)
+    args, extra = ((how,), None) if how == "--no-motion" else ((), {"NO_COLOR": "1"})
+    child = spawn(home, *args, extra=extra)
+    opened(child)
+    assert bowl(screen_of(child)) == still
+    assert quiet(child, 1.2), "the still opening moved"
+    if how == "NO_COLOR":
+        screen = pyte.Screen(80, 24)
+        pyte.ByteStream(screen).feed(child.transcript.getvalue())
+        inked = [screen.buffer[y][x].fg for y in range(1, 8) for x in range(80)
+                 if screen.buffer[y][x].data.strip()]
+        assert inked and set(inked) == {"default"}, set(inked)
+    child.send("q")
+    finish(child)
+
+
+# 이것을 실패시키는 것: 그릇 줄이 없는 창(24줄 미만)에 그리는 것, 그때도 타이머로 깨어나 쓰는 것.
+def test_a_window_without_the_bowl_rows_has_no_opening(home):
+    child = spawn(home, rows=20)
+    opened(child, rows=20)
+    display = screen_of(child, rows=20)
+    assert display[2].startswith(" preview"), display[:4]
+    assert quiet(child, 1.2), "frames with no bowl on the screen"
+    child.send("q")
+    finish(child)
+
+
+# 이것을 실패시키는 것: 정지(SIGSTOP)와 재개 뒤에도 여는 그림을 이어 가는 것(설계: 끝 프레임으로 그림).
+def test_the_opening_ends_after_a_stop(home):
+    still = end_frame(home)
+    child = spawn(home, background=True)
+    opened(child)
+    pid = int(re.search(rb"BPID=(\d+)", child.transcript.getvalue()).group(1))
+    os.kill(pid, signal.SIGSTOP)
+    time.sleep(0.3)
+    resumed_at = len(child.transcript.getvalue())
+    os.kill(pid, signal.SIGCONT)
+    # The resume draws the whole screen again (`ESC [ 2 J`): that frame,
+    # up to its end, has the end frame of the opening.
+    def full_frame_after_resume():
+        log = child.transcript.getvalue()
+        start = log.find(b"\x1b[2J", resumed_at)
+        end = log.find(b"\x1b[?2026l", start) if start >= 0 else -1
+        return log[:end + len(b"\x1b[?2026l")] if end >= 0 else None
+    deadline = time.monotonic() + 10
+    while full_frame_after_resume() is None:
+        assert time.monotonic() < deadline, "no full frame after the resume"
+        drain(child, 0.05)
+    screen = pyte.Screen(80, 24)
+    pyte.ByteStream(screen).feed(full_frame_after_resume())
+    assert bowl(screen.display) == still, "\n".join(bowl(screen.display))
+    assert quiet(child, 1.2), "the opening went on after the resume"
+    child.send("q")
+    finish(child)
+
+
+# 이것을 실패시키는 것: 색 줄로 모드가 바뀌어도 그릇을 그 모드의 잉크로 다시 칠하지 않는 것.
+def test_the_bowl_takes_the_colors_of_the_mode(home):
+    def inks(child):
+        screen = pyte.Screen(80, 24)
+        pyte.ByteStream(screen).feed(child.transcript.getvalue())
+        return [screen.buffer[y][x].fg for y in range(1, 8) for x in range(80)
+                if screen.buffer[y][x].data.strip()]
+    child = spawn(home, "--no-motion", extra={"COLORTERM": "truecolor"})
+    opened(child)
+    dark = inks(child)
+    # The colors row: auto (dark here), dark, light.
+    child.send("c")
+    until(child, has("preview  80 columns, dark"))
+    child.send("c")
+    until(child, has("preview  80 columns, light"))
+    light = inks(child)
+    assert dark and light and dark != light
+    child.send("\x03")
+    finish(child)

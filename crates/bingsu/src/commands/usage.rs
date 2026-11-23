@@ -219,7 +219,7 @@ pub(super) const COMMANDS: &[Cmd] = &[
     ),
     cmd(
         "setup",
-        "[--yes] [--plain] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]",
+        "[--yes] [--plain] [--no-motion] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]",
         "make a first settings file, asking on the terminal",
         &[
             Opt {
@@ -229,6 +229,10 @@ pub(super) const COMMANDS: &[Cmd] = &[
             Opt {
                 words: "--plain",
                 what: "ask line by line instead of the one-screen editor",
+            },
+            Opt {
+                words: "--no-motion",
+                what: "draw the opening still (no animation)",
             },
             Opt {
                 words: "--icons nerd|light|unicode|ascii",

@@ -23,12 +23,13 @@ use bingsu_core::config::starter::{Choices, Icons as StarterIcons, Mode as Start
 use bingsu_core::config::tree::Format;
 use bingsu_core::diag::{Severity, render_human};
 use bingsu_core::envelope::{colorfgbg_mode, display_mode};
+use bingsu_core::opening::{Bowl, Inks, Opening};
 use bingsu_core::preview::{PreviewLine, Request, Sample, lines};
 use bingsu_core::setup_editor::layers::{Layers, builtin_narrow, composed_text};
 use bingsu_core::setup_editor::model::{Effect, Given, Input, Model, Target};
 use bingsu_core::setup_editor::rows::{MODES, Row};
 use bingsu_core::setup_editor::screen::{
-    Grid, MAX_COLS, View, draw, existing_report, frame, too_small,
+    Grid, MAX_COLS, View, bowl_shown, draw, existing_report, frame, put_band, too_small,
 };
 use bingsu_core::setup_editor::write::{candidate_toml, changes, new_file_text};
 use std::ffi::OsStr;
@@ -78,6 +79,8 @@ pub(crate) struct Start<'a> {
     pub depth: ColorDepth,
     /// `NO_COLOR`.
     pub mono: bool,
+    /// `--no-motion`: the opening's end frame from the start.
+    pub still: bool,
     /// The folder is not one only the user can change: nothing is saved.
     pub read_only: bool,
     pub given: Given,
@@ -205,22 +208,112 @@ fn file_key(s: &Start<'_>, m: &Model) -> String {
 const NOT_UPDATED: &str = "not updated for this format";
 const NOT_EDITED: &str = "not updated for this layout";
 
-/// The opening in rows 1-7 of a full-size main screen. A seam until the
-/// opening is connected: it draws nothing and asks for no frame, so the
-/// loop around it already keeps the opening's call pattern.
-struct Band;
+/// The shaved-ice opening in rows 1-7 of the main screen (`bowl_shown`),
+/// as `bingsu_core::opening` describes: the bowl is made the first time it
+/// is shown, a frame goes in whenever the screen is drawn, and the next one
+/// is due one `FRAME` after the last one drawn or missed. With no bowl rows
+/// on the screen, or once the end frame was drawn, no frame is due.
+struct Band {
+    /// When the editor began: the opening's clock counts from here.
+    origin: Instant,
+    opening: Opening,
+    bowl: Option<Bowl>,
+    /// The inks, and the mode they were made for (`None`: none yet).
+    inks: Inks,
+    inks_mode: Option<Mode>,
+    /// When a frame was last drawn or missed, into the opening.
+    last: Option<Duration>,
+    /// The last screen drawn had the bowl's rows.
+    shown: bool,
+}
 
 impl Band {
-    /// When the next frame of the band is due; `None`: no timer.
-    fn next(&self) -> Option<Instant> {
-        None
+    /// `still`: `--no-motion` or a set `NO_COLOR` (the end frame at once).
+    fn new(origin: Instant, still: bool) -> Self {
+        Self {
+            origin,
+            opening: if still {
+                Opening::still()
+            } else {
+                Opening::new(Duration::ZERO)
+            },
+            bowl: None,
+            inks: Inks::of(Mode::Dark),
+            inks_mode: None,
+            last: None,
+            shown: false,
+        }
     }
-    /// A frame is built at `now`: the band's cells go into `grid`.
-    fn draw(&mut self, _grid: &mut Grid, _now: Instant) {}
-    /// A frame came due while the writer still held the last one.
-    fn missed(&mut self) {}
-    /// A key: the end frame from now on.
-    fn skip(&mut self) {}
+
+    fn since(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.origin)
+    }
+
+    /// When the next frame of the band is due; `None`: no timer (the bowl
+    /// is not on the screen, the end frame was drawn, or no frame was
+    /// drawn yet: the first comes with the first screen).
+    /// 이것을 실패시키는 것: 그릇이 화면에 없을 때도 기한을 두는 것(작은 창에서 30번씩 깨어남;
+    /// a_band_off_the_screen_asks_for_no_frame).
+    fn next(&self) -> Option<Instant> {
+        if !self.shown {
+            return None;
+        }
+        let at = self.opening.next(self.last?)?;
+        self.origin.checked_add(at)
+    }
+
+    /// A frame is built at `now`: the time into the opening it shows, and
+    /// the frame counted as drawn; `None` when it has no bowl rows
+    /// (`shown` false).
+    fn take(&mut self, shown: bool, now: Instant) -> Option<Duration> {
+        self.shown = shown;
+        if !shown {
+            return None;
+        }
+        let t = self.since(now);
+        let at = self.opening.at(t);
+        self.opening.drawn(t);
+        self.last = Some(t);
+        Some(at)
+    }
+
+    /// A frame is built at `now`: when `shown` (the frame has the bowl's
+    /// rows), the band of `now` goes into `grid` in `mode`'s inks.
+    fn draw(
+        &mut self,
+        grid: &mut Grid,
+        shown: bool,
+        mode: Mode,
+        how: (ColorDepth, bool),
+        now: Instant,
+    ) {
+        let Some(at) = self.take(shown, now) else {
+            return;
+        };
+        let bowl = self.bowl.get_or_insert_with(Bowl::new);
+        // New inks when the mode changed: the colors row repaints the bowl,
+        // it does not move it.
+        // 이것을 실패시키는 것: 모드가 바뀌어도 그릇의 잉크를 다시 만들지 않는 것(the_bowl_takes_the_colors_of_the_mode).
+        if self.inks_mode != Some(mode) {
+            self.inks = Inks::of(mode);
+            self.inks_mode = Some(mode);
+        }
+        let band = bowl.draw(at, grid.cols().saturating_sub(1), &self.inks);
+        put_band(grid, &band, how.0, how.1);
+    }
+
+    /// A frame came due at `now` while the writer still held the last one.
+    /// 이것을 실패시키는 것: 놓친 시각을 기록하지 않는 것(지난 기한이 남아 기다림이 곧바로 끝나기를 되풀이함;
+    /// a_missed_frame_moves_the_next_one_on).
+    fn missed(&mut self, now: Instant) {
+        self.opening.missed();
+        self.last = Some(self.since(now));
+    }
+
+    /// A key, or a resume after a stop: the end frame from now on.
+    fn skip(&mut self) {
+        self.opening.skip();
+    }
 }
 
 /// Asks the terminal for its background once, right after the session
@@ -340,7 +433,7 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
     // and the preview is laid out at most `MAX_COLS` wide.
     let (mut cols, mut rows) = (size.cols, size.rows);
     let mut shown: Option<Grid> = None;
-    let mut band = Band;
+    let mut band = Band::new(origin, s.still || s.mono);
     let Some(mut preview) = Preview::new(s, &m, cols) else {
         return Ended::Lost(String::from("the default colors could not be made"));
     };
@@ -374,7 +467,13 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
                     stale: preview.stale,
                 },
             );
-            band.draw(&mut grid, Instant::now());
+            band.draw(
+                &mut grid,
+                bowl_shown(&m, cols, rows),
+                preview.mode,
+                (s.depth, s.mono),
+                Instant::now(),
+            );
             let mut bytes = Vec::new();
             frame(shown.as_ref(), &grid, &mut bytes);
             if writer.begin(&bytes, Instant::now()).is_err() {
@@ -412,6 +511,10 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
                 keys.reset();
                 writer.discard();
                 shown = None;
+                // A stop in the middle of the opening comes back to its
+                // end frame.
+                // 이것을 실패시키는 것: 재개 뒤에도 여는 그림을 이어 가는 것(the_opening_ends_after_a_stop).
+                band.skip();
                 continue;
             }
             // A signal: dropping the session puts the terminal back and
@@ -426,7 +529,7 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
                     if writer.idle() {
                         writer.request();
                     } else {
-                        band.missed();
+                        band.missed(now);
                     }
                 }
                 read += 1;
@@ -510,6 +613,64 @@ pub(crate) fn preview_mode(word: &str, colorfgbg: Option<&OsStr>) -> (Mode, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bingsu_core::opening::{FRAME, LENGTH};
+
+    // 이것을 실패시키는 것: 그릇이 화면에 없을 때도 기한을 두는 것(작은 창이나 다른 화면에서 1초에 30번 깨어남), 첫
+    // 화면 전에 기한을 두는 것.
+    #[test]
+    fn a_band_off_the_screen_asks_for_no_frame() {
+        let origin = Instant::now();
+        let mut b = Band::new(origin, false);
+        assert_eq!(b.next(), None, "before the first screen");
+        assert_eq!(b.take(false, origin), None);
+        assert_eq!(b.next(), None, "no bowl rows");
+        let at = origin + Duration::from_millis(100);
+        assert_eq!(b.take(true, at), Some(Duration::from_millis(100)));
+        assert_eq!(b.next(), Some(at + FRAME));
+        assert_eq!(b.take(false, at + FRAME), None);
+        assert_eq!(b.next(), None, "the rows went");
+    }
+
+    // 이것을 실패시키는 것: 놓친 시각을 기록하지 않는 것(지난 기한이 남아 기다림이 곧바로 끝나기를 되풀이함), 열 번
+    // 놓쳐도 끝 프레임으로 가지 않는 것.
+    #[test]
+    fn a_missed_frame_moves_the_next_one_on() {
+        let origin = Instant::now();
+        let mut b = Band::new(origin, false);
+        b.take(true, origin);
+        let mut now = origin;
+        for _ in 0..9 {
+            now += FRAME;
+            b.missed(now);
+            assert_eq!(b.next(), Some(now + FRAME));
+        }
+        now += FRAME;
+        b.missed(now);
+        // The tenth: the end frame comes next, and after it no timer.
+        assert_eq!(b.take(true, now + FRAME), Some(LENGTH));
+        assert_eq!(b.next(), None);
+    }
+
+    // 이것을 실패시키는 것: --no-motion이나 NO_COLOR에서 움직이는 것, 키나 재개 뒤에도 이어 가는 것, 끝 프레임 뒤에도
+    // 기한을 두는 것(끝난 뒤 30 fps로 깨어남).
+    #[test]
+    fn a_still_or_skipped_opening_draws_its_end_frame_once() {
+        let origin = Instant::now();
+        let mut still = Band::new(origin, true);
+        assert_eq!(still.take(true, origin), Some(LENGTH));
+        assert_eq!(still.next(), None);
+        let mut b = Band::new(origin, false);
+        let at = origin + Duration::from_millis(500);
+        assert_eq!(b.take(true, at), Some(Duration::from_millis(500)));
+        assert!(b.next().is_some());
+        b.skip();
+        assert_eq!(b.take(true, at + FRAME), Some(LENGTH));
+        assert_eq!(b.next(), None);
+        // Its own end: a frame at `LENGTH` or later is the last.
+        let mut run = Band::new(origin, false);
+        assert_eq!(run.take(true, origin + LENGTH), Some(LENGTH));
+        assert_eq!(run.next(), None);
+    }
 
     // 이것을 실패시키는 것: 링크로 들어온 같은 폴더의 $PWD 대신 물리 경로를 보이는 것, 다른 폴더를 가리키는 $PWD나
     // 상대 경로, 없는 경로의 $PWD를 믿는 것.

@@ -52,6 +52,8 @@ pub(super) struct Args {
     yes: bool,
     /// The line questions even where the editor could be drawn.
     plain: bool,
+    /// The editor's opening drawn still (its end frame).
+    no_motion: bool,
     icons: Option<Icons>,
     mode: Option<Mode>,
 }
@@ -63,6 +65,7 @@ pub(super) fn parse(args: &[OsString]) -> Result<Args, String> {
         match word {
             Some("--yes") => out.yes = true,
             Some("--plain") => out.plain = true,
+            Some("--no-motion") => out.no_motion = true,
             Some("--icons") => {
                 let v = it.next().flatten().and_then(Icons::parse);
                 out.icons = Some(v.ok_or("--icons takes nerd, light, unicode or ascii")?);
@@ -878,6 +881,7 @@ fn edit_with(
             ColorDepth::Ansi256
         },
         mono: no_color,
+        still: args.no_motion,
         read_only: !mine,
         given: Given {
             icons: args.icons,
@@ -1090,11 +1094,14 @@ mod tests {
             Args {
                 yes: true,
                 plain: false,
+                no_motion: false,
                 icons: Some(Icons::Nerd),
                 mode: Some(Mode::Light)
             }
         );
         assert!(parse(&args(&["--plain"])).unwrap().plain);
+        assert!(parse(&args(&["--no-motion"])).unwrap().no_motion);
+        assert!(!parse(&args(&["--plain"])).unwrap().no_motion);
         for bad in [
             &["--icons", "emoji"][..],
             &["--icons", "Light"],
@@ -1139,6 +1146,7 @@ mod tests {
         );
         let usage = crate::commands::usage::line(&["setup"]);
         assert!(usage.contains(" [--plain] "), "{usage}");
+        assert!(usage.contains(" [--no-motion] "), "{usage}");
     }
 
     // 이것을 실패시키는 것: 터미널 없이 기본값을 조용히 고르는 것, 빠진 인자를 이름으로 알리지 않는 것,

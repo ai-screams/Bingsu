@@ -50,7 +50,7 @@ fn usage_lines_are_the_ones_from_before() {
         (&["reload"], "usage: bingsu reload"),
         (
             &["setup"],
-            "usage: bingsu setup [--yes] [--plain] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]",
+            "usage: bingsu setup [--yes] [--plain] [--no-motion] [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]",
         ),
         (&["--version"], "usage: bingsu --version"),
     ];
@@ -526,7 +526,10 @@ fn a_usage_line_breaks_only_past_80_columns_between_groups() {
     assert_eq!(out, format!("usage: bingsu n {long}\n{indent} [x y]\n"));
     let setup = text(&["setup"]);
     assert!(
-        setup.contains(&format!("\n{} [--mode auto|dark|light]\n", " ".repeat(19))),
+        setup.contains(&format!(
+            "\n{} [--icons nerd|light|unicode|ascii] [--mode auto|dark|light]\n",
+            " ".repeat(19)
+        )),
         "{setup}"
     );
 }
