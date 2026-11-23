@@ -660,6 +660,8 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 Ended::Lost(why) => {
                     return refuse(&format!("{why}; nothing was written"));
                 }
+                // Only an existing file is compared.
+                Ended::NotLoaded(_) => return ctx::code(EXIT_FAILED),
                 // A new file's save screen writes.
                 Ended::Report { .. } => return ctx::code(EXIT_FAILED),
             }
@@ -939,6 +941,16 @@ fn edit_existing(
             }
             Ended::Cancelled => cancelled(),
             Ended::Lost(why) => refuse(&format!("{why}; nothing was written")),
+            Ended::NotLoaded(why) => {
+                eprintln!(
+                    "bingsu: {} is already there, so nothing was written.",
+                    ctx::show(Path::new(std::ffi::OsStr::from_bytes(&display)))
+                );
+                eprintln!("The settings do not load now, so there is nothing to compare it with:");
+                eprintln!("{why}");
+                eprintln!("`bingsu config check` lists every problem.");
+                finish(runs_here)
+            }
             // An existing file's save screen writes nothing.
             Ended::Write { .. } => ctx::code(EXIT_FAILED),
         },

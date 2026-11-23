@@ -18,8 +18,10 @@ use bingsu_core::color::osc11::{REPLY_MAX, find_reply, is_light, parse_osc11};
 use bingsu_core::color::palette::{Knobs, Mode, PaletteInput, ResolvedPalette, resolve_palette};
 use bingsu_core::color::sgr::ColorDepth;
 use bingsu_core::config::report;
+use bingsu_core::config::source::Catalog;
 use bingsu_core::config::starter::{Choices, Icons as StarterIcons, Mode as StarterMode};
 use bingsu_core::config::tree::Format;
+use bingsu_core::diag::{Severity, render_human};
 use bingsu_core::envelope::{colorfgbg_mode, display_mode};
 use bingsu_core::preview::{PreviewLine, Request, Sample, lines};
 use bingsu_core::setup_editor::layers::{Layers, builtin_narrow, composed_text};
@@ -56,6 +58,11 @@ pub(crate) enum Ended {
     /// The terminal went away, took no output, or could not be taken:
     /// nothing written, and why.
     Lost(String),
+    /// An existing file the settings do not apply as they are (another
+    /// file, or the file itself, fails to load): no editor, since there is
+    /// nothing to compare against; the reader's first problem, rendered and
+    /// cleaned.
+    NotLoaded(String),
 }
 
 /// What the editor draws with, decided before it starts.
@@ -267,6 +274,20 @@ fn ask_background(session: &mut Session<'_>) -> Result<Option<Mode>, Ended> {
     Ok(answer.flatten())
 }
 
+/// The first error of a load (else its first diagnostic), as `config
+/// check` shows it; its texts are cleaned (`diag::render_human`).
+fn first_problem(r: &report::ConfigReport) -> String {
+    let d = r
+        .diagnostics
+        .iter()
+        .find(|d| d.severity() == Severity::Error)
+        .or(r.diagnostics.first());
+    d.map_or_else(
+        || String::from("the settings did not load"),
+        |d| render_human(d, &Catalog(&r.files)),
+    )
+}
+
 fn gone() -> Ended {
     Ended::Lost(String::from("the terminal went away"))
 }
@@ -275,7 +296,16 @@ fn gone() -> Ended {
 pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
     let start = s.sources.load(s.sources.original());
     let r = report::from_loaded(start, Mode::Dark);
-    let layers = match s.sources.target(&r.files) {
+    let target = s.sources.target(&r.files);
+    // An existing file's values are known only from a load that applies
+    // it: a failed one keeps no order, and the file would seem to set
+    // nothing.
+    // 이것을 실패시키는 것: 불러오지 못한 설정에서 편집판을 여는 것(이미 있는 값을 "not set now"로 보임;
+    // test_settings_that_do_not_load_show_nothing_to_compare).
+    if matches!(s.target, Target::Existing(_)) && !target.is_some_and(|t| r.order.contains(&t)) {
+        return Ended::NotLoaded(first_problem(&r));
+    }
+    let layers = match target {
         Some(t) => Layers::from_sources(&r.files, &r.order, t),
         None => Layers::default(),
     };

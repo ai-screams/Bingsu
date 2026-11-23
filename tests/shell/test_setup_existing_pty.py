@@ -254,6 +254,32 @@ def test_quit_and_ctrl_c_keep_the_file(home, key, want, stdout):
     assert kept(path) == before
 
 
+# 이것을 실패시키는 것: 설정이 지금 불러지지 않을 때(다른 파일이나 그 파일 자신의 문법 오류) 편집판을 여는 것(불러오지 못한
+# 읽기에는 적용 순서가 없어 이미 있는 값을 "not set now"로, 고른 값을 바꿀 줄로 보인다), 그 이유와 위치를 알리지 않는 것,
+# 시작 줄을 내지 않는 것, 그 파일을 바꾸는 것.
+@pytest.mark.parametrize(("own", "other"), [
+    ('[style]\npreset = "pill"\ngap = true\n', "x = [\n"),
+    ('[style]\npreset = "pill"\ngap = [\n', None),
+])
+def test_settings_that_do_not_load_show_nothing_to_compare(home, own, other):
+    path = put(home / "cfg/bingsu/config.toml", own)
+    if other:
+        put(home / "cfg/bingsu/conf.d/10-bad.toml", other)
+    before = kept(path)
+    out = home / "out"
+    child = spawn(home, out=out)
+    code, _, _, transcript = finish(child)
+    assert code == 0, transcript
+    assert b"\x1b[?1049h" not in child.transcript.getvalue()
+    assert "config.toml is already there, so nothing was written." in transcript, transcript
+    assert "The settings do not load now, so there is nothing to compare it with:" in transcript, transcript
+    bad = "10-bad.toml:1:" if other else "config.toml:3:"
+    assert "E101: this is not valid TOML" in transcript and bad in transcript, transcript
+    assert "not set now" not in transcript and CHANGED not in transcript, transcript
+    assert out.read_text() == STARTUP
+    assert kept(path) == before
+
+
 # 이것을 실패시키는 것: 두 이름(config.toml과 config.json)이 다 있을 때 편집판을 여는 것, 하나를 골라 비교하는 것, 종료
 # 코드가 1이 아닌 것.
 def test_two_settings_files_in_one_place_open_nothing(home):
