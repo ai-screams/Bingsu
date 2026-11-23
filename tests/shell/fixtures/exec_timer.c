@@ -1,6 +1,7 @@
 /* K87 test-only launcher. exec preserves ITIMER_REAL; fork would not.
  * Blocking across exec controls the reproduction, not a product guarantee. */
 #include <signal.h>
+#include <stdio.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -13,5 +14,7 @@ int main(int argc, char **argv) {
     struct itimerval timer = {{0, 0}, {0, 20000}};
     if (setitimer(ITIMER_REAL, &timer, 0)) return 92;
     execv(argv[1], argv + 1);
+    /* Why the exec failed, for the test's assertion message (it shows stderr). */
+    perror("exec_timer: execv");
     return 93;
 }
