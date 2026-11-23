@@ -422,28 +422,33 @@ def raw_terminal(home, after=""):
 
 
 def late_answer_after_a_cancel_is_discarded(home):
-    """One run. `True`: the answer came after the cancel but before the terminal was restored, and was
-    discarded: nothing was echoed and the next `read` got nothing. A run where the answer came after the
-    restore (the test slept longer than the 50 ms read) shows its bytes echoed or in `LEFT`: no evidence."""
+    """One run: `(True, ...)` when the answer came after the cancel but before the terminal was restored,
+    and was discarded: nothing was echoed and the next `read` got nothing. A run where the answer came after
+    the restore (the test slept longer than the 50 ms read) shows its bytes echoed or in `LEFT`: no
+    evidence. The second part says how the run went and when the answer was written."""
     t = raw_terminal(home, after="read -r LEFT; echo LEFT=[$LEFT]; ")
-    t.read_until(b"\x1b]11;?\x1b\\")
+    seen = t.read_until(b"\x1b]11;?\x1b\\")
     os.write(t.fd, b"\x03")
     time.sleep(0.01)
+    late = time.perf_counter() - seen
     os.write(t.fd, b"\x1b]11;rgb:0000/0000/0000\x1b\\")
+    when = f"answer {late * 1000:.0f} ms after the query"
     if t.read_any([b"RC="], timeout=3.0) is None:
         t.kill()
-        return False
+        return False, f"none ({when})"
     time.sleep(0.1)
     os.write(t.fd, b"\n")
     code, before, after, text = t.finish()
-    return (code == 130 and "LEFT=[]" in text and "rgb:0000" not in text
-            and before == after and config(home) is None)
+    if (code == 130 and "LEFT=[]" in text and "rgb:0000" not in text
+            and before == after and config(home) is None):
+        return True, f"discarded ({when})"
+    return False, f"leaked ({when})"
 
 
 # 이것을 실패시키는 것: 취소(Ctrl-C) 직후에는 버리기 없이 끝내는 것(취소 뒤 10 ms에 오는 늦은 응답이 복구 뒤에
 # 도착해 echo되거나 셸 입력 줄에 남음: 뒤따른 `read`가 그 글자를 받음).
 def test_a_late_answer_after_a_cancel_is_discarded_too(home):
-    assert any(late_answer_after_a_cancel_is_discarded(attempt_home(home, n)) for n in range(TRIES))
+    tries(late_answer_after_a_cancel_is_discarded, home)
 
 
 # 이것을 실패시키는 것: 터미널 설명자가 FD_SETSIZE(1024) 이상일 때 거르지 않는 것(`FD_SET`이 abort해 터미널이
@@ -467,6 +472,22 @@ def test_a_terminal_on_a_high_descriptor_is_not_used(home):
 # run lands in the window and behaves, and fails when none of TRIES does (a bingsu that does not discard
 # never has a run that behaves).
 TRIES = 12
+# Seconds between a try that did not land and the next: a few seconds of load on the runner, which put a
+# run outside the window, then cannot sink every try (twelve tries back to back take about 3 s).
+SPACING = 0.75
+
+
+def tries(one, home):
+    """Runs `one` (a run in a fresh home, giving `(landed and behaved, how it went)`) until a run lands and
+    behaves, at most TRIES times, SPACING apart; fails with how each run went."""
+    went = []
+    for n in range(TRIES):
+        ok, how = one(attempt_home(home, n))
+        if ok:
+            return
+        went.append(how)
+        time.sleep(SPACING)
+    pytest.fail(f"no run landed in the window and behaved: {went}")
 
 
 def attempt_home(home, n):
@@ -476,64 +497,74 @@ def attempt_home(home, n):
 
 
 def wait_late(t):
+    """Waits until LATE_WINDOW_MIDDLE after the query was seen; returns how long after it is now (the
+    answer is written right after)."""
     seen = t.read_until(b"\x1b]11;?\x1b\\")
     while time.perf_counter() < seen + LATE_WINDOW_MIDDLE:
         time.sleep(0.001)
+    return time.perf_counter() - seen
 
 
 def late_answer_is_discarded(home):
-    """One run. `True`: the answer came in the window and did not reach the next question."""
+    """One run: `(True, ...)` when the answer came in the window and did not reach the next question. The
+    second part says how the run went (taken, none, leaked) and when the answer was written."""
     t = raw_terminal(home)
-    wait_late(t)
+    late = wait_late(t)
     os.write(t.fd, b"\x1b]11;rgb:0000/0000/0000\x1b\\")
+    when = f"answer {late * 1000:.0f} ms after the query"
     got = t.read_any([b"the terminal did not say", b"the terminal looks"])
     if got == b"the terminal looks":  # taken as an answer: no late answer in this run
         os.write(t.fd, b"\n")
         t.read_until(b"[Y/n] ")
         os.write(t.fd, b"n\n")
         t.finish()
-        return False
+        return False, f"taken ({when})"
     if got is None:
         t.kill()
-        return False
+        return False, f"none ({when})"
     time.sleep(0.3)
     os.write(t.fd, b"l\n")
     t.read_until(b"[Y/n] ")
     os.write(t.fd, b"\n")
     code, before, after, text = t.finish()
     # A leaked answer makes "l" no choice and the default (auto) is used: that run came after the read.
-    return code == 0 and before == after and 'mode = "light"' in (config(home) or "")
+    if code == 0 and before == after and 'mode = "light"' in (config(home) or ""):
+        return True, f"discarded ({when})"
+    return False, f"leaked ({when})"
 
 
 # 이것을 실패시키는 것: 시간 제한 뒤 짧게 더 읽어 버리는 것과 `tcsetattr`·`tcflush`를 뺀 것(늦은 응답이 입력 줄에
 # 남아 다음 질문의 답을 오염시킴: 답 "l"이 "light"가 아니라 "auto"가 됨).
 def test_a_late_answer_does_not_reach_the_next_question(home):
-    assert any(late_answer_is_discarded(attempt_home(home, n)) for n in range(TRIES))
+    tries(late_answer_is_discarded, home)
 
 
 def ctrl_c_in_the_discard_cancels(home):
-    """One run. `True`: the Ctrl-C came in the window and cancelled."""
+    """One run: `(True, ...)` when the Ctrl-C came in the window and cancelled; the second part says how
+    the run went and when the Ctrl-C was written."""
     t = raw_terminal(home)
-    wait_late(t)
+    late = wait_late(t)
     os.write(t.fd, b"\x03")
+    when = f"Ctrl-C {late * 1000:.0f} ms after the query"
     got = t.read_any([b"cancelled", b"Color mode"])
     if got == b"cancelled":
         code, before, after, text = t.finish()
-        return code == 130 and "Color mode" not in text and before == after and config(home) is None
+        ok = code == 130 and "Color mode" not in text and before == after and config(home) is None
+        return ok, f"{'cancelled' if ok else 'cancelled but not restored'} ({when})"
     if got is None:
         t.kill()
-        return False
+        return False, f"none ({when})"
     # The Ctrl-C was lost (it came after the read, or was ignored): answer and stop.
     os.write(t.fd, b"\n")
     t.read_until(b"[Y/n] ")
     os.write(t.fd, b"n\n")
     t.finish()
-    return False
+    return False, f"lost ({when})"
 
 
 # 이것을 실패시키는 것: 시간 초과 뒤 버리기 읽기 중 온 Ctrl-C(0x03)를 무시하고 질문으로 넘어가는 것.
 def test_ctrl_c_while_the_late_answer_is_being_discarded_cancels(home):
-    assert any(ctrl_c_in_the_discard_cancels(attempt_home(home, n)) for n in range(TRIES))
+    tries(ctrl_c_in_the_discard_cancels, home)
 
 
 # Becomes its own process group (so it is not the terminal's foreground job), ignores SIGTTOU (so a change of
