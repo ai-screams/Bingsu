@@ -13,7 +13,7 @@
 use super::{
     clock::SystemClock,
     config_inspect::{self, Opening, Selection, open_loader},
-    config_load::name_present,
+    config_load::{TwoNames, name_present, pick_name},
     ctx::{self, Applied, EXIT_FAILED, EXIT_USAGE, User},
     group_policy::SystemGroups,
     init::{roots, trusted_env::TrustedEnv},
@@ -32,11 +32,12 @@ use bingsu_core::config::source::Trust;
 use bingsu_core::config::starter::{Choices, Icons, Mode, differences, starter};
 use bingsu_core::fs_trust::Last;
 use bingsu_core::icons::{IconSet, lookup};
-use bingsu_core::setup_editor::model::Given;
+use bingsu_core::setup_editor::model::{Given, Target};
 use bingsu_core::setup_editor::screen::too_small;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -575,6 +576,31 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
             t.size().map(|s| (s.cols, s.rows)),
         ),
     };
+    // An existing settings file: the editor shows what to change in it,
+    // and nothing is written. A place that holds both names is an error
+    // the reader stops at (E308).
+    if chosen.is_none()
+        && pick_name([&dir.join(FILE), &dir.join(NAMES[1])], name_present) == TwoNames::Both
+    {
+        eprintln!(
+            "bingsu: {} and {} are both here, so no file is opened. Keep one of them (bingsu help E308)",
+            ctx::show(&dir.join(FILE)),
+            ctx::show(&dir.join(NAMES[1]))
+        );
+        return ctx::code(EXIT_FAILED);
+    }
+    let place = chosen.clone().or_else(|| {
+        match pick_name([&dir.join(FILE), &dir.join(NAMES[1])], name_present) {
+            TwoNames::First => Some(dir.join(FILE)),
+            TwoNames::Second => Some(dir.join(NAMES[1])),
+            TwoNames::Neither | TwoNames::Both => None,
+        }
+    });
+    if let (Some(place), Some(t), Way::Editor) = (&place, &tty, way)
+        && let Some(code) = edit_existing(t, &start, place, &user, &args, mine, runs_here)
+    {
+        return code;
+    }
     if let Some(file) = chosen {
         use std::os::unix::ffi::OsStrExt;
         let choices = match choose(tty.as_ref(), given, &args) {
@@ -619,34 +645,9 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
     // The choices: the editor, the line questions, or all given.
     let (text, choices) = match (&tty, way) {
         (Some(t), Way::Editor) => {
-            let (_, colorterm, no_color) = TrustedEnv::terminal();
-            let truecolor = colorterm
-                .as_deref()
-                .is_some_and(|v| matches!(v.as_encoded_bytes(), b"truecolor" | b"24bit"));
-            let here = std::env::current_dir().unwrap_or_default();
-            let folder = setup_screen::sample_folder(TrustedEnv::pwd().as_deref(), &here);
-            let host = sys::host_name();
-            let colorfgbg = TrustedEnv::terminal_hints().0;
-            let start = setup_screen::Start {
-                sources: &sources,
-                path: &sources.file().display,
-                folder: folder.as_os_str().as_encoded_bytes(),
-                home: user.pw.home.as_os_str().as_encoded_bytes(),
-                host: host.as_deref(),
-                colorfgbg: colorfgbg.as_deref(),
-                depth: if truecolor {
-                    ColorDepth::TrueColor
-                } else {
-                    ColorDepth::Ansi256
-                },
-                mono: no_color,
-                read_only: !mine,
-                given: Given {
-                    icons: args.icons,
-                    mode: args.mode,
-                },
-            };
-            match setup_screen::edit(t, &start) {
+            let display = sources_path(&dir);
+            let ended = edit_with(t, &sources, &display, Target::New, &user, &args, mine);
+            match ended {
                 // The editor saves nothing in a folder setup may not
                 // write; should it ever say to, the write is refused here.
                 Ended::Write { .. } if !may_write(mine) => return not_mine(),
@@ -659,6 +660,10 @@ pub fn run(exe: &OsStr, args: &[OsString]) -> ExitCode {
                 Ended::Lost(why) => {
                     return refuse(&format!("{why}; nothing was written"));
                 }
+                // Only an existing file is compared.
+                Ended::NotLoaded(_) => return ctx::code(EXIT_FAILED),
+                // A new file's save screen writes.
+                Ended::Report { .. } => return ctx::code(EXIT_FAILED),
             }
         }
         _ => {
@@ -822,6 +827,148 @@ fn new_file_trust(shape_only: bool) -> Trust {
 /// could not all be confirmed) read-only.
 fn refuses_folder(mine: bool, way: Way) -> bool {
     !mine && way != Way::Editor
+}
+
+/// The name the loader gives the settings folder's new file.
+fn sources_path(dir: &Path) -> Vec<u8> {
+    dir.join(FILE).into_os_string().into_encoded_bytes()
+}
+
+/// The editor on the terminal `t` for the settings file `path` (as the
+/// loader names it).
+fn edit_with(
+    t: &Tty,
+    sources: &Sources,
+    path: &[u8],
+    target: Target,
+    user: &User,
+    args: &Args,
+    mine: bool,
+) -> Ended {
+    let (_, colorterm, no_color) = TrustedEnv::terminal();
+    let truecolor = colorterm
+        .as_deref()
+        .is_some_and(|v| matches!(v.as_encoded_bytes(), b"truecolor" | b"24bit"));
+    let here = std::env::current_dir().unwrap_or_default();
+    let folder = setup_screen::sample_folder(TrustedEnv::pwd().as_deref(), &here);
+    let host = sys::host_name();
+    let colorfgbg = TrustedEnv::terminal_hints().0;
+    let start = setup_screen::Start {
+        sources,
+        path,
+        folder: folder.as_os_str().as_encoded_bytes(),
+        home: user.pw.home.as_os_str().as_encoded_bytes(),
+        host: host.as_deref(),
+        colorfgbg: colorfgbg.as_deref(),
+        depth: if truecolor {
+            ColorDepth::TrueColor
+        } else {
+            ColorDepth::Ansi256
+        },
+        mono: no_color,
+        read_only: !mine,
+        given: Given {
+            icons: args.icons,
+            mode: args.mode,
+        },
+        target,
+    };
+    setup_screen::edit(t, &start)
+}
+
+/// The editor for the existing settings file the reader reads in the
+/// settings place (the chosen one, else the folder's own): what to change
+/// in it goes to stderr once the editor is left, the file stays as it was.
+/// A file the reader could not read opens no editor: its reason, then the
+/// startup line. `None`: the reading has no such file (it went meanwhile);
+/// the caller goes on the way it did before.
+fn edit_existing(
+    t: &Tty,
+    start: &Tape,
+    place: &Path,
+    user: &User,
+    args: &Args,
+    mine: bool,
+    runs_here: bool,
+) -> Option<ExitCode> {
+    let (key, display, why) = start.settings_root(place)?;
+    // Nothing to show against: no editor and no questions, the reader's
+    // reason instead.
+    if let Some(why) = why {
+        eprintln!(
+            "bingsu: {} is already there, so nothing was written.",
+            ctx::show(Path::new(std::ffi::OsStr::from_bytes(display)))
+        );
+        eprintln!(
+            "It could not be read to compare: {}.",
+            bingsu_core::sanitize::sanitize(why.as_bytes())
+        );
+        return Some(finish(runs_here));
+    }
+    let format = bingsu_core::config::tree::format_of(display);
+    let display = display.to_vec();
+    let sources = Sources::existing(start.clone(), key, ctx::version())?;
+    Some(
+        match edit_with(
+            t,
+            &sources,
+            &display,
+            Target::Existing(format),
+            user,
+            args,
+            mine,
+        ) {
+            Ended::Report { lines, changes } => {
+                let mut lines = lines.into_iter();
+                if let Some(title) = lines.next() {
+                    eprintln!("bingsu: {title}");
+                }
+                // The title names the file the link leads to.
+                if let Some(link) = link_note(place, &display) {
+                    eprintln!("{link}");
+                }
+                for line in lines {
+                    eprintln!("{line}");
+                }
+                if changes {
+                    eprintln!("Edit it yourself: bingsu config edit");
+                }
+                finish(runs_here)
+            }
+            Ended::Quit => {
+                eprintln!("bingsu: nothing written.");
+                finish(runs_here)
+            }
+            Ended::Cancelled => cancelled(),
+            Ended::Lost(why) => refuse(&format!("{why}; nothing was written")),
+            Ended::NotLoaded(why) => {
+                eprintln!(
+                    "bingsu: {} is already there, so nothing was written.",
+                    ctx::show(Path::new(std::ffi::OsStr::from_bytes(&display)))
+                );
+                eprintln!("The settings do not load now, so there is nothing to compare it with:");
+                eprintln!("{why}");
+                eprintln!("`bingsu config check` lists every problem.");
+                finish(runs_here)
+            }
+            // An existing file's save screen writes nothing.
+            Ended::Write { .. } => ctx::code(EXIT_FAILED),
+        },
+    )
+}
+
+/// When the settings file `place` is a link (its folder resolved, the
+/// name is not the file the reader read, `display`): which file that is.
+fn link_note(place: &Path, display: &[u8]) -> Option<String> {
+    let name = place.file_name()?;
+    let through = roots::canonical_lenient(place.parent()?)?.join(name);
+    (through.as_os_str().as_bytes() != display).then(|| {
+        format!(
+            "{} is a link to {}.",
+            ctx::show(place),
+            ctx::show(Path::new(std::ffi::OsStr::from_bytes(display)))
+        )
+    })
 }
 
 /// Whether setup may write into the settings folder: only one nobody but

@@ -16,8 +16,8 @@ use bingsu_core::preview::{PreviewLine, Request, Sample, lines};
 use bingsu_core::setup_editor::layers::Layers;
 use bingsu_core::setup_editor::model::{Effect, Given, Input, Model, Note, Screen, Target};
 use bingsu_core::setup_editor::rows::{self, ENDS, GAPS, ICONS, JOINTS, Row, STYLES};
-use bingsu_core::setup_editor::screen::{Grid, View, draw, frame};
-use bingsu_core::setup_editor::write::{changes, new_file_text, written_keys};
+use bingsu_core::setup_editor::screen::{Grid, View, draw, existing_report, frame};
+use bingsu_core::setup_editor::write::{candidate_toml, changes, new_file_text, written_keys};
 use bingsu_core::style::{PRESETS, generate, preset};
 use bingsu_core::template::compile::{CompiledLine, compile};
 
@@ -154,6 +154,41 @@ fn every_shape_state_writes_a_file_that_draws_it() {
         }
     }
     assert_eq!(checked, 3 * 2400);
+}
+
+// 이것을 실패시키는 것: 있는 TOML 파일의 후보가 고친 값을 넣지 않거나(미리보기가 고른 값을 그리지 않음) 지울 키를
+// 남기는 것, 주석·다른 키·순서를 바꾸는 것, 국소 편집이 거부하는 모양(인라인 표)에서 후보를 지어내는 것. 2,400
+// 상태마다, 후보를 그 파일 자리에 둔 설정의 줄이 그 상태를 생성기로 만든 줄과 같아야 한다.
+#[test]
+fn every_shape_state_of_an_existing_file_previews_from_its_candidate() {
+    let original = "# mine\nicons = \"nerd\"\n\n[style]\n# the shape\npreset = \"pill\"\ngap = true\n\n[colors]\nmode = \"dark\"\n";
+    let l = layers(&load(original, &[], &[]));
+    let mut checked = 0;
+    for s in states() {
+        let mut m = Model::new(l.clone(), Target::Existing(Format::Toml), Given::default());
+        set(&mut m, s);
+        let text = candidate_toml(&m, original.as_bytes()).expect("edited in place");
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.starts_with("# mine\nicons = \"nerd\"\n"), "{text}");
+        assert!(
+            text.contains("# the shape\n") && text.contains("[colors]\nmode = \"dark\"\n"),
+            "{text}"
+        );
+        let c = compiled(load(&text, &[], &[]));
+        assert_eq!(c.variants[0], template_of(s), "{s:?}\n{text}");
+        checked += 1;
+    }
+    assert_eq!(checked, 2400);
+    // An inline table is not edited in place: no candidate.
+    let inline = "style = { preset = \"pill\" }\n";
+    let mut m = Model::new(
+        layers(&load(inline, &[], &[])),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    m.pick(Row::Outer, 1);
+    assert!(m.marked(Row::Outer), "triangle ends are not pill's");
+    assert!(candidate_toml(&m, inline.as_bytes()).is_err());
 }
 
 // 이것을 실패시키는 것: `extends`의 값을 물려받은 값으로 읽지 않는 것, 대상의 값을 쓴 값으로 읽지 않는 것, 뒤
@@ -507,6 +542,7 @@ fn screen(m: &Model, path: &[u8], cols: u16, rows: u16) -> Grid {
             terminal: None,
             narrow: cols < 60,
             mono: false,
+            stale: None,
         },
     )
 }
@@ -800,6 +836,7 @@ fn view<'a>(
         terminal: None,
         narrow: cols < 60,
         mono: false,
+        stale: None,
     }
 }
 
@@ -1467,7 +1504,8 @@ fn the_preset_reset_follows_this_files_choice() {
 }
 
 // 이것을 실패시키는 것: 템플릿이 줄 수(`layout` 줄)도 대신 그리는데 lines 줄에 그 알림을 붙이지 않는 것, 저장 화면이
-// 템플릿을 둔 출처와 그 키들이 그려지지 않는다는 것을 말하지 않는 것, 쓰는 키가 없을 때도 그 줄을 내는 것.
+// 템플릿을 둔 출처와 그 키들이 그려지지 않는다는 것을 말하지 않는 것, 쓰는 키가 없을 때도 그 줄을 내는 것, 있는 파일의
+// 바꿀 줄(저장 화면과 stderr)에 그 줄을 빠뜨리는 것.
 #[test]
 fn a_template_replaces_the_lines_too() {
     let later = [(
@@ -1505,6 +1543,20 @@ fn a_template_replaces_the_lines_too() {
     key(&mut e, Key::Enter, 1);
     let save = text(&draw(&e, &view(&e, &c, &lines, 80, 24))).concat();
     assert!(!save.contains("A template in"), "{save}");
+    // One that changes a style key under it: the line, there and in what
+    // setup prints once the editor is left.
+    let mut e = Model::new(
+        layers(&load("icons = \"nerd\"\n", &later, &[])),
+        Target::Existing(Format::Toml),
+        Given::default(),
+    );
+    e.pick(Row::Outer, 1);
+    let report = existing_report(&e, b"/home/u/.config/bingsu/config.toml").concat();
+    key(&mut e, Key::Enter, 1);
+    let save = text(&draw(&e, &view(&e, &c, &lines, 80, 24))).concat();
+    let line = "A template in config.local.toml draws in place of the style and line keys.";
+    assert!(save.contains(line), "{save}");
+    assert!(report.contains(line), "{report}");
 }
 
 // 이것을 실패시키는 것: lines 줄의 두 키 가운데 `layout.line2.enabled`만 보고 뒤 출처가 `layout.line1.left`만 덮는 것을

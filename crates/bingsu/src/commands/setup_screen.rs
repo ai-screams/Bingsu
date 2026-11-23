@@ -18,14 +18,19 @@ use bingsu_core::color::osc11::{REPLY_MAX, find_reply, is_light, parse_osc11};
 use bingsu_core::color::palette::{Knobs, Mode, PaletteInput, ResolvedPalette, resolve_palette};
 use bingsu_core::color::sgr::ColorDepth;
 use bingsu_core::config::report;
+use bingsu_core::config::source::Catalog;
 use bingsu_core::config::starter::{Choices, Icons as StarterIcons, Mode as StarterMode};
+use bingsu_core::config::tree::Format;
+use bingsu_core::diag::{Severity, render_human};
 use bingsu_core::envelope::{colorfgbg_mode, display_mode};
 use bingsu_core::preview::{PreviewLine, Request, Sample, lines};
-use bingsu_core::setup_editor::layers::{Layers, builtin_narrow};
+use bingsu_core::setup_editor::layers::{Layers, builtin_narrow, composed_text};
 use bingsu_core::setup_editor::model::{Effect, Given, Input, Model, Target};
 use bingsu_core::setup_editor::rows::{MODES, Row};
-use bingsu_core::setup_editor::screen::{Grid, MAX_COLS, View, draw, frame, too_small};
-use bingsu_core::setup_editor::write::new_file_text;
+use bingsu_core::setup_editor::screen::{
+    Grid, MAX_COLS, View, draw, existing_report, frame, too_small,
+};
+use bingsu_core::setup_editor::write::{candidate_toml, changes, new_file_text};
 use std::ffi::OsStr;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -46,9 +51,18 @@ pub(crate) enum Ended {
     Cancelled,
     /// Enter on the save screen: write this text, made from these choices.
     Write { text: String, choices: Choices },
+    /// Enter on an existing file's save screen: what to change in it, line
+    /// by line (`screen::existing_report`), and whether anything is to
+    /// change; nothing is written.
+    Report { lines: Vec<String>, changes: bool },
     /// The terminal went away, took no output, or could not be taken:
     /// nothing written, and why.
     Lost(String),
+    /// An existing file the settings do not apply as they are (another
+    /// file, or the file itself, fails to load): no editor, since there is
+    /// nothing to compare against; the reader's first problem, rendered and
+    /// cleaned.
+    NotLoaded(String),
 }
 
 /// What the editor draws with, decided before it starts.
@@ -66,11 +80,17 @@ pub(crate) struct Start<'a> {
     /// The folder is not one only the user can change: nothing is saved.
     pub read_only: bool,
     pub given: Given,
+    /// A new file, or the existing one (`Sources::existing`).
+    pub target: Target,
 }
 
 /// The preview of one state at one width.
 struct Preview {
+    /// What the settings file's bytes came from (the new file's text, or
+    /// the changes to an existing one).
     text: String,
+    /// Why the preview does not follow the picks.
+    stale: Option<&'static str>,
     cols: u16,
     lines: Vec<PreviewLine>,
     palette: ResolvedPalette,
@@ -84,11 +104,16 @@ impl Preview {
     /// from the start's reading (no file is opened). Settings that do not
     /// compile (another file has an error) show no preview, on the
     /// default colors of the mode. `None`: those colors could not be made.
+    ///
+    /// The color mode is what those settings compose to, as the prompt
+    /// draws them: a later file (`config.local`) can cover the pick, and a
+    /// file the preview does not follow keeps its own.
     fn new(s: &Start<'_>, m: &Model, cols: u16) -> Option<Self> {
-        let text = new_file_text(m).unwrap_or_default();
-        let word = MODES[usize::from(m.chosen(Row::Colors))];
+        let (text, bytes, stale) = file_bytes(s, m);
+        // The mode given here is not used by the report.
+        let r = report::from_loaded(s.sources.load(&bytes), Mode::Dark);
+        let word = composed_text(&r.files, &r.order, &["colors", "mode"]).unwrap_or("auto");
         let (mode, note) = preview_mode(word, s.colorfgbg);
-        let r = report::from_loaded(s.sources.load(text.as_bytes()), mode);
         let Some(c) = &r.snapshot else {
             let palette = resolve_palette(&PaletteInput {
                 mode,
@@ -99,6 +124,7 @@ impl Preview {
             .ok()?;
             return Some(Self {
                 text,
+                stale,
                 cols,
                 lines: Vec::new(),
                 palette,
@@ -126,6 +152,7 @@ impl Preview {
         );
         Some(Self {
             text,
+            stale,
             cols,
             lines,
             palette: match mode {
@@ -138,6 +165,44 @@ impl Preview {
         })
     }
 }
+
+/// The settings file's bytes for the model's state, what they came from
+/// (the preview is made again only when that changes), and why they do not
+/// follow the picks. A new file: its text. An existing TOML file: the
+/// changes made in place (`config::edit`); one whose shape that does not
+/// edit, and a JSON or YAML file, stay as they are.
+fn file_bytes(s: &Start<'_>, m: &Model) -> (String, Vec<u8>, Option<&'static str>) {
+    let key = file_key(s, m);
+    match s.target {
+        Target::New => {
+            let bytes = key.clone().into_bytes();
+            (key, bytes, None)
+        }
+        Target::Existing(format) => {
+            let original = s.sources.original();
+            match format {
+                Format::Toml => match candidate_toml(m, original) {
+                    Ok(bytes) => (key, bytes, None),
+                    Err(_) => (key, original.to_vec(), Some(NOT_EDITED)),
+                },
+                _ => (key, original.to_vec(), Some(NOT_UPDATED)),
+            }
+        }
+    }
+}
+
+/// What the settings file's bytes come from, cheap to make for every
+/// frame: the new file's text, or the changes to the existing one.
+fn file_key(s: &Start<'_>, m: &Model) -> String {
+    match s.target {
+        Target::New => new_file_text(m).unwrap_or_default(),
+        Target::Existing(_) => format!("{:?}", changes(m)),
+    }
+}
+
+// Short enough for the preview's label at 80 columns.
+const NOT_UPDATED: &str = "not updated for this format";
+const NOT_EDITED: &str = "not updated for this layout";
 
 /// The opening in rows 1-7 of a full-size main screen. A seam until the
 /// opening is connected: it draws nothing and asks for no frame, so the
@@ -209,19 +274,42 @@ fn ask_background(session: &mut Session<'_>) -> Result<Option<Mode>, Ended> {
     Ok(answer.flatten())
 }
 
+/// The first error of a load (else its first diagnostic), as `config
+/// check` shows it; its texts are cleaned (`diag::render_human`).
+fn first_problem(r: &report::ConfigReport) -> String {
+    let d = r
+        .diagnostics
+        .iter()
+        .find(|d| d.severity() == Severity::Error)
+        .or(r.diagnostics.first());
+    d.map_or_else(
+        || String::from("the settings did not load"),
+        |d| render_human(d, &Catalog(&r.files)),
+    )
+}
+
 fn gone() -> Ended {
     Ended::Lost(String::from("the terminal went away"))
 }
 
 /// The editor, from its first frame to the end. Nothing is written here.
 pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
-    let start = s.sources.load(b"");
+    let start = s.sources.load(s.sources.original());
     let r = report::from_loaded(start, Mode::Dark);
-    let layers = match s.sources.target(&r.files) {
+    let target = s.sources.target(&r.files);
+    // An existing file's values are known only from a load that applies
+    // it: a failed one keeps no order, and the file would seem to set
+    // nothing.
+    // 이것을 실패시키는 것: 불러오지 못한 설정에서 편집판을 여는 것(이미 있는 값을 "not set now"로 보임;
+    // test_settings_that_do_not_load_show_nothing_to_compare).
+    if matches!(s.target, Target::Existing(_)) && !target.is_some_and(|t| r.order.contains(&t)) {
+        return Ended::NotLoaded(first_problem(&r));
+    }
+    let layers = match target {
         Some(t) => Layers::from_sources(&r.files, &r.order, t),
         None => Layers::default(),
     };
-    let mut m = Model::new(layers, Target::New, s.given);
+    let mut m = Model::new(layers, s.target, s.given);
     m.set_read_only(s.read_only);
     let mut session = match tty.full_screen() {
         Ok(session) => session,
@@ -252,7 +340,7 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
     loop {
         m.set_too_small(too_small(cols, rows));
         if writer.wants_frame() {
-            let text = new_file_text(&m).unwrap_or_default();
+            let text = file_key(s, &m);
             if text != preview.text || cols != preview.cols {
                 match Preview::new(s, &m, cols) {
                     Some(p) => preview = p,
@@ -275,6 +363,7 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
                     terminal,
                     narrow: preview.narrow,
                     mono: s.mono,
+                    stale: preview.stale,
                 },
             );
             band.draw(&mut grid, Instant::now());
@@ -359,8 +448,12 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
                         choices: Choices { icons, mode },
                     };
                 }
-                // An existing file has no save here.
-                Effect::Report => {}
+                Effect::Report => {
+                    return Ended::Report {
+                        lines: existing_report(&m, s.path),
+                        changes: !changes(&m).is_empty(),
+                    };
+                }
             }
         }
     }

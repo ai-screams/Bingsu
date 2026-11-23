@@ -270,6 +270,9 @@ pub struct View<'a> {
     /// `NO_COLOR`: bingsu's own text in the terminal's colors, the picked
     /// value reversed and bold; the preview keeps its colors.
     pub mono: bool,
+    /// Why the preview does not follow the picks (`not updated for this
+    /// file format`): it then shows the settings as they are.
+    pub stale: Option<&'a str>,
 }
 
 /// The paints of bingsu's own text.
@@ -441,8 +444,10 @@ fn main_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
             Line::Bowl | Line::Blank => {}
             Line::Label => {
                 let text = format!(
-                    "preview  {} columns, {}, sample values",
-                    v.cols, v.mode_note
+                    "preview  {} columns, {}, {}",
+                    v.cols,
+                    v.mode_note,
+                    v.stale.unwrap_or("sample values")
                 );
                 g.put(1, y, &cut_end(&text, end - 1), u.sub, end);
             }
@@ -676,6 +681,42 @@ fn template_line(m: &Model, writes: impl Fn(Row) -> bool) -> Option<(String, boo
     ))
 }
 
+/// What the save screen says of an existing settings file `path` (as the
+/// loader names it), line by line from its title: nothing is written, and
+/// each key to change with its value now and the one chosen, the line to
+/// put in or take out, and a later file that sets it too. The CLI prints
+/// the same lines once the editor is left. Every text from outside
+/// (values, names, the path) is cleaned.
+pub fn existing_report(m: &Model, path: &[u8]) -> Vec<String> {
+    let name = |i: usize| clean(m.layers().names.get(i).map_or(&[][..], |n| n.as_slice()));
+    let path = clean(path);
+    let file = path.rsplit('/').next().unwrap_or("");
+    let mut lines = vec![
+        format!("{file} is already there; bingsu does not change it."),
+        String::new(),
+    ];
+    let c = changes(m);
+    if c.is_empty() {
+        lines.push(String::from("It already has the choices you made."));
+    }
+    lines.extend(template_line(m, |r| m.marked(r)).map(|(l, _)| l));
+    for ch in c {
+        lines.push(format!(
+            "{}: {} now, {} chosen",
+            ch.key,
+            clean(ch.now.as_bytes()),
+            ch.chosen
+        ));
+        lines.push(format!("  {}", ch.line));
+        if let Some(n) = ch.covered_by {
+            // Only the fact: whether that file can be edited (a package's
+            // theme reached through `extends`) is not known here.
+            lines.push(format!("  {} sets this too, and wins.", name(n)));
+        }
+    }
+    lines
+}
+
 fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
     let end = v.cols - 1;
     let path = clean(v.path);
@@ -723,38 +764,11 @@ fn save_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
             }
         }
         Target::Existing(_) => {
-            let file = path.rsplit('/').next().unwrap_or("");
-            lines.push((
-                format!("{file} is already there; bingsu does not change it."),
-                true,
-            ));
-            lines.push((String::new(), false));
-            let c = changes(m);
-            if c.is_empty() {
-                lines.push((String::from("It already has the choices you made."), false));
+            let mut report = existing_report(m, v.path).into_iter();
+            if let Some(head) = report.next() {
+                lines.push((head, true));
             }
-            lines.extend(template_line(m, |r| m.marked(r)));
-            for ch in c {
-                lines.push((
-                    format!(
-                        "{}: {} now, {} chosen",
-                        ch.key,
-                        clean(ch.now.as_bytes()),
-                        ch.chosen
-                    ),
-                    false,
-                ));
-                lines.push((format!("  {}", ch.line), false));
-                if let Some(n) = ch.covered_by {
-                    lines.push((
-                        // Only the fact: whether that file can be edited
-                        // (a package's theme reached through `extends`) is
-                        // not known here.
-                        format!("  {} sets this too, and wins.", name(n)),
-                        false,
-                    ));
-                }
-            }
+            lines.extend(report.map(|l| (l, false)));
             "enter print and quit  esc back"
         }
     };

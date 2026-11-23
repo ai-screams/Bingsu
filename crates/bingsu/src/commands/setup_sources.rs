@@ -23,8 +23,8 @@ use bingsu_core::config::source::{
 };
 use bingsu_core::config::tree::{SyntaxError, Table};
 use bingsu_core::diag::SourceId;
-use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 /// One answer of the loader at the start, in call order.
@@ -87,6 +87,32 @@ impl Resolver for Recorder<'_> {
 }
 
 impl Tape {
+    /// The settings place's root, the file `place` (right after the
+    /// built-in source, named by its canonical path once checked, by
+    /// `place` when the check failed): its key and name, and why the reading
+    /// could not use it (`None`: read). `None` when the reading found no
+    /// such file there (it went, or another root comes first).
+    pub(crate) fn settings_root(&self, place: &Path) -> Option<(FileKey, &[u8], Option<&str>)> {
+        let Some(Root::File(m)) = self.roots.get(1) else {
+            return None;
+        };
+        // A root checked is named by its canonical path, one whose check
+        // failed by the path the reader tried (in the pinned folder, itself
+        // canonical).
+        let display = Path::new(OsStr::from_bytes(&m.display));
+        if display != place && canonical_lenient(place).as_deref() != Some(display) {
+            return None;
+        }
+        let why = self.calls.iter().find_map(|c| match c {
+            Call::Root(k, got) if *k == m.key => {
+                Some(got.as_ref().err().map(|e| e.reason.as_str()))
+            }
+            _ => None,
+        });
+        // A root the reading never asked for (over its budget) is unread too.
+        Some((m.key, &m.display, why.unwrap_or(Some("not read"))))
+    }
+
     /// The bytes the reading got for the root it names `display`, when it
     /// read them.
     pub(crate) fn root_bytes(&self, display: &[u8]) -> Option<&[u8]> {
@@ -123,9 +149,27 @@ impl Tape {
 struct Replay<'a> {
     calls: &'a [Call],
     used: Vec<bool>,
+    target: Option<Swap<'a>>,
+}
+
+/// The settings file's bytes in the preview.
+#[derive(Clone, Copy)]
+enum Swap<'a> {
     /// The new file and its path: an `extends` entry that led there opens
     /// it, as it will once the file is written.
-    target: Option<(&'a Path, &'a Opened)>,
+    New { path: &'a Path, file: &'a Opened },
+    /// The existing file's key and the bytes in its place: an `extends`
+    /// entry that opened it gets them, with the trust of that answer.
+    ///
+    /// The loader does not reach that today: core keeps a file's first
+    /// place when it meets the file again, and gives the place to a later
+    /// answer only when that one has stronger trust, which the loader has
+    /// not given an alias (a link through a folder others can change and a
+    /// hard link from a trusted folder both read with the root's trust).
+    /// It stays because such an alias would otherwise draw the start's
+    /// bytes in the preview; `every_answer_that_opened_the_settings_file_
+    /// gets_the_changed_bytes` makes that case from a recorded reading.
+    Existing { key: FileKey, bytes: &'a [u8] },
 }
 
 impl<'a> Replay<'a> {
@@ -159,8 +203,18 @@ impl Resolver for Replay<'_> {
             |c| matches!(c, Call::Edge { from: f, text, .. } if *f == from.key && *text == r.text),
         );
         match (edge, self.target) {
-            (Some(Call::Edge { to: Some(to), .. }), Some((path, file))) if to == path => {
+            (Some(Call::Edge { to: Some(to), .. }), Some(Swap::New { path, file }))
+                if to == path =>
+            {
                 Ok(file.clone())
+            }
+            (Some(Call::Edge { got: Ok(o), .. }), Some(Swap::Existing { key, bytes }))
+                if o.key == key =>
+            {
+                Ok(Opened {
+                    bytes: bytes.to_vec(),
+                    ..o.clone()
+                })
             }
             (Some(Call::Edge { got, .. }), _) => got.clone(),
             _ => Err(not_read(Trust::ShapeOnly)),
@@ -193,10 +247,17 @@ pub(crate) struct NewFile {
 /// trust or evidence is kept under it from one reading to the next.
 pub(crate) const NEW_FILE_KEY: FileKey = FileKey { dev: 1, ino: 0 };
 
-/// The start's tape and the file to add to it.
+/// The settings file the editor is for.
+enum Place {
+    New(NewFile),
+    /// A root the start read, as the loader answered it.
+    Existing(Opened),
+}
+
+/// The start's tape and the settings file whose bytes a preview sets.
 pub(crate) struct Sources {
     tape: Tape,
-    file: NewFile,
+    place: Place,
     version: Version,
 }
 
@@ -204,8 +265,31 @@ impl Sources {
     pub(crate) fn new(tape: Tape, file: NewFile, version: Version) -> Self {
         Self {
             tape,
-            file,
+            place: Place::New(file),
             version,
+        }
+    }
+
+    /// The sources for the existing root `key`; `None` when the start
+    /// could not read it (the loader's reason is then the tape's).
+    pub(crate) fn existing(tape: Tape, key: FileKey, version: Version) -> Option<Self> {
+        let read = tape.calls.iter().find_map(|c| match c {
+            Call::Root(k, Ok(o)) if *k == key => Some(o.clone()),
+            _ => None,
+        })?;
+        Some(Self {
+            tape,
+            place: Place::Existing(read),
+            version,
+        })
+    }
+
+    /// The existing file's bytes as the start read them (empty for a new
+    /// file).
+    pub(crate) fn original(&self) -> &[u8] {
+        match &self.place {
+            Place::New(_) => &[],
+            Place::Existing(o) => &o.bytes,
         }
     }
 
@@ -213,36 +297,62 @@ impl Sources {
     /// file stands where the reader puts the settings folder's own file:
     /// `Loader::roots` gives the built-in source, then that place
     /// (`config.toml` or `config.json`), then `conf.d` and `config.local`.
+    /// An existing file's bytes are swapped in its own place: its root,
+    /// read whole into the catalog with the trust and name the loader gave
+    /// it, and every `extends` answer that opened it.
     pub(crate) fn load(&self, bytes: &[u8]) -> Result<LoadReport, LoadError> {
-        let file = Opened {
-            key: NEW_FILE_KEY,
-            bytes: bytes.to_vec(),
-            trust: self.file.trust,
-            display: self.file.display.clone(),
-        };
-        let path = PathBuf::from(OsString::from_vec(self.file.display.clone()));
-        let mut roots = self.tape.roots.clone();
-        let at = 1.min(roots.len());
-        roots.insert(at, Root::Read(file.clone()));
         let mut replay = Replay {
             calls: &self.tape.calls,
             used: vec![false; self.tape.calls.len()],
-            target: Some((&path, &file)),
+            target: None,
         };
-        load(roots, &mut replay, self.version)
+        match &self.place {
+            Place::New(new) => {
+                let file = Opened {
+                    key: NEW_FILE_KEY,
+                    bytes: bytes.to_vec(),
+                    trust: new.trust,
+                    display: new.display.clone(),
+                };
+                let path = PathBuf::from(OsString::from_vec(new.display.clone()));
+                let mut roots = self.tape.roots.clone();
+                let at = 1.min(roots.len());
+                roots.insert(at, Root::Read(file.clone()));
+                replay.target = Some(Swap::New {
+                    path: &path,
+                    file: &file,
+                });
+                load(roots, &mut replay, self.version)
+            }
+            Place::Existing(read) => {
+                let roots: Vec<Root> = self
+                    .tape
+                    .roots
+                    .iter()
+                    .map(|r| match r {
+                        Root::File(m) if m.key == read.key => Root::Read(Opened {
+                            bytes: bytes.to_vec(),
+                            ..read.clone()
+                        }),
+                        other => other.clone(),
+                    })
+                    .collect();
+                replay.target = Some(Swap::Existing {
+                    key: read.key,
+                    bytes,
+                });
+                load(roots, &mut replay, self.version)
+            }
+        }
     }
 
-    /// The file setup would make.
-    pub(crate) fn file(&self) -> &NewFile {
-        &self.file
-    }
-
-    /// The new file's place in a catalog `load` returned.
+    /// The settings file's place in a catalog `load` returned.
     pub(crate) fn target(&self, files: &[Found]) -> Option<SourceId> {
-        files
-            .iter()
-            .find(|f| f.opened.key == NEW_FILE_KEY)
-            .map(|f| f.id)
+        let key = match &self.place {
+            Place::New(_) => NEW_FILE_KEY,
+            Place::Existing(o) => o.key,
+        };
+        files.iter().find(|f| f.opened.key == key).map(|f| f.id)
     }
 
     /// Whether `now`, a reading made later, saw the same sources.

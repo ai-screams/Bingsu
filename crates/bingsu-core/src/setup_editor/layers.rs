@@ -106,8 +106,8 @@ impl Layers {
     }
 }
 
-/// The text at `path` in `t`, when it is one.
-fn text_at<'a>(t: &'a Table, path: &[&str]) -> Option<&'a str> {
+/// The value at `path` in `t`, when the tables on the way are there.
+fn value_at<'a>(t: &'a Table, path: &[&str]) -> Option<&'a Value> {
     let (last, tables) = path.split_last()?;
     let mut t = t;
     for key in tables {
@@ -116,8 +116,29 @@ fn text_at<'a>(t: &'a Table, path: &[&str]) -> Option<&'a str> {
             _ => return None,
         }
     }
-    match t.get(last).map(|e| &e.node.value) {
-        Some(Value::Str(s)) => Some(s.as_str()),
+    t.get(last).map(|e| &e.node.value)
+}
+
+/// The text at `path` in `t`, when it is one.
+fn text_at<'a>(t: &'a Table, path: &[&str]) -> Option<&'a str> {
+    match value_at(t, path)? {
+        Value::Str(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// The text the settings compose to at `path`: that of the last applied
+/// source in `order` that sets it (later wins, `config::merge`). `None`
+/// when no applied source sets it, or the last one sets something else
+/// (`config check` refuses that).
+pub fn composed_text<'a>(files: &'a [Found], order: &[SourceId], path: &[&str]) -> Option<&'a str> {
+    let value = order
+        .iter()
+        .rev()
+        .filter_map(|id| files.get(id.0 as usize))
+        .find_map(|f| value_at(&f.tree, path))?;
+    match value {
+        Value::Str(s) => Some(s.as_str()),
         _ => None,
     }
 }
