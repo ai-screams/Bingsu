@@ -1969,9 +1969,15 @@ fn frames_draw_the_grid_and_then_only_what_changed() {
 // 이것을 실패시키는 것: 편집판의 글(제목, 줄 이름, 값, 고른 값, 효과 없는 값, 안내, 키 안내, 저장 화면)을 바탕과
 // 4.5:1 아래로 칠하는 것, 고른 값의 상자(표시)를 화면 바탕과 3:1 아래로 칠하는 것, 효과 없는 고른 값에 상자를
 // 두는 것(두 모드, 24비트와 256색), 팔레트에 없는 이름에 색을 주는 것.
-// 미리보기 줄은 사용자 테마의 색이고, 그릇 줄(1-7)은 장식이라 이 기준 밖이다.
+// 미리보기 줄은 사용자 테마의 색이다. 그릇은 장식이라 기준 밖인데, 면제는 그릇이 실제로 그린 칸뿐이다: 여는 그림의
+// 여러 시각을 화면에 합성하고, 그 칸만 빼고 본다. 이것을 실패시키는 것: 그릇 줄에 편집판 글을 두는 것(면제가 줄
+// 단위가 아님), 그릇이 그 밖의 줄에 그려지는 것.
 #[test]
 fn every_editor_text_cell_meets_4_5_to_1() {
+    use bingsu_core::opening::{Bowl, Inks, LENGTH};
+    use bingsu_core::setup_editor::screen::{BOWL_TOP, bowl_shown, put_band};
+    use std::time::Duration;
+    let bowl = Bowl::new();
     use bingsu_core::color::math::{Srgb8, contrast_milli, xterm};
     use bingsu_core::color::sgr::Ink;
     let rgb = |i: Ink| match i {
@@ -2004,54 +2010,98 @@ fn every_editor_text_cell_meets_4_5_to_1() {
                     Mode::Dark => &c.palette,
                     Mode::Light => &c.light_palette,
                 };
-                let g = draw(&s, &v);
+                let mut g = draw(&s, &v);
                 let label = (0..24).find(|&y| g.row_text(y).starts_with(" preview"));
-                let exempt = |y: u16| {
-                    (screen == "main" && (1..=7).contains(&y))
-                        || label.is_some_and(|l| y == l + 1 || y == l + 2)
-                };
-                let base = rgb(g.cell(79, 0).paint.bg).unwrap();
-                let shown = |name: &str| {
-                    let c = bingsu_core::color::palette::named_color(name, mode, false).unwrap();
-                    match depth {
-                        ColorDepth::Ansi256 => xterm(bingsu_core::color::math::nearest_256(c)),
-                        _ => c,
+                // Before the bowl goes in: its rows hold no editor text.
+                assert_eq!(bowl_shown(&s, 80, 24), screen == "main");
+                if screen == "main" {
+                    for y in BOWL_TOP..BOWL_TOP + 7 {
+                        assert!(g.row_text(y).trim().is_empty(), "{y}: {:?}", g.row_text(y));
                     }
+                }
+                let times = [
+                    Duration::from_millis(1200),
+                    Duration::from_millis(3000),
+                    LENGTH,
+                ];
+                let shots = if screen == "main" {
+                    &times[..]
+                } else {
+                    &[][..]
                 };
-                let accent = shown("accent.blue");
-                for y in (0..24).filter(|&y| !exempt(y)) {
-                    for x in 0..79 {
-                        let cell = g.cell(x, y);
-                        // The box of an effective pick (the accent) marks
-                        // it: 3:1 on the screen's background. A pick that
-                        // changes nothing has no box: its brackets and
-                        // text are text cells, 4.5:1 below.
-                        if let Some(bg) = rgb(cell.paint.bg).filter(|&b| b == accent) {
+                // The cells some frame of the opening draws: the only ones
+                // below the line.
+                let mut band_cells = std::collections::HashSet::new();
+                let mut composed = vec![g.clone()];
+                for &t in shots {
+                    let band = bowl.draw(t, 79, &Inks::of(mode));
+                    let mut with = g.clone();
+                    put_band(&mut with, &band, depth, false);
+                    for y in 0..7u16 {
+                        for (x, c) in band.row(y).iter().enumerate() {
+                            if c.ink.is_some() {
+                                band_cells.insert((x as u16, BOWL_TOP + y));
+                            }
+                        }
+                    }
+                    composed.push(with);
+                }
+                assert!(
+                    screen != "main" || band_cells.len() > 100,
+                    "{}",
+                    band_cells.len()
+                );
+                let exempt_row = |y: u16| label.is_some_and(|l| y == l + 1 || y == l + 2);
+                for with in composed {
+                    g = with;
+                    let base = rgb(g.cell(79, 0).paint.bg).unwrap();
+                    let shown = |name: &str| {
+                        let c =
+                            bingsu_core::color::palette::named_color(name, mode, false).unwrap();
+                        match depth {
+                            ColorDepth::Ansi256 => xterm(bingsu_core::color::math::nearest_256(c)),
+                            _ => c,
+                        }
+                    };
+                    let accent = shown("accent.blue");
+                    for y in (0..24).filter(|&y| !exempt_row(y)) {
+                        for x in 0..79 {
+                            if band_cells.contains(&(x, y)) {
+                                continue;
+                            }
+                            let cell = g.cell(x, y);
+                            // The box of an effective pick (the accent) marks
+                            // it: 3:1 on the screen's background. A pick that
+                            // changes nothing has no box: its brackets and
+                            // text are text cells, 4.5:1 below.
+                            if let Some(bg) = rgb(cell.paint.bg).filter(|&b| b == accent) {
+                                assert!(
+                                    contrast_milli(bg, base) >= 3000,
+                                    "{mode:?} {depth:?} {x},{y}: box {}",
+                                    contrast_milli(bg, base)
+                                );
+                                picks += 1;
+                            } else if cell.paint.bg != g.cell(79, 0).paint.bg {
+                                panic!("{mode:?} {depth:?} {x},{y}: a box of another color");
+                            }
+                            if cell.text == "[" {
+                                idles += 1;
+                            }
+                            if cell.text.trim().is_empty() {
+                                continue;
+                            }
+                            let (Some(fg), Some(bg)) = (rgb(cell.paint.fg), rgb(cell.paint.bg))
+                            else {
+                                panic!("{mode:?} {depth:?} {screen} {x},{y}: {:?}", cell.paint);
+                            };
+                            let ratio = contrast_milli(fg, bg);
                             assert!(
-                                contrast_milli(bg, base) >= 3000,
-                                "{mode:?} {depth:?} {x},{y}: box {}",
-                                contrast_milli(bg, base)
+                                ratio >= 4500,
+                                "{mode:?} {depth:?} {screen} {x},{y} {:?}: {ratio}",
+                                cell.text
                             );
-                            picks += 1;
-                        } else if cell.paint.bg != g.cell(79, 0).paint.bg {
-                            panic!("{mode:?} {depth:?} {x},{y}: a box of another color");
+                            checked += 1;
                         }
-                        if cell.text == "[" {
-                            idles += 1;
-                        }
-                        if cell.text.trim().is_empty() {
-                            continue;
-                        }
-                        let (Some(fg), Some(bg)) = (rgb(cell.paint.fg), rgb(cell.paint.bg)) else {
-                            panic!("{mode:?} {depth:?} {screen} {x},{y}: {:?}", cell.paint);
-                        };
-                        let ratio = contrast_milli(fg, bg);
-                        assert!(
-                            ratio >= 4500,
-                            "{mode:?} {depth:?} {screen} {x},{y} {:?}: {ratio}",
-                            cell.text
-                        );
-                        checked += 1;
                     }
                 }
             }
@@ -2066,4 +2116,102 @@ fn every_editor_text_cell_meets_4_5_to_1() {
         bingsu_core::color::palette::named_color("neutral.nope", Mode::Dark, true),
         None
     );
+}
+
+// The band goes into rows 1-7 of the main screen at a size whose layout
+// keeps them empty for it, and nowhere else: not the title, not the rows
+// under it, not the last column. Its inks become 24-bit or 256-color
+// paints, or the default color with `NO_COLOR`; the background stays.
+// 이것을 실패시키는 것: 그릇 자리 조건을 배치와 따로 두는 것(그 크기에서 1-7행에 다른 줄이 옴), 다른 줄이나
+// 마지막 칸에 쓰는 것, 색 깊이를 무시하는 것, NO_COLOR에서 색을 쓰는 것, 바탕을 바꾸는 것.
+#[test]
+fn the_band_goes_only_where_the_layout_keeps_the_bowl() {
+    use bingsu_core::color::math::nearest_256;
+    use bingsu_core::color::sgr::Ink;
+    use bingsu_core::opening::{Bowl, Inks, LENGTH};
+    use bingsu_core::setup_editor::screen::{BOWL_TOP, bowl_shown, put_band};
+    let bowl = Bowl::new();
+    let m = fresh();
+    let c = compiled(load(&new_file_text(&m).unwrap(), &[], &[]));
+    for (cols, rows, shown) in [
+        (80, 24, true),
+        (60, 24, true),
+        (120, 40, true),
+        (59, 24, false),
+        (80, 23, false),
+        (39, 30, false),
+    ] {
+        assert_eq!(bowl_shown(&m, cols, rows), shown, "{cols}x{rows}");
+        if !shown {
+            continue;
+        }
+        let lines = view_lines(&c, cols);
+        let g = draw(&m, &view(&m, &c, &lines, cols, rows));
+        for y in BOWL_TOP..BOWL_TOP + 7 {
+            assert!(g.row_text(y).trim().is_empty(), "{cols}x{rows} row {y}");
+        }
+        let band = bowl.draw(LENGTH, cols - 1, &Inks::of(Mode::Dark));
+        for (depth, mono) in [
+            (ColorDepth::TrueColor, false),
+            (ColorDepth::Ansi256, false),
+            (ColorDepth::TrueColor, true),
+        ] {
+            let mut with = g.clone();
+            put_band(&mut with, &band, depth, mono);
+            let mut drawn = 0;
+            for y in 0..rows {
+                for x in 0..cols {
+                    let (before, after) = (g.cell(x, y), with.cell(x, y));
+                    let inside = (BOWL_TOP..BOWL_TOP + 7).contains(&y) && x < cols - 1;
+                    if !inside {
+                        assert_eq!(before, after, "{cols}x{rows} {x},{y}");
+                        continue;
+                    }
+                    assert_eq!(after.paint.bg, before.paint.bg);
+                    let c = band.row(y - BOWL_TOP)[usize::from(x)];
+                    let Some(ink) = c.ink else {
+                        assert_eq!(before, after);
+                        continue;
+                    };
+                    drawn += 1;
+                    assert_eq!(after.text, char::from(c.ch).to_string());
+                    let want = match (mono, depth) {
+                        (true, _) => Ink::Default,
+                        (false, ColorDepth::TrueColor) => Ink::Rgb(ink.r, ink.g, ink.b),
+                        _ => Ink::Indexed(nearest_256(ink)),
+                    };
+                    assert_eq!(after.paint.fg, want, "{depth:?} {mono}");
+                }
+            }
+            assert!(drawn > 100, "{cols}x{rows}: {drawn}");
+        }
+        // A band as wide as the screen, at a moment its snow reaches the
+        // last column, still leaves that column empty.
+        let wide = (0..26u64)
+            .map(|tenth| {
+                bowl.draw(
+                    std::time::Duration::from_millis(tenth * 100),
+                    cols,
+                    &Inks::of(Mode::Dark),
+                )
+            })
+            .find(|b| (0..7).any(|y| b.row(y)[usize::from(cols - 1)].ink.is_some()))
+            .expect("a frame with snow in the last column");
+        let mut with = g.clone();
+        put_band(&mut with, &wide, ColorDepth::TrueColor, false);
+        for y in 0..rows {
+            assert_eq!(
+                g.cell(cols - 1, y),
+                with.cell(cols - 1, y),
+                "{cols}x{rows} row {y}"
+            );
+        }
+    }
+    // Not on the keys or save screens, which use those rows.
+    let mut keys = fresh();
+    keys.handle(Input {
+        key: Key::Char(b'?'),
+        read: 1,
+    });
+    assert!(!bowl_shown(&keys, 80, 24));
 }

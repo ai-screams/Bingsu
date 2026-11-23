@@ -1,6 +1,7 @@
 //! The editor's screen as a grid of cells, from the model and the preview
-//! lines. Writing the grid to the terminal, and the
-//! shaved-ice bowl in rows 1-7, are not here.
+//! lines. Writing the grid to the terminal is not here; the shaved-ice
+//! bowl's frames come from `crate::opening`, and [`put_band`] copies one
+//! into rows 1-7 where [`bowl_shown`] says the main screen has them.
 //!
 //! Sizes: 80 columns or more list every value of a row; 60-79 show the
 //! picked one (`< triangle >  2/8`); below 24 rows or 60 columns the bowl's
@@ -44,6 +45,54 @@ pub const MAX_ROWS: u16 = 256;
 
 pub fn too_small(cols: u16, rows: u16) -> bool {
     cols < MIN_COLS || rows < MIN_ROWS
+}
+
+/// The first of the bowl's rows (under the title).
+pub const BOWL_TOP: u16 = 1;
+
+/// Whether the main screen's layout keeps the bowl's rows at this size
+/// (24 rows and 60 columns or more).
+/// 이것을 실패시키는 것: 그릇 자리 조건을 배치와 따로 두는 것(그릇이 다른 줄 위에 그려짐;
+/// the_band_goes_only_where_the_layout_keeps_the_bowl).
+const fn bowl_fits(cols: u16, rows: u16) -> bool {
+    rows >= 24 && cols >= 60
+}
+
+/// Whether a frame drawn now (`draw(m, v)`) has the bowl's rows: the main
+/// screen, at a size that keeps them. The keys and save screens use those
+/// rows for their own text.
+pub fn bowl_shown(m: &Model, cols: u16, rows: u16) -> bool {
+    let (cols, rows) = (cols.min(MAX_COLS), rows.min(MAX_ROWS));
+    m.screen() == Screen::Main && !too_small(cols, rows) && bowl_fits(cols, rows)
+}
+
+/// Copies the opening's `band` into the grid's rows `BOWL_TOP`.. (the
+/// caller draws it `cols - 1` wide: the last column stays empty). A cell
+/// with an ink takes its glyph in that color (24-bit, or the nearest of
+/// 256), or in the default color with `mono` (`NO_COLOR`); the background
+/// stays the screen's. An empty cell is left as the screen has it. Nothing
+/// goes past the grid or onto its last column.
+pub fn put_band(g: &mut Grid, band: &crate::opening::Band, depth: ColorDepth, mono: bool) {
+    let end = g.cols.saturating_sub(1);
+    for y in 0..crate::opening::ROWS {
+        let gy = BOWL_TOP + y;
+        if gy >= g.rows {
+            break;
+        }
+        for (x, c) in (0..end).zip(band.row(y)) {
+            let Some(ink) = c.ink else { continue };
+            let fg = if mono {
+                Ink::Default
+            } else if depth == ColorDepth::TrueColor {
+                Ink::Rgb(ink.r, ink.g, ink.b)
+            } else {
+                Ink::Indexed(nearest_256(ink))
+            };
+            let cell = g.cell_mut(x, gy);
+            cell.text = String::from(char::from(c.ch));
+            cell.paint = Paint { fg, ..cell.paint };
+        }
+    }
 }
 
 /// One cell: one grapheme cluster and its paint. A cell covered by the
@@ -408,7 +457,7 @@ fn too_small_screen(g: &mut Grid, v: &View<'_>, u: &Ui) {
 }
 
 fn main_screen(g: &mut Grid, m: &Model, v: &View<'_>, u: &Ui) {
-    let bowl = v.rows >= 24 && v.cols >= 60;
+    let bowl = bowl_fits(v.cols, v.rows);
     let mut plan = vec![Line::Title];
     if bowl {
         plan.extend([Line::Bowl; BOWL_ROWS as usize]);
