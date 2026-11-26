@@ -14,4 +14,4 @@ workspace = true
 [dependencies]
 # Standard regex with Unicode classes, no perf engines (the helper's worst round stays a few milliseconds, the binary
 # about 0.85 MB smaller than with perf).
-regex = { version = "=1.13.1", default-features = false, features = ["std", "unicode"] }
+regex = { version = "=1.13.2", default-features = false, features = ["std", "unicode"] }
