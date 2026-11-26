@@ -26,7 +26,7 @@ bingsu-bench = { path = "../bingsu-bench", optional = true }
 # copied. In the CLI only; core takes the tree it builds and checks it again.
 # Without default features: no encoding_rs (the text is UTF-8 already), and
 # no build script or proc-macro enters the shipped graph.
-yaml-rust2 = { version = "=0.13.0", default-features = false }
+yaml-rust2 = { version = "=0.13.2", default-features = false }
 # The sibling build-marker scan (collector::read_build): a SIMD substring
 # search over the whole file. Only std (and alloc, which std turns on): the
 # features the collector's graph already uses through bstr, so building both
