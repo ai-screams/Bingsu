@@ -15,6 +15,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import tty
 from pathlib import Path
 
 import pexpect
@@ -381,8 +382,28 @@ def test_the_preview_follows_each_key(home):
     assert host_shown(before[row + 1], os.uname().nodename.split(".")[0]), before[row + 1]
 
 
-# 이것을 실패시키는 것: 쓰는 중인 프레임이 끝난 직후 그 사이 요청된 프레임을 바로 만들지 않는 것(`setup_screen::edit`의
-# `wants_frame` 재검사를 뺌). 그러면 `u`의 화면이 다음 입력까지 그려지지 않아 "undone"이 오지 않는다.
+def pty_capacity():
+    """How many bytes a pseudo-terminal in raw mode takes from its slave side
+    before a write would block, with nobody reading the master side."""
+    master, slave = os.openpty()
+    try:
+        tty.setraw(slave)
+        os.set_blocking(slave, False)
+        total = 0
+        while True:
+            try:
+                total += os.write(slave, b"x" * 512)
+            except BlockingIOError:
+                return total
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+# 이것을 실패시키는 것: 쓰는 중인 프레임이 끝난 직후, 그사이 요청된 프레임을 바로 만들지 않는 것
+# (`setup_screen::edit`의 `wants_frame` 재검사를 뺌). 그러면 `u`의 화면이 다음 입력까지
+# 그려지지 않아 "undone"이 오지 않는다. 프레임이 터미널 용량보다 작아 쓰는 중 상태가 안 생기면
+# 아무것도 잡지 못하므로, 그 경우는 통과하지 않고 실패로 알린다(마지막 assert).
 def test_a_key_while_a_frame_is_being_written_is_drawn(home):
     rows, cols = 60, 200
     child = spawn(home, "--no-motion", rows=rows, cols=cols)
@@ -392,15 +413,24 @@ def test_a_key_while_a_frame_is_being_written_is_drawn(home):
     # `s`'s frame is whole once its end mark has come and nothing follows.
     child.expect(FRAME)
     assert child.expect([pexpect.TIMEOUT, FRAME], timeout=0.5) == 0
-    # Not reading: Ctrl-L is a whole screen, more than the terminal holds,
-    # so the frame stays pending while `u` arrives.
+    start = len(child.transcript.getvalue())
+    # Ctrl-L is a whole screen. Read only up to the start of its frame, one
+    # byte a time, so the frame is under way and the rest stays unread.
     child.send(b"\x0c")
-    time.sleep(0.3)
+    child.maxread = 1
+    child.expect(rb"\x1b\[\?2026h")
+    child.maxread = 2000
     child.send("u")
-    time.sleep(0.3)
     until(child, has("undone"), rows, cols)
     child.send("q")
     finish(child)
+    sent = child.transcript.getvalue()[start:]
+    begin = sent.index(b"\x1b[?2026h")
+    size = sent.index(b"\x1b[?2026l", begin) + len(b"\x1b[?2026l") - begin
+    room = pty_capacity()
+    assert size > room, (
+        f"the whole-screen frame ({size} bytes) fits in the terminal ({room} bytes): "
+        "it was never pending when `u` came, so this test shows nothing here")
 
 
 def host_shown(line, host):

@@ -495,8 +495,8 @@ pub(crate) fn edit(tty: &Tty, s: &Start<'_>) -> Ended {
         // tick asked for the next one: build it now, as the wait below
         // would not wake for it. `begin` fills the writer, so `wants_frame`
         // is false again on the next turn and this does not spin.
-        // 이것을 실패시키는 것: 이 검사를 빼는 것(쓰는 중 온 키의 화면이 다음 입력까지 그려지지 않음,
-        // test_a_key_while_a_frame_is_being_written_is_drawn).
+        // 이것을 실패시키는 것: 이 검사를 빼는 것(쓰는 중 온 키의 화면이 다음 입력까지
+        // 그려지지 않음, test_a_key_while_a_frame_is_being_written_is_drawn).
         if writer.wants_frame() {
             continue;
         }
