@@ -381,6 +381,28 @@ def test_the_preview_follows_each_key(home):
     assert host_shown(before[row + 1], os.uname().nodename.split(".")[0]), before[row + 1]
 
 
+# 이것을 실패시키는 것: 쓰는 중인 프레임이 끝난 직후 그 사이 요청된 프레임을 바로 만들지 않는 것(`setup_screen::edit`의
+# `wants_frame` 재검사를 뺌). 그러면 `u`의 화면이 다음 입력까지 그려지지 않아 "undone"이 오지 않는다.
+def test_a_key_while_a_frame_is_being_written_is_drawn(home):
+    rows, cols = 60, 200
+    child = spawn(home, "--no-motion", rows=rows, cols=cols)
+    opened(child, rows, cols)
+    child.send("s")
+    until(child, has("writes 2 keys"), rows, cols)
+    # `s`'s frame is whole once its end mark has come and nothing follows.
+    child.expect(FRAME)
+    assert child.expect([pexpect.TIMEOUT, FRAME], timeout=0.5) == 0
+    # Not reading: Ctrl-L is a whole screen, more than the terminal holds,
+    # so the frame stays pending while `u` arrives.
+    child.send(b"\x0c")
+    time.sleep(0.3)
+    child.send("u")
+    time.sleep(0.3)
+    until(child, has("undone"), rows, cols)
+    child.send("q")
+    finish(child)
+
+
 def host_shown(line, host):
     """Whether the preview line shows the machine name `host`: whole, or,
     when the line has no room for it, cut to a prefix of at least eight
