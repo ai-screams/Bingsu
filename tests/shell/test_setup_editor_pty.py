@@ -405,7 +405,7 @@ def pty_capacity():
 # 그려지지 않아 "undone"이 오지 않는다. 프레임이 터미널 용량보다 작아 쓰는 중 상태가 안 생기면
 # 아무것도 잡지 못하므로, 그 경우는 통과하지 않고 실패로 알린다(마지막 assert).
 def test_a_key_while_a_frame_is_being_written_is_drawn(home):
-    rows, cols = 60, 200
+    rows, cols = 100, 400
     child = spawn(home, "--no-motion", rows=rows, cols=cols)
     opened(child, rows, cols)
     child.send("s")
