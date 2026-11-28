@@ -427,7 +427,9 @@ def test_a_key_while_a_frame_is_being_written_is_drawn(home):
     sent = child.transcript.getvalue()[start:]
     begin = sent.index(b"\x1b[?2026h")
     size = sent.index(b"\x1b[?2026l", begin) + len(b"\x1b[?2026l") - begin
-    room = pty_capacity()
+    # The start mark was read before `u` came, which made room for as many
+    # bytes as it is long.
+    room = pty_capacity() + len(b"\x1b[?2026h")
     assert size > room, (
         f"the whole-screen frame ({size} bytes) fits in the terminal ({room} bytes): "
         "it was never pending when `u` came, so this test shows nothing here")
